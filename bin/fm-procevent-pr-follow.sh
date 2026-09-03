@@ -39,8 +39,11 @@
 #            through gh (GitHub) or glab (GitLab) with fixed argv plus
 #            structural field selection, and on the first new event prints one
 #            bounded result document and exits. A no-change poll prints nothing
-#            and keeps waiting. A bounded run of consecutive failed fetches
-#            prints a diagnostic error document that invents no forge result.
+#            and keeps waiting; when the source it was started for is gone or
+#            already converted it exits nonzero with no output, so the runner
+#            records no result instead of capturing an empty document. A
+#            bounded run of consecutive failed fetches prints a diagnostic
+#            error document that invents no forge result.
 # handle     Apply one captured result and acknowledge it: merge the document's
 #            cursor into the durable cursor (monotonic, receipt-bound per
 #            sequence, idempotent under byte-identical replay), then record the
@@ -1109,7 +1112,7 @@ delta_common_start() {
 # Returns 0 when the head moved (check map is already the new head's), 1 when
 # the head is unchanged and per-transition detection must run.
 delta_head_and_state() {
-  local check_id check_sc check_name _check_updated
+  local check_id check_sc check_name _check_updated head_from=unknown
   if [ "$CUR_BASELINE" = "done" ] && [ "$CUR_STATE" != "$SN_STATE" ]; then
     ev_add "$EV_KEY_EXEMPT	event: pr-state from=$CUR_STATE state=$SN_STATE"
   fi
@@ -1117,9 +1120,8 @@ delta_head_and_state() {
   if [ -z "$SN_HEAD" ] || [ "$SN_HEAD" = "$CUR_HEAD" ]; then
     return 1
   fi
-  if [ -n "$CUR_HEAD" ]; then
-    ev_add "$EV_KEY_EXEMPT	event: head from=${CUR_HEAD%"${CUR_HEAD#????????????}"} to=${SN_HEAD%"${SN_HEAD#????????????}"}"
-  fi
+  [ -z "$CUR_HEAD" ] || head_from=${CUR_HEAD%"${CUR_HEAD#????????????}"}
+  ev_add "$EV_KEY_EXEMPT	event: head from=$head_from to=${SN_HEAD%"${SN_HEAD#????????????}"}"
   NEW_HEAD=$SN_HEAD
   NEW_CHECKS=
   while IFS=$'\t' read -r check_id check_sc check_name _check_updated; do
@@ -2219,7 +2221,7 @@ error_tick() {
   cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
   if [ "$CURSOR_PRESENT" -ne 1 ]; then
     fm_lock_release "$(lifecycle_lock_path "$SID")"
-    exit 0
+    exit 1
   fi
   streak=$(( CUR_ERROR_STREAK + 1 ))
   if [ "$streak" -ge "$ERROR_BUDGET" ]; then
@@ -2243,7 +2245,7 @@ persist_scan_progress() {
   cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
   if [ "$CURSOR_PRESENT" -ne 1 ]; then
     fm_lock_release "$(lifecycle_lock_path "$SID")"
-    exit 0
+    exit 1
   fi
   if [ "$CUR_GENERATION" = "$expected_generation" ]; then
     CUR_GH_ISSUE_PAGE=$NEW_GH_ISSUE_PAGE
@@ -2589,7 +2591,7 @@ cmd_run() {
     ensure_scheduler \
       || { fm_lock_release "$(roster_lock_path)"; die "cannot register the PR follow scheduler"; }
     fm_lock_release "$(roster_lock_path)"
-    exit 0
+    exit 1
   fi
   if [ "$requested" = "$SCHEDULER_ID" ]; then
     [ -f "$REG_DIR/$SCHEDULER_ID.source" ] && [ ! -L "$REG_DIR/$SCHEDULER_ID.source" ] \
@@ -2654,7 +2656,7 @@ cmd_run() {
       if poll_once_locked; then
         fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
         cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cursor is unreadable: $SID"; }
-        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 0; }
+        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 1; }
         if [ "$CUR_BASELINE" != "done" ]; then
           baseline_write || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cannot store the baseline"; }
         fi
@@ -2680,7 +2682,7 @@ cmd_run() {
       if [ "$CUR_ERROR_STREAK" != 0 ]; then
         fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
         cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cursor is unreadable: $SID"; }
-        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 0; }
+        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 1; }
         if [ "$CUR_ERROR_STREAK" != 0 ]; then
           CUR_ERROR_STREAK=0
           cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cannot store the cursor"; }
@@ -3440,9 +3442,12 @@ cmd_backfill() {
     sid=$(prf_source_id "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER") \
       || { skipped=$((skipped + 1)); continue; }
     if [ -f "$(cursor_file "$sid")" ] && [ ! -L "$(cursor_file "$sid")" ]; then
-      cmd_arm "$id" "$FM_PR_META_URL" --backfill >/dev/null 2>&1 \
-        || { skipped=$((skipped + 1)); continue; }
-      already=$((already + 1))
+      if out=$(cmd_arm "$id" "$FM_PR_META_URL" --backfill 2>&1); then
+        already=$((already + 1))
+      else
+        skipped=$((skipped + 1))
+        printf 'backfill: refused %s: %s\n' "$id" "$out" >&2
+      fi
       continue
     fi
     if out=$(cmd_arm "$id" "$FM_PR_META_URL" --backfill 2>&1); then

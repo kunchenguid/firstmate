@@ -209,12 +209,13 @@ While `state/.afk` exists the watcher stays one-shot as before, because this del
 
 ## PR lifecycle follow-through adapter
 
-Verified 2026-09-03 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (35 scenarios, one green run against this head), whose stub `gh` and `glab` executables serve representative REST payloads as raw JSON while the adapter's own production projections produce every asserted row.
+Verified 2026-09-03 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (37 scenarios, one green run against this head), whose stub `gh` and `glab` executables serve representative REST payloads as raw JSON while the adapter's own production projections produce every asserted row.
 
 The suite proves the load-bearing guarantees end to end through the adapter's public commands plus the generic runner:
 
 - a silent first-registration baseline for older history, plus a caller-verified head seed that prevents unrelated activity during a multi-page baseline from being mislabeled as a head replacement while still announcing activity that arrived after registration;
 - one announcement per forge event across open-PR comments, inline review comments and replies, review submissions and dismissals, head moves, check additions, pending transitions, regressions, and recoveries, merge, close, and reopen, and post-merge comments, each reaching the durable wake queue as the fixed line `check: procevent pr-follow <sid> <seq>` with no remote text;
+- a tracked PR whose announced head never reached its cursor re-announces that head as a first observation and goes on announcing check transitions, so one lost capture cannot silence monitoring; a run with nothing to report - a legacy per-PR registration the home scheduler has already absorbed - ends as the runner's no-result case instead of capturing an empty document that could never be applied;
 - GET-only GitHub REST capture for core PR state and review submissions, with newest-page review coverage beyond the former 100-review ceiling;
 - newest-first bounded rotation across GitLab's oldest-first discussion pages, plus replay-safe individual state records for opaque discussion ids, so pages beyond the first 500 and thread transitions beyond the cursor's map cache remain observable without repeated notifications;
 - the shared-vocabulary contract as the independent judge's disconfirming regressions: GitHub check runs in `queued`, `in_progress`, `waiting`, `requested`, and `pending` states and GitLab pipelines in `created`, `preparing`, and `running` states apply through `handle`, store their real composite or bare tokens, advance the cursor, replay as `already-applied`, and never re-announce on later reconciles; transitions such as `queued` to `in_progress` and `created` to `preparing` to `running` advance even though their summary category remains pending;
@@ -228,12 +229,12 @@ The suite proves the load-bearing guarantees end to end through the adapter's pu
 - a review that already existed when the source was armed - the migration case the backfill sweep exists for - enters the durable review map at the baseline, so its later dismissal is announced as a state change instead of being silently dropped;
 - the bounded approval set never announces a grant it cannot record: with more maximum-length approvers than the set holds, durable per-approver records preserve every grant, the unrelated check-transition document carries `dropped: 0`, and no further document appears on a later poll;
 - the approval set is only ever compared against an approval list the poll actually read: an approvals endpoint that stops answering announces no revocation and leaves the durable set intact, and its recovery re-announces nothing, so an intermittent endpoint cannot produce a repeating DISMISSED/APPROVED cycle;
-- task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force` - leaving the registration and the durable cursor in place, so a refused retirement is a true no-op - the backfill sweep is idempotent, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
+- task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force` - leaving the registration and the durable cursor in place, so a refused retirement is a true no-op - the backfill sweep is idempotent and resumable past a record it refuses, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
 
 Exact commands (the follow-through, PR-check security, and merge suites were re-run against this exact head; the others were last green on the head that introduced the code they cover):
 
 ```sh
-bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 35 scenarios, one green run
+bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 37 scenarios, one green run
 bin/fm-test-run.sh tests/fm-procevent.test.sh tests/fm-procevent-when.test.sh
 bin/fm-test-run.sh tests/fm-pr-check-security.test.sh tests/fm-pr-merge.test.sh
 bin/fm-test-run.sh tests/fm-bootstrap.test.sh tests/fm-watch-triage.test.sh tests/fm-wake-queue.test.sh

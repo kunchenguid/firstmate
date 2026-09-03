@@ -563,6 +563,31 @@ assert_grep 'change=red->green' "$RESULT" "the recovery is labeled"
 ack "$H" "$sid" 2 "$RESULT"
 pass "head replacement announces the move and re-baselines its checks"
 
+# --- an unrecorded head heals instead of silencing every later transition ----
+new_section headheal
+gh_fix_default
+gh_checks '[{"id":80,"status":"completed","conclusion":"success","name":"build"}]'
+arm_gh "$H" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
+# Model a baseline whose announcement never reached the cursor: tracking is
+# complete but the head it announced was never durably recorded.
+cursor_set_field "$H" "$sid" head "" || fail "could not model the unrecorded head"
+restart_runner "$H"
+wait_for_result "$H" "$sid" || fail "an unrecorded head silenced every announcement"
+RESULT=$(first_result "$H" "$sid")
+assert_grep "event: head from=unknown to=${GH_SHA1%"${GH_SHA1#????????????}"}" "$RESULT" \
+  "an unrecorded head is announced as a first observation"
+ack "$H" "$sid" 1 "$RESULT"
+wait_for_cursor "$H" "$sid" head "$GH_SHA1" || fail "the announced head never reached the cursor"
+restart_runner "$H"
+gh_checks '[{"id":80,"status":"completed","conclusion":"failure","name":"build"}]'
+wait_for_result_count "$H" "$sid" 2 || fail "the check regression produced no result"
+RESULT=$(latest_result "$H" "$sid")
+assert_grep 'change=green->red' "$RESULT" "check transitions resume once the head is recorded"
+ack "$H" "$sid" 2 "$RESULT"
+pass "an unrecorded head is announced instead of silencing check transitions"
+
 # --- check regressions, pending transitions, and recovery --------------------
 new_section checks
 gh_fix_default
@@ -1147,14 +1172,38 @@ for _ in 1 2 3; do
 done
 for n in 1 2 3; do
   rsid=$(prf "$H" source-id "https://github.com/octo/app/pull/$((700 + n))")
-  assert_present "$H/state/pr-follow/$rsid.cursor" "resumable sweep reached PR $n"
+  # The sweep is the only path that arms with --backfill, so the flipped
+  # backfill field is state no pre-existing registration can account for.
+  assert_contains "$(cursor_field "$H" "$rsid" backfill)" "on" "resumable sweep reached PR $n"
 done
 assert_absent "$H/state/pr-follow/backfill.scan" "completed sweep clears its progress cursor"
 assert_absent "$H/state/pr-follow/legacy.scan" "bounded legacy conversion clears after resumable passes"
 assert_present "$H/state/pr-follow/legacy.done" "completed legacy conversion stays latched"
 FM_PR_FOLLOW_BACKFILL_SCAN_CAP=1 prf "$H" backfill >/dev/null
 assert_absent "$H/state/pr-follow/legacy.scan" "later sweeps do not restart legacy conversion"
+prf "$H" backfill >/dev/null
+# One record the adapter refuses must not end the pass: every later record and
+# the sweep's own progress still have to be reached.
+rsid=$(prf "$H" source-id "https://github.com/octo/app/pull/701")
+printf 'bogus=1\n' >> "$H/state/pr-follow/$rsid.cursor"
+out=$(prf "$H" backfill 2>/dev/null) || fail "a refused record aborted the migration sweep"
+printf '%s\n' "$out" > "$TMP_ROOT/sweep-damaged"
+assert_grep 'backfill summary: scanned=3 armed=0 already=2 skipped=1 capped=0' "$TMP_ROOT/sweep-damaged" \
+  "the sweep counts the refused record and still finishes the later ones"
+assert_absent "$H/state/pr-follow/backfill.scan" "the surviving sweep still clears its progress cursor"
 pass "the capped migration sweep resumes beyond its first batch"
+
+# --- a poll with nothing to report captures nothing --------------------------
+new_section legacy-convert
+gh_fix_default
+arm_gh "$H" >/dev/null
+pe "$H" register pr-follow "$sid" -- "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" >/dev/null
+out=$(pe "$H" start "$sid" 2>&1) || fail "starting a legacy registration failed: $out"
+assert_contains "$out" "no-result: $sid" "a converted legacy registration reports no usable result"
+assert_absent "$H/state/procevent-inbox/$sid.1.result" \
+  "a run with nothing to report never captures an empty document"
+assert_present "$H/state/procevent/$scheduler_id.source" "the conversion keeps the home scheduler registered"
+pass "a run with nothing to report captures no document"
 
 # --- GitLab lifecycle events through the real JSON parser ---------------------
 new_section gitlab
