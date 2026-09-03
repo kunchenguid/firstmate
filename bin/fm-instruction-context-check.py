@@ -48,6 +48,22 @@ def load_prompt(path: str | None) -> object:
         fail(f"cannot read Codex prompt input: {exc}")
 
 
+def load_agents_md(path: str | None) -> str:
+    candidate = Path(path) if path else Path(
+        os.environ.get("FM_ROOT", Path(__file__).resolve().parent.parent)
+    ) / "AGENTS.md"
+    try:
+        return candidate.read_text()
+    except OSError as exc:
+        fail(f"cannot read {candidate}: {exc}")
+
+
+def protected_block(text: str) -> str:
+    start = text.index(BLOCK_SENTINEL)
+    end = text.index(END_SENTINEL) + len(END_SENTINEL)
+    return text[start:end]
+
+
 def instruction_block(payload: object) -> str:
     if not isinstance(payload, list):
         fail("prompt input must be a JSON array")
@@ -71,6 +87,9 @@ def main() -> None:
     parser.add_argument(
         "--budget", type=int, default=DEFAULT_BUDGET, help="estimated-token ceiling"
     )
+    parser.add_argument(
+        "--agents-md", help="path to the AGENTS.md the protected block must match verbatim"
+    )
     args = parser.parse_args()
     if args.budget < 1:
         parser.error("--budget must be positive")
@@ -88,6 +107,11 @@ def main() -> None:
         if index <= last_index:
             fail(f"model-visible instructions are out of order; {marker} did not follow {last_marker}")
         last_index, last_marker = index, marker
+
+    expected_block = protected_block(load_agents_md(args.agents_md))
+    actual_block = protected_block(text)
+    if actual_block != expected_block:
+        fail("model-visible instructions do not match AGENTS.md verbatim; interior content was altered")
 
     words = len(text.split())
     estimated_tokens = (words * 4 + 2) // 3
