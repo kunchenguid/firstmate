@@ -86,13 +86,13 @@
 #          the backlog row inside the script that moves the task's record
 #          (bin/fm-backlog-transition-lib.sh), so this sweep exists for the
 #          crash window inside those scripts and for drift a home was already
-#          carrying: it finishes the authoritative close an interrupted cleanup
-#          recorded, and marks In flight any item this home already owns a worker
-#          for. The worker-record sweep never starts a captain-held or closed
-#          item, and reconciliation never reads or writes another home; the fleet
-#          snapshot's classifier and
+#          carrying: it finishes the authoritative close or captain-call
+#          retention an interrupted cleanup recorded, and marks In flight any
+#          item this home already owns a worker for. The worker-record sweep
+#          never starts a captain-held or closed item, and reconciliation never
+#          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
-#          closes and restored In-flight rows print BOOTSTRAP_INFO facts.
+#          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
