@@ -3720,6 +3720,32 @@ test_rendered_busy_state_reads_the_cursor_busy_token() {
   pass "fm_backend_herdr_rendered_busy_state: busy/idle/unknown from the rendered footer, with an unreadable pane never reading idle"
 }
 
+test_rendered_busy_state_rejects_foreign_claude_footer() {
+  local dir log resp fb foreign_out genuine_out
+  dir="$TMP_ROOT/rendered-busy-claude-foreign-footer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' \
+    '────────────────────────' \
+    '❯' \
+    '────────────────────────' \
+    'Claude 4.1' \
+    '✲ Working… (4s)' > "$resp/1.out"
+  printf '%s\n' \
+    '────────────────────────' \
+    '❯' \
+    '────────────────────────' \
+    '✲ Pollinating… (16s · ↓ 1.1k tokens)' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  foreign_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2 claude' "$ROOT" )
+  genuine_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2 claude' "$ROOT" )
+  [ "$foreign_out" = unknown ] \
+    || fail "a foreign Working row outside the selected Claude composer boundary must be unknown, got '$foreign_out'"
+  [ "$genuine_out" = busy ] \
+    || fail "a genuine Claude footer immediately below its composer must be busy, got '$genuine_out'"
+  pass "fm_backend_herdr_rendered_busy_state: scopes Claude busy proof to the selected composer boundary"
+}
+
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-cursor-footer-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4629,6 +4655,7 @@ test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
 test_composer_state_cursor_midturn_row_reads_pending
 test_rendered_busy_state_reads_the_cursor_busy_token
+test_rendered_busy_state_rejects_foreign_claude_footer
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition
 test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
