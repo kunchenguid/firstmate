@@ -129,6 +129,12 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   config/crew-claude-agent is an optional local file naming one Claude agent
+#   profile. Its first non-empty, non-comment line must be a safe token
+#   ([A-Za-z0-9_.:-]); anything else refuses the spawn. When present, claude
+#   CREWMATE and SCOUT launches (including a --relaunch onto claude) carry
+#   --agent '<name>'; secondmate launches never do, because a secondmate is a
+#   firstmate in its own home and keeps the operator's default profile.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -1256,7 +1262,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____AGENTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1423,6 +1429,33 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+# config/crew-claude-agent optionally names one Claude agent profile for CREWMATE
+# and SCOUT launches. Without it a claude worker inherits whatever `agent:` the
+# operator's own ~/.claude/settings.json selects, which is a primary-session
+# profile rather than a worker one. Secondmate launches are deliberately excluded:
+# a secondmate is a firstmate in its own home and keeps that default. Resolving
+# and validating here refuses a malformed file before any task state is created.
+CLAUDE_AGENT=
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-claude-agent" ]; then
+  while IFS= read -r crew_agent_line || [ -n "$crew_agent_line" ]; do
+    crew_agent_line="${crew_agent_line#"${crew_agent_line%%[![:space:]]*}"}"
+    crew_agent_line="${crew_agent_line%"${crew_agent_line##*[![:space:]]}"}"
+    [ -n "$crew_agent_line" ] || continue
+    case "$crew_agent_line" in
+      '#'*) continue ;;
+    esac
+    CLAUDE_AGENT=$crew_agent_line
+    break
+  done < "$CONFIG/crew-claude-agent"
+  case "$CLAUDE_AGENT" in
+    '') ;;
+    *[!A-Za-z0-9_.:-]*)
+      echo "error: config/crew-claude-agent names an unsafe agent profile '$CLAUDE_AGENT'; use letters, digits, and _ - . : only" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -3024,6 +3057,9 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+AGENTFLAG=
+[ -z "$CLAUDE_AGENT" ] || AGENTFLAG="--agent $(shell_quote "$CLAUDE_AGENT") "
+LAUNCH=${LAUNCH//__AGENTFLAG__/$AGENTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
