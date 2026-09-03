@@ -1221,7 +1221,7 @@ PY
 write_archive() {  # <bench-dir> <src-repo>
   local bench=$1 src=$2
   python3 - "$bench" "$src" "$ROOT" <<'PY'
-import hashlib, json, shlex, shutil, subprocess, sys
+import hashlib, json, shlex, shutil, struct, subprocess, sys, zlib
 from pathlib import Path
 
 bench, src, repo_root = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
@@ -1260,6 +1260,21 @@ for track_name, candidate, packet in work:
     (src / ".ignored-by-evaluator").write_text("not scored\n")
     (src / "work.json").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
     (src / "work.ts").write_text(f'export default "{slug}";\n')
+    (src / "work.css").write_text(f'.sample::after {{ content: "{slug}"; }}\n')
+    (src / "work.html").write_text(f'<main data-sample="{slug}">candidate</main>\n')
+    png_chunks = []
+    for kind, payload in (
+        (b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)),
+        (b"IDAT", zlib.compress(b"\x00\x20\x40\x60")),
+        (b"IEND", b""),
+    ):
+        png_chunks.append(
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+    (src / "work.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"".join(png_chunks))
     git("add", "-A")
     git("commit", "-q", "-m", slug)
     sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -1282,10 +1297,16 @@ if [ -r {shlex.quote(str(operator_secret))} ] || [ -r {shlex.quote(str(repo_root
   printf 'unconfined host access\\n'
   exit 0
 fi
-value=$(sed -n 's/^{{"value":"\\([^"]*\\)"}}$/\\1/p' "$1/work.json")
+value=$(sed -n 's/^[[:space:]]*"value":[[:space:]]*"\\([^"]*\\)".*$/\\1/p' "$1/work.json")
 if [ -z "$value" ]; then
   printf 'invalid structured input\n' >&2
   exit 9
+fi
+actual=$(cat "$1/work.json")
+expected_document=$(printf '{{\n  "value": "%s"\n}}' "$value")
+if [ "$actual" != "$expected_document" ]; then
+  printf 'scored input changed outside its declared value\n' >&2
+  exit 10
 fi
 printf '%s\n' "$value"
 """
@@ -1333,8 +1354,8 @@ out=$(run_gate "$BENCH" restore-drill) || fail "the restore drill must pass: $ou
 assert_contains "$out" "restored into a fresh repository, and rebound to its archived tree" \
   "each bundle is really restored and rebound"
 assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt"
-assert_contains "$out" "identically prepared copies differ only at declared JSON pointers" \
-  "both evaluator inputs use the same preparation pipeline before the declared scalar changes"
+assert_contains "$out" "genuine copy retained its archived bytes" \
+  "the genuine replay scores the archived input while the strict evaluator accepts the minimal edit"
 assert_contains "$out" "evaluator_dependence ok proven" \
   "the evaluator responds to its declared scored subset rather than the first restored file"
 python3 - "$BENCH" <<'PY' || fail "the receipt must record its bounded deterministic evaluator sample"
@@ -1345,7 +1366,8 @@ receipt = json.loads((bench / "archive" / "restore-drill.json").read_text())
 expected = sorted(path.name for path in (bench / "archive").iterdir() if path.is_dir())[:1]
 if receipt.get("evaluator_samples") != expected:
     raise SystemExit(f"expected evaluator sample {expected}, got {receipt.get('evaluator_samples')}")
-if receipt.get("evaluator_dependence") != {expected[0]: "proven"}:
+dependence = receipt.get("evaluator_dependence")
+if dependence != {expected[0]: {"overall": "proven", "inputs": {"work.json": "proven"}}}:
     raise SystemExit(f"expected proven dependence for {expected[0]}, got {receipt.get('evaluator_dependence')}")
 PY
 out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: $out"
@@ -1528,42 +1550,92 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
-assert_contains "$out" "ignored its declared scored inputs" "the rerun contract proves evaluator dependence on restored content"
+assert_contains "$out" "ignored declared scored input work.json" \
+  "the rerun contract proves evaluator dependence on restored content"
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
 pass "the restore drill refuses an executable evaluator that ignores restored content"
 
-BENCH="$TMP_ROOT/archive-source-input"
+BENCH="$TMP_ROOT/archive-real-content-inputs"
 write_plan "$BENCH"
-write_archive "$BENCH" "$TMP_ROOT/srcrepo-source-input"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-real-content-inputs"
 python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
+import hashlib, json, struct, sys, zlib
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
-scoring.write_text("#!/bin/sh\ncat \"$1/work.ts\"\n")
+scoring.write_text(
+    '#!/bin/sh\ncat "$1/work.ts" "$1/work.css" "$1/work.html" "$1/work.png" "$1/.ignored-by-evaluator"\n'
+)
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
-record["evaluator_rerun"]["scored_inputs"] = ["work.ts"]
-record["evaluator_rerun"].pop("input_perturbations")
-record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
-    f'export default "{record["sample"]}";\n'.encode()
-).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = [
+    "./work.ts",
+    "work.css",
+    "work.html",
+    "work.png",
+    ".ignored-by-evaluator",
+]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "work.ts": {"kind": "text-token", "token": record["sample"]},
+    "work.css": {"kind": "text-token", "token": record["sample"]},
+    "work.html": {"kind": "text-token", "token": record["sample"]},
+    "work.png": {"kind": "png-pixel", "x": 0, "y": 0, "channel": 0},
+}
+png_chunks = []
+for kind, payload in (
+    (b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)),
+    (b"IDAT", zlib.compress(b"\x00\x20\x40\x60")),
+    (b"IEND", b""),
+):
+    png_chunks.append(
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+slug = record["sample"]
+genuine = (
+    f'export default "{slug}";\n'.encode()
+    + f'.sample::after {{ content: "{slug}"; }}\n'.encode()
+    + f'<main data-sample="{slug}">candidate</main>\n'.encode()
+    + b"\x89PNG\r\n\x1a\n"
+    + b"".join(png_chunks)
+    + b"not scored\n"
+)
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(genuine).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
-out=$(run_gate "$BENCH" restore-drill) || fail "a source-scoring archive must remain restorable: $out"
-assert_contains "$out" "evaluator_dependence ok unproven" \
-  "an input without a sound perturbation narrows the dependence claim"
-python3 - "$BENCH" <<'PY' || fail "the receipt must preserve the unproven dependence state"
+out=$(run_gate "$BENCH" restore-drill) || fail "real benchmark content must support dependence proof: $out"
+assert_contains "$out" "work.ts proven by its declared form-preserving perturbation" \
+  "a normalized TypeScript declaration proves dependence"
+assert_contains "$out" "work.css proven by its declared form-preserving perturbation" \
+  "CSS content proves dependence"
+assert_contains "$out" "work.html proven by its declared form-preserving perturbation" \
+  "HTML content proves dependence"
+assert_contains "$out" "work.png proven by its declared form-preserving perturbation" \
+  "PNG content proves dependence"
+assert_contains "$out" ".ignored-by-evaluator unproven; another scored input supplies the required dependence proof" \
+  "unproven is retained only as a per-input state beside a real proof"
+python3 - "$BENCH" <<'PY' || fail "the receipt must preserve proven and per-input unproven states"
 import json, sys
 from pathlib import Path
 receipt = json.loads((Path(sys.argv[1]) / "archive" / "restore-drill.json").read_text())
-if list(receipt.get("evaluator_dependence", {}).values()) != ["unproven"]:
-    raise SystemExit(f"expected one unproven dependence result, got {receipt.get('evaluator_dependence')}")
+sample = receipt["evaluator_samples"][0]
+record = receipt["evaluator_dependence"][sample]
+expected = {
+    ".ignored-by-evaluator": "unproven",
+    "work.css": "proven",
+    "work.html": "proven",
+    "work.png": "proven",
+    "work.ts": "proven",
+}
+if record != {"overall": "proven", "inputs": expected}:
+    raise SystemExit(f"unexpected dependence receipt: {record}")
 PY
-out=$(run_gate "$BENCH" cleanup-gate) || fail "unproven dependence must preserve the other cleanup proofs: $out"
-pass "source inputs rerun under confinement with dependence explicitly unproven"
+out=$(run_gate "$BENCH" cleanup-gate) || fail "mixed proven and unproven inputs must preserve cleanup proofs: $out"
+pass "TypeScript, CSS, HTML, and PNG prove dependence through pure-data declarations"
 
 BENCH="$TMP_ROOT/archive-stateful-evaluator"
 write_plan "$BENCH"
@@ -1583,7 +1655,7 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "per-run evaluator state cannot impersonate scored-input dependence"
-assert_contains "$out" "ignored its declared scored inputs" \
+assert_contains "$out" "ignored declared scored input work.json" \
   "fresh scratch state makes both input-ignoring evaluator results identical"
 assert_absent "$BENCH/archive/restore-drill.json" "a stateful no-op evaluator writes no cleanup receipt"
 pass "differential evaluator runs use independent scratch state"
@@ -1613,7 +1685,7 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "run paths and environments cannot reveal differential roles"
-assert_contains "$out" "ignored its declared scored inputs" \
+assert_contains "$out" "ignored declared scored input work.json" \
   "opaque roots make a role-sniffing evaluator input-invariant"
 assert_absent "$BENCH/archive/restore-drill.json" "a self-identifying evaluator writes no cleanup receipt"
 pass "differential evaluator runs hide their role in paths and environment"
@@ -1642,11 +1714,39 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "recognising an old perturbation marker cannot impersonate evaluation"
-assert_contains "$out" "ignored its declared scored inputs" "fresh structured perturbation reveals the marker-sniffing no-op"
+assert_contains "$out" "ignored declared scored input work.json" \
+  "fresh structured perturbation reveals the marker-sniffing no-op"
 assert_absent "$BENCH/archive/restore-drill.json" "a marker-sniffing evaluator writes no cleanup receipt"
 pass "structured differential perturbations carry no fixed recognizable marker"
 
 fi
+
+BENCH="$TMP_ROOT/archive-no-perturbable-input"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-perturbable-input"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("#!/bin/sh\ncat \"$1/work.ts\"\n")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work.ts"]
+record["evaluator_rerun"].pop("input_perturbations")
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
+    f'export default "{record["sample"]}";\n'.encode()
+).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an evaluator with no perturbable scored input is refused"
+assert_contains "$out" "must declare at least one supported form-preserving scored-input perturbation" \
+  "dependence cannot be skipped by omitting the perturbation declaration"
+assert_absent "$BENCH/archive/restore-drill.json" "an all-unproven evaluator writes no cleanup receipt"
+pass "every archived evaluator proves dependence on at least one scored input"
 
 BENCH="$TMP_ROOT/archive-no-scored-inputs"
 write_plan "$BENCH"
@@ -1701,6 +1801,24 @@ assert_contains "$out" "scored input perturbation is invalid for work.json" \
 assert_absent "$BENCH/archive/restore-drill.json" "an invalid perturbation pointer writes no cleanup receipt"
 pass "scored-input perturbation pointers are validated against restored content"
 
+BENCH="$TMP_ROOT/archive-executable-perturbation"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-executable-perturbation"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["input_perturbations"]["work.json"]["argv"] = ["mutate-input"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an executable perturbation declaration is refused"
+assert_contains "$out" "json-value accepts only kind and pointer" \
+  "the gate accepts only its own pure-data perturbation schema"
+assert_absent "$BENCH/archive/restore-drill.json" "an executable perturbation writes no cleanup receipt"
+pass "archived evaluators cannot supply code for their dependence perturbation"
+
 BENCH="$TMP_ROOT/archive-escaping-scored-input"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-escaping-scored-input"
@@ -1717,7 +1835,7 @@ p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a declared scored input cannot escape the restored candidate"
-assert_contains "$out" "scored input escapes the restored candidate" "the escaping scored-input path is refused"
+assert_contains "$out" "path is not a contained relative path" "the escaping scored-input path is refused"
 assert_absent "$BENCH/archive/restore-drill.json" "an escaping scored-input declaration writes no cleanup receipt"
 pass "declared scored inputs stay inside the restored candidate"
 
@@ -1735,7 +1853,7 @@ record = json.loads(manifest.read_text())
 scoring = sample / "scoring.py"
 expected = shlex.quote(record["sample"])
 scoring.write_text(f"""#!/bin/sh
-value=$(sed -n 's/^{{\"value\":\"\\([^\"]*\\)\"}}$/\\1/p' \"$1/work.json\")
+value=$(sed -n 's/^[[:space:]]*\"value\":[[:space:]]*\"\\([^\"]*\\)\".*$/\\1/p' \"$1/work.json\")
 if [ \"$value\" != {expected} ]; then
   printf 'valid JSON but unsupported value\n' >&2
   exit 9
@@ -1748,9 +1866,9 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a rejected form-preserving perturbation is inconclusive"
-assert_contains "$out" "perturbed evaluator run was inconclusive" \
+assert_contains "$out" "was inconclusive because the declared form-preserving input" \
   "a parser rejection is distinguished from input invariance"
-assert_not_contains "$out" "ignored its declared scored inputs" \
+assert_not_contains "$out" "ignored declared scored input" \
   "a failed perturbation is not mislabeled as a no-op evaluator"
 assert_absent "$BENCH/archive/restore-drill.json" "an inconclusive perturbation writes no cleanup receipt"
 pass "perturbation failures are inconclusive rather than invariant"
@@ -1765,7 +1883,7 @@ sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
 scoring.write_text("""#!/bin/sh
 printf 'scratch\\n' > scratch-only.txt
-sed -n 's/^{"value":"\\([^"]*\\)"}$/\\1/p' "$1/work.json"
+sed -n 's/^[[:space:]]*"value":[[:space:]]*"\\([^"]*\\)".*$/\\1/p' "$1/work.json"
 cat scratch-only.txt
 """)
 scoring.chmod(0o755)
@@ -1792,7 +1910,7 @@ sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
 scoring.write_text(f"""#!/bin/sh
 printf 'dirty\\n' > {shlex.quote(str(sample / 'archive-dirty.txt'))}
-sed -n 's/^{{"value":"\\([^"]*\\)"}}$/\\1/p' "$1/work.json"
+sed -n 's/^[[:space:]]*"value":[[:space:]]*"\\([^"]*\\)".*$/\\1/p' "$1/work.json"
 """)
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
@@ -2074,6 +2192,24 @@ out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
 expect_code 1 "$status" "a loss beyond the declared zero-loss bound refuses promotion"
 assert_contains "$out" "above the declared maximum 0" "the veto reads its declared loss bound"
 pass "promotion enforces the frozen baseline loss limit"
+
+BENCH="$TMP_ROOT/promote-loosened-mean-bound"
+write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_negative_mean_quality_delta"] = -1000'
+write_results "$BENCH" veto
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "promotion refuses a mean bound loosened after plan validation"
+assert_contains "$out" "bounds exceed the zero mean floor or one-loss outer limit" \
+  "the promotion path independently enforces the hard mean floor"
+pass "promotion cannot bypass the baseline mean floor through a plan edit"
+
+BENCH="$TMP_ROOT/promote-loosened-loss-bound"
+write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_losses_of_three"] = 3'
+write_results "$BENCH" veto
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "promotion refuses a loss bound loosened after plan validation"
+assert_contains "$out" "bounds exceed the zero mean floor or one-loss outer limit" \
+  "the promotion path independently enforces the hard one-loss ceiling"
+pass "promotion cannot bypass the baseline loss ceiling through a plan edit"
 
 refuses_promotion() {  # <label> <mode> <expected>
   local label=$1 mode=$2 expected=$3
