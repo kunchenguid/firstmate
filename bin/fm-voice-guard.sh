@@ -33,6 +33,13 @@
 # hold", "captain intent", "captain-gated", and "reaches the captain" all pass
 # untouched, while "…: Captain, fixed the…" and "…scans, captain" refuse.
 #
+# KNOWN RESIDUAL. The trailing rule refuses a subject that ends in a bare
+# ",<space>captain", so a comma list whose last item is the word captain
+# ("firstmate, secondmate, captain") would be refused as an address. No such
+# line exists in merged history and the six lines this rule caught existed only
+# in this shape, so it is kept and the refusal is reworded past rather than
+# narrowed on a case that has never occurred.
+#
 # REJECTED, with the evidence that rejected them:
 #   - Bare nautical words (ahoy, shipshape, avast). This repo ships an /ahoy
 #     skill and a "Captain, shipshape." acknowledgement rule; 13 legitimate
