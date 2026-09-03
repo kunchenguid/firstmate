@@ -28,6 +28,19 @@ TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 PF_TEST_NOW=1787539200
 PF_TEST_LOCK_HOLDER=
 
+write_promotion_brief() {  # <home> <id>
+  local home=$1 id=$2
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Promote the selected scout.
+
+## Firstmate spec
+Verify promotion preserves the behavior under test.
+EOF
+}
+
 # The remote-route cases drive the real remote job worker, which outlives the
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
@@ -2254,6 +2267,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
 
   fm_write_meta "$child/state/promote-conflict.meta" \
     "window=firstmate:fm-promote-conflict" "kind=scout"
+  write_promotion_brief "$child" promote-conflict
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-conflict --mode local-only --yolo off 2>&1) \
@@ -2268,6 +2282,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   rm -f "$child/.fm-secondmate-parent"
   fm_write_meta "$child/state/promote-legacy.meta" \
     "window=firstmate:fm-promote-legacy" "kind=scout"
+  write_promotion_brief "$child" promote-legacy
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" \
     "$PROMOTE" promote-legacy --mode local-only --yolo off 2>&1) \
@@ -2284,6 +2299,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   printf 'FMX_PAIRING_TOKEN=child-local-token\n' > "$remote_child/.env"
   fm_write_meta "$remote_child/state/promote-remote.meta" \
     "window=firstmate:fm-promote-remote" "kind=scout"
+  write_promotion_brief "$remote_child" promote-remote
   out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
     FM_STATE_OVERRIDE="$remote_child/state" \
     "$PROMOTE" promote-remote --mode local-only --yolo off 2>&1) \

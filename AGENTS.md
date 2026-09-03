@@ -308,6 +308,7 @@ Serialize only for a true semantic dependency, shared mutable external state, in
 An idle slot while a ready item exists is a defect, so dispatch it or record on the item the exact rule that blocks it.
 A captain-ordered sequence sets priority among the items it names, is not a whitelist unless the captain says so, and when its last item is blocked or an umbrella the frontier resumes.
 Write the task-specific brief under section 11 before spawning.
+Fill the task subsections according to section 11.
 
 ### Dispatch and supervision handoff
 
@@ -355,6 +356,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+When the captain adds or changes an ask mid-task, append the captain's words to that brief's `## Captain's intent` and steer the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+`bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
@@ -538,8 +541,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 ## 11. Crewmate briefs
 
-`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, and mode-specific definitions of done rendered into briefs and promotions.
-Use the generated brief scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
+`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, mode-specific definitions of done, and what a no-mistakes worker may pass as `--intent`, rendered into briefs and promotions.
+Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus only the context needed to read it, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
 Firstmate names the test scope at intake as part of that proof: targeted tests covering the changed surface are the default proof for a surgical change under section 7's proportional-validation doctrine.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
