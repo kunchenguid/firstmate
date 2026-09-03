@@ -121,8 +121,8 @@ The repositioning move-to-last preserves every surviving workspace's relative or
 If that rollback cannot restore the verified original order, cleanup warns loudly and leaves the retained records for inspection rather than retrying the shared-layout mutation.
 The pane-death signals are pid-exact: the escalation re-reads the pane's process information and refuses unless the same shell pid still passes the strict bare-idle ownership proof, so an exited and reused pid is never signaled.
 Any ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close.
-Below the release floor the exact prior-tab restore remains the backstop behind every close, so degraded behavior is never worse than the pre-mitigation sub-second restore.
-At or above the floor, where every removal primitive already preserves focus, that restore is skipped entirely, so it can never revert a captain focus change made during the operation.
+Below the release floor, or when the release cannot be confirmed, the exact prior-tab restore remains the backstop after every presentation operation, so degraded behavior is never worse than the pre-mitigation sub-second restore.
+At or above the floor, where every presentation primitive already preserves focus, that restore is skipped entirely, so it can never revert a captain focus change made during the operation.
 Ordinary non-projected task removal serializes through the same session lock, applies the same focus-safe plan when its close would empty a non-focused workspace, keeps the legitimate plain close when the target is the active tab, and refuses an unlocked close if the lock cannot be acquired.
 Task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child, then retains each child's durable identity unless that exact pane returns structured not-found after its close.

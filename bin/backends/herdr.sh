@@ -754,8 +754,8 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
 
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
 # workspace and tab ids as one tab-separated record.
-# Presentation mutations use this read-only snapshot as their sole focus
-# restoration authority.
+# Below-floor or release-indeterminate presentation mutations use this read-only
+# snapshot as their sole focus restoration authority.
 # Labels, workspace order, and ambient client state are never focus authority.
 fm_backend_herdr_projection_focus_snapshot() {  # <session>
   local session=$1 list snapshot workspace tab tabs
@@ -782,14 +782,14 @@ fm_backend_herdr_projection_focus_snapshot() {  # <session>
   printf '%s\t%s' "$workspace" "$tab"
 }
 
-# fm_backend_herdr_projection_focus_restore: verify that one presentation
-# mutation preserved the exact active workspace and tab captured immediately
-# before it.
+# fm_backend_herdr_projection_focus_restore: below the presentation release
+# floor, verify that one presentation mutation preserved the exact active
+# workspace and tab captured immediately before it.
 # This is the backstop for every focus-unsafe instant: on Herdr 0.7.5 an
 # explicit pane.close that empties a non-focused workspace moves focus to
 # that workspace's neighbor (upstream #1328/#1877), and a pane-death removal
 # before a non-last focused workspace moves focus to the focused workspace's
-# right neighbor (upstream #1621/#1912); both fixes are unreleased.
+# right neighbor (upstream #1621/#1912); both fixes shipped in Herdr 0.8.0.
 # A single tab.focus on the exact response-independent pre-operation tab id
 # restores both the workspace and tab atomically.
 #
