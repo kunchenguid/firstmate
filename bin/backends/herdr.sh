@@ -2570,6 +2570,26 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # timeout (default 90000ms, above the observed ~57s pyenv lock). fm-spawn treats
 # a non-zero return as a hard spawn failure so its existing abort cleanup removes
 # the unverified Space.
+fm_backend_herdr_now_ms() {
+  local raw sec frac
+  raw=${EPOCHREALTIME:-}
+  case "$raw" in
+    *[0-9][.,][0-9]*)
+      sec=${raw%%[.,]*}
+      frac=${raw#*[.,]}
+      frac="${frac}000"
+      frac=${frac:0:3}
+      case "$sec$frac" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s\n' "$((sec * 1000 + 10#$frac))"; return 0 ;;
+      esac
+      ;;
+  esac
+  sec=$(date +%s 2>/dev/null) || return 1
+  case "$sec" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$((sec * 1000))"
+}
+
 fm_backend_herdr_wait_shell_ready() {  # <target> [timeout-ms]
   fm_backend_herdr_target_ready "$1" || return 1
   local timeout=${2:-${FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS:-90000}}
@@ -2584,14 +2604,12 @@ fm_backend_herdr_wait_shell_ready() {  # <target> [timeout-ms]
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
     "printf 'FMSHELLRDY%s\\n' $token" >/dev/null 2>&1 || return 1
   marker="FMSHELLRDY$token"
-  now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
-    -e 'printf "%d\n", int(clock_gettime(CLOCK_MONOTONIC) * 1000)' 2>/dev/null) || return 1
+  now=$(fm_backend_herdr_now_ms) || return 1
   deadline=$((now + timeout))
   while :; do
     output=$(fm_backend_herdr_capture "$1" 200) || return 1
     printf '%s' "$output" | grep -Fq "$marker" && return 0
-    now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
-      -e 'printf "%d\n", int(clock_gettime(CLOCK_MONOTONIC) * 1000)' 2>/dev/null) || return 1
+    now=$(fm_backend_herdr_now_ms) || return 1
     [ "$now" -lt "$deadline" ] || return 1
     remaining=$((deadline - now))
     nap=$poll

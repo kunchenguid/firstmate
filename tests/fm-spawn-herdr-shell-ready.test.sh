@@ -167,8 +167,8 @@ $1
 EOF
 }
 
-run_ready_spawn() {  # <id> <ready-after-polls>
-  local id=$1 ready_after=$2
+run_ready_spawn() {  # <id> <ready-after-polls> <timeout-ms>
+  local id=$1 ready_after=$2 timeout=$3
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
       -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID \
     FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -181,7 +181,7 @@ run_ready_spawn() {  # <id> <ready-after-polls>
     FM_FAKE_READY_READ_COUNT_FILE="$FAKEBIN_DIR/../ready-read-count" \
     FM_FAKE_READY_AFTER_POLLS="$ready_after" \
     FM_FAKE_FOREGROUND_CWD="$WT_DIR" \
-    FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS=500 \
+    FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS="$timeout" \
     FM_BACKEND_HERDR_SHELL_READY_POLL_MS=1 \
     FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -196,7 +196,7 @@ test_delayed_shell_success_precedes_treehouse_get() {
   runlog="$FAKEBIN_DIR/../pane-run.log"
   : > "$runlog"
 
-  out=$(run_ready_spawn "$id" 3)
+  out=$(run_ready_spawn "$id" 3 2000)
   status=$?
   expect_code 0 "$status" "spawn should succeed after delayed shell readiness"
   assert_contains "$out" "spawned $id" "spawn did not report success after readiness released"
@@ -219,7 +219,7 @@ test_permanent_busy_pane_never_receives_treehouse_get() {
   runlog="$FAKEBIN_DIR/../pane-run.log"
   : > "$runlog"
 
-  out=$(run_ready_spawn "$id" -1)
+  out=$(run_ready_spawn "$id" -1 200)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn must fail when the pane shell never becomes ready"$'\n'"$out"
   assert_contains "$out" "did not become ready before treehouse get" \
@@ -239,7 +239,7 @@ test_barrier_failure_records_no_task() {
   rec=$(make_ready_case ready-notask "$id")
   read_ready_record "$rec"
 
-  out=$(run_ready_spawn "$id" -1)
+  out=$(run_ready_spawn "$id" -1 200)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn must fail closed on a readiness timeout"$'\n'"$out"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a failed spawn must not record task metadata"

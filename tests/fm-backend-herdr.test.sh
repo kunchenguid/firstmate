@@ -3069,15 +3069,15 @@ test_wait_shell_ready_respects_custom_timeout() {
   local dir log resp fb status start end
   dir="$TMP_ROOT/ready-custom-to"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
-  start=$(perl -MTime::HiRes=time -e 'printf "%d\n", int(time * 1000)')
+  start=$(date +%s)
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_HERDR_READY_AFTER_READS=-1 FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS=2000 \
+    FM_HERDR_READY_AFTER_READS=-1 FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS=5000 \
     FM_BACKEND_HERDR_SHELL_READY_POLL_MS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready default:w1:p2 20' "$ROOT"
   status=$?
-  end=$(perl -MTime::HiRes=time -e 'printf "%d\n", int(time * 1000)')
+  end=$(date +%s)
   [ "$status" -ne 0 ] || fail "wait_shell_ready should time out when the marker never renders"
-  [ $((end - start)) -lt 1000 ] || fail "explicit timeout-ms argument did not override the longer environment default"
+  [ $((end - start)) -lt 3 ] || fail "explicit timeout-ms argument did not override the longer environment default"
   pass "fm_backend_herdr_wait_shell_ready: honors an explicit timeout-ms argument"
 }
 
