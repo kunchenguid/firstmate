@@ -881,7 +881,8 @@ test_unbound_claude_daemon_ignores_predecessor_alarm() {
 }
 
 test_stale_recovery_claimant_owns_failure_suppression() {
-  local dir owner holder first_out first_status second_out second_status failure reset before after
+  local dir owner holder first_out first_status repeat_out repeat_status
+  local second_out second_status failure reset before after
   dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-claimant-suppression")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
@@ -907,6 +908,11 @@ test_stale_recovery_claimant_owns_failure_suppression() {
     "stale recovery notice was not scoped to its authenticated claimant"
   assert_contains "$first_out" "stale session lock recovery failed" \
     "authenticated stale recovery did not deliver its first failure"
+
+  repeat_out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 \
+    run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); repeat_status=$?
+  expect_code 2 "$repeat_status" "the claimant's continuing failure must retain the Stop-owned retry"
+  [ -z "$repeat_out" ] || fail "the claimant repeated its owned failure notice: $repeat_out"
 
   bash -c '
     . "$1/bin/fm-wake-lib.sh"
@@ -2112,6 +2118,64 @@ test_transition_revocation_does_not_signal_released_owner() {
 
   expect_code 1 "$revoke_rc" "a completed transition release must win against stale revocation"
   pass "auto-arm: transition release wins atomically against stale revocation"
+}
+
+test_transition_revocation_rechecks_identity_before_signalling() {
+  local dir state ready release holder signal_log revoke_rc revoked_count i
+  dir=$(make_primary_dir "$TMP_ROOT/transition-revocation-identity-race")
+  state="$dir/state"
+  ready="$state/transition-identity-ready"
+  release="$state/transition-identity-release"
+  signal_log="$state/transition-identity-signals"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    : > "$2"
+    while [ ! -e "$3" ]; do sleep 0.01; done
+  ' _ "$dir" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition identity-race holder did not acquire its lock"
+  sleep 1
+
+  FM_TEST_OWNER="$holder" FM_TEST_SIGNAL_LOG="$signal_log" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    recorded=$(cat "$state/.claude-autoarm-transition.lock/pid-identity") || exit
+    fm_pid_identity() {
+      if [ "$1" = "$FM_TEST_OWNER" ]; then
+        if [ -e "$state/.claude-autoarm-transition.lock" ] \
+          || [ -L "$state/.claude-autoarm-transition.lock" ]; then
+          printf "%s\n" "$recorded"
+        else
+          printf "replacement-identity\n"
+        fi
+        return 0
+      fi
+      return 1
+    }
+    kill() {
+      printf "%s\n" "$*" >> "$FM_TEST_SIGNAL_LOG"
+      return 0
+    }
+    fm_autoarm_transition_revoke_stalled "$state" 1 caller-identity
+  ' _ "$dir"
+  revoke_rc=$?
+  kill -0 "$holder" 2>/dev/null \
+    || fail "transition revocation signalled a replacement process after identity changed"
+  assert_absent "$signal_log" \
+    "transition revocation attempted to signal after the detached owner's identity changed"
+  assert_absent "$state/.claude-autoarm-transition.lock" \
+    "identity-mismatched transition lock was restored instead of discarded"
+  revoked_count=$(find "$state" -maxdepth 1 \
+    -name '.claude-autoarm-transition.lock.revoked.*' | wc -l | tr -d ' ')
+  [ "$revoked_count" -eq 0 ] || fail "identity-mismatched revoked lock was not discarded"
+  : > "$release"
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 0 "$revoke_rc" "identity mismatch after detachment must reclaim without signalling"
+  pass "auto-arm: transition revocation rechecks identity immediately before signalling"
 }
 
 test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
@@ -4000,6 +4064,7 @@ test_legacy_predecessor_alarm_cannot_hide_successor_claim_failure
 test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
 test_transition_revocation_does_not_signal_released_owner
+test_transition_revocation_rechecks_identity_before_signalling
 test_stalled_transition_steal_holder_falls_back_to_durable_failure
 test_pid_reused_transition_holder_cannot_hide_failure
 test_zombie_transition_holder_cannot_hide_failure

@@ -1168,6 +1168,17 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
     fm_lock_release "$steal"
     return 1
   fi
+  if ! current=$(fm_pid_identity "$pid" 2>/dev/null) \
+    || [ "$current" != "$recorded" ]; then
+    fm_lock_remove_path "$revoked_lock" || {
+      fm_lock_release "$steal"
+      return 1
+    }
+    fm_lock_release "$steal"
+    FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=$revoked_signature
+    FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=$revoked_identity
+    return 0
+  fi
   if ! kill -TERM "$pid" 2>/dev/null; then
     if current=$(fm_pid_identity "$pid" 2>/dev/null) \
       && [ "$current" = "$recorded" ]; then

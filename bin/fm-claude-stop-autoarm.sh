@@ -206,7 +206,7 @@ autoarm_claim_failure() {  # <reason> [baseline]
     0|3)
       autoarm_alarm_current && exit 0
       if [ "$failure_rc" -eq 0 ] \
-        || [ "$FAILURE_SUPPRESSION_OWNER_PID" != "$SESSION_OWNER_PID" ]; then
+        || [ -z "$FAILURE_SUPPRESSION_OWNER_PID" ]; then
         {
           printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not claim recovery: %s.\n' "$reason"
           printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook claim path before ending blind.\n'
