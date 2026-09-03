@@ -3,7 +3,7 @@ name: updatefirstmate
 description: >-
   Self-update a running firstmate and its secondmates to the latest from origin.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and restarts each second mate whose own instructions changed - after it has written down the open work it was holding - so the whole tree actually runs the latest bin/ and instructions.
+  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and reloads changed second-mate instructions through persist-gated restarts or fallback re-read nudges.
 user-invocable: true
 metadata:
   internal: true
@@ -42,7 +42,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `nudge-secondmates: fm-<id>...|none`
 
    The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
-   A mate reached neither set because it was skipped, was already current, advanced without changing anything it reads or runs, or lacked a positively confirmed live agent - none of those need any action from you.
+   A mate reaches neither set because it was skipped, was already current, advanced without changing anything it reads or runs, or had an endpoint positively classified as dead or missing - none of those need any action from you.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.

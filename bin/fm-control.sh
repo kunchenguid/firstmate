@@ -34,10 +34,12 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
-#              model and effort tokens) exactly as any other respawn does, while
-#              a ship or scout keeps the exact adapter already recorded for it.
+#              of this verb. An explicit `default` model or effort clears that
+#              axis for the replacement. With no explicit axis, a secondmate
+#              re-resolves its durable config/secondmate-harness pin (harness
+#              plus its optional model and effort tokens) exactly as any other
+#              respawn does, while a ship or scout keeps the exact adapter
+#              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement

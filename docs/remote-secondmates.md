@@ -228,7 +228,7 @@ The primary records that remote nudge before delivery and retries it during lock
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
 A live remote second mate is restarted with `relaunch`, which runs the ordinary [control plane](agent-control.md) on that host: the endpoint record there was written by a host-local launch and carries no remote placement, so the transaction, its checkpoint, and its postconditions are the local ones.
-The primary passes `<harness> <model|-> <effort|->` explicitly, because `config/secondmate-harness` is not inherited into a second mate's home and the file on that host belongs to a different home; letting the far side re-resolve it would silently move the mate onto another runtime.
+The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin, because `config/secondmate-harness` is not inherited into a second mate's home and the file on that host belongs to a different home; letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
 
 Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
