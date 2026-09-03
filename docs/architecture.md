@@ -228,15 +228,24 @@ An agent working inside this repo reads `AGENTS.md`'s "address the user as capta
 `bin/fm-prepush-voice-guard.sh` is deterministic commit-message prevention, paired with the scoping sentence at that instruction in `AGENTS.md`.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
-The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit that is about to leave, including the ones the gate's own agents wrote.
-The guard uses `origin/main` as the publication boundary when it resolves and falls back to local `main` only when it does not, so an ahead local branch cannot hide commits that the first feature push would publish.
-It stops with an unknown-range error when neither ref resolves, which is why the CI lint job checks out full history.
-A matching commit message is therefore refused before it leaves the machine.
+The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.
+It stops with an unknown-range error when neither `origin/main` nor local `main` resolves, which is why the CI lint job checks out full history.
+On a branch that has not been pushed, a matching commit message is therefore refused before it leaves the machine.
 
-The pull request title and description half is only a backstop.
+The set the guard scans by default is every commit reachable from `HEAD` but not from the default-branch ref, preferring `origin/main` and falling back to local `main` only when it does not resolve, so an ahead local branch cannot shrink the set.
+That set is deliberately broader than "commits that have never been pushed": a commit already on a feature remote or already visible in an open pull request stays in it until the default branch carries it.
+The conservative choice is what keeps the refusal standing while the leak is still in what a maintainer would merge, and the cost is that clearing such a refusal means rewriting already-pushed history rather than adding a commit on top.
+
+The pull request title and description half is only a backstop, and this section owns that limit.
 `.github/workflows/internal-voice-guard.yml` receives them on open, edit, synchronize, and reopen after GitHub has already stored and exposed the text.
 A failed check reports a leak that is already public and cannot undo that disclosure.
 Preventing that earlier requires scanning the locally generated title and description before the API call in the no-mistakes repository, which is outside this change's scope.
+
+That workflow runs the base branch's copy of the scanner, checked out separately, and never the pull request's own.
+A `pull_request` checkout is the pull request's own code, so running the scanner from it would let a pull request rewrite the scanner to succeed and ship a leaking title and body, approving itself with a green check.
+While `bin/fm-prepush-voice-guard.sh` is absent from the base branch the check does not scan at all, including on the pull request that introduces the scanner.
+It reports that skip as a warning annotation and a job summary line rather than passing silently, and it does not fall back to the pull request's copy, because that fallback is the same vulnerability with extra steps.
+The condition ends as soon as the file is on the base branch, and the residual that follows is that deleting the scanner from the default branch would make this check skip again until it is restored.
 
 The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment; three such trailers are already in merged history.
 It refuses the pointer shape rather than the word, so the 333 merged lines using "session" in its ordinary technical sense still pass.

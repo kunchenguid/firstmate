@@ -18,8 +18,19 @@
 # owner on its default (no explicit-path) path, which is both what CI runs and
 # what .no-mistakes.yaml pins as commands.lint. The gate's pipeline order puts
 # lint last before push, after the review, test, and document steps have made
-# their own commits, so this check reads back every commit that is about to
-# leave - including the ones the gate's own agents wrote.
+# their own commits, so this check reads back every commit the branch would
+# contribute - including the ones the gate's own agents wrote.
+#
+# WHAT THE DEFAULT RANGE ACTUALLY IS, stated precisely because the obvious
+# shorthand for it is wrong. It is every commit reachable from HEAD but not from
+# the default-branch ref. That is NOT "commits that have never been pushed": a
+# commit already pushed to a feature remote, or already visible in an open pull
+# request, is still in the set and is still refused until the default branch
+# carries it. That is deliberate. The conservative set is what keeps refusing
+# while the leak is still in what a maintainer would merge, and a leak that has
+# reached a feature branch is not a leak that has stopped mattering. The cost is
+# that clearing such a refusal means rewriting already-pushed history rather
+# than adding a commit on top.
 #
 # WHAT IT REFUSES, and why the set is this narrow. Every rule below was selected
 # against the real merged history of this repo (530 commits, ~15k message lines)
@@ -158,7 +169,8 @@
 #   fm-prepush-voice-guard.sh --help           print this usage
 #
 # The default range is bounded by origin/main when it resolves and by local main
-# only as a fallback, so an ahead local main cannot hide unpushed commits.
+# only as a fallback, so an ahead local main cannot shrink the set and hide a
+# commit the default branch does not yet carry.
 set -u
 
 SELF_DIR=
@@ -365,19 +377,20 @@ fm_voice_default_ref() {
 }
 
 # Commits on HEAD that the authoritative default-branch ref does not carry.
-# Preferring origin/main prevents an ahead local main from hiding commits that
-# the first feature push would publish.
+# Preferring origin/main prevents an ahead local main from shrinking that set.
+# The set is not "commits never pushed anywhere"; see the header for why the
+# broader set is the deliberate one.
 #
 # Both failure modes return 3, never 1: an unresolvable ref and an unusable
 # rev-list both mean the range is unknown, and an unknown range must not be
 # reported as either clean or leaking.
-fm_voice_unpublished_commits() {  # <destination>
+fm_voice_commits_off_default_branch() {  # <destination>
   local destination=$1
   local base_ref
   base_ref=$(fm_voice_default_ref)
 
   if [ -z "$base_ref" ]; then
-    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried origin/main, main).\n' >&2
+    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are not yet on the default branch: no default-branch ref resolved (tried origin/main, main).\n' >&2
     printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main), or name the bound with --range <a>..<b>, then re-run. An unknown range is not a clean range.\n' >&2
     return 3
   fi
@@ -490,9 +503,9 @@ else
     SUBJECT_LABEL='the commits in that range'
   else
     rc=0
-    fm_voice_unpublished_commits "$COMMITS_FILE" || rc=$?
+    fm_voice_commits_off_default_branch "$COMMITS_FILE" || rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
-    SUBJECT_LABEL='the commits about to be pushed'
+    SUBJECT_LABEL='the commits not yet on the default branch'
   fi
 
   FOUND=0
