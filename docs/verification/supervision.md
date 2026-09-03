@@ -317,12 +317,12 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` first uses the session's contiguous harness ancestry, while detached Claude Stop delivery uses the owner-and-root-bound daemon bridge documented in [`watcher-continuity.md`](../watcher-continuity.md#ownership) instead of treating the detached daemon ancestry as the foreground session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees, while it and `tests/fm-claude-stop-autoarm.test.sh` cover the detached bridge's owner/root negatives and zombie-owner recovery path.
-The detached-daemon bridge currently has deterministic evidence only: the recorded 2026-07-24 credentialed run predates that bridge, and its opt-in guard does not assert that Stop delivery left the foreground ancestry or that `--spawned-by` carried ownership.
+The detached-daemon bridge currently has deterministic evidence only: the current credentialed live guard observed foreground-ancestry Stop delivery on `claude -p`, so it does not live-prove a daemon `--spawned-by` bridge.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.259 on 2026-09-03:
 
 ```sh
 claude --version
@@ -332,8 +332,8 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.259 (Claude Code)
+ok - Claude 2.1.259 (Claude Code) live E2E reclaimed a stale session lock through session start, authenticated real Stop delivery, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
 Current entry points:

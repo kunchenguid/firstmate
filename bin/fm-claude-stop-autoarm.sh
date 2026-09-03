@@ -125,6 +125,28 @@ LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
 case "$LOCK_PID" in
   ''|*[!0-9]*) exit 0 ;;
 esac
+
+autoarm_trace_session_probe() {  # <lock-pid>
+  [ -n "${FM_CLAUDE_AUTOARM_TRACE:-}" ] || return 0
+  local lock_pid=$1 ancestry pid in_ancestry=0 bridge=0 owned=0
+  ancestry=$(fm_harness_ancestry_pids 2>/dev/null || true)
+  while IFS= read -r pid; do
+    [ "$pid" = "$lock_pid" ] && in_ancestry=1
+  done <<EOF
+$ancestry
+EOF
+  fm_claude_daemon_spawned_by_lock_owner "$lock_pid" "$FM_ROOT" \
+    && bridge=1
+  fm_session_lock_owned_by_self "$STATE" "$FM_ROOT" \
+    && owned=1
+  {
+    printf 'autoarm_trace hook_pid=%s lock_pid=%s foreground_owner_in_hook_ancestry=%s spawned_by_authorizes_lock_owner=%s session_lock_owned_by_self=%s\n' \
+      "$$" "$lock_pid" "$in_ancestry" "$bridge" "$owned"
+  } >>"$FM_CLAUDE_AUTOARM_TRACE" 2>/dev/null || true
+}
+
+autoarm_trace_session_probe "$LOCK_PID"
+
 SESSION_OWNER_PID=$LOCK_PID
 if ! fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"; then
   SESSION_AUTHENTICATED=0

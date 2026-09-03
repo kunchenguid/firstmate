@@ -4,9 +4,11 @@
 # Proves, against the real installed Claude Code and the real tracked hook
 # registration: a fresh session with in-flight work, no watcher, and a stale
 # session lock can run fm-session-start.sh first; session start reclaims the
-# dead owner; at least two tokenless auto-arm and rewake cycles then complete
-# with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# dead owner; real Stop delivery authenticates the foreground owner through the
+# live hook ancestry or Claude daemon --spawned-by metadata;
+# at least two tokenless auto-arm and rewake cycles then complete with zero
+# model-issued arm commands; and the cooperative guard consumes no forced
+# continuation while the hook's launch is healthy.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -34,9 +36,53 @@ TRANSCRIPT="$LAB/claude.jsonl"
 CLAUDE_VERSION=$(claude --version)
 
 cleanup() {
+  if [ "${FM_CLAUDE_LIVE_E2E_KEEP_LAB:-0}" = 1 ]; then
+    printf 'kept lab: %s\n' "$LAB" >&2
+    return
+  fi
   rm -rf "$LAB"
 }
 trap cleanup EXIT
+
+assert_session_start_before_cycle0() {
+  local tool_first session_line cycle_line
+  tool_first=$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null || true)
+  if [ "$tool_first" = 'bin/fm-session-start.sh' ]; then
+    return 0
+  fi
+  session_line=$(grep -nF "SESSION START - $HOME_DIR" "$TRANSCRIPT" | sed -n '1s/:.*//p' || true)
+  cycle_line=$(grep -n '"text":"CYCLE0"' "$TRANSCRIPT" | sed -n '1s/:.*//p' || true)
+  case "$session_line" in
+    ''|*[!0-9]*) fail "fresh Claude session did not run native or model-issued session start before CYCLE0: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" ;;
+  esac
+  case "$cycle_line" in
+    ''|*[!0-9]*) fail "fresh Claude session never replied CYCLE0 after session start" ;;
+  esac
+  [ "$session_line" -lt "$cycle_line" ] \
+    || fail "fresh Claude session replied CYCLE0 before session start completed"
+}
+
+assert_autoarm_trace_authenticated() {
+  local trace trace_lines bad_lines
+  trace="$HOME_DIR/state/autoarm-trace.log"
+  trace_lines=$(grep -c '^autoarm_trace ' "$trace" 2>/dev/null || true)
+  case "$trace_lines" in
+    ''|*[!0-9]*) trace_lines=0 ;;
+  esac
+  [ "$trace_lines" -ge 2 ] \
+    || fail "expected at least two real auto-arm hook traces, got $trace_lines: $(cat "$trace" 2>/dev/null)"
+  bad_lines=$(grep '^autoarm_trace ' "$trace" 2>/dev/null | grep -vc 'session_lock_owned_by_self=1$' || true)
+  case "$bad_lines" in
+    ''|*[!0-9]*) bad_lines=0 ;;
+  esac
+  [ "$bad_lines" -eq 0 ] \
+    || fail "at least one auto-arm Stop delivery could not authenticate the session lock: $(cat "$trace" 2>/dev/null)"
+  grep -Eq '^autoarm_trace .*foreground_owner_in_hook_ancestry=1 .*session_lock_owned_by_self=1$' "$trace" \
+    && return 0
+  grep -Eq '^autoarm_trace .*spawned_by_authorizes_lock_owner=1 .*session_lock_owned_by_self=1$' "$trace" \
+    && return 0
+  fail "auto-arm hook did not prove foreground ancestry or --spawned-by lock-owner authorization: $(cat "$trace" 2>/dev/null)"
+}
 
 mkdir -p "$LAB"
 # git clone of this worktree carries only committed state, so copy the
@@ -93,14 +139,22 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
 exit 0
 SH
-# Drain fixture: session start invokes it once, then the model invokes it once
-# per rewake. The third total drain ends the in-flight need after two complete
-# Stop-owned cycles.
+# Drain fixture: native and model-issued session starts may both invoke it, then
+# the model invokes it once per rewake.
+# Only model-issued wake drains count toward ending the in-flight need, so a
+# duplicate session start cannot shorten the auto-arm cycle count.
 cat > "$PROJECT/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 N=$(cat "$FM_HOME/state/drain-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/drain-count"
 echo "drain-run=$N" >> "$FM_HOME/state/drain-ran"
-if [ "$N" -ge 3 ]; then
+LAST_TOOL=$(tail -1 "$FM_HOME/state/tool-calls.log" 2>/dev/null || true)
+if [ "$LAST_TOOL" = 'bin/fm-wake-drain.sh' ]; then
+  W=$(cat "$FM_HOME/state/wake-drain-count" 2>/dev/null || echo 0); W=$((W+1)); echo "$W" > "$FM_HOME/state/wake-drain-count"
+  echo "wake-drain-run=$W" >> "$FM_HOME/state/wake-drain-ran"
+else
+  W=$(cat "$FM_HOME/state/wake-drain-count" 2>/dev/null || echo 0)
+fi
+if [ "$W" -ge 2 ]; then
   rm -f "$FM_HOME/state/task.meta"
 fi
 printf 'stale: fixture-rapid drained\n'
@@ -111,20 +165,22 @@ PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call.
 
 (
   cd "$PROJECT" || exit 1
-  FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  FM_HOME="$HOME_DIR" FM_CLAUDE_AUTOARM_TRACE="$HOME_DIR/state/autoarm-trace.log" \
+    CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
     claude -p "$PROMPT" --dangerously-skip-permissions --effort low --output-format stream-json --verbose
 ) > "$TRANSCRIPT" 2>&1 || fail "Claude credentialed auto-arm session failed: $(tail -20 "$TRANSCRIPT")"
 
 ARM_RUNS=$(wc -l < "$HOME_DIR/state/arm-ran" 2>/dev/null | tr -d ' ')
 [ "$ARM_RUNS" = 2 ] || fail "expected exactly 2 hook-owned arm cycles, got $ARM_RUNS: $(cat "$HOME_DIR/state/arm-ran" 2>/dev/null)"
 DRAIN_RUNS=$(wc -l < "$HOME_DIR/state/drain-ran" 2>/dev/null | tr -d ' ')
-[ "$DRAIN_RUNS" = 3 ] || fail "expected one session-start drain plus two model wake drains, got $DRAIN_RUNS drains"
+[ "$DRAIN_RUNS" -ge 3 ] || fail "expected session-start and wake-feedback drains, got $DRAIN_RUNS drains"
+WAKE_DRAIN_RUNS=$(wc -l < "$HOME_DIR/state/wake-drain-ran" 2>/dev/null | tr -d ' ')
+[ "$WAKE_DRAIN_RUNS" = 2 ] || fail "expected exactly 2 model wake drains, got $WAKE_DRAIN_RUNS"
 REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
-  || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
+assert_session_start_before_cycle0
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
@@ -133,6 +189,7 @@ if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q '&' "$HOME_DIR/state/tool-calls.log" \
     || fail "model used a shell ampersand: $(cat "$HOME_DIR/state/tool-calls.log")"
 fi
+assert_autoarm_trace_authenticated
 ! grep -q 'TURN WOULD END BLIND' "$TRANSCRIPT" \
   || fail "cooperative guard consumed a forced continuation while the auto-arm launch was healthy"
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
@@ -161,4 +218,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, authenticated real Stop delivery, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
