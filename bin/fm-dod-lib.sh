@@ -219,7 +219,8 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe the implementation is complete and committed, append \`ready: {summary}\` to the status file and stop.
+Use \`ready:\`, never \`done:\`: nothing has been validated or shipped yet, and a \`done:\` line is a terminal claim that must name what it claims.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.

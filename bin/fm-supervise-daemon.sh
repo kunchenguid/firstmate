@@ -439,7 +439,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
           ;;
       esac
     fi
-    printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    printf 'self|stale + captain-relevant (already escalated by signal): %s' "$last"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller

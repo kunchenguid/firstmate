@@ -306,7 +306,11 @@ test_legacy_claim_degrades_and_is_never_upgraded() {
   printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$dir/state/task-v.status"
   result=$(FAKE_GH_OUT="MERGED	deadbeef	fm/task-v	SUCCESS" verify "$dir")
   [ "${result%%$'\t'*}" = 3 ] || fail "a legacy claim did not exit unverified: $result"
-  case "$result" in *"legacy claim, no commit identity"*) ;; *) fail "the legacy claim was not named as such: $result" ;; esac
+  case "$result" in *"the claim names no commit identity"*) ;; *) fail "the claim was not named as identity-less: $result" ;; esac
+  # The reason must say what is CHECKABLE about the claim and nothing about when
+  # it was written: the current brief can produce this shape minutes before the
+  # reason is read, so "legacy" would be an assertion nothing here observed.
+  case "$result" in *legacy*) fail "the reason asserted when the claim was written: $result" ;; esac
   # The verdict token is the whole word after the exit code, so a check for
   # "verified" must not be satisfied by the "verified" inside "unverified".
   case "${result#*$'\t'}" in verified:*) fail "a legacy claim was silently upgraded to verified: $result" ;; esac
@@ -917,6 +921,39 @@ test_a_configured_verb_vocabulary_is_not_unrecognised() {
   pass "a home's configured verb vocabulary and the legacy bare lines stay recognised"
 }
 
+# The pre-validation handoff verb. `done:` was doing two jobs, and under this
+# contract only one of them is legitimate: a no-mistakes worker whose brief told
+# it to append `done: {summary}` before validating stood on a claim nothing could
+# ever establish. `ready:` carries that handoff instead - captain-relevant, so
+# firstmate still sees it, but asserting nothing about a shipped commit.
+test_the_prevalidation_handoff_is_not_a_claim() {
+  local dir state
+  dir="$TMP_ROOT/ready-handoff"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf 'working: implementing\nready: implementation complete and committed\n' > "$state/task-v.status"
+  fm_done_claim_status "$state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = none ] \
+    || fail "the pre-validation handoff stood as a terminal claim: $FM_DONE_CLAIM_STATE"
+  [ -z "$FM_DONE_CLAIM_LINE" ] \
+    || fail "the pre-validation handoff was returned as a claim line: $FM_DONE_CLAIM_LINE"
+
+  # It has to reach firstmate the way `done:` did, be recognised as a real state
+  # so the drain does not flag it as prose, and never be read as terminal.
+  status_is_captain_relevant 'ready: implementation complete and committed' \
+    || fail "the handoff verb would not wake firstmate"
+  status_is_terminal_verb 'ready: implementation complete and committed' \
+    && fail "the handoff verb was read as a terminal outcome"
+  status_line_is_unrecognized 'ready: implementation complete and committed' \
+    && fail "the handoff verb was flagged as matching no status verb"
+
+  # The legacy free-text tokens in the same default set are prose, not this verb,
+  # so the verb earns its captain relevance rather than borrowing theirs.
+  status_is_captain_relevant 'working: PR ready in branch fm/x' \
+    && fail "a nonterminal progress line became captain-relevant from legacy prose"
+  pass "the pre-validation handoff is captain-relevant, recognised, and never a claim"
+}
+
 # The reflog is the branch's own history, but only while its creation entry
 # survives: `git gc` prunes entries past gc.reflogExpire, and on a long-lived
 # branch that can leave the oldest SURVIVING entry sitting on the tip. Reading
@@ -1117,6 +1154,35 @@ test_a_direct_pr_claim_on_this_task_branch_verifies() {
 }
 
 # --- a report must be this task's own deliverable ----------------------------
+# The binding is on the real LOCATION, not on how the path is spelled. A scout
+# that resolves its own deliverable (realpath, or `pwd -P` in its worktree) hands
+# back a physical path, and on any platform whose home sits under a symlinked
+# component that path is spelled differently from the logical one - so a spelling
+# test would record the task's OWN report as established-false. Only the resolved
+# comparison may establish falsity; the foreign case below proves it still does.
+test_a_scout_claim_spelled_through_a_symlink_is_its_own_report() {
+  local dir link real result
+  dir=$(make_world scout-symlinked-home scout scout)
+  mkdir -p "$dir/data/task-v"
+  printf 'the findings\n' > "$dir/data/task-v/report.md"
+  # The home is REACHED through a symlinked component, exactly as a home under
+  # /tmp is on this platform, while the scout resolves and claims the real path.
+  link="$TMP_ROOT/scout-symlinked-link"
+  rm -f "$link"
+  ln -s "$dir" "$link"
+  real=$(cd "$link/data/task-v" && pwd -P) || fail "could not resolve the report directory"
+  [ "$real" != "$link/data/task-v" ] \
+    || fail "setup error: the fixture link did not make the spellings differ"
+  printf 'done: report=%s/report.md - shipped\n' "$real" > "$dir/state/task-v.status"
+  result=$(verify "$link")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "a scout claim naming its own report by its real path was not verified: $result"
+  case "${result#*$'\t'}" in
+    *contradicted*) fail "the task's own report was recorded established-false: $result" ;;
+  esac
+  pass "a report named by its resolved path is this task's own, however the home is spelled"
+}
+
 test_a_scout_claim_on_another_tasks_report_is_not_verified() {
   local dir result
   dir=$(make_world scout-foreign scout scout)
@@ -1774,6 +1840,7 @@ test_an_unresolvable_absent_mode_is_unverified_never_contradicted
 test_help_prints_the_whole_header
 test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
+test_the_prevalidation_handoff_is_not_a_claim
 test_a_pruned_reflog_is_unverified_not_contradicted
 test_a_contradiction_needs_the_observation_it_contradicts_with
 test_a_local_only_claim_on_work_the_branch_never_made_is_not_verified
@@ -1781,6 +1848,7 @@ test_a_retired_branch_claim_on_work_never_made_is_not_verified
 test_a_direct_pr_claim_on_another_branch_is_not_verified
 test_a_direct_pr_claim_on_this_task_branch_verifies
 test_a_scout_claim_on_another_tasks_report_is_not_verified
+test_a_scout_claim_spelled_through_a_symlink_is_its_own_report
 test_a_later_failed_line_withdraws_the_claim
 test_only_a_failed_line_withdraws_the_claim
 test_only_the_task_itself_may_withdraw_its_claim

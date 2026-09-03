@@ -172,6 +172,7 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
+    "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}") echo ready ;;
     done|failed)    echo unknown ;;
     *)              echo unknown ;;
   esac

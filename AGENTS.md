@@ -373,6 +373,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 A terminal `done:` claim names the exact commit, PR, branch, or report it is claiming, and only `bin/fm-verify-done.sh` decides whether that claim is true; `bin/fm-done-claim-lib.sh` owns the grammar and the durable verdict.
+A no-mistakes worker whose implementation is committed but not yet validated appends `ready: <summary>` instead, which is captain-relevant so firstmate sees the handoff, and is not terminal: it asserts nothing about a commit that has shipped, so it neither stands as a claim nor is verified as one.
 A claim that has not been established is never done: `bin/fm-crew-state.sh` reports it as `done-unverified`, and teardown refuses it.
 Terminal evidence about a claim has three shapes, not two, and the verdict record names all three: `unverified` is absence of evidence and never downgrades what already stands, `contradicted` is positive evidence of falsity and overwrites anything, and `stale` is the world having changed under a verdict that was true when it was made, which `bin/fm-merge-outcome-lib.sh` records when a PR merges under a claim already established as verified.
 A PR closed without merging is not stale but false, so the same owner records `contradicted` for it.

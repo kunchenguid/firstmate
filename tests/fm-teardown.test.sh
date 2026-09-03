@@ -2799,8 +2799,10 @@ test_legacy_claim_without_commit_identity_refuses() {
   [ "$rc" -ne 0 ] || fail "a legacy claim with no commit identity was torn down as done"
   assert_grep "could not be established" "$case_dir/stderr" \
     "the refusal did not say the claim could not be established"
-  assert_grep "legacy claim, no commit identity" "$case_dir/stderr" \
+  assert_grep "names no commit identity" "$case_dir/stderr" \
     "the refusal did not name the missing commit identity"
+  assert_no_grep "written before this contract" "$case_dir/stderr" \
+    "the refusal asserted when the claim was written, which nothing here observed"
   [ -e "$case_dir/state/task-x1.meta" ] \
     || fail "the claim refusal erased the durable task record"
   pass "a legacy claim with no commit identity refuses cleanup"
@@ -2984,12 +2986,14 @@ test_a_stale_record_does_not_carry_a_task_through_cleanup() {
 
 # The three-week rot, end to end at the gate: a claim established while its PR
 # was open, then closed unmerged. The close must have corrected the record, so
-# cleanup refuses rather than passing on what the record used to say.
+# cleanup refuses rather than passing on what the record used to say. The claim
+# NAMES the PR that closed, which is what makes the close evidence about it -
+# a close only falsifies a claim that is about the PR whose close was observed.
 test_a_closed_pr_stops_its_own_done_record_carrying_cleanup() {
   local case_dir rc=0 head
   case_dir=$(make_claim_case claim-closed "placeholder")
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+  printf 'done: pr=https://github.com/o/r/pull/7 branch=fm/task-x1 head=%s - shipped\n' "$head" \
     > "$case_dir/state/task-x1.status"
   seed_verdict_record "$case_dir" verified 'the PR is open at the claimed head'
   # shellcheck source=bin/fm-merge-outcome-lib.sh disable=SC1091

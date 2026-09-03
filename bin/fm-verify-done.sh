@@ -58,11 +58,12 @@
 #       own directory under the home's data root. A file existing is not this
 #       task having produced it, so the path is bound to <data>/<task-id>/ the
 #       same way the local-only arm is bound to fm/<task-id>. That binding is
-#       made on the real location, not on the spelling of one: a `report=`
-#       carrying a `..` component is refused outright, and the containing
-#       directory is then resolved physically before it is compared, so neither
-#       an upward walk nor a directory symlink can present another task's
-#       deliverable as this one's. An absolute path is used as given (what
+#       made on the real location, and ONLY there: a `report=` carrying a `..`
+#       component is refused outright, and both the claimed directory and this
+#       task's own are then resolved physically before they are compared, so
+#       neither an upward walk nor a directory symlink can present another task's
+#       deliverable as this one's, and no mismatch of SPELLING alone can call a
+#       report foreign that really sits where the claim says. An absolute path is used as given (what
 #       bin/fm-brief.sh renders into a scout brief); a relative one is resolved
 #       against the data root, so a relocated FM_DATA_OVERRIDE resolves the same
 #       claim as an unrelocated one. A leading `data/` is the home-relative
@@ -203,7 +204,7 @@ MODE=$(meta_field mode)
 WT=$(meta_field worktree)
 
 if ! fm_done_claim_has_identity; then
-  verdict_is unverified 'legacy claim, no commit identity'
+  verdict_is unverified 'the claim names no commit identity'
   finish
 fi
 
@@ -239,33 +240,38 @@ if [ "$KIND" = scout ]; then
   # anywhere else names someone else's deliverable however real that file is -
   # the same binding the local-only arm makes by requiring branch = fm/<id>.
   #
-  # Tested twice, on the spelling and then on the real location, because a prefix
-  # match alone tests only how a path is written: this same binding was added to
-  # stop a substitution and shipped with `..` walking straight through it. The
-  # second test resolves both sides physically, so a directory symlink cannot
-  # stand in for the walk either. A path that will not resolve is left to the
-  # existence checks below, which report it as missing rather than as foreign.
-  case "$REPORT" in
-    "$DATA/$ID/"?*) ;;
-    *)
-      verdict_is contradicted "the claimed report is not this task's own: $FM_DONE_CLAIM_REPORT resolves to $REPORT, outside $DATA/$ID/" \
-        "$REPORT"
-      finish
-      ;;
-  esac
-  # The task's own directory has to BE a directory for containment in it to mean
-  # anything: a link there points containment wherever the link does. Refusing to
-  # read it is not proof the claim is false, so it names the link and reads
-  # unverified, exactly as the report symlink below does.
+  # Tested on the REAL LOCATION and only there. A prefix match on the spelling
+  # tests how a path is written, not where it goes: this same binding was added
+  # to stop a substitution and shipped with `..` walking straight through it, and
+  # a spelling test that could contradict would also call a scout's own report
+  # foreign whenever the home sits under a symlinked component (`/tmp` on this
+  # platform), which is a false statement about a file sitting exactly where the
+  # claim says. So both sides are resolved physically and compared, and nothing
+  # short of that comparison may establish falsity.
+  #
+  # Containment that cannot be RESOLVED is not containment established, so it is
+  # never passed by default. What an unresolved own directory means depends on
+  # WHY it did not resolve, and the two answers are different evidence: a task
+  # that has no report directory AT ALL has produced no report, so a real file
+  # somewhere else is positively not its deliverable and is contradicted with
+  # that observation; a directory that exists but could not be read is a refusal
+  # to look, which is unverified. A claimed path that does not exist is reported
+  # as missing by the existence checks below either way.
+  #
+  # The task's own directory also has to BE a directory for containment in it to
+  # mean anything: a link there points containment wherever the link does.
+  # Refusing to read it is not proof the claim is false, so it names the link and
+  # reads unverified, exactly as the report symlink below does.
   if [ -L "$DATA/$ID" ]; then
     verdict_is unverified "this task's report directory is a symlink, which is not read as evidence: $DATA/$ID"
     finish
   fi
   REPORT_DIR=$(cd "$(dirname "$REPORT")" 2>/dev/null && pwd -P) || REPORT_DIR=
   OWN_DIR=$(cd "$DATA/$ID" 2>/dev/null && pwd -P) || OWN_DIR=
+  CONTAINED=0
   if [ -n "$REPORT_DIR" ] && [ -n "$OWN_DIR" ]; then
     case "$REPORT_DIR/" in
-      "$OWN_DIR/"*) ;;
+      "$OWN_DIR/"*) CONTAINED=1 ;;
       *)
         verdict_is contradicted "the claimed report is not this task's own: $FM_DONE_CLAIM_REPORT is really in $REPORT_DIR, outside $OWN_DIR" \
           "$REPORT_DIR"
@@ -282,7 +288,14 @@ if [ "$KIND" = scout ]; then
     finish
   fi
   if [ -f "$REPORT" ] && [ -s "$REPORT" ]; then
-    verdict_is verified "report present at $FM_DONE_CLAIM_REPORT"
+    if [ "$CONTAINED" -eq 1 ]; then
+      verdict_is verified "report present at $FM_DONE_CLAIM_REPORT"
+    elif [ ! -e "$DATA/$ID" ]; then
+      verdict_is contradicted "the claimed report is not this task's own: $FM_DONE_CLAIM_REPORT is a real file at $REPORT while this task has no report directory at all" \
+        "nothing exists at $DATA/$ID"
+    else
+      verdict_is unverified "the claimed report could not be bound to this task's own directory, which did not resolve: $DATA/$ID"
+    fi
   elif [ ! -e "$REPORT" ]; then
     verdict_is contradicted "claimed report is missing: $FM_DONE_CLAIM_REPORT" \
       "nothing exists at $REPORT"

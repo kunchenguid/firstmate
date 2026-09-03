@@ -453,7 +453,8 @@ test_ci_ready_done_log_beats_monitoring_run() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
   assert_contains "$out" "state: done-unverified" "a legacy ci-ready claim carries no commit identity, so it is not done"
-  assert_contains "$out" "legacy claim, no commit identity" "the downgrade names why the claim could not be established"
+  assert_contains "$out" "the claim names no commit identity" "the downgrade names why the claim could not be established"
+  assert_not_contains "$out" "legacy" "the reason asserted when the claim was written, which nothing here observed"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
@@ -1035,6 +1036,43 @@ test_every_reader_agrees_about_a_keyed_terminal_line() {
     fi
   done
   pass "the current-state reader and the fleet snapshot agree about a keyed terminal line"
+}
+
+# The pre-validation handoff. A no-mistakes worker that has committed but not yet
+# validated writes `ready:`, which is a state of its own - the task is neither
+# done nor failed, it is waiting for firstmate to say "run /no-mistakes". The
+# second half is the one that matters: because `ready:` is not a claim, a task
+# that later passes its run-step reports plain `done` again. That exemption
+# ("a run-step passed on a task that never claimed anything stays done") was
+# unreachable while the brief told every worker to write a pre-validation
+# `done:`, and this proves it is reachable now.
+test_the_prevalidation_handoff_has_its_own_state_and_leaves_done_intact() {
+  reset_fakes
+  local d out
+  d=$(new_case ready-handoff)
+  make_repo_on_branch "$d/wt" fm/feat-rh
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rh.meta" "window=fm:fm-feat-rh" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'ready: implementation complete and committed\n' > "$d/state/feat-rh.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rh
+  out=$(run_crew_state "$d" feat-rh)
+  assert_contains "$out" "state: ready" "the pre-validation handoff did not report its own state"
+  assert_not_contains "$out" "done-unverified" "the handoff was downgraded as if it were a claim"
+
+  reset_fakes
+  d=$(new_case ready-then-passed)
+  make_repo_on_branch "$d/wt" fm/feat-rp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rp.meta" "window=fm:fm-feat-rp" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'ready: implementation complete and committed\n' > "$d/state/feat-rp.status"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-rp)"
+  out=$(run_crew_state "$d" feat-rp)
+  assert_contains "$out" "state: done" "a passed run on a task that claimed nothing was not done"
+  assert_not_contains "$out" "done-unverified" "a machine-established pass was downgraded with no claim to distrust"
+  assert_contains "$out" "source: run-step" "the passed run is the authoritative source"
+  pass "the pre-validation handoff has its own state and leaves a machine-established pass intact"
 }
 
 # (g) no run + idle pane -> the status-log verb, as-is
@@ -1685,6 +1723,7 @@ test_terminal_passed
 test_terminal_failed
 test_a_keyed_done_is_not_the_tasks_own_terminal_state
 test_every_reader_agrees_about_a_keyed_terminal_line
+test_the_prevalidation_handoff_has_its_own_state_and_leaves_done_intact
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

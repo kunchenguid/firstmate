@@ -2676,7 +2676,7 @@ if [ -n "$TEARDOWN_CLAIM" ]; then
       echo "REFUSED: task $ID claims it is done, but that claim could not be established." >&2
       printf '%s\n' "$TEARDOWN_CLAIM_OUT" >&2
       echo "Re-run bin/fm-verify-done.sh $ID once the forge and the validation run can be read." >&2
-      echo "A claim written before this contract carries no commit identity and can never be established: append a conforming claim naming the commit that shipped, then verify it." >&2
+      echo "A claim that names no commit identity can never be established: append a conforming claim naming the commit that shipped, then verify it." >&2
       exit 1
       ;;
     4)

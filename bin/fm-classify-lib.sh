@@ -74,8 +74,28 @@ unset _fm_classify_nounset
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+# "working: rebased onto merged #76"). The legacy tokens `PR ready` and
+# `ready in branch` are prose, not the `ready:` verb below, and neither matches a
+# bare `ready:` line - the verb earns its captain relevance in its own right.
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|ready:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+
+# The PRE-VALIDATION HANDOFF verb. A no-mistakes worker appends
+#   ready: <summary>
+# when the implementation is committed and it is waiting for firstmate to tell it
+# to run /no-mistakes. It exists because `done:` was doing two jobs - "I have
+# finished implementing, now validate" and "the task is complete" - and under the
+# terminal-claim contract the second meaning is the only one `done:` may carry:
+# a pre-validation `done:` names no commit identity, so it stood as a claim
+# nothing could ever establish and downgraded the task from the moment the worker
+# followed its own brief. Separating the words makes `done:` terminal by
+# construction rather than by a reader's special case.
+#
+# It is CAPTAIN-RELEVANT, because a handoff waiting on firstmate to say "run
+# /no-mistakes" is exactly the thing firstmate must see, and that is what `done:`
+# used to buy here. It is deliberately NOT terminal: status_is_terminal_verb says
+# no, and fm_done_claim_last does not read it as a claim, because nothing has
+# been delivered yet. FM_CLASSIFY_READY_VERB overrides it.
+FM_CLASSIFY_READY_VERB_DEFAULT='ready'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -116,6 +136,9 @@ last_status_line() {
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
+# The pre-validation handoff verb is captain-relevant but NOT terminal, so it is
+# absent here on purpose: a worker waiting to be told to validate has delivered
+# nothing yet.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -144,6 +167,7 @@ status_line_verb_is_known() {  # <status-line>
   case "$verb" in
     working|needs-decision|blocked|done|failed|note) return 0 ;;
   esac
+  [ "$verb" = "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}" ] && return 0
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ] && return 0
   [ "$verb" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] && return 0
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ] && return 0
@@ -184,6 +208,7 @@ status_is_captain_relevant() {
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
     esac
+    [ "$verb" = "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}" ] && return 0
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }

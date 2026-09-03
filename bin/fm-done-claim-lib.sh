@@ -455,7 +455,7 @@ fm_done_claim_status() {  # <state> <task-id>
   fm_done_claim_parse "$FM_DONE_CLAIM_LINE" || return 0
   if ! fm_done_claim_has_identity; then
     FM_DONE_CLAIM_STATE=unverified
-    FM_DONE_CLAIM_REASON='legacy claim, no commit identity'
+    FM_DONE_CLAIM_REASON='the claim names no commit identity'
     return 0
   fi
   if ! hash=$(fm_done_claim_hash "$FM_DONE_CLAIM_LINE"); then
