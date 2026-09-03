@@ -2562,9 +2562,9 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # token. The marker prefix lives INSIDE the printf format and the token is a
 # separate operand, so the contiguous marker string is produced only when the
 # shell actually RUNS the printf - it never appears in the echoed command line.
-# Waiting on the contiguous marker therefore proves real command execution, not
-# a rendered prompt or an echoed keystroke. recent-unwrapped matching survives a
-# marker the terminal hard-wrapped across rows on a narrow pane.
+# Polling the version-safe `pane read --source recent` capture for the contiguous
+# marker therefore proves real command execution, not a rendered prompt or an
+# echoed keystroke, across the full supported Herdr 0.7.1+ range.
 #
 # Returns non-zero on an unreadable/unparseable pane, a failed submit, or the
 # timeout (default 90000ms, above the observed ~57s pyenv lock). fm-spawn treats
@@ -2572,17 +2572,33 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # the unverified Space.
 fm_backend_herdr_wait_shell_ready() {  # <target> [timeout-ms]
   fm_backend_herdr_target_ready "$1" || return 1
-  local timeout=${2:-90000} token
+  local timeout=${2:-${FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS:-90000}}
+  local poll=${FM_BACKEND_HERDR_SHELL_READY_POLL_MS:-500}
+  local token marker output now deadline remaining nap sleep_seconds
   case "$timeout" in ''|*[!0-9]*) timeout=90000 ;; esac
+  case "$poll" in ''|*[!0-9]*|0) poll=500 ;; esac
   token=$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
   [ -n "$token" ] || return 1
   # printf renders "FMSHELLRDY<token>"; the typed command keeps the prefix and
   # token apart, so the contiguous marker exists only in real output.
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
     "printf 'FMSHELLRDY%s\\n' $token" >/dev/null 2>&1 || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output \
-    --match "FMSHELLRDY$token" --source recent-unwrapped --timeout "$timeout" \
-    "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1
+  marker="FMSHELLRDY$token"
+  now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+    -e 'printf "%d\n", int(clock_gettime(CLOCK_MONOTONIC) * 1000)' 2>/dev/null) || return 1
+  deadline=$((now + timeout))
+  while :; do
+    output=$(fm_backend_herdr_capture "$1" 200) || return 1
+    printf '%s' "$output" | grep -Fq "$marker" && return 0
+    now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+      -e 'printf "%d\n", int(clock_gettime(CLOCK_MONOTONIC) * 1000)' 2>/dev/null) || return 1
+    [ "$now" -lt "$deadline" ] || return 1
+    remaining=$((deadline - now))
+    nap=$poll
+    [ "$nap" -le "$remaining" ] || nap=$remaining
+    sleep_seconds=$(printf '%d.%03d' "$((nap / 1000))" "$((nap % 1000))")
+    sleep "$sleep_seconds" || return 1
+  done
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the

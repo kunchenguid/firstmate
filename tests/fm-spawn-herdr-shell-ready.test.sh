@@ -10,15 +10,10 @@
 #
 # fm-spawn now calls fm_backend_herdr_wait_shell_ready first, and only submits
 # `treehouse get` once the pane's shell is proven to be executing commands. This
-# test drives the REAL fm-spawn.sh against a stateful fake herdr whose
-# wait-output can be forced to time out, and asserts the safety property that is
-# awkward to force with a real shell (you cannot easily make a real shell stay
-# busy on demand): when readiness cannot be confirmed, `treehouse get` is NEVER
-# submitted and the spawn fails.
-#
-# The happy path (a shell that DOES become ready) is covered deterministically by
-# the adapter unit tests in tests/fm-backend-herdr.test.sh and end to end against
-# the real binary by the real-herdr-gated launcher E2E suite.
+# test drives the REAL fm-spawn.sh against a stateful fake Herdr capture that
+# releases the rendered marker after a deterministic number of polls or never
+# releases it. The cases prove delayed success ordering, permanent-busy refusal,
+# and the absence of task metadata after a readiness failure.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -35,8 +30,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-herdr-shell-ready)
 # barrier itself:
 #   - `pane run <pane> <command>`   appends <command> to FM_FAKE_PANE_RUN_LOG,
 #     so the test can prove what was and was not submitted, and in what order.
-#   - `pane wait-output ...`        exits with FM_FAKE_WAIT_OUTPUT_EXIT, so the
-#     test can force a readiness timeout.
+#   - `pane read <pane> ...`        echoes the split-token command until the
+#     configured poll releases the contiguous rendered marker.
 # It reuses the same JSON shapes tests/fm-backend-herdr.test.sh's statefake
 # asserts against the real binary in docs/herdr-backend.md.
 make_ready_fakebin() {  # <dir> -> echoes fakebin dir; seeds an empty state file
@@ -105,10 +100,25 @@ case "$cmd $sub" in
     printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     ;;
   "pane run")
-    printf '%s\n' "${4:-}" >> "$FM_FAKE_PANE_RUN_LOG"
+    command=${4:-}
+    printf '%s\n' "$command" >> "$FM_FAKE_PANE_RUN_LOG"
+    case "$command" in
+      "printf 'FMSHELLRDY%s\\n' "*) printf '%s\n' "${command##* }" > "$FM_FAKE_READY_TOKEN_FILE" ;;
+    esac
     ;;
-  "pane wait-output")
-    exit "${FM_FAKE_WAIT_OUTPUT_EXIT:-0}"
+  "pane read")
+    count=0
+    [ ! -f "$FM_FAKE_READY_READ_COUNT_FILE" ] || count=$(cat "$FM_FAKE_READY_READ_COUNT_FILE")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_READY_READ_COUNT_FILE"
+    if [ -f "$FM_FAKE_READY_TOKEN_FILE" ]; then
+      token=$(cat "$FM_FAKE_READY_TOKEN_FILE")
+      printf "printf 'FMSHELLRDY%%s\\\\n' %s\n" "$token"
+      if [ "${FM_FAKE_READY_AFTER_POLLS:--1}" -ge 0 ] 2>/dev/null \
+        && [ "$count" -ge "$FM_FAKE_READY_AFTER_POLLS" ]; then
+        printf 'FMSHELLRDY%s\n' "$token"
+      fi
+    fi
     ;;
   "pane get")
     pane=${3:-}
@@ -124,20 +134,20 @@ SH
 }
 
 # make_ready_case builds a home + a real git project and returns a pipe-joined
-# record. No worktree is created: the barrier fails before treehouse get and the
-# worktree-detection loop, so none is needed.
+# record, including a real isolated worktree for the delayed-success case.
 make_ready_case() {  # <name> <id> -> record
-  local name=$1 id=$2 case_dir home proj fb
+  local name=$1 id=$2 case_dir home proj wt fb
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
+  wt="$case_dir/worktree"
   fb=$(make_ready_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   # Force the ordinary flat layout so the test does not depend on presentation
   # projection state; the barrier runs on both layouts.
   printf 'off\n' > "$home/config/herdr-presentation-spaces"
-  fm_git_init_commit "$proj"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -148,17 +158,17 @@ Exercise the herdr readiness barrier for $id.
 Never submit treehouse get before the pane shell is ready.
 EOF
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$fb"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fb"
 }
 
 read_ready_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
 }
 
-run_ready_spawn() {  # <id> <wait-output-exit>
-  local id=$1 wait_exit=$2
+run_ready_spawn() {  # <id> <ready-after-polls>
+  local id=$1 ready_after=$2
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
       -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID \
     FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -167,14 +177,40 @@ run_ready_spawn() {  # <id> <wait-output-exit>
     FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_HERDR_STATE="$FAKEBIN_DIR/../state.json" \
     FM_FAKE_PANE_RUN_LOG="$FAKEBIN_DIR/../pane-run.log" \
-    FM_FAKE_WAIT_OUTPUT_EXIT="$wait_exit" \
+    FM_FAKE_READY_TOKEN_FILE="$FAKEBIN_DIR/../ready-token" \
+    FM_FAKE_READY_READ_COUNT_FILE="$FAKEBIN_DIR/../ready-read-count" \
+    FM_FAKE_READY_AFTER_POLLS="$ready_after" \
+    FM_FAKE_FOREGROUND_CWD="$WT_DIR" \
+    FM_BACKEND_HERDR_SHELL_READY_TIMEOUT_MS=500 \
+    FM_BACKEND_HERDR_SHELL_READY_POLL_MS=1 \
     FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --backend herdr --mode no-mistakes --yolo off 2>&1
 }
 
-# The core safety property: a pane whose shell never becomes ready (wait-output
-# times out) must fail the spawn and MUST NOT have `treehouse get` submitted.
+test_delayed_shell_success_precedes_treehouse_get() {
+  local rec id out status runlog ready_line treehouse_line
+  id=herdr-ready-delayed-z0
+  rec=$(make_ready_case ready-delayed "$id")
+  read_ready_record "$rec"
+  runlog="$FAKEBIN_DIR/../pane-run.log"
+  : > "$runlog"
+
+  out=$(run_ready_spawn "$id" 3)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed after delayed shell readiness"
+  assert_contains "$out" "spawned $id" "spawn did not report success after readiness released"
+  assert_grep "printf 'FMSHELLRDY" "$runlog" "the readiness probe was not submitted"
+  grep -Fxq 'treehouse get' "$runlog" || fail "treehouse get was not submitted after readiness released"
+  [ "$(cat "$FAKEBIN_DIR/../ready-read-count")" -ge 3 ] || fail "the fake did not hold readiness for the configured initial polls"
+  ready_line=$(grep -n -m1 "printf 'FMSHELLRDY" "$runlog" | cut -d: -f1)
+  treehouse_line=$(grep -n -m1 '^treehouse get$' "$runlog" | cut -d: -f1)
+  [ "$ready_line" -lt "$treehouse_line" ] || fail "treehouse get was submitted before the readiness probe"
+  pass "fm-spawn (herdr): delayed shell readiness releases treehouse get in order"
+}
+
+# The core safety property: a pane whose shell never renders the marker must
+# fail the spawn and MUST NOT have `treehouse get` submitted.
 test_permanent_busy_pane_never_receives_treehouse_get() {
   local rec id out status runlog
   id=herdr-ready-timeout-z1
@@ -183,7 +219,7 @@ test_permanent_busy_pane_never_receives_treehouse_get() {
   runlog="$FAKEBIN_DIR/../pane-run.log"
   : > "$runlog"
 
-  out=$(run_ready_spawn "$id" 1)
+  out=$(run_ready_spawn "$id" -1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn must fail when the pane shell never becomes ready"$'\n'"$out"
   assert_contains "$out" "did not become ready before treehouse get" \
@@ -203,13 +239,14 @@ test_barrier_failure_records_no_task() {
   rec=$(make_ready_case ready-notask "$id")
   read_ready_record "$rec"
 
-  out=$(run_ready_spawn "$id" 1)
+  out=$(run_ready_spawn "$id" -1)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn must fail closed on a readiness timeout"$'\n'"$out"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a failed spawn must not record task metadata"
   pass "fm-spawn (herdr): a readiness-barrier failure propagates as a failed spawn with no recorded task"
 }
 
+test_delayed_shell_success_precedes_treehouse_get
 test_permanent_busy_pane_never_receives_treehouse_get
 test_barrier_failure_records_no_task
 
