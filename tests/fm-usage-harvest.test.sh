@@ -19,6 +19,8 @@
 # that keeps that scan bound safe, the harvest of a secondmate's children
 # before a forced cleanup retires them, and the scan-then-append split that
 # keeps an aborted teardown from freezing a row its rerun could not correct.
+# Also covers the nested remote secondmate teardown, whose append is skipped
+# because the home it removed is the one holding its own ledger.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1187,6 +1189,56 @@ JSON
   pass "teardown integration: a nested home's same-named task cannot overwrite its parent's row"
 }
 
+# The nested host-local teardown of a remote secondmate runs on the far host
+# with its state and data overridden into that home's own parent-route
+# directories (bin/fm-remote-secondmate-control.sh retire owns those paths), so
+# the home it removes is the one holding its own ledger. The append phase must
+# be skipped there: the harvester creates its data directory on append, so
+# appending after the removal resurrects the home that was just retired. The
+# surviving parent teardown is what records such a task. The scan still stages
+# a row, so the skip shows only as the home staying gone.
+teardown_remote_nested_home_case() {
+  local id=usageharvself1 fb home state data config wt out encoded logdir now
+  fb="$TMP_ROOT/self-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  chmod +x "$fb/tmux"
+  home="$TMP_ROOT/self-home"; config="$TMP_ROOT/self-config"
+  state="$home/state/parent-route"; data="$home/data/.parent-route"
+  mkdir -p "$state" "$data" "$config" "$TMP_ROOT/self-proj"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  wt="$TMP_ROOT/.no-mistakes/wt-$id"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$TMP_ROOT/self-proj" \
+    "harness=claude" "home=$home" "kind=secondmate" "mode=no-mistakes" \
+    "model=default" "effort=default"
+  now=$(date +%s)
+  printf 'spawn_gen=s%s.91.1\n' "$((now - 400))" >> "$state/$id.meta"
+  printf 'working: nested remote secondmate\n' > "$state/$id.status"
+  touch -t "$(touch_stamp $((now - 30)))" "$state/$id.status"
+
+  # A real log, so the scan stages a non-empty row and only the append is
+  # skipped.
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/self-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgSELF","model":"claude-self","usage":{"input_tokens":31,"output_tokens":4}}}
+JSON
+  touch -t "$(touch_stamp $((now - 20)))" "$logdir/session.jsonl"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/self-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/self-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/self-fake-pi" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  expect_code 0 "$?" "nested remote secondmate teardown should succeed"$'\n'"$out"
+  [ ! -e "$home" ] \
+    || fail "the append resurrected the retired secondmate home: [$(find "$home" | tr '\n' ' ')]"$'\n'"$out"
+  pass "teardown integration: the append never resurrects the home holding its own ledger"
+}
+
 teardown_pool_order_case() {
   local proj wt id fb state data config out row occupant thlog encoded logdir base
   id=usageharvpool1
@@ -1984,6 +2036,7 @@ report_malformed_case
 teardown_status_case
 teardown_child_case
 teardown_nested_child_case
+teardown_remote_nested_home_case
 teardown_pool_order_case
 teardown_refusal_case
 teardown_single_diagnostic_case
