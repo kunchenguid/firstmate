@@ -38,6 +38,17 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 
+write_spawn_brief() {  # <file> <id>
+  cat > "$1" <<EOF
+# Task
+## Captain's intent
+Exercise backend dispatch for $2.
+
+## Firstmate spec
+Verify backend selection without changing task intent.
+EOF
+}
+
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
 # docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,
 # and ps. FAKE_NONDARWIN_BIN pins uname to Linux so the whole fallback is
@@ -882,7 +893,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
-  printf 'test brief content\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
@@ -1043,7 +1054,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
@@ -1065,7 +1076,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
@@ -1089,7 +1100,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
 

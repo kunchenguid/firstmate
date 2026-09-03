@@ -57,7 +57,17 @@ make_home() {  # <name> [task-id...]
     > "$home/data/backlog.md"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'Delivery contract: mode=no-mistakes\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
+    cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise backlog dispatch for $id.
+
+## Firstmate spec
+Verify the atomic backlog transition.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
   done
 
   cat > "$fakebin/tmux" <<'SH'
