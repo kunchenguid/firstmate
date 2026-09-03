@@ -57,6 +57,33 @@ NODE
   pass "OMP candidate renderer emits its requested argv and environment contract"
 }
 
+test_omp_manifest_routes_agent_tools_away_from_captain_claude_tools() {
+  local captain_home captain_tools manifest
+  captain_home="$TMP_ROOT/captain-home"
+  captain_tools="$captain_home/.claude/tools"
+  mkdir -p "$captain_tools"
+  printf '%s\n' 'captain-only' > "$captain_tools/agent-secrets-collect.py"
+  printf '%s\n' 'captain-only' > "$captain_tools/rotate-pending-keys.sh"
+  manifest=$(HOME="$captain_home" "$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
+    /firstmate/isolated-agent /firstmate/isolated-cwd /opt/omp "$OMP_MODEL" \
+    /state/task.omp-ext.ts) || fail "candidate OMP manifest did not render"
+  MANIFEST=$manifest CAPTAIN_TOOLS=$captain_tools node <<'NODE' \
+    || fail "candidate OMP manifest inherited the captain Claude tools directory"
+const manifest = JSON.parse(process.env.MANIFEST);
+const expectedAgentDirectory = "/firstmate/isolated-agent";
+const expectedToolSurface = "/firstmate/isolated-agent/tools";
+const captainToolsDirectory = process.env.CAPTAIN_TOOLS;
+const renderedToolSurface = `${manifest.environment.PI_CODING_AGENT_DIR}/tools`;
+if (manifest.environment.PI_CODING_AGENT_DIR !== expectedAgentDirectory) process.exit(1);
+if (renderedToolSurface !== expectedToolSurface) process.exit(1);
+const rendered = JSON.stringify(manifest);
+if (rendered.includes(captainToolsDirectory)) process.exit(1);
+if (rendered.includes("agent-secrets-collect.py")) process.exit(1);
+if (rendered.includes("rotate-pending-keys.sh")) process.exit(1);
+NODE
+  pass "OMP candidate manifest routes agent tools away from the captain Claude tools directory"
+}
+
 test_omp_consumer_proof_gate_never_executes_candidate() {
   local dir fakebin log out status
   dir="$TMP_ROOT/omp-consumer-proof"
@@ -209,6 +236,7 @@ test_spawn_policy_matrix_stays_dormant_and_tmux_only() {
 }
 
 test_omp_launch_request_is_rendered
+test_omp_manifest_routes_agent_tools_away_from_captain_claude_tools
 test_omp_consumer_proof_gate_never_executes_candidate
 test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation
 test_spawn_policy_matrix_stays_dormant_and_tmux_only

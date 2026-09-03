@@ -1402,8 +1402,14 @@ A second regression holds a branch settlement open while the verified successor 
 ## OMP candidate tool containment
 
 The OMP adapter and manifest are review-only.
-They may report requested and rendered settings for exact `omp/17.2.9`, but those records are not effective consumer proof; effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
+The candidate contract and refusal gate are pinned to exact `omp/17.2.9`.
+`tests/fm-omp-harness.test.sh` proves that the adapter renders isolated settings, routes its rendered agent tool path to `/firstmate/isolated-agent/tools` instead of a present captain `~/.claude/tools` fixture, and requests the tool surface disabled with `--no-tools`.
+These are renderer and requested-settings proofs only.
+Effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
 No supported session-free consumer pinned to that exact artifact has been established.
+
+On 2026-09-03, an accidental ambient OMP run enumerated `~/.claude/tools` and attempted to load `agent-secrets-collect.py` and `rotate-pending-keys.sh` as tools.
+Both files failed format validation, but the attempted loads establish ambient tool inheritance as a measured hazard rather than a theoretical one.
 
 Two measured findings bound which consumer surfaces remain worth attempting.
 On 2026-08-24, source review invalidated an earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it falls outside this candidate's no-session and no-network verification authority.
