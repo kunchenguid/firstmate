@@ -3067,7 +3067,7 @@ if (globalThis.__fmSessions[1].options.thinkingLevel !== "high") {
 }
 
 // When main's model cannot be resolved, the effort step derives Pi's level
-// set from the model recorded by the persistent branch conversation.
+// set from the model recorded by the most recent branch conversation.
 uiSelections.push("openai/shallow-1", "max");
 await command.handler("", makeCtx());
 dispatch("signal: record shallow branch model");
