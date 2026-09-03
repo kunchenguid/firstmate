@@ -384,6 +384,25 @@ test_copilot_half_box_requires_complete_rules() {
   pass "fm_tmux_composer_state: Copilot half-box emptiness requires complete width-matched rules"
 }
 
+test_tmux_copilot_detection_falls_back_to_current_command() (
+  tmux() {
+    case "$*" in
+      *pane_tty*) printf '/dev/pts/9\n' ;;
+      *pane_current_command*) printf 'copilot\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  ps() {
+    case "$*" in
+      *'-t pts/9 -o pid=,pgid=,tpgid=,comm='*) printf '123 10 11 MainThread\n' ;;
+      *'-p 123 -o args='*) printf 'python helper.py\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_tmux_pane_is_copilot fakepane || fail "pane_current_command=copilot must keep the tmux Copilot gate true when ps lacks argv zero"
+  pass "fm_tmux_pane_is_copilot falls back to pane_current_command"
+)
+
 test_copilot_cursorless_fallback_requires_identity() (
   local dir fb capture out
   dir="$TMP_ROOT/copilot-cursorless"; mkdir -p "$dir"
@@ -759,6 +778,7 @@ test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_proven_box_bottom_border_cursor_classifies_content
 test_copilot_half_box_requires_complete_rules
+test_tmux_copilot_detection_falls_back_to_current_command
 test_copilot_cursorless_fallback_requires_identity
 test_pi_identity_requires_readable_busy_state
 test_bordered_busy_signatures_are_pending
