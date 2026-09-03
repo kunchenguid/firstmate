@@ -68,7 +68,9 @@ Only differential execution is bounded: the drill selects the first sample in th
 Both evaluator executions use the same preflight-proven `bin/fm-bench-confine.sh` mechanism with networking disabled, a scrubbed environment, and one independently generated opaque run root as the only writable candidate-data bind.
 The archive and repository are not mounted for the evaluator, and the genuine and perturbed runs expose the same internal layout without a role-bearing path, environment value, or recognizable perturbation marker.
 The gate supports pure-data JSON-value, source text-token, and PNG-pixel declarations for JSON, TypeScript, JavaScript, CSS, HTML, and non-interlaced 8-bit PNG inputs.
-The genuine run receives the archived bytes unchanged, while each separate perturbed run changes only its declared value, token, or filtered pixel byte before the evaluator executes.
+Every opaque run root is materialised in the same stable path order, then matching ownership and permissions, normalized access and modification times, directory order, and bytes are compared before execution so only the declared perturbation can differ.
+JSON and source inputs retain their archived bytes in the genuine run, while PNG inputs are decoded within a 128 MiB raster limit and both copies pass through the same deterministic encoder before one filtered pixel byte changes.
+The recorded result hash therefore covers archived bytes for JSON and source inputs, and the gate-prepared genuine encoding for a declared PNG input.
 Only a successful genuine run and a successful single-input perturbation with identical output prove that an evaluator ignored that declared perturbable input.
 Every evaluator must prove dependence on at least one scored input, while another input without a declared supported perturbation remains visibly unproven per input in the gate output and drill receipt.
 A restore-drill attempt revokes its earlier receipt before any check runs, so every refusal leaves cleanup held even when a required restore dependency has disappeared.

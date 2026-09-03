@@ -28,6 +28,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -48,6 +49,8 @@ FREEZE_SCHEMA = "fm-bench-freeze.v1"
 RECEIPT_SCHEMA = "fm-bench-preflight-receipt.v1"
 DRILL_SCHEMA = "fm-bench-restore-drill.v1"
 RESTORE_EVALUATOR_SAMPLE_LIMIT = 1
+MAX_PNG_RASTER_BYTES = 128 * 1024 * 1024
+NORMALIZED_RUN_TIME_NS = 1_600_000_000_000_000_000
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -2076,7 +2079,7 @@ def validate_archived_evaluator_declaration(
             continue
         perturbation = normalized_perturbations[relative]
         try:
-            build_perturbed_input(candidate.read_bytes(), candidate.suffix.lower(), perturbation, bytes(32))
+            build_input_differential(candidate.read_bytes(), candidate.suffix.lower(), perturbation, bytes(32))
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:
             return None, f"archived evaluator scored input perturbation is invalid for {relative}: {exc}"
         perturbable_paths.append(relative)
@@ -2140,14 +2143,12 @@ def json_scalar_replacement(current: Any, entropy: bytes) -> Any:
     raise ValueError("JSON pointer does not select a supported scalar")
 
 
-def replace_unique_bytes(original: bytes, old: bytes, new: bytes, label: str) -> bytes:
+def replace_unique_bytes(original: bytes, old: bytes, new: bytes, label: str) -> tuple[bytes, dict[str, Any]]:
     if not old or original.count(old) != 1:
         raise ValueError(f"{label} must identify exactly one byte span")
     start = original.index(old)
     changed = original[:start] + new + original[start + len(old) :]
-    if changed[:start] != original[:start] or changed[start + len(new) :] != original[start + len(old) :]:
-        raise ValueError(f"prepared copies differ outside {label}")
-    return changed
+    return changed, {"kind": "byte-span", "start": start, "old": old, "new": new, "label": label}
 
 
 def mutate_text_token(token: str, entropy: bytes) -> str:
@@ -2158,17 +2159,17 @@ def mutate_text_token(token: str, entropy: bytes) -> str:
     raise ValueError("text-token must contain an ASCII letter or digit")
 
 
-def perturb_json_bytes(original: bytes, pointer: str, entropy: bytes) -> bytes:
+def perturb_json_bytes(original: bytes, pointer: str, entropy: bytes) -> tuple[bytes, dict[str, Any]]:
     document = json.loads(original.decode("utf-8"))
     current = json_pointer_value(document, pointer)
     replacement = json_scalar_replacement(current, entropy)
     old_token = json.dumps(current, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     new_token = json.dumps(replacement, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    changed = replace_unique_bytes(original, old_token, new_token, f"JSON pointer {pointer!r}")
+    changed, descriptor = replace_unique_bytes(original, old_token, new_token, f"JSON pointer {pointer!r}")
     changed_document = json.loads(changed.decode("utf-8"))
     if json_pointer_value(changed_document, pointer) == current:
         raise ValueError(f"JSON pointer {pointer!r} did not change")
-    return changed
+    return changed, descriptor
 
 
 def parse_png(data: bytes) -> tuple[list[tuple[bytes, bytes]], int, int, int, int]:
@@ -2209,7 +2210,56 @@ def parse_png(data: bytes) -> tuple[list[tuple[bytes, bytes]], int, int, int, in
     return chunks, width, height, bit_depth, color_type
 
 
-def perturb_png_bytes(original: bytes, declaration: dict[str, Any]) -> bytes:
+def png_pixels(
+    chunks: list[tuple[bytes, bytes]],
+    width: int,
+    height: int,
+    channels: int,
+) -> bytes:
+    stride = width * channels
+    expected_size = height * (stride + 1)
+    if expected_size > MAX_PNG_RASTER_BYTES:
+        raise ValueError(
+            f"png-pixel raster exceeds the {MAX_PNG_RASTER_BYTES}-byte safe decompression limit"
+        )
+    compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
+    decompressor = zlib.decompressobj()
+    pixels = decompressor.decompress(compressed, expected_size + 1)
+    if len(pixels) > expected_size or decompressor.unconsumed_tail:
+        raise ValueError("png-pixel decompressed raster exceeds its declared dimensions")
+    remaining = expected_size + 1 - len(pixels)
+    if remaining > 0:
+        pixels += decompressor.flush(remaining)
+    if (
+        len(pixels) != expected_size
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise ValueError("png-pixel compressed stream does not match its declared dimensions")
+    return pixels
+
+
+def encode_png(chunks: list[tuple[bytes, bytes]], pixels: bytes) -> bytes:
+    rebuilt = bytearray(b"\x89PNG\r\n\x1a\n")
+    inserted_idat = False
+    for kind, payload in chunks:
+        if kind == b"IDAT":
+            if inserted_idat:
+                continue
+            payload = zlib.compress(pixels)
+            inserted_idat = True
+        rebuilt.extend(struct.pack(">I", len(payload)))
+        rebuilt.extend(kind)
+        rebuilt.extend(payload)
+        rebuilt.extend(struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+    return bytes(rebuilt)
+
+
+def prepare_png_differential(
+    original: bytes,
+    declaration: dict[str, Any],
+) -> tuple[bytes, bytes, dict[str, Any]]:
     if set(declaration) != {"kind", "x", "y", "channel"}:
         raise ValueError("png-pixel accepts only kind, x, y, and channel")
     chunks, width, height, bit_depth, color_type = parse_png(original)
@@ -2221,32 +2271,24 @@ def perturb_png_bytes(original: bytes, declaration: dict[str, Any]) -> bytes:
         raise ValueError("png-pixel coordinates must be integers")
     if not (0 <= x < width and 0 <= y < height and 0 <= channel < channels):
         raise ValueError("png-pixel coordinates are outside the image")
-    compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
-    pixels = bytearray(zlib.decompress(compressed))
     stride = width * channels
-    if len(pixels) != height * (stride + 1):
-        raise ValueError("png-pixel scanline layout is unsupported")
+    original_pixels = png_pixels(chunks, width, height, channels)
+    pixels = bytearray(original_pixels)
     pixel_offset = y * (stride + 1) + 1 + x * channels + channel
-    before = bytes(pixels)
     pixels[pixel_offset] ^= 1
-    if before[:pixel_offset] != pixels[:pixel_offset] or before[pixel_offset + 1 :] != pixels[pixel_offset + 1 :]:
-        raise ValueError("PNG perturbation changed more than the declared filtered pixel byte")
-    rebuilt = bytearray(b"\x89PNG\r\n\x1a\n")
-    inserted_idat = False
-    for kind, payload in chunks:
-        if kind == b"IDAT":
-            if inserted_idat:
-                continue
-            payload = zlib.compress(bytes(pixels))
-            inserted_idat = True
-        rebuilt.extend(struct.pack(">I", len(payload)))
-        rebuilt.extend(kind)
-        rebuilt.extend(payload)
-        rebuilt.extend(struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
-    return bytes(rebuilt)
+    return (
+        encode_png(chunks, original_pixels),
+        encode_png(chunks, bytes(pixels)),
+        {"kind": "png-pixel", "pixel_offset": pixel_offset},
+    )
 
 
-def build_perturbed_input(original: bytes, suffix: str, declaration: Any, entropy: bytes) -> bytes:
+def build_input_differential(
+    original: bytes,
+    suffix: str,
+    declaration: Any,
+    entropy: bytes,
+) -> tuple[bytes, bytes, dict[str, Any]]:
     if not isinstance(declaration, dict) or not isinstance(declaration.get("kind"), str):
         raise ValueError("perturbation must be a pure-data object with a supported kind")
     kind = declaration["kind"]
@@ -2256,7 +2298,8 @@ def build_perturbed_input(original: bytes, suffix: str, declaration: Any, entrop
         pointer = declaration.get("pointer")
         if not isinstance(pointer, str) or not pointer.startswith("/"):
             raise ValueError("json-value needs a JSON pointer")
-        return perturb_json_bytes(original, pointer, entropy)
+        changed, descriptor = perturb_json_bytes(original, pointer, entropy)
+        return original, changed, descriptor
     if kind == "text-token":
         if set(declaration) != {"kind", "token"}:
             raise ValueError("text-token accepts only kind and token")
@@ -2267,24 +2310,190 @@ def build_perturbed_input(original: bytes, suffix: str, declaration: Any, entrop
             raise ValueError("text-token needs a non-empty token")
         old = token.encode("utf-8")
         new = mutate_text_token(token, entropy).encode("utf-8")
-        return replace_unique_bytes(original, old, new, "declared text token")
+        changed, descriptor = replace_unique_bytes(original, old, new, "declared text token")
+        return original, changed, descriptor
     if kind == "png-pixel":
         if suffix != ".png":
             raise ValueError("png-pixel requires a PNG input")
-        return perturb_png_bytes(original, declaration)
+        return prepare_png_differential(original, declaration)
     raise ValueError(f"unsupported pure-data perturbation kind: {kind}")
 
 
-def prepare_input_differential(genuine: Path, perturbed: Path, declaration: Any, entropy: bytes) -> None:
-    original = genuine.read_bytes()
-    if perturbed.read_bytes() != original:
-        raise ValueError("the two restored scored-input copies differ before perturbation")
-    changed = build_perturbed_input(original, genuine.suffix.lower(), declaration, entropy)
-    if changed == original:
-        raise ValueError("declared perturbation did not change the scored input")
-    perturbed.write_bytes(changed)
-    if genuine.read_bytes() != original:
-        raise ValueError("genuine scored-input bytes changed during differential preparation")
+def materialize_tree(source: Path, destination: Path, overrides: dict[str, bytes]) -> None:
+    destination.mkdir(parents=True)
+    source_paths = sorted(source.rglob("*"), key=lambda path: path.relative_to(source).as_posix())
+    directory_modes: list[tuple[Path, int]] = []
+    symlink_overrides: list[tuple[Path, bytes]] = []
+    for source_path in source_paths:
+        relative = source_path.relative_to(source)
+        relative_name = relative.as_posix()
+        destination_path = destination / relative
+        source_stat = source_path.lstat()
+        if stat.S_ISDIR(source_stat.st_mode):
+            destination_path.mkdir(parents=True, exist_ok=True)
+            directory_modes.append((destination_path, stat.S_IMODE(source_stat.st_mode)))
+        elif stat.S_ISLNK(source_stat.st_mode):
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            destination_path.symlink_to(os.readlink(source_path))
+            if relative_name in overrides:
+                symlink_overrides.append((destination_path, overrides[relative_name]))
+        elif stat.S_ISREG(source_stat.st_mode):
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            if relative_name in overrides:
+                destination_path.write_bytes(overrides[relative_name])
+            else:
+                shutil.copyfile(source_path, destination_path)
+            destination_path.chmod(stat.S_IMODE(source_stat.st_mode))
+        else:
+            raise ValueError(f"restored candidate contains unsupported file type: {relative_name}")
+    for destination_path, mode in directory_modes:
+        destination_path.chmod(mode)
+    for destination_path, content in symlink_overrides:
+        destination_path.write_bytes(content)
+
+
+def materialize_evaluator_root(
+    sample: Path,
+    files: dict[str, Any],
+    restored_tree: Path,
+    scratch: Path,
+    candidate_name: str,
+    overrides: dict[str, bytes],
+) -> Path:
+    scratch.mkdir()
+    for relative in sorted(files):
+        source = (sample / relative).resolve()
+        if not is_within(source, sample.resolve()) or not source.is_file():
+            raise ValueError(f"archived evaluator input is unavailable: {relative}")
+        destination = scratch / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        destination.chmod(stat.S_IMODE(source.stat().st_mode))
+    run_tree = scratch / candidate_name
+    if run_tree.exists():
+        raise ValueError("archived evaluator evidence collides with its opaque candidate path")
+    materialize_tree(restored_tree, run_tree, overrides)
+    return run_tree
+
+
+def root_entries(root: Path) -> list[Path]:
+    return [Path(".")] + sorted(
+        (path.relative_to(root) for path in root.rglob("*")),
+        key=lambda path: path.as_posix(),
+    )
+
+
+def normalize_root_metadata(root: Path, entries: list[Path]) -> None:
+    for index, relative in enumerate(entries):
+        path = root if relative == Path(".") else root / relative
+        timestamp = NORMALIZED_RUN_TIME_NS + index
+        os.utime(path, ns=(timestamp, timestamp), follow_symlinks=False)
+
+
+def verify_prepared_input(genuine: bytes, perturbed: bytes, descriptor: dict[str, Any]) -> None:
+    kind = descriptor["kind"]
+    if kind == "byte-span":
+        start = descriptor["start"]
+        old = descriptor["old"]
+        new = descriptor["new"]
+        expected = genuine[:start] + new + genuine[start + len(old) :]
+        if genuine[start : start + len(old)] != old or perturbed != expected:
+            raise ValueError(f"prepared copies differ outside {descriptor['label']}")
+        return
+    if kind == "png-pixel":
+        genuine_chunks, width, height, bit_depth, color_type = parse_png(genuine)
+        perturbed_chunks, other_width, other_height, other_depth, other_color = parse_png(perturbed)
+        channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+        if (width, height, bit_depth, color_type) != (
+            other_width,
+            other_height,
+            other_depth,
+            other_color,
+        ) or bit_depth != 8 or channels is None:
+            raise ValueError("prepared PNG copies have different image declarations")
+        genuine_pixels = png_pixels(genuine_chunks, width, height, channels)
+        perturbed_pixels = png_pixels(perturbed_chunks, width, height, channels)
+        pixel_offset = descriptor["pixel_offset"]
+        expected_pixels = bytearray(genuine_pixels)
+        expected_pixels[pixel_offset] ^= 1
+        if perturbed_pixels != bytes(expected_pixels):
+            raise ValueError("prepared PNG copies differ outside the declared filtered pixel byte")
+        if encode_png(genuine_chunks, genuine_pixels) != genuine or encode_png(
+            perturbed_chunks, perturbed_pixels
+        ) != perturbed:
+            raise ValueError("prepared PNG copies do not share the gate's deterministic encoding")
+        return
+    raise ValueError("prepared input has an unsupported differential descriptor")
+
+
+def verify_prepared_roots(
+    genuine_root: Path,
+    perturbed_root: Path,
+    allowed_relative: Path,
+    descriptor: dict[str, Any],
+) -> None:
+    genuine_entries = root_entries(genuine_root)
+    perturbed_entries = root_entries(perturbed_root)
+    if genuine_entries != perturbed_entries:
+        raise ValueError("prepared run roots contain different paths")
+    content_error: ValueError | None = None
+    for relative in genuine_entries:
+        genuine_path = genuine_root if relative == Path(".") else genuine_root / relative
+        perturbed_path = perturbed_root if relative == Path(".") else perturbed_root / relative
+        genuine_stat = genuine_path.lstat()
+        if stat.S_ISDIR(genuine_stat.st_mode):
+            genuine_order = [entry.name for entry in os.scandir(genuine_path)]
+            perturbed_order = [entry.name for entry in os.scandir(perturbed_path)]
+            if genuine_order != perturbed_order:
+                raise ValueError(f"prepared run roots expose different directory entry order at {relative}")
+        elif stat.S_ISLNK(genuine_stat.st_mode):
+            if os.readlink(genuine_path) != os.readlink(perturbed_path):
+                raise ValueError(f"prepared run roots expose different symlink targets at {relative}")
+        elif stat.S_ISREG(genuine_stat.st_mode):
+            genuine_bytes = genuine_path.read_bytes()
+            perturbed_bytes = perturbed_path.read_bytes()
+            if relative == allowed_relative:
+                try:
+                    verify_prepared_input(genuine_bytes, perturbed_bytes, descriptor)
+                except ValueError as exc:
+                    content_error = content_error or exc
+            elif genuine_bytes != perturbed_bytes and content_error is None:
+                content_error = ValueError(
+                    f"prepared run roots differ outside the declared perturbation at {relative}"
+                )
+        else:
+            raise ValueError(f"prepared run roots contain unsupported file type at {relative}")
+    normalize_root_metadata(genuine_root, genuine_entries)
+    normalize_root_metadata(perturbed_root, perturbed_entries)
+    for relative in genuine_entries:
+        genuine_path = genuine_root if relative == Path(".") else genuine_root / relative
+        perturbed_path = perturbed_root if relative == Path(".") else perturbed_root / relative
+        genuine_stat = genuine_path.lstat()
+        perturbed_stat = perturbed_path.lstat()
+        genuine_signature = (
+            stat.S_IFMT(genuine_stat.st_mode),
+            stat.S_IMODE(genuine_stat.st_mode),
+            genuine_stat.st_uid,
+            genuine_stat.st_gid,
+            genuine_stat.st_nlink,
+            genuine_stat.st_atime_ns,
+            genuine_stat.st_mtime_ns,
+        )
+        perturbed_signature = (
+            stat.S_IFMT(perturbed_stat.st_mode),
+            stat.S_IMODE(perturbed_stat.st_mode),
+            perturbed_stat.st_uid,
+            perturbed_stat.st_gid,
+            perturbed_stat.st_nlink,
+            perturbed_stat.st_atime_ns,
+            perturbed_stat.st_mtime_ns,
+        )
+        if genuine_signature != perturbed_signature:
+            raise ValueError(f"prepared run roots expose different metadata at {relative}")
+        if relative != allowed_relative and genuine_stat.st_size != perturbed_stat.st_size:
+            raise ValueError(f"prepared run roots expose different sizes outside the declared perturbation at {relative}")
+    if content_error is not None:
+        raise content_error
 
 
 def rerun_archived_evaluator(
@@ -2302,61 +2511,67 @@ def rerun_archived_evaluator(
     input_statuses = dict(declaration["input_statuses"])
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
+            prepared: dict[str, tuple[bytes, bytes, dict[str, Any]]] = {}
+            for relative in perturbable_paths:
+                source = (restored_tree / relative).resolve()
+                perturbation = perturbations.get(relative)
+                if perturbation is None:
+                    return False, f"archived evaluator lost the normalized perturbation for scored input: {relative}", {}
+                prepared[relative] = build_input_differential(
+                    source.read_bytes(),
+                    source.suffix.lower(),
+                    perturbation,
+                    os.urandom(32),
+                )
+            genuine_overrides = {relative: values[0] for relative, values in prepared.items()}
+            candidate_name = uuid.uuid4().hex
             run_roots: list[tuple[Path, Path]] = []
-            for _ in range(1 + len(perturbable_paths)):
+            for index in range(1 + len(perturbable_paths)):
                 scratch = Path(workspace) / uuid.uuid4().hex
-                scratch.mkdir()
-                for relative in files:
-                    source = (sample / relative).resolve()
-                    if not is_within(source, sample.resolve()) or not source.is_file():
-                        return False, f"archived evaluator input is unavailable: {relative}", {}
-                    destination = scratch / relative
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, destination)
-                run_tree = scratch / uuid.uuid4().hex
-                shutil.copytree(restored_tree, run_tree, symlinks=True)
+                overrides = dict(genuine_overrides)
+                if index:
+                    relative = perturbable_paths[index - 1]
+                    overrides[relative] = prepared[relative][1]
+                run_tree = materialize_evaluator_root(
+                    sample,
+                    files,
+                    restored_tree,
+                    scratch,
+                    candidate_name,
+                    overrides,
+                )
                 run_roots.append((scratch, run_tree))
             genuine_scratch, genuine_tree = run_roots[0]
             for index, relative in enumerate(perturbable_paths, start=1):
                 perturbed_scratch, perturbed_tree = run_roots[index]
-                genuine_input = (genuine_tree / relative).resolve()
-                perturbed_input = (perturbed_tree / relative).resolve()
-                if not is_within(genuine_input, genuine_tree.resolve()) or not is_within(
-                    perturbed_input, perturbed_tree.resolve()
-                ):
-                    return False, f"archived evaluator scored input cannot be prepared inside scratch: {relative}", {}
-                perturbation = perturbations.get(relative)
-                if perturbation is None:
-                    return False, f"archived evaluator lost the normalized perturbation for scored input: {relative}", {}
-                prepare_input_differential(
-                    genuine_input,
-                    perturbed_input,
-                    perturbation,
-                    os.urandom(32),
+                verify_prepared_roots(
+                    genuine_scratch,
+                    perturbed_scratch,
+                    Path(candidate_name) / relative,
+                    prepared[relative][2],
                 )
-            genuine = subprocess.run(
-                confined_evaluator_command(wrapper, genuine_scratch, genuine_scratch / evaluator_name, genuine_tree),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=60,
-            )
-            perturbed_runs: list[tuple[str, subprocess.CompletedProcess[bytes]]] = []
+            executions: list[tuple[str, Path, Path]] = [("genuine", genuine_scratch, genuine_tree)]
             for index, relative in enumerate(perturbable_paths, start=1):
                 perturbed_scratch, perturbed_tree = run_roots[index]
+                executions.append((relative, perturbed_scratch, perturbed_tree))
+            executions.sort(key=lambda _item: os.urandom(16))
+            results: dict[str, subprocess.CompletedProcess[bytes]] = {}
+            for role, scratch, run_tree in executions:
                 completed = subprocess.run(
                     confined_evaluator_command(
                         wrapper,
-                        perturbed_scratch,
-                        perturbed_scratch / evaluator_name,
-                        perturbed_tree,
+                        scratch,
+                        scratch / evaluator_name,
+                        run_tree,
                     ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=False,
                     timeout=60,
                 )
-                perturbed_runs.append((relative, completed))
+                results[role] = completed
+            genuine = results["genuine"]
+            perturbed_runs = [(relative, results[relative]) for relative in perturbable_paths]
     except subprocess.TimeoutExpired:
         return False, "archived evaluator exceeded the 60-second restore-drill limit", {}
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:
@@ -2538,12 +2753,12 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     reran += 1
                     report.ok(
                         f"restore.{sample.name}.evaluator_rerun",
-                        "confined archived evaluator rerun reproduced the recorded genuine result",
+                        "confined archived evaluator rerun reproduced the recorded gate-prepared genuine result",
                     )
                     dependence[sample.name] = {"overall": "proven", "inputs": input_statuses}
                     report.ok(
                         f"restore.{sample.name}.evaluator_dependence",
-                        "proven; the genuine copy retained its archived bytes and each declared pure-data perturbation changed output",
+                        "proven; corresponding run roots shared one preparation pipeline and each declared perturbation changed output",
                     )
                     for input_index, (relative, status) in enumerate(sorted(input_statuses.items())):
                         if status == "proven":
