@@ -1989,13 +1989,13 @@ test_stalled_transition_holder_cannot_hide_failure() {
 }
 
 test_transition_revocation_does_not_signal_released_owner() {
-  local dir state ready release released done holder revoke_rc i
+  local dir state ready release released done_marker holder revoke_rc i
   dir=$(make_primary_dir "$TMP_ROOT/transition-release-race")
   state="$dir/state"
   ready="$state/transition-release-ready"
   release="$state/transition-release"
   released="$state/transition-released"
-  done="$state/transition-release-done"
+  done_marker="$state/transition-release-done"
   bash -c '
     . "$1/bin/fm-wake-lib.sh"
     fm_autoarm_transition_acquire "$1/state" || exit
@@ -2004,7 +2004,7 @@ test_transition_revocation_does_not_signal_released_owner() {
     fm_lock_release "$1/state/.claude-autoarm-transition.lock"
     : > "$4"
     while [ ! -e "$5" ]; do sleep 0.01; done
-  ' _ "$dir" "$ready" "$release" "$released" "$done" &
+  ' _ "$dir" "$ready" "$release" "$released" "$done_marker" &
   holder=$!
   i=0
   while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
@@ -2028,7 +2028,7 @@ test_transition_revocation_does_not_signal_released_owner() {
   revoke_rc=$?
   kill -0 "$holder" 2>/dev/null \
     || fail "transition revocation signalled an owner that had already released its lock"
-  : > "$done"
+  : > "$done_marker"
   wait "$holder" 2>/dev/null || true
 
   expect_code 1 "$revoke_rc" "a completed transition release must win against stale revocation"
