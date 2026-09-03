@@ -69,6 +69,12 @@ make_spawn_case() {
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
 
+write_crew_claude_agent() {
+  local home=$1
+  shift
+  printf '%s\n' "$@" > "$home/config/crew-claude-agent"
+}
+
 enable_dispatch_profile() {
   local home=$1
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
@@ -822,6 +828,104 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_absent_crew_claude_agent_omits_the_agent_flag() {
+  local rec id out status launch
+  id=profile-claude-agent-absent-z20
+  rec=$(make_spawn_case profile-claude-agent-absent claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without config/crew-claude-agent should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--agent" \
+    "an absent config/crew-claude-agent must leave the claude launch command unchanged"
+  pass "an absent config/crew-claude-agent adds no --agent flag"
+}
+
+test_crew_claude_agent_flows_to_crewmate_and_scout_launches() {
+  local rec ship_id scout_id out status launch
+  ship_id=profile-claude-agent-ship-z21
+  scout_id=profile-claude-agent-scout-z22
+  rec=$(make_spawn_case profile-claude-agent claude "$ship_id" "$scout_id")
+  read_case_record "$rec"
+  write_crew_claude_agent "$HOME_DIR" '# worker profile' '' 'fm-worker.v2'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship_id" "$PROJ_DIR" --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "claude crewmate spawn with an agent profile should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high' --agent 'fm-worker.v2'" \
+    "claude crewmate launch did not carry the configured agent profile after the shared profile flags"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout_id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with an agent profile should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--agent 'fm-worker.v2'" \
+    "claude scout launch did not carry the configured agent profile"
+  pass "config/crew-claude-agent adds --agent to claude crewmate and scout launches"
+}
+
+test_crew_claude_agent_is_omitted_from_secondmate_launches() {
+  local rec id sm out status launch
+  id=profile-claude-agent-secondmate-z23
+  rec=$(make_spawn_case profile-claude-agent-secondmate claude "$id")
+  read_case_record "$rec"
+  write_crew_claude_agent "$HOME_DIR" fm-worker
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn with an agent profile configured should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" "secondmate launch did not resolve the claude harness"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--agent" \
+    "a secondmate is a firstmate in its own home and must keep the operator's default agent profile"
+  pass "config/crew-claude-agent never reaches a secondmate launch"
+}
+
+test_invalid_crew_claude_agent_refuses_the_spawn() {
+  local rec id out status
+  id=profile-claude-agent-invalid-z24
+  rec=$(make_spawn_case profile-claude-agent-invalid claude "$id")
+  read_case_record "$rec"
+  write_crew_claude_agent "$HOME_DIR" 'bad name; rm -rf /'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unsafe agent profile token should refuse the spawn"
+  assert_contains "$out" "config/crew-claude-agent names an unsafe agent profile" \
+    "spawn did not name the unsafe agent profile refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal should happen before meta is written"
+  pass "an unsafe config/crew-claude-agent token refuses the spawn"
+}
+
+test_raw_launch_command_ignores_crew_claude_agent() {
+  local rec id out status launch
+  id=profile-claude-agent-raw-z25
+  rec=$(make_spawn_case profile-claude-agent-raw claude "$id")
+  read_case_record "$rec"
+  write_crew_claude_agent "$HOME_DIR" 'bad name; rm -rf /'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --resume")
+  status=$?
+  expect_code 0 "$status" "a raw launch command carries no agent slot, so the config must not refuse the spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    *"claude --resume") ;;
+    *) fail "raw launch command changed"$'\n'"actual: $launch" ;;
+  esac
+  pass "config/crew-claude-agent neither alters nor refuses a raw launch command"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_absent_crew_claude_agent_omits_the_agent_flag
+test_raw_launch_command_ignores_crew_claude_agent
+test_crew_claude_agent_flows_to_crewmate_and_scout_launches
+test_crew_claude_agent_is_omitted_from_secondmate_launches
+test_invalid_crew_claude_agent_refuses_the_spawn
 
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -321,6 +321,13 @@ An explicit harness argument to `fm-spawn.sh` still overrides either config file
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
+`config/crew-claude-agent` is a separate local, gitignored file naming one Claude agent profile for crewmate and scout launches.
+Firstmate launches Claude workers as fresh `claude` sessions, so without it a worker inherits whatever `agent:` the operator's own global Claude settings select, which is normally a primary-session profile rather than a worker one.
+The first non-empty, non-comment line is the agent name and must be a safe token of letters, digits, `_`, `-`, `.`, and `:`; any other content refuses the spawn instead of launching.
+When it is present, `fm-spawn.sh` adds `--agent '<name>'` to claude crewmate and scout launches, including a relaunch onto claude; secondmate launches never carry it, because a secondmate is a firstmate in its own home and keeps the operator's default profile.
+An absent file leaves every launch command unchanged, as does a raw launch command, which carries no agent slot to substitute and is therefore never refused over this file's contents.
+The name is validated as a safe token only; it is never checked to exist, and `claude --agent <unknown>` refuses to start, so an agent name that the launching machine's Claude installation does not define makes every claude crewmate and scout pane in that home exit immediately with no spawn-time signal.
+The same applies in a secondmate home that inherits the file, where the primary's profile name may not exist in that machine's Claude configuration at all.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
@@ -411,7 +418,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `crew-claude-agent`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
