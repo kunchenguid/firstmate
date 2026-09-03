@@ -738,6 +738,48 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
+# The latest explicit pause naming the exact current green open PR is an
+# authoritative external wait. URL drift, later events, fixing, non-green CI,
+# or PR closure restore the generic run state.
+test_current_green_pr_pause_is_narrow_and_supersedable() {
+  reset_fakes
+  local d out
+  d=$(new_case current-green-pr-pause)
+  make_repo_on_branch "$d/wt" fm/feat-merge-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/merge-pause.meta" "window=fm:fm-merge-pause" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-merge-pause)"$'\nbranch_sync:\n  pr_state: open'
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  printf 'paused: PR https://github.com/o/r/pull/2 is green and awaiting an upstream maintainer merge\n' > "$d/state/merge-pause.status"
+
+  out=$(run_crew_state "$d" merge-pause)
+  assert_contains "$out" "state: paused" "an exact green open PR pause must become the current external wait"
+  assert_contains "$out" "source: status-log" "the merge pause must remain explicitly status-log sourced"
+
+  printf 'working: merge wait ended; resuming\n' >> "$d/state/merge-pause.status"
+  out=$(run_crew_state "$d" merge-pause)
+  assert_not_contains "$out" "state: paused" "a later event must supersede the merge pause"
+
+  printf 'paused: PR https://github.com/o/r/pull/20 is green and awaiting merge\n' >> "$d/state/merge-pause.status"
+  out=$(run_crew_state "$d" merge-pause)
+  assert_not_contains "$out" "state: paused" "a changed PR URL must not preserve the old wait"
+
+  printf 'paused: PR https://github.com/o/r/pull/2 is green and awaiting merge\n' >> "$d/state/merge-pause.status"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  out=$(run_crew_state "$d" merge-pause)
+  assert_contains "$out" "state: working" "non-green CI must supersede the merge pause"
+
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/pr_state: open/pr_state: closed}
+  out=$(run_crew_state "$d" merge-pause)
+  assert_not_contains "$out" "state: paused" "a closed PR must supersede the merge pause"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_ci_running fm/feat-merge-pause)"$'\nbranch_sync:\n  pr_state: open'
+  out=$(run_crew_state "$d" merge-pause)
+  assert_contains "$out" "state: working" "active fixing must supersede the merge pause"
+  pass "an exact current green PR pause is authoritative only while its whole conjunction holds"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -1570,6 +1612,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_current_green_pr_pause_is_narrow_and_supersedable
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane

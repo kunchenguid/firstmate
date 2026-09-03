@@ -1712,7 +1712,8 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
+#   done    - crew_state_class ONLY: the authoritative current state is completed;
+#   none    - neither, so the wake must surface (a stopped/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
@@ -1720,18 +1721,36 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
+#
+# crew_state_class is the raw resolution and additionally reports `done`, the
+# authoritative completed state. Absorbing a completed ship needs evidence this
+# shared classifier does not have (a canonical merge poll), so crew_absorb_class
+# below is the policy wrapper every shared caller keeps using: `done` is NOT
+# absorbable here, and only bin/fm-watch.sh may combine it with that provenance.
+crew_state_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
+  case "$state" in
+    paused) printf 'paused'; return ;;
+    done) printf 'done'; return ;;
+    working)
+      src=${line#*source: }; src=${src%% *}
+      case "$src" in run-step|pane) printf 'working'; return ;; esac
+      ;;
+  esac
   printf 'none'
+}
+
+crew_absorb_class() {  # <id>
+  local class
+  class=$(crew_state_class "$1")
+  case "$class" in
+    working|paused) printf '%s' "$class" ;;
+    *) printf 'none' ;;
+  esac
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

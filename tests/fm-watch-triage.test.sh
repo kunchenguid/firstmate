@@ -21,9 +21,38 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+POLL_TEMPLATE="$ROOT/bin/fm-pr-poll.sh"
+
+# Publish a REAL canonical merge poll for <task>, exactly as bin/fm-pr-check.sh
+# does, so the bounded merge-wait assertions below run against the same
+# provenance validator production uses instead of a hand-faked marker file.
+publish_canonical_poll() {  # <state> <task> <window> [url]
+  local state=$1 task=$2 window=$3 url=${4:-https://github.com/o/r/pull/9}
+  local provider host path number
+  fm_pr_url_parse "$url" || fail "canonical poll fixture URL was invalid"
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  printf 'window=%s\nkind=ship\npr=%s\n' "$window" "$url" > "$state/$task.meta"
+  fm_pr_poll_prepare "$state" "$task" "$provider" "$url" "$host" "$path" "$number" "$POLL_TEMPLATE" \
+    || fail "could not prepare canonical poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish canonical poll fixture"
+}
+
+# Read fm-watch.sh's own waiting classifier in isolation, with a canned
+# authoritative verdict, so the strict conjunction can be exercised directly.
+watch_class() {  # <state> <fakebin> <window> <task> <authoritative-line>
+  local state=$1 fakebin=$2 window=$3 task=$4 verdict=$5
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE="$verdict" bash -c \
+    '. "$1"; watch_stale_class "$2" "$3"' _ "$WATCH" "$window" "$task"
+}
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
@@ -460,6 +489,9 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_state_class a)" = "done" ] || fail "the low-level classifier did not expose authoritative done"
+  [ "$(crew_absorb_class a)" = none ] || fail "the shared absorb policy treated done as absorbable"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -1866,6 +1898,168 @@ test_nonterminal_stale_not_working_surfaced() {
 # uses the wedge timer; it re-surfaces once past PAUSE_RESURFACE_SECS (anchored on
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
+# The watcher-only `waiting` class is a strict CONJUNCTION: a ship record, an
+# authoritative done verdict, an exact current done event, and the complete
+# canonical merge-poll provenance. Each leg is removed in turn.
+test_watch_waiting_classifier_matrix() {
+  local dir state fakebin window task verdict meta
+  dir=$(make_case waiting-classifier)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  window=test:fm-await
+  task=await
+  verdict='state: done · source: run-step · checks green'
+  publish_canonical_poll "$state" "$task" "$window"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$state/$task.status"
+  meta=$(cat "$state/$task.meta")
+
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" "$verdict")" = waiting ] \
+    || fail "authoritative done ship with a canonical poll was not classed waiting"
+
+  mv "$state/$task.pr-poll-registration" "$state/$task.pr-poll-registration.saved"
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" "$verdict")" = none ] \
+    || fail "a partially published poll was treated as a merge wait"
+  mv "$state/$task.pr-poll-registration.saved" "$state/$task.pr-poll-registration"
+
+  printf 'blocked: merge credential expired\n' > "$state/$task.status"
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" "$verdict")" = none ] \
+    || fail "a non-done latest event was treated as a merge wait"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$state/$task.status"
+
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" 'state: working · source: run-step · validating')" = working ] \
+    || fail "a resumed run did not leave the merge wait for working"
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" 'state: failed · source: run-step · run failed')" = none ] \
+    || fail "a failed run was absorbed as a merge wait"
+
+  rm -f "$state/$task.check.sh" "$state/$task.pr-poll" "$state/$task.pr-poll-registration"
+  cat > "$state/$task.check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod 0700 "$state/$task.check.sh"
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" "$verdict")" = none ] \
+    || fail "a custom check was accepted as canonical merge-poll provenance"
+
+  rm -f "$state/$task.check.sh"
+  publish_canonical_poll "$state" "$task" "$window"
+  printf 'kind=scout\nwindow=%s\npr=https://github.com/o/r/pull/9\n' "$window" > "$state/$task.meta"
+  [ "$(watch_class "$state" "$fakebin" "$window" "$task" "$verdict")" = none ] \
+    || fail "a scout was treated as a merge-waiting ship"
+  printf '%s\n' "$meta" > "$state/$task.meta"
+  pass "the waiting class needs a ship, an authoritative done, an exact done event, and canonical poll provenance"
+}
+
+# The merge-wait behavior: a completed ship whose PR is open and whose
+# canonical merge poll is armed must NOT be re-surfaced as a possible wedge on
+# every pane change or watcher re-arm. It takes the bounded pause cadence: quiet
+# while fresh, exactly one recheck once the cadence elapses (the recheck is
+# labeled a merge wait, never a wedge), and quiet again on an immediate re-arm.
+# FM_PAUSE_RESURFACE_SECS=60 is deliberately well beyond suite startup under
+# load, so "quiet" is a decision and never a race.
+test_done_canonical_poll_uses_bounded_wait_cadence() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid back wakes_before
+  dir=$(make_case done-canonical-wait)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  capture_file="$dir/pane.txt"
+  statusf="$state/await.status"
+  window=test:fm-await
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  publish_canonical_poll "$state" await "$window"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$statusf"
+  sig=$(seen_sig "$statusf")
+  printf '%s' "$sig" > "$state/.seen-await_status"
+  printf 'PR open, awaiting merge' > "$capture_file"
+  pane_hash=$(hash_text "PR open, awaiting merge")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a fresh canonical merge wait: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a fresh merge wait printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh merge wait enqueued a wake"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the merge wait did not take the bounded cadence"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a merge wait started the wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional merge-wait phase-A stop"
+
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-await_status"
+  printf 'PR open, awaiting merge (token 2)' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the elapsed merge-wait cadence did not re-surface"
+  grep -F "awaiting merge" "$out" >/dev/null || fail "the merge-wait recheck omitted its reason: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a canonical merge wait was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the merge-wait re-surface throttle marker was not recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "could not drain the merge-wait recheck"
+
+  wakes_before=$(wc -l < "$state/.wake-queue" | tr -d ' ')
+  printf 'PR open, awaiting merge (token 3)' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the immediate re-arm repeated the merge-wait recheck: $(cat "$out")"
+  fi
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" = "$wakes_before" ] \
+    || { reap "$pid"; fail "the immediate re-arm enqueued a duplicate recheck: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional merge-wait phase-C stop"
+  pass "a completed ship with a canonical merge poll re-surfaces once per bounded cadence across pane churn and re-arm"
+}
+
+# The disconfirming case for the same behavior: an identical completed ship with
+# NO canonical poll must still surface, so the merge wait can never become a
+# blanket suppressor for anything that once said done.
+test_done_without_canonical_poll_still_surfaces() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case done-no-poll)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/await.status"
+  window=test:fm-await
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/await.meta"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-await_status"
+  printf 'PR open, awaiting merge' > "$capture_file"
+  pane_hash=$(hash_text "PR open, awaiting merge")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a completed ship with no canonical poll was silently absorbed"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the unpolled completed ship did not surface a stale wake: $(cat "$out")"
+  pass "a completed ship without canonical merge-poll provenance still surfaces"
+}
+
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4000,6 +4194,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_watch_waiting_classifier_matrix
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -4053,6 +4248,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_done_canonical_poll_uses_bounded_wait_cadence
+test_done_without_canonical_poll_still_surfaces
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle

@@ -35,7 +35,11 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. Reconcile the status log: the latest explicit pause naming the exact PR the
+#      current run is monitoring, while that PR is open and green, narrows generic
+#      merge monitoring to a declared external wait; any later status event,
+#      changed or closed PR, non-green check, active fix, or terminal run
+#      supersedes it. Otherwise, if the last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
@@ -427,6 +431,51 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
 
+# 0 when the bare `axi status` answer establishes only that a run is ACTIVE:
+# no outcome, an active status word, and no gate detail of any kind. It is
+# deliberately weaker than full attribution - it may prove liveness, never a
+# gate state and never a terminal outcome.
+nm_axi_status_is_active() {
+  local status outcome gate_status
+  status=$(strip_quotes "$(nm_field status)")
+  outcome=$(strip_quotes "$(nm_field outcome)")
+  [ -z "$outcome" ] || return 1
+  case "$status" in running|fixing|ci) ;; *) return 1 ;; esac
+  ! nm_has_gate || return 1
+  gate_status=$(nm_gate_status)
+  [ -z "$gate_status" ] || return 1
+  ! printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*awaiting_agent:'
+}
+
+# 0 when the crew's LATEST status event is an explicit pause that names the exact
+# PR this crew's own active run is monitoring, and that PR is currently open with
+# green checks. That combination narrows generic "run still monitoring PR" work
+# into a DECLARED external wait, so supervision holds it on the bounded wait
+# cadence instead of re-surfacing it. Requiring the pause to be the latest line
+# is what makes every later event supersede it; requiring live PR/CI agreement is
+# what makes PR drift, closure, a red check, or an active fix supersede it too.
+log_declares_current_merge_wait() {
+  local status run_pr pr_state step_status note
+  status_is_paused "$LOG_LINE" || return 1
+  [ "${run_branch:-}" = "$CREW_BRANCH" ] || return 1
+  nm_axi_status_is_active || return 1
+  status=$(strip_quotes "$(nm_field status)")
+  [ "$status" != fixing ] || return 1
+  run_pr=$(strip_quotes "$(nm_field pr)")
+  [ -n "$run_pr" ] || return 1
+  note=$(status_line_note "$LOG_LINE")
+  case " $note " in *" $run_pr "*) ;; *) return 1 ;; esac
+  pr_state=$(strip_quotes "$(nm_field pr_state)")
+  case "$pr_state" in ''|open) ;; *) return 1 ;; esac
+  step_status=$(nm_effective_ci_step_status)
+  [ "$step_status" = running ] || return 1
+  if [ -n "${CI_LOG_STATE:-}" ]; then
+    [ "$CI_LOG_STATE" = green ]
+    return
+  fi
+  [ "$(nm_ci_checks_state)" = green ]
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -548,6 +597,14 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  # The declared merge wait is read BEFORE the generic "still monitoring PR"
+  # mapping below, because both describe the same run and only this one carries
+  # the crew's own explicit statement that the wait is external.
+  if { [ "$RUN_STATE" = working ] || [ "$RUN_STATE" = "done" ]; } \
+      && log_declares_current_merge_wait; then
+    emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}current PR checks green; run monitoring merge"
+  fi
+
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
@@ -565,9 +622,10 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
-  # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # Reconcile decision and blocker events AFTER the narrower current-merge-wait
+  # exception above. A needs-decision/blocked log line that the run-step has
+  # moved past (anything but a genuinely parked run) is deterministically stale:
+  # the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$RUN_STATE" != parked ]; then
