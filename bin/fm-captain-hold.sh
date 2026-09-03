@@ -115,6 +115,16 @@
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task.
 #
+# Both gates resolve every entry against this home's closed-task archive
+# (tasks-axi's `[markdown] archive`) as well as its live backlog, because
+# `tasks-axi prune` moves closed tasks out of the backlog and an answered
+# captain call is exactly as durable once it has moved. Resolution is the only
+# thing widened: a call closed with no recorded captain answer still fails the
+# gate wherever it lives. An archive this home cannot READ refuses both gates
+# by name, since a check that could not look must never be recorded as a check
+# that found nothing outstanding; an archive that does not exist yet is not an
+# error and simply carries no tasks.
+#
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -226,6 +236,119 @@ require_tasks_axi() {
 
 task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+# The closed-task archive beside this home's backlog, as an absolute path.
+# tasks-axi's own `[markdown] archive` setting is the owner; the default below
+# only covers a home whose config omits it.
+#
+# This must read the setting the way tasks-axi does, or the gate resolves
+# against a DIFFERENT file than the one tasks-axi prunes into and a correctly
+# answered call fails the gate anyway - the same defect this lookup exists to
+# remove, wearing a config-parsing disguise. tasks-axi honours a basic
+# (double-quoted) string, a literal (single-quoted) string, and an inline
+# comment after either, so all of those are read here. Matching the value by
+# its own quote delimiters rather than to end-of-line is what keeps a `#`
+# INSIDE the path from being mistaken for the start of a comment. An escaped
+# quote within a basic string is not decoded; that needs a real TOML parser,
+# and no such path has ever been configured here.
+#
+# The setting also has to be read from the table tasks-axi reads it from. An
+# `archive` key belongs to whichever table heading precedes it, so any other
+# table - or the root table above the first heading - is free to carry one of
+# its own, and tasks-axi ignores those. Taking the first `archive` line in the
+# file regardless of heading would point the gate at that unrelated value and
+# reopen the same miss, so only lines inside `[markdown]` are considered here.
+archive_path() {
+  local configured=''
+  if [ -f "$FM_HOME/.tasks.toml" ]; then
+    configured=$(awk '
+      /^[[:space:]]*\[/ {
+        heading = $0
+        sub(/^[[:space:]]*\[/, "", heading)
+        sub(/\].*$/, "", heading)
+        gsub(/[[:space:]]/, "", heading)
+        in_markdown = (heading == "markdown")
+        next
+      }
+      in_markdown { print }
+    ' "$FM_HOME/.tasks.toml" | sed -n \
+      -e 's/^[[:space:]]*archive[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' \
+      -e "s/^[[:space:]]*archive[[:space:]]*=[[:space:]]*'\([^']*\)'.*\$/\1/p" \
+      | head -1)
+  fi
+  [ -n "$configured" ] || configured=data/done-archive.md
+  case "$configured" in
+    /*) printf '%s' "$configured" ;;
+    *) printf '%s/%s' "$FM_HOME" "$configured" ;;
+  esac
+}
+
+# An unreadable archive is missing evidence, not evidence of absence. Every
+# path that resolves captain calls against the archive calls this first, so
+# "the gate could not look" can never be recorded as "the captain owes
+# nothing". An archive that simply does not exist is not an error: this home
+# has pruned nothing yet, and the lookup below correctly finds no task.
+require_readable_archive() {
+  local archive
+  archive=$(archive_path)
+  [ -e "$archive" ] || return 0
+  [ -r "$archive" ] \
+    || fail "cannot read the closed-task archive $archive; refusing to resolve captain calls against an archive this home cannot read"
+}
+
+# One task from the archive, parsed by tasks-axi rather than by a second reader
+# here, so the row format keeps exactly one owner. The archive holds the same
+# rows under dated `## Archived` headings, so they are restaged under the
+# section heading tasks-axi reads before it is asked for the task.
+#
+# An id can appear in more than one section: prune appends a section per run,
+# and a home is free to reuse an id for a later call. tasks-axi returns the
+# FIRST row carrying an id, so the sections are restaged newest-first. The
+# newest row is the one describing that call's current durable state; resolving
+# to an older one would let a long-settled answer stand in for a question the
+# captain still owes. Only an unindented `## ` line starts a section - row
+# bodies are indented - so splitting on that leaves each row with its body.
+restage_archive_newest_first() {  # <archive-path>
+  awk '
+    /^## / { section++; next }
+    { block[section] = block[section] $0 "\n" }
+    END { for (i = section; i >= 0; i--) printf "%s", block[i] }
+  ' "$1"
+}
+
+archived_task_show() {  # <id>
+  local id=$1 archive tmp out
+  archive=$(archive_path)
+  [ -r "$archive" ] || return 1
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-archive.XXXXXX") \
+    || fail "cannot stage the closed-task archive for lookup"
+  if ! { printf '## In flight\n\n## Queued\n\n## Done\n'; restage_archive_newest_first "$archive"; } > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    fail "cannot stage the closed-task archive $archive for lookup"
+  fi
+  if out=$(tasks_axi show "$id" --file "$tmp" --full 2>/dev/null); then
+    rm -f -- "$tmp"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+# The task carrying an id wherever it durably lives. An answered captain call
+# does not stay in the live backlog forever - tasks-axi prune moves closed
+# tasks into the archive - and it is exactly as durable after that move. This
+# widens WHERE a call is looked up and nothing else: what counts as answered is
+# still decided by verify_hold_durable, so an archived call closed with no
+# recorded captain answer keeps failing the gate exactly as it did while live.
+task_show_durable() {  # <id>
+  local out
+  if out=$(task_show "$1"); then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  archived_task_show "$1"
 }
 
 show_field() {  # <show-output> <field>
@@ -344,7 +467,8 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") \
+    || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md and from $(archive_path)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -361,19 +485,19 @@ verify_hold_durable() {  # <task-id>
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  if task_show_durable "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if task_show_durable "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md or $(archive_path)"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no captain-held task $entry in $FM_HOME/data/backlog.md or $(archive_path)"
 }
 
 command_hold() {
@@ -723,7 +847,7 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
+    show=$(task_show_durable "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
@@ -796,6 +920,7 @@ command_complete() {
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
+    require_readable_archive
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       verify_hold_durable "$(resolve_entry "$origin" "$entry")"
@@ -850,6 +975,7 @@ command_verify() {
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
   if [ -n "$keys" ]; then
+    require_readable_archive
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       verify_hold_durable "$(resolve_entry "$origin" "$entry")"

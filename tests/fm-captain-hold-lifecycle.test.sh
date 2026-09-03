@@ -1168,6 +1168,326 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# Answered captain calls do not stay in the live backlog forever: tasks-axi
+# prune moves closed tasks into the archive. The completion gate must still
+# find them there, or a finished investigation whose calls were correctly
+# answered fails its own gate permanently and its cleanup is refused. The
+# other direction is what the gate is for, so it is pinned in the same pass: a
+# call closed with no recorded captain answer must keep failing after it is
+# archived, and an archive that cannot be read must refuse rather than count
+# as "nothing left to answer".
+test_archived_captain_calls_resolve_without_waving_work_through() {
+  local home answered dropped unreadable rc
+  home=$(make_home archived-calls)
+
+  # Direction one: answered, then archived. The gate must pass and cleanup
+  # must proceed.
+  answered=sample-archived-review
+  mkdir -p "$home/data/$answered"
+  tasks_in "$home" add "$answered" "Review the archived path" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the answered-call origin"
+  write_origin_meta "$home" "$answered"
+  printf 'done: report complete\n' > "$home/state/$answered.status"
+  printf '# Archived review\n\nOne captain choice remained.\n' > "$home/data/$answered/report.md"
+  run_captain "$home" hold sample-archived-call \
+    --title "Choose the archived option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the answered captain call"
+  run_captain "$home" complete "$answered" sample-archived-call >/dev/null \
+    || fail "completion failed while the captain call was still live"
+  printf 'Take the northern route.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain answer"
+
+  # Direction two: held, inventoried, then closed with no recorded captain
+  # answer - the question the captain still owes.
+  dropped=sample-dropped-review
+  mkdir -p "$home/data/$dropped"
+  tasks_in "$home" add "$dropped" "Review the dropped path" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the dropped-call origin"
+  write_origin_meta "$home" "$dropped"
+  printf 'done: report complete\n' > "$home/state/$dropped.status"
+  printf '# Dropped review\n\nOne captain choice remained.\n' > "$home/data/$dropped/report.md"
+  run_captain "$home" hold sample-dropped-call \
+    --title "Choose the dropped option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the dropped captain call"
+  run_captain "$home" complete "$dropped" sample-dropped-call >/dev/null \
+    || fail "completion failed while the dropped call was still live"
+  tasks_in "$home" "done" sample-dropped-call >/dev/null \
+    || fail "could not close the dropped call outside the answer path"
+
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not archive the closed captain calls"
+  if tasks_in "$home" show sample-archived-call >/dev/null 2>&1; then
+    fail "setup error: the answered call is still in the live backlog"
+  fi
+  assert_grep "sample-archived-call" "$home/data/done-archive.md" "the answered call was not archived"
+  assert_grep "sample-dropped-call" "$home/data/done-archive.md" "the dropped call was not archived"
+
+  run_captain "$home" verify "$answered" >/dev/null 2> "$home/verify-answered.err" \
+    || fail "an answered, archived captain call failed its own completion gate: $(cat "$home/verify-answered.err")"
+  run_captain "$home" complete "$answered" sample-archived-call >/dev/null 2>&1 \
+    || fail "a later completion pass failed on an answered, archived captain call"
+  run_teardown "$home" "$answered" >/dev/null 2> "$home/teardown.err" \
+    || fail "cleanup was refused for an answered, archived captain call: $(cat "$home/teardown.err")"
+
+  set +e
+  run_captain "$home" verify "$dropped" > "$home/verify-dropped.out" 2> "$home/verify-dropped.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "an archived captain call closed with no recorded answer passed the gate: $(cat "$home/verify-dropped.out")"
+  assert_grep "recorded captain answer" "$home/verify-dropped.err" \
+    "the refusal must name the missing captain answer"
+  set +e
+  run_teardown "$home" "$dropped" > "$home/teardown-dropped.out" 2> "$home/teardown-dropped.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup erased an investigation whose archived captain call was never answered"
+  assert_grep "fm-captain-hold.sh" "$home/teardown-dropped.err" \
+    "cleanup must be refused by the captain-call gate, not incidentally"
+
+  # An archive that cannot be read is not evidence that everything was
+  # answered. The gate must refuse and say so.
+  unreadable=sample-unreadable-review
+  mkdir -p "$home/data/$unreadable"
+  tasks_in "$home" add "$unreadable" "Review the unreadable path" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unreadable-archive origin"
+  write_origin_meta "$home" "$unreadable"
+  printf 'done: report complete\n' > "$home/state/$unreadable.status"
+  run_captain "$home" hold sample-unreadable-call \
+    --title "Choose the unreadable option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the unreadable-archive captain call"
+  run_captain "$home" complete "$unreadable" sample-unreadable-call >/dev/null \
+    || fail "completion failed while the unreadable-archive call was still live"
+  printf 'Take the southern route.\n' > "$home/answer2.txt"
+  run_captain "$home" answer sample-unreadable-call --decision-file "$home/answer2.txt" >/dev/null \
+    || fail "could not record the second captain answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not archive the second answered call"
+  run_captain "$home" verify "$unreadable" >/dev/null 2>&1 \
+    || fail "setup error: the second answered call should pass with a readable archive"
+  chmod 000 "$home/data/done-archive.md"
+  if [ -r "$home/data/done-archive.md" ]; then
+    chmod 644 "$home/data/done-archive.md"
+    echo "skip: this user can read a mode-000 archive; unreadable-archive case not exercised"
+  else
+    set +e
+    run_captain "$home" verify "$unreadable" > "$home/verify-unreadable.out" 2> "$home/verify-unreadable.err"
+    rc=$?
+    set -e
+    chmod 644 "$home/data/done-archive.md"
+    [ "$rc" -ne 0 ] \
+      || fail "an unreadable archive was read as proof the captain owed nothing: $(cat "$home/verify-unreadable.out")"
+    assert_grep "cannot read the closed-task archive" "$home/verify-unreadable.err" \
+      "the refusal must say the archive could not be read, not that the call was absent"
+  fi
+  pass "archived captain calls resolve, unanswered and unreadable ones still refuse"
+}
+
+# The archive the gate resolves against is whichever one tasks-axi actually
+# writes, so this home must read that setting the way tasks-axi does. tasks-axi
+# accepts a double-quoted path, a single-quoted (TOML literal) path, and an
+# inline comment after either. Reading only the first form makes the gate fall
+# back to the default path and miss a correctly answered, pruned call - the very
+# failure this suite exists to prevent, reappearing as a config misparse.
+test_configured_archive_is_read_the_way_tasks_axi_reads_it() {
+  local home origin call form line archive rc
+  form=0
+  while IFS='|' read -r line archive; do
+    [ -n "$line" ] || continue
+    form=$((form + 1))
+    home=$(make_home "archive-toml-$form")
+    cat > "$home/.tasks.toml" <<EOF
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+$line
+done_keep = 10
+EOF
+    origin="sample-toml-review-$form"
+    call="sample-toml-call-$form"
+    mkdir -p "$home/data/$origin"
+    tasks_in "$home" add "$origin" "Review the configured archive" \
+      --kind scout --repo sample --start >/dev/null \
+      || fail "form $form: could not create the origin"
+    write_origin_meta "$home" "$origin"
+    printf 'done: report complete\n' > "$home/state/$origin.status"
+    printf '# Configured archive review\n\nOne captain choice remained.\n' \
+      > "$home/data/$origin/report.md"
+    run_captain "$home" hold "$call" \
+      --title "Choose the configured option" --reason "captain choice pending" --repo sample >/dev/null \
+      || fail "form $form: could not register the captain call"
+    run_captain "$home" complete "$origin" "$call" >/dev/null \
+      || fail "form $form: completion failed while the call was still live"
+    printf 'Take the configured route.\n' > "$home/answer.txt"
+    run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+      || fail "form $form: could not record the captain answer"
+    tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+      || fail "form $form: could not archive the answered call"
+
+    # tasks-axi honours this form: it must have written the configured archive,
+    # not the default one. If this fails the fixture is wrong, not the gate.
+    assert_present "$home/$archive" "form $form: tasks-axi did not write the configured archive"
+    if [ -e "$home/data/done-archive.md" ]; then
+      fail "form $form: setup error - tasks-axi used the default archive path"
+    fi
+
+    set +e
+    run_captain "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] \
+      || fail "form $form ($line): an answered call archived at the CONFIGURED path failed the gate: $(cat "$home/verify.err")"
+    run_teardown "$home" "$origin" >/dev/null 2> "$home/teardown.err" \
+      || fail "form $form ($line): cleanup was refused for a call archived at the configured path: $(cat "$home/teardown.err")"
+  done <<'EOF'
+archive = "data/arc-basic.md"|data/arc-basic.md
+archive = 'data/arc-literal.md'|data/arc-literal.md
+archive = "data/arc-comment.md" # where closed tasks go|data/arc-comment.md
+archive = 'data/arc-literal-comment.md'   # where closed tasks go|data/arc-literal-comment.md
+EOF
+  [ "$form" -eq 4 ] || fail "expected 4 configured-archive forms, exercised $form"
+  pass "the configured archive is read for every TOML form tasks-axi honours"
+}
+
+# An `archive` key belongs to the table heading above it, so a home is free to
+# carry one in some other table - or in the root table before the first heading
+# - and tasks-axi ignores both. Reading the first `archive` line in the file
+# regardless of heading points the gate at that unrelated value, so a correctly
+# answered call pruned into the REAL archive is not found and fails the gate:
+# the same miss this suite exists to prevent, this time through a decoy key.
+test_archive_setting_is_read_from_the_markdown_table_only() {
+  local home origin call rc
+  home=$(make_home archive-toml-table-scope)
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+archive = "data/root-decoy-archive.md"
+
+[other]
+archive = "data/other-decoy-archive.md"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/scoped-archive.md"
+done_keep = 10
+EOF
+  origin=sample-scoped-review
+  call=sample-scoped-call
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review the scoped archive" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the table-scope origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Scoped archive review\n\nOne captain choice remained.\n' \
+    > "$home/data/$origin/report.md"
+  run_captain "$home" hold "$call" \
+    --title "Choose the scoped option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the table-scope captain call"
+  run_captain "$home" complete "$origin" "$call" >/dev/null \
+    || fail "completion failed while the table-scope call was still live"
+  printf 'Take the scoped route.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the table-scope captain answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not archive the table-scope answered call"
+
+  # tasks-axi ignores both decoys and prunes into `[markdown] archive`. If this
+  # fails the fixture no longer matches tasks-axi, not the gate.
+  assert_present "$home/data/scoped-archive.md" \
+    "tasks-axi did not prune into the [markdown] archive"
+  assert_absent "$home/data/root-decoy-archive.md" \
+    "setup error - tasks-axi honoured a root-table archive key"
+  assert_absent "$home/data/other-decoy-archive.md" \
+    "setup error - tasks-axi honoured another table's archive key"
+
+  set +e
+  run_captain "$home" verify "$origin" > "$home/verify.out" 2> "$home/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a decoy archive key outside [markdown] made the gate miss an answered, pruned call: $(cat "$home/verify.err")"
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/teardown.err" \
+    || fail "cleanup was refused because a decoy archive key outside [markdown] was read: $(cat "$home/teardown.err")"
+  pass "the archive setting is read from the [markdown] table only"
+}
+
+# An id can carry more than one captain call over a home's life: prune appends
+# a section per run, and a home is free to reuse an id once the earlier call is
+# archived. tasks-axi returns the FIRST row carrying an id, so an archive read
+# oldest-first answers with the long-settled call and its recorded answer -
+# waving through a later question the captain never answered. The newest row is
+# the one that describes the call's current durable state.
+test_reused_id_resolves_to_the_newest_archived_row() {
+  local home first second call rc
+  home=$(make_home reused-archived-id)
+  call=sample-reused-call
+
+  # The first life of the id: held, answered, closed and archived.
+  first=sample-first-review
+  mkdir -p "$home/data/$first"
+  tasks_in "$home" add "$first" "Review the first path" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the first origin"
+  write_origin_meta "$home" "$first"
+  printf 'done: report complete\n' > "$home/state/$first.status"
+  printf '# First review\n\nOne captain choice remained.\n' > "$home/data/$first/report.md"
+  run_captain "$home" hold "$call" \
+    --title "Choose the first option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the first captain call"
+  run_captain "$home" complete "$first" "$call" >/dev/null \
+    || fail "completion failed while the first call was still live"
+  printf 'Take the northern route.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the first captain answer"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not archive the first captain call"
+
+  # The second life of the same id: held for a later investigation, never
+  # answered, closed outside the answer path and archived in its own section.
+  second=sample-second-review
+  mkdir -p "$home/data/$second"
+  tasks_in "$home" add "$second" "Review the second path" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the second origin"
+  write_origin_meta "$home" "$second"
+  printf 'done: report complete\n' > "$home/state/$second.status"
+  printf '# Second review\n\nOne captain choice remained.\n' > "$home/data/$second/report.md"
+  run_captain "$home" hold "$call" \
+    --title "Choose the second option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not re-register the reused captain call"
+  run_captain "$home" complete "$second" "$call" >/dev/null \
+    || fail "completion failed while the second call was still live"
+  tasks_in "$home" "done" "$call" >/dev/null \
+    || fail "could not close the second call outside the answer path"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not archive the second captain call"
+
+  [ "$(grep -c "^- \[x\] $call " "$home/data/done-archive.md")" -eq 2 ] \
+    || fail "setup error: the archive does not hold two rows for the reused id"
+
+  set +e
+  run_captain "$home" verify "$second" > "$home/verify-second.out" 2> "$home/verify-second.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a stale archived answer waved through a captain call that was never answered: $(cat "$home/verify-second.out")"
+  assert_grep "recorded captain answer" "$home/verify-second.err" \
+    "the refusal must name the missing captain answer"
+
+  set +e
+  run_teardown "$home" "$second" > "$home/teardown-second.out" 2> "$home/teardown-second.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "cleanup erased an investigation whose reused captain call was never answered"
+  pass "a reused archived id resolves to its newest row, not a stale answered one"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1185,3 +1505,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_archived_captain_calls_resolve_without_waving_work_through
+test_configured_archive_is_read_the_way_tasks_axi_reads_it
+test_archive_setting_is_read_from_the_markdown_table_only
+test_reused_id_resolves_to_the_newest_archived_row
