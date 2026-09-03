@@ -33,6 +33,7 @@
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
+#   handoff=<id>               present only for an idempotent cross-task handoff
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -138,8 +139,8 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-id]
+  local dir=$1 text=$2 delivery_mode=${3:-} handoff_id=${4:-} seq tmp rec status=0
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -147,10 +148,72 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    [ -z "$handoff_id" ] || printf 'handoff=%s\n' "$handoff_id"
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
+  printf '%s' "$rec"
+}
+
+# Read the cross-task handoff identity attached to one inbox record, or fail
+# when the record is an ordinary steer. The body remains byte-exact and does
+# not carry transport metadata.
+fm_task_inbox_handoff_id() {  # <record-path>
+  local rec=$1 line
+  [ -f "$rec" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" != -- ] || return 1
+    case "$line" in
+      handoff=*) printf '%s' "${line#handoff=}"; return 0 ;;
+    esac
+  done < "$rec"
+  return 1
+}
+
+# Find one inbox record by its handoff identity across both the unhandled and
+# acknowledged locations. Caller must hold the inbox sequence lock.
+_fm_task_inbox_find_handoff_locked() {  # <inbox-dir> <handoff-id>
+  local dir=$1 handoff_id=$2 d f found
+  for d in "$dir" "$dir/handled"; do
+    for f in "$d"/*.msg; do
+      [ -e "$f" ] || continue
+      found=$(fm_task_inbox_handoff_id "$f" 2>/dev/null || true)
+      [ "$found" = "$handoff_id" ] || continue
+      printf '%s' "$f"
+      return 0
+    done
+  done
+  return 1
+}
+
+# Enqueue one cross-task handoff at most once by its stable handoff identity.
+# A retry after lease ownership changes, sender restart, or completion loss
+# returns the original unhandled or handled record. Reusing an identity with a
+# different body is refused rather than silently collapsing distinct work.
+fm_task_inbox_write_handoff() {  # <state-dir> <task-id> <text> <handoff-id>
+  local state=$1 task=$2 text=$3 handoff_id=$4 dir lock rec want have status=0
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  mkdir -p "$dir/handled" || return 1
+  lock="$dir/.seq.lock"
+  fm_task_inbox_lock_acquire "$lock" || return 1
+  rec=$(_fm_task_inbox_find_handoff_locked "$dir" "$handoff_id" 2>/dev/null || true)
+  if [ -n "$rec" ]; then
+    want=$(mktemp "$dir/.handoff-want.XXXXXX") || status=1
+    have=$(mktemp "$dir/.handoff-have.XXXXXX") || status=1
+    if [ "$status" -eq 0 ]; then
+      printf '%s' "$text" > "$want" || status=1
+      fm_task_inbox_body "$rec" > "$have" || status=1
+      if [ "$status" -eq 0 ] && ! cmp -s "$want" "$have"; then
+        status=2
+      fi
+    fi
+    rm -f "${want:-}" "${have:-}" 2>/dev/null || true
+  else
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" '' "$handoff_id") || status=1
+  fi
+  fm_lock_release "$lock"
+  [ "$status" -eq 0 ] || return "$status"
   printf '%s' "$rec"
 }
 
