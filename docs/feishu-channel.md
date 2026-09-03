@@ -166,13 +166,14 @@ Firstmate does not maintain a cross-channel scheduler.
 
 The custom message's private `details` carries only a schema, derived delivery reference, and binding generation.
 It carries no app ID, open ID, chat ID, credential, or path, and Pi does not send `details` to the model.
-A session restart scans exact persisted Feishu custom-message metadata to settle prior native-queue submissions.
+A session restart scans exact persisted Feishu custom-message metadata, and still recognizes the pre-upgrade leading-marker form, to settle prior native-queue submissions.
 An owner change resets an unpersisted prior submission to pending instead of redirecting it to another session.
 A wrong session, stale generation, lost lock, or closed live owner leaves durable input suspended.
 
 The registered custom renderer verifies that metadata and the exact content against the durable accepted event, then renders only the captain's text and images with no title, source badge, slash instruction, delivery reference, or bridge framing.
 Immediately before provider conversion, the context hook performs the same verification and adds the source fence and slash-handling instruction to model text without changing persisted or rendered content.
 Verification matches the exact content against the immutable digest recorded in the private inbound ledger when the message is offered to Pi, so routine terminal media cleanup never changes trust, rendering, or fencing, and repeated provider/UI verification reuses that evidence without rereading media bytes or reacquiring Feishu state locks.
+A message persisted by an earlier build keeps its already-fenced model context, while display strips only its exact legacy prefix after the marker matches the durable accepted event.
 The metadata does not control outbound eligibility.
 Native TUI and operational user messages remain unmodified, cannot acquire Feishu trust from body text, and need no synthetic provenance.
 
