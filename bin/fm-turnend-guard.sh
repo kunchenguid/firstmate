@@ -390,13 +390,9 @@ terminal_fail_open() {
     return 1
   fi
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    if ! fm_failure_episode_reset "$STATE" held; then
-      fm_lock_release "$BUDGET_LOCK"
-      fm_lock_release "$OWNER_LOCK"
-      return 1
-    fi
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
+    fm_failure_episode_reset "$STATE" || return 1
     return 2
   fi
   # Re-check for a live open generation claim now that both locks are held: a

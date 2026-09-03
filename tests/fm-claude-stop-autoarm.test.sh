@@ -559,6 +559,36 @@ test_live_claim_mutex_holder_cannot_hide_failure() {
   pass "auto-arm: live claim-mutex contention records a durable failure independently"
 }
 
+test_stalled_transition_holder_cannot_hide_failure() {
+  local dir state ready holder out status i
+  dir=$(make_primary_dir "$TMP_ROOT/stalled-transition-failure")
+  state="$dir/state"
+  ready="$state/transition-holder-ready"
+  : > "$state/task.meta"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    : > "$2"
+    pid=${BASHPID:-$$}
+    kill -STOP "$pid"
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition holder did not acquire its boundary"
+
+  out=$(FM_AUTOARM_TRANSITION_GRACE=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  kill -CONT "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a stalled transition holder must not hide an eligible claim failure"
+  assert_contains "$out" "could not claim recovery" "transition-stall failure did not report the failed claim"
+  assert_present "$state/.claude-autoarm-failure-notified" "transition-stall failure did not write the failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "transition-stall failure did not record outcome=failed"
+  assert_absent "$state/arm-ran" "transition-stall failure reached the arm"
+  pass "auto-arm: stalled transition holders are fenced before durable failure publication"
+}
+
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
   local dir out status holder prior_gen
   dir=$(make_primary_dir "$TMP_ROOT/fresh-prior-terminal-failure")
@@ -683,6 +713,108 @@ test_stale_failure_publisher_cannot_emit_after_success() {
   [ -z "$err" ] || fail "stale publisher emitted failure output after success: $err"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale publisher disturbed the successful terminal ledger"
   pass "auto-arm: a later successful ledger transition silences a stalled failure publisher"
+}
+
+test_recovery_reset_cannot_be_followed_by_stalled_failure_publication() {
+  local dir state ready release publisher resetter i
+  dir=$(make_primary_dir "$TMP_ROOT/reset-failure-publication")
+  state="$dir/state"
+  ready="$state/failure-publisher-ready"
+  release="$state/failure-publisher-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    mkdir() {
+      if [ "${1:-}" = "$state/.claude-autoarm-failure-epochs" ] \
+        && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      command mkdir "$@"
+    }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
+      "$state/.claude-autoarm-failure-notified"
+  ' _ "$dir" "$ready" "$release" &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "failure publisher did not reach its serialized boundary"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    : > "$1/state/reset-started"
+    fm_failure_episode_reset "$1/state"
+  ' _ "$dir" &
+  resetter=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$state/reset-started" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$state/reset-started" ] || fail "recovery reset did not start"
+  : > "$release"
+  wait "$publisher" || fail "stalled failure publisher could not commit before reset"
+  wait "$resetter" || fail "serialized recovery reset could not complete"
+
+  assert_absent "$state/.claude-autoarm-failure-notified" "failure publication recreated the notice after recovery reset"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "failure publication recreated an epoch after recovery reset"
+  pass "auto-arm: recovery reset serializes after in-flight failure publication"
+}
+
+test_failure_reader_rejects_record_superseded_during_selection() {
+  local dir state ready release reader rc i
+  dir=$(make_primary_dir "$TMP_ROOT/failure-reader-superseded")
+  state="$dir/state"
+  ready="$state/failure-reader-ready"
+  release="$state/failure-reader-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  mkdir -p "$state/.claude-autoarm-failure-epochs"
+  printf 'epoch=123 owner_pid=701 outcome=failed baseline=17:700:rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-failure-epochs/17.700.rewake"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    fm_autoarm_failure_ledger_read() {
+      if [ "${2:-}" = "$state/.claude-autoarm-failure-epochs/17.700.rewake" ]; then
+        FM_AUTOARM_FAILURE_EPOCH=123
+        FM_AUTOARM_FAILURE_OWNER=701
+        FM_AUTOARM_FAILURE_OUTCOME=failed
+        FM_AUTOARM_FAILURE_BASELINE=17:700:rewake
+        FM_AUTOARM_FAILURE_PATH=$2
+      else
+        return 1
+      fi
+      if [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      return 0
+    }
+    fm_autoarm_failure_ledger_current "$state"
+    printf "%s\n" "$?" > "$state/failure-reader-rc"
+  ' _ "$dir" "$ready" "$release" &
+  reader=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "failure reader did not reach its selection boundary"
+  printf 'epoch=18 owner_pid=800 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  : > "$release"
+  wait "$reader" || fail "failure reader fixture exited unexpectedly"
+
+  rc=$(cat "$state/failure-reader-rc")
+  expect_code 1 "$rc" "failure reader must reject a record superseded during selection"
+  pass "auto-arm: current-failure selection rejects a concurrently superseded record"
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
@@ -1454,9 +1586,12 @@ test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
+test_stalled_transition_holder_cannot_hide_failure
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
 test_stale_failure_publisher_cannot_emit_after_success
+test_recovery_reset_cannot_be_followed_by_stalled_failure_publication
+test_failure_reader_rejects_record_superseded_during_selection
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
