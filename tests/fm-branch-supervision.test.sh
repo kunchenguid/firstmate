@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-branch-supervision)
+fm_git_identity fmtest fmtest@example.invalid
 
 # --- byte-stable branch prompt ------------------------------------------------
 
@@ -49,8 +50,12 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for any outcome that directly answers an explicit captain request."*"This rule is unconditional"*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
-    *) fail "branch prompt lost the unconditional requested-outcome or routine-silence rules" ;;
+    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
+  esac
+  case "$out_a" in
+    *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
+    *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
@@ -92,13 +97,18 @@ PY
   esac
   [ "$(cat "$store")" = "$snapshot" ] || fail "mark-read rewrote the append-only store"
 
-  # startup-replay surfaces the unread remainder once, then goes silent, and
-  # later appends land strictly after the earlier bytes (append-only merge).
+  # startup-replay must stop before an unread captain row. Only Pi's durable
+  # visible entry may acknowledge it, so the cursor cannot skip past it.
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup-replay failed"
-  assert_contains "$replay" "BRANCH OUTCOMES" "replay lost its section header"
-  assert_contains "$replay" "https://example.com/pr/2" "replay lost the unread outcome"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay)" ] \
-    || fail "startup-replay re-presented already-read outcomes"
+  [ -z "$replay" ] || fail "startup-replay printed a captain row before Pi persisted its visible entry"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/2" "startup-replay advanced past an unrendered captain row"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] \
+    || fail "startup-replay moved the cursor across the captain row"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 \
+    || fail "synthetic Pi acknowledgement failed"
+
+  # Later appends land strictly after the earlier bytes (append-only merge).
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-3 --verdict routine --summary 'later outcome' >/dev/null || fail "third append failed"
   case "$(cat "$store")" in
@@ -112,15 +122,28 @@ PY
     --task task-5 --verdict captain --summary 'must remain unrecorded' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "append accepted a malformed outcome-store tail"
-  assert_contains "$out" "malformed final record" "torn-tail refusal lost its diagnostic"
+  assert_contains "$out" "malformed or non-sequential" "torn-tail refusal lost its diagnostic"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the torn outcome store"
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
 test_outcome_startup_replay_preserves_silence() {
-  local home replay
+  local home replay out status store
   home="$TMP_ROOT/store-silent-home"
   mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'blocked' --silent true 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a silent captain outcome"
+  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent captain refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'healthy' --silent true 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a silent task-scoped outcome"
+  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent task refusal lost its diagnostic"
+  [ ! -e "$store" ] || fail "refused silent outcomes changed the durable store"
 
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
@@ -141,7 +164,285 @@ test_outcome_startup_replay_preserves_silence() {
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
-  pass "startup replay skips silent outcomes and preserves visible and legacy rows"
+
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a stored silent captain outcome"
+  assert_contains "$out" "malformed or non-sequential" "stored silent captain refusal lost its diagnostic"
+  pass "only routine fleet outcomes can be silent"
+}
+
+test_outcome_startup_replay_stops_at_captain_barrier() {
+  local home replay unread
+  home="$TMP_ROOT/store-captain-barrier-home"
+  mkdir -p "$home/state"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'leading routine' >/dev/null || fail "leading append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain must render in Pi' >/dev/null || fail "captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict routine --summary 'routine behind captain' >/dev/null || fail "trailing append failed"
+
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "barrier replay failed"
+  assert_contains "$replay" "leading routine" "startup replay lost the leading routine row"
+  assert_not_contains "$replay" "captain must render in Pi" "startup replay rendered the captain row"
+  assert_not_contains "$replay" "routine behind captain" "startup replay crossed the captain barrier"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "cursor crossed the captain barrier"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "barrier unread failed"
+  assert_contains "$unread" '"seq":2' "captain row did not remain unread"
+  assert_contains "$unread" '"seq":3' "row behind captain did not remain unread"
+  pass "startup replay cannot advance the cursor across an unrendered captain outcome"
+}
+
+test_outcome_cursor_corruption_fails_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-corrupt-cursor-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict captain --summary 'captain outcome must remain unread' >/dev/null \
+    || fail "captain outcome append failed"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 01 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read accepted a noncanonical sequence"
+  [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "noncanonical mark-read created a malformed cursor"
+
+  printf '1x2\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a malformed cursor and skipped an outcome"
+  assert_contains "$out" "outcome cursor is malformed" "malformed cursor refusal lost its diagnostic"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1x2 ] || fail "failed unread rewrote the malformed cursor"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed unread changed the append-only outcome store"
+
+  printf '999999999999999999999999999999999\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted an out-of-range cursor"
+  assert_contains "$out" "outcome cursor is out of range" "out-of-range cursor refusal lost its diagnostic"
+
+  printf '2\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a cursor beyond the outcome-store tail"
+  assert_contains "$out" "cursor is ahead of the store" "ahead-of-store refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read accepted an existing cursor beyond the store"
+  assert_contains "$out" "cursor is ahead of the store" "mark-read ahead-cursor refusal lost its diagnostic"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 2 ] || fail "refused mark-read changed the ahead cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'must not remain hidden behind the cursor' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a cursor beyond the outcome-store tail"
+  assert_contains "$out" "cursor is invalid or ahead of the store" "append cursor refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the store behind an invalid cursor"
+  pass "malformed and ahead-of-store cursor state fail closed before any outcome can be skipped"
+}
+
+test_cursor_advancement_refuses_ahead_processed_marker() {
+  local home cursor marker out status
+  home="$TMP_ROOT/store-ahead-processed-home"
+  mkdir -p "$home/state"
+  cursor="$home/state/.branch-outcomes-cursor"
+  marker="$home/state/.branch-outcomes-processed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'already read' >/dev/null || fail "first routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'replayable second' >/dev/null || fail "second routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict routine --summary 'replayable third' >/dev/null || fail "third routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "fixture mark-read failed"
+  printf '3\n' > "$marker"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read legitimized an ahead processed marker"
+  assert_contains "$out" "processed marker is ahead of the read cursor" "mark-read ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$cursor")" = 1 ] || fail "refused mark-read advanced the cursor"
+  [ "$(cat "$marker")" = 3 ] || fail "refused mark-read changed the processed marker"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "startup replay legitimized an ahead processed marker"
+  assert_contains "$out" "processed marker is ahead of the read cursor" "startup replay ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$cursor")" = 1 ] || fail "refused startup replay advanced the cursor"
+  [ "$(cat "$marker")" = 3 ] || fail "refused startup replay changed the processed marker"
+  pass "cursor advancement refuses to legitimize an ahead processed marker"
+}
+
+test_outcome_sequence_conflicts_fail_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-sequence-conflict-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"first","silent":false}' \
+    '{"seq":1,"epoch":2,"task":"task-conflict","wake":"","verdict":"captain","summary":"conflict","silent":false}' \
+    '{"seq":3,"epoch":3,"task":"task-3","wake":"","verdict":"routine","summary":"third","silent":false}' \
+    > "$store"
+  snapshot=$(cat "$store")
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread skipped over a conflicting middle sequence"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict read refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-4 --verdict routine --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append continued after a conflicting middle sequence"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict append refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 2 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "list exposed rows from a conflicting outcome store"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict list refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "sequence-conflict refusal changed the durable store"
+  pass "middle sequence conflicts fail closed for every store read and append"
+}
+
+test_outcome_non_jsonl_layout_fails_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-physical-layout-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf '%s\n' \
+    '{' \
+    '  "seq": 1, "epoch": 1, "task": "task-1", "wake": "",' \
+    '  "verdict": "routine", "summary": "pretty printed", "silent": false' \
+    '}' > "$store"
+  snapshot=$(cat "$store")
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "list accepted a multi-line outcome record"
+  assert_contains "$out" "malformed or non-sequential" "multi-line record refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append extended a store containing a multi-line record"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "multi-line layout refusal changed the durable store"
+
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"first","silent":false}' \
+    '' \
+    '{"seq":2,"epoch":2,"task":"task-2","wake":"","verdict":"captain","summary":"second","silent":false}' \
+    > "$store"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a blank physical record"
+  assert_contains "$out" "malformed or non-sequential" "blank-record refusal lost its diagnostic"
+
+  printf '%s' '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"unterminated","silent":false}' > "$store"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted an unterminated outcome store"
+  assert_contains "$out" "malformed or non-sequential" "unterminated-store refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the unterminated store"
+  pass "outcome stores require terminated single-line JSON records"
+}
+
+test_outcome_processed_marker_is_sequence_bound() {
+  local home marker out status
+  home="$TMP_ROOT/store-processed-home"
+  mkdir -p "$home/state"
+  marker="$home/state/.branch-outcomes-processed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'routine first' >/dev/null || fail "routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain second' >/dev/null || fail "captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict captain --summary 'captain third' >/dev/null || fail "second captain append failed"
+
+  # Nothing is unprocessed until it has been read (its visible entry exists).
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "an unread captain row was reported as unprocessed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "unprocessed failed"
+  case "$out" in
+    '{"seq":2,'*) ;;
+    *) fail "unprocessed did not return exactly the read captain rows: $out" ;;
+  esac
+  assert_not_contains "$out" '"seq":1' "a routine row entered the processing path"
+
+  # The marker advances only to a read, currently unprocessed captain row.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed advanced past the read cursor"
+  assert_contains "$out" "beyond the read cursor" "past-cursor refusal lost its diagnostic"
+  [ ! -e "$marker" ] || fail "a refused acknowledgement created the processed marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed accepted a routine sequence"
+  assert_contains "$out" "not an unprocessed captain outcome" "routine-sequence refusal lost its diagnostic"
+  [ ! -e "$marker" ] || fail "a routine-sequence acknowledgement created the processed marker"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "mark-processed failed"
+  [ "$(cat "$marker")" = 2 ] || fail "processed marker was not written"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "an acknowledged row stayed unprocessed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed accepted an already-processed sequence"
+  assert_contains "$out" "already processed" "already-processed refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 2 ] || fail "refused backwards acknowledgement moved the processed marker"
+
+  # Reading the next captain row reopens exactly that row for processing.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 || fail "second mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "second unprocessed failed"
+  case "$out" in
+    '{"seq":3,'*) ;;
+    *) fail "the newly read captain row was not the only unprocessed row: $out" ;;
+  esac
+
+  # processed-init leaves a present marker alone and fails closed on a
+  # malformed one instead of skipping an outcome.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "processed-init failed on a present marker"
+  [ "$(cat "$marker")" = 2 ] || fail "processed-init rewrote a present marker"
+  printf '2x\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted a malformed processed marker"
+  assert_contains "$out" "processed marker is malformed" "malformed marker refusal lost its diagnostic"
+  printf '5\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted a marker ahead of the read cursor"
+  assert_contains "$out" "ahead of the read cursor" "ahead-of-cursor refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "processed-init accepted a marker ahead of the read cursor"
+  assert_contains "$out" "ahead of the read cursor" "processed-init ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 5 ] || fail "refused processed-init rewrote the ahead marker"
+  printf '999999999999999999999999999999999\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted an out-of-range processed marker"
+  assert_contains "$out" "processed marker is out of range" "out-of-range marker refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 999999999999999999999999999999999 ] \
+    || fail "out-of-range marker refusal changed the marker"
+
+  # Migration: a home with delivered history and no marker starts processed
+  # at its read cursor, so that history is not re-presented; an absent marker
+  # otherwise reads as zero, the safe direction.
+  home="$TMP_ROOT/store-processed-migration-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-old --verdict captain --summary 'delivered before the marker existed' >/dev/null || fail "migration append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "migration mark-read failed"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "an absent marker hid a delivered captain row instead of reading as zero"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "migration processed-init failed"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "processed-init did not start at the read cursor"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "migrated history was re-presented for processing"
+  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -539,6 +840,12 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
+test_outcome_startup_replay_stops_at_captain_barrier
+test_outcome_cursor_corruption_fails_closed
+test_cursor_advancement_refuses_ahead_processed_marker
+test_outcome_sequence_conflicts_fail_closed
+test_outcome_non_jsonl_layout_fails_closed
+test_outcome_processed_marker_is_sequence_bound
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

@@ -2159,6 +2159,33 @@ assert_absent "$H_EXAMPLE/state/procevent/example-file.source" "example terminal
 FM_HOME="$H_EXAMPLE" "$PROCEVENT" retire example-file --if-owner "$example_token" >/dev/null
 pass "the shipped file-signal package is a runnable end-to-end external adapter"
 
+# The same home spelled through a symlinked ancestor must capture external
+# evidence identically, including the external capture path's pinned staging,
+# inbox, and reservation boundaries.
+ln -s "$HOMES" "$TMP_ROOT/homes-through-symlink"
+H_EXAMPLE_SYMLINKED="$TMP_ROOT/homes-through-symlink/example"
+SIGNAL_FILE_SYMLINKED="$TMP_ROOT/example-symlinked-result.txt"
+symlinked_registration=$(FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" register-extension file-signal example-symlinked \
+  --config-ref "file:$SIGNAL_FILE_SYMLINKED")
+symlinked_token=$(printf '%s\n' "$symlinked_registration" | sed -n 's/^owner-token: //p')
+FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" start example-symlinked > "$TMP_ROOT/example-symlinked-start.out" &
+symlinked_start=$!
+for _ in $(seq 1 100); do
+  [ -f "$FM_PROCEVENT_CLAIM_ROOT/example-symlinked.claim" ] && break
+  sleep 0.05
+done
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/example-symlinked.claim" \
+  "a home reached through a symlinked ancestor never started its external source"
+printf 'build 43 completed successfully\n' > "$SIGNAL_FILE_SYMLINKED"
+wait "$symlinked_start" \
+  || fail "a home reached through a symlinked ancestor failed its external source"
+symlinked_result=$(first_result "$H_EXAMPLE" example-symlinked) \
+  || fail "a home reached through a symlinked ancestor captured no external result"
+assert_grep 'build 43 completed successfully' "$symlinked_result" \
+  "the symlinked-ancestor home did not preserve external evidence"
+FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" retire example-symlinked --if-owner "$symlinked_token" >/dev/null
+pass "a home reached through a symlinked ancestor captures external evidence normally"
+
 P_HANDSHAKE_ORPHAN="$PACKAGES/handshake-orphan"
 P_HANDSHAKE_RECOVER="$PACKAGES/handshake-recover"
 handshake_orphan_pid_file="$TMP_ROOT/handshake-orphan.pid"

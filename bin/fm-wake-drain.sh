@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
-# informational status lines, OPEN DECISIONS, and captain-call record
-# divergence, then assert liveness.
+# informational status lines, latest captain-facing statuses not covered by a
+# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
+# then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+# FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
+# presentation-path locks (default 10); queue mutation locks remain blocking.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +35,8 @@ ACK_THROUGH=
 ACK_GENERATION=
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
+case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -195,6 +200,151 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
+BRANCH_OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
+BRANCH_OUTCOME_INDEX_MAX_BYTES=512
+BRANCH_OUTCOME_INDEX_STATE=ok
+BRANCH_OUTCOME_INDEX_ENDPOINT=
+BRANCH_OUTCOME_INDEX_IDENT=
+STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+outcome_index_ready_ok() { # <ready-path>
+  local seq
+  [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ] || return 1
+  seq=$(LC_ALL=C command cat "$1" 2>/dev/null) || return 1
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+load_branch_outcome_index() { # <task>
+  local task=$1 path data version seq endpoint ident extra size
+  BRANCH_OUTCOME_INDEX_STATE=ok
+  BRANCH_OUTCOME_INDEX_ENDPOINT=
+  BRANCH_OUTCOME_INDEX_IDENT=
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  path="$STATE/.$task.branch-outcome-index"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ -L "$path" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  size=$(_fm_status_file_size "$path") || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  if [ "$size" -gt "$BRANCH_OUTCOME_INDEX_MAX_BYTES" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  data=$(LC_ALL=C command cat "$path" 2>/dev/null) \
+    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  case "$data" in *$'\n'*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  IFS=$(printf '\t') read -r version seq endpoint ident extra <<EOF
+$data
+EOF
+  if [ "$version" != "$BRANCH_OUTCOME_INDEX_VERSION" ] || [ -n "$extra" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  case "$seq:$endpoint" in *[!0-9:]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  [ -n "$seq" ] && [ -n "$endpoint" ] && [ -n "$ident" ] \
+    && [ "${#seq}" -le 16 ] && [ "${#endpoint}" -le 16 ] \
+    && [ "$seq" -le 9007199254740991 ] && [ "$endpoint" -le 9007199254740991 ] \
+    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  BRANCH_OUTCOME_INDEX_ENDPOINT=$endpoint
+  BRANCH_OUTCOME_INDEX_IDENT=$ident
+}
+
+print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
+  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
+  local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
+  [ "$ACTOR" = main ] || return 0
+
+  store="$STATE/branch-outcomes.jsonl"
+  lock="$STATE/.branch-outcomes.lock"
+  if [ -e "$store" ] || [ -L "$store" ]; then
+    if [ ! -f "$store" ] || [ ! -r "$store" ] || [ -L "$store" ]; then
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history could not be read safely; repair it before relying on drain recovery.\n'
+      return 0
+    fi
+    if ! fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
+      printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history is busy; retry on the next drain.\n'
+      return 0
+    fi
+    ready="$STATE/.branch-outcome-index-ready"
+    if ! outcome_index_ready_ok "$ready"; then
+      if ! "$SCRIPT_DIR/fm-branch-outcome.sh" processed-init --held-lock >/dev/null 2>&1 \
+        || ! outcome_index_ready_ok "$ready"; then
+        fm_lock_release "$lock"
+        printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes could not be rebuilt because the outcome store is unsafe; repair it before relying on drain recovery.\n'
+        return 0
+      fi
+    fi
+  fi
+
+  STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }
+    [ "$receipt" -lt "$endpoint" ] || continue
+    status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
+    event=$FM_STATUS_SNAPSHOT_EVENT_LINE
+    event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
+    [ "$receipt" -lt "$event_endpoint" ] || continue
+    status_is_captain_relevant "$event" || continue
+    verb=$(status_line_verb "$event")
+    case "$verb" in
+      needs-decision|blocked)
+        key=$(_fm_decision_key "$event") || key=
+        # Parseable decisions belong exclusively to the durable fold. That
+        # includes reserved-key transitions the fold rejects; resurfacing one
+        # here would let a foreign writer bypass the namespace guard. A line
+        # with malformed key syntax has no fold representation, so the
+        # captain-facing backstop remains its only safe presentation path.
+        [ -z "$key" ] || continue
+        ;;
+    esac
+    load_branch_outcome_index "$task"
+    if [ "$BRANCH_OUTCOME_INDEX_STATE" != ok ]; then
+      rc=2
+      break
+    fi
+    if [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
+      && [ "$BRANCH_OUTCOME_INDEX_IDENT" = "$ident" ] \
+      && [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge "$event_endpoint" ]; then
+      continue
+    fi
+
+    line="$task $event"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$snapshot
+EOF
+
+  if [ -e "$store" ] || [ -L "$store" ]; then fm_lock_release "$lock"; fi
+  if [ "$rc" -eq 1 ]; then return 1; fi
+  if [ "$rc" -eq 2 ]; then
+    printf 'STATUS OUTCOME BACKSTOP SKIPPED: a bounded task outcome index could not be read safely; repair it before relying on drain recovery.\n'
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+    return 0
+  fi
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+}
+
 # Print still-unread informational status lines (note: answers and pending-reply
 # resolutions) that the OPEN DECISIONS fold never carries. Uses the same
 # cursor-backed unread span as the annotation path, and runs on every drain -
@@ -350,19 +500,50 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
-  print_unread_status_section "$snapshot" || return 1
-  print_open_decisions_section "$snapshot" || return 1
-  print_record_divergence_section || return 1
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
+  if ! {
+    print_unread_status_section "$snapshot" \
+      && print_status_outcome_backstop_section "$snapshot" \
+      && print_open_decisions_section "$snapshot" \
+      && print_record_divergence_section
+  } > "$prepared"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  # Prepare every section before presentation, but do not commit its receipt
+  # until the prepared bytes reach stdout. If the consumer closes or fails,
+  # leave the receipt behind so the next drain can recover the presentation.
+  if ! command cat "$prepared"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  rm -f -- "$prepared"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
-  fm_lock_acquire_wait "$lock" || return 1
+  local lock_rc holder_pid
+  if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
+    :
+  else
+    lock_rc=$?
+    if [ "$lock_rc" -eq 124 ]; then
+      holder_pid=${FM_LOCK_HELD_PID:-unknown}
+      printf 'STATUS PRESENTATION SKIPPED: lock remains held by live pid %s after %ss; retry on the next drain.\n' \
+        "$holder_pid" "$PRESENTATION_LOCK_TIMEOUT"
+    else
+      printf 'wake drain: status presentation lock could not be acquired safely\n' >&2
+    fi
+    return 1
+  fi
   snapshot=$(status_presentation_snapshot "$STATE") || {
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
     rc=1
@@ -394,7 +575,20 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+if [ -n "$ACK_THROUGH" ]; then
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+elif fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$PRESENTATION_LOCK_TIMEOUT"; then
+  :
+else
+  lock_rc=$?
+  if [ "$lock_rc" -eq 124 ]; then
+    printf 'WAKE DRAIN SKIPPED: queue lock remains held by live pid %s after %ss; retry on the next drain.\n' \
+      "${FM_LOCK_HELD_PID:-unknown}" "$PRESENTATION_LOCK_TIMEOUT"
+    exit 0
+  fi
+  printf 'wake drain: queue lock could not be acquired safely\n' >&2
+  exit 1
+fi
 DRAIN_LOCK_HELD=true
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1

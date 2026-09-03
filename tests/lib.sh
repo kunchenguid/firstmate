@@ -97,8 +97,10 @@ fm_test_cleanup() {
 }
 
 fm_test_tmproot() {
-  local prefix=${1:-fm-test} root canonical
-  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX") || return 1
+  local prefix=${1:-fm-test} root tmp_base canonical
+  tmp_base=${TMPDIR:-/tmp}
+  tmp_base=${tmp_base%/}
+  root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || return 1
   canonical=$(cd -P -- "$root" 2>/dev/null && pwd -P) || {
     rm -rf "$root"
     return 1

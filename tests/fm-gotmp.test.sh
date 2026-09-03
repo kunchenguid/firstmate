@@ -51,12 +51,12 @@ make_fake_root() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
-  # fm-backend.sh unconditionally, and dispatches the kill call through the
-  # tmux adapter; both are unchanged by this suite's fixture, just newly
-  # required siblings since the P1 backend extraction).
+  # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
+  # test cannot depend on or mutate a host tmux server.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
+  cat > "$fake/bin/backends/tmux.sh" <<'SH'
+fm_backend_tmux_kill() { return 0; }
+SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
@@ -91,6 +91,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # Ordinary teardown reports any final ledger outcome before removing records.
+  ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
+  ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -153,7 +156,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
+  cat > "$fake/bin/backends/tmux.sh" <<'SH'
+fm_backend_tmux_kill() { return 0; }
+SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
@@ -182,6 +187,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
+  ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

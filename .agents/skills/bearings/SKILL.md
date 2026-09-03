@@ -16,8 +16,8 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from the cooldown-limited reconcile instruction and its `state/<id>.reconcile-nudged` record, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
-During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker except through that reconcile hook, answers a decision, cleans up work, or mutates backlog or task state beyond the reconcile record.
+A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
@@ -38,7 +38,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    It is the single bounded, deterministic fleet-state source for Bearings.
    Do not create or consult a second fleet-state reader, parser contract, status-event-tail interpretation, visible-session recap, ad-hoc project probe, or ad-hoc `gh-axi`/`gh` query.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
-   Keep the default local-only read unless the captain asks to include PRs.
+   The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
+   Only pass `--include-prs` when the captain asks for live GitHub PR enrichment.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`); every due, unblocked captain-held task appears under `decisions_open`, whatever its kind.
@@ -50,13 +51,15 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
    The same holds for a secondmate home whose current state is unavailable, and for a readable home whose `invalidity` reports a backlog-vs-metadata mismatch: the mismatch is a repair notice about that home's own books, not a reason to drop its separately projected decisions, queued, landed, or live work.
 
-2. **Ask any home whose own books disagree to reconcile them.**
+2. **Record a later reconcile notification for any home whose own books disagree.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh notify --snapshot -` inline immediately after gathering the snapshot, so the durable fire-and-forget enqueue finishes before digest composition without spawning any child or second snapshot.
-   The script header owns the cooldown window, non-blocking lock skips, stale-endpoint checks, retry, and fire-and-forget delivery contract; this hook arms no reply recovery or inbox escalation.
-   If the hook reports a skip or failure, continue composing the digest from the captured snapshot; a lock skip or known-undelivered send leaves the cooldown unset for a later recap.
-   A home is asked at most once per four-hour window, so running this on every recap costs nothing and cannot nag, while a mismatch still sitting there after the window earns one gentle re-nudge.
-   Never edit another home's backlog or metadata from here, and never expect or wait on a reply: the mate acts asynchronously from its durable inbox while the digest is composed from the snapshot already in hand.
+   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh request --snapshot -` immediately after gathering the snapshot.
+   This atomically records one local one-shot request per mismatched target and returns without sending, taking a mate lifecycle lock, or waiting behind a local or remote delivery queue.
+   The supervision loop later claims the requests and runs the cooldown-limited fire-and-forget deliveries; the script header owns per-target coalescing, request durability, retries, cooldown, identity checks, and retirement.
+   Continue composing the digest from the captured snapshot as soon as the local requests are recorded.
+   If local request publication fails, continue composing, report that durability blocker, and never fall back to an inline send.
+   A home is still asked at most once per four-hour window, while a skipped or failed later delivery leaves the request durable for another supervision pass.
+   Never edit another home's backlog or metadata from here, and never expect or wait on a reply.
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
@@ -135,9 +138,10 @@ Rules that keep the contract unambiguous:
 - Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
+- The four buckets are mutually exclusive per item: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
+- A secondmate home can contribute to more than one section at once. Each active child is an Underway row regardless of the home-level `bearings_state`, while that same home's due captain hold is Captain's Call and its queued or external holds stay Charted Next. Do not hide active children because the home also has an open captain hold.
 - The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
-- A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
+- A secondmate's own home-level row is not an Underway unit: `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
@@ -155,7 +159,7 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-During a digest/build invocation, this skill changes no fleet state beyond its reconcile instruction and cooldown record, explicit report or board artifacts, binding, and source registration.
-Do not tear down a task, merge a PR, dispatch queued work, steer a worker except through the reconcile hook, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
+During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, durable local per-target reconcile-notify requests, explicit report or board artifacts, binding, and source registration.
+Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

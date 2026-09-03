@@ -344,15 +344,21 @@ fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
 
 fm_procevent_claim_state_root_identity() {  # <state-root>
   local state=$1 canonical device inode owner mode
-  fm_procevent_private_directory_valid "$state" 0 || return 1
-  canonical=$(cd -P -- "$state" && pwd -P) || return 1
-  [ "$canonical" = "$(fm_procevent_path_normalize "$state")" ] || return 1
+  canonical=$(fm_procevent_state_root_resolve "$state") || return 1
   fm_procevent_claim_state_root_field_valid "$canonical" || return 1
   device=$(fm_pr_file_device "$canonical") || return 1
   inode=$(fm_pr_file_inode "$canonical") || return 1
   owner=$(id -u) || return 1
   mode=$(fm_pr_file_mode "$canonical") || return 1
   printf '%s\t%s\t%s\t%s\t%s\n' "$canonical" "$device" "$inode" "$owner" "$mode"
+}
+
+fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
+  if [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ]; then
+    [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
+  else
+    [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
+  fi
 }
 
 fm_procevent_claim_recorded_state_root_valid() {
@@ -424,10 +430,10 @@ fm_procevent_claim_state_locked() {
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
 
-# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration>
+# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state state_root state_device state_inode state_owner state_mode
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -480,7 +486,6 @@ fm_procevent_claim_acquire_locked() {
     tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || status=1
   fi
   if [ "$status" -eq 0 ]; then
-    state=${FM_STATE_OVERRIDE:-$home/state}
     IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode \
       < <(fm_procevent_claim_state_root_identity "$state") || status=1
   fi
@@ -586,6 +591,21 @@ fm_procevent_directory_owned_by_current_user() {
   [ "$owner" = "$(id -u)" ]
 }
 
+# fm_procevent_state_root_resolve <state-root>
+# Print the physical private directory this module operates on, or fail. A home
+# is legitimately spelled through a symlinked ancestor - /tmp and $TMPDIR are
+# symlinks on macOS - so the caller's spelling is resolved exactly once here and
+# every derived path, recorded claim identity, and later confinement check uses
+# the physical root instead. Resolving before validating is what makes the
+# private-directory contract hold for the directory actually operated on, rather
+# than only for callers that already spelled it physically.
+fm_procevent_state_root_resolve() {  # <state-root>
+  local state=$1 canonical
+  canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
+  fm_procevent_private_directory_valid "$canonical" 0 || return 1
+  printf '%s\n' "$canonical"
+}
+
 fm_procevent_private_directory_valid() {
   local directory=$1 exact_mode=$2 canonical normalized mode
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
@@ -604,7 +624,7 @@ fm_procevent_private_directory_valid() {
 
 fm_procevent_capture_inbox_prepare() {
   local state=$1 inbox
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   inbox=$(fm_procevent_inbox_dir "$state")
   if [ ! -e "$inbox" ] && [ ! -L "$inbox" ]; then
     (umask 077; mkdir "$inbox") || return 1
@@ -613,16 +633,20 @@ fm_procevent_capture_inbox_prepare() {
   printf '%s\n' "$inbox"
 }
 
+# Print the validated physical registry directory, like the inbox and
+# reservation preparers beside it, so a caller that pins the boundary with
+# `pwd -P` compares against the same physical path this validated.
 fm_procevent_extension_staging_prepare() {
   local state=$1 registry
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   registry=$(fm_procevent_registry_dir "$state")
-  fm_procevent_private_directory_valid "$registry" 1
+  fm_procevent_private_directory_valid "$registry" 1 || return 1
+  printf '%s\n' "$registry"
 }
 
 fm_procevent_capture_reservation_prepare() {
   local state=$1 reservation
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   reservation=$(fm_procevent_capture_reservation_dir "$state")
   if [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
     (umask 077; mkdir "$reservation") || return 1

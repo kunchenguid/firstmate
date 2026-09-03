@@ -21,11 +21,12 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          When a RUNNING local secondmate worktree is fast-forwarded to
-#          firstmate's own current default-branch commit, that update is a
-#          purely local fast-forward and never an origin fetch. Remote routes
-#          instead converge the persistent home to their configured remote code
-#          root. If either placement changes its loaded instruction surface
+#          When a RUNNING secondmate home is fast-forwarded, its target is
+#          firstmate's own current default-branch commit. A local worktree uses
+#          a purely local fast-forward with no origin fetch; a remote route hands
+#          the same commit to its host, which imports that commit into the home
+#          without moving the host's Firstmate copy. If either placement changes
+#          its loaded instruction surface
 #          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
 #          current route and the standard from-firstmate marker is applied. A
@@ -86,13 +87,13 @@
 #          the backlog row inside the script that moves the task's record
 #          (bin/fm-backlog-transition-lib.sh), so this sweep exists for the
 #          crash window inside those scripts and for drift a home was already
-#          carrying: it finishes the authoritative close an interrupted cleanup
-#          recorded, and marks In flight any item this home already owns a worker
-#          for. The worker-record sweep never starts a captain-held or closed
-#          item, and reconciliation never reads or writes another home; the fleet
-#          snapshot's classifier and
+#          carrying: it finishes the authoritative close or captain-call
+#          retention an interrupted cleanup recorded, and marks In flight any
+#          item this home already owns a worker for. The worker-record sweep
+#          never starts a captain-held or closed item, and reconciliation never
+#          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
-#          closes and restored In-flight rows print BOOTSTRAP_INFO facts.
+#          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
@@ -344,13 +345,15 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Placement-specific secondmate sync: local homes fast-forward to the primary
-  # checkout's current default-branch commit. That path is purely LOCAL - no
-  # fetch, no origin dependency: a linked-worktree home already holds the primary's
-  # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
-  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
-  # .agents/skills/) actually changed, so a secondmate already on the primary's
+  # Placement-specific secondmate sync: EVERY home, local or remote, follows the
+  # primary checkout's current default-branch commit. The local path is purely
+  # LOCAL - no fetch, no origin dependency: a linked-worktree home already holds
+  # the primary's commit (fm-ff-lib.sh), while a standalone clone without it is
+  # skipped until /updatefirstmate refreshes it from origin. A remote home is on
+  # another machine, so its host is handed that same commit and imports it there
+  # (bin/fm-remote-secondmate-control.sh); this side still fetches nothing.
+  # Startup sends reread nudges only for RUNNING secondmates whose instruction
+  # surface (AGENTS.md, bin/, or .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
   # /updatefirstmate, startup owns the live-convergence send itself because it is
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
@@ -567,7 +570,7 @@ secondmate_sync() {
   # "move on to the next secondmate".
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -593,10 +596,12 @@ secondmate_sync() {
     fi
     nudge_needed=0
     converged=1
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
+      "$primary_head" < /dev/null 2>&1); then
       case "$sync_out" in synced:*) nudge_needed=1 ;; esac
     else
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+      sync_rc=$?
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
     fi
     if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
@@ -629,9 +634,10 @@ secondmate_sync() {
     fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
   }
 
-  # Remote routes converge through the generic transport. Their code root and
-  # inherited files are authoritative on that host; no local path probe or
-  # local fast-forward is attempted for them.
+  # Remote routes converge through the generic transport. The primary commit is
+  # authoritative for tracked files, while inherited files come from this
+  # primary home; no local path probe or local fast-forward is attempted for
+  # either remote surface.
   local remote_host __fm_timing_stamp parallel=0
   if bootstrap_parallel_begin; then
     parallel=1
@@ -1193,7 +1199,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta meta_lock id row label has_record=0 gate_status
+  local marker meta control_lock meta_lock id row label has_record=0 gate_status
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1224,8 +1230,13 @@ backlog_record_reconcile() {
       return 2
     fi
     label=$(basename "$marker" .backlog-close)
+    control_lock="$STATE/.control-$label.lock"
     meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
-    fm_lock_try_acquire "$meta_lock" || continue
+    fm_lock_try_acquire "$control_lock" || continue
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      fm_lock_release "$control_lock"
+      continue
+    fi
     if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
       case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
         closed)
@@ -1234,11 +1245,21 @@ backlog_record_reconcile() {
         closed_incomplete)
           echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
+        retained)
+          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after an interrupted cleanup"
+          ;;
+        retained_incomplete)
+          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+          ;;
+        answered)
+          echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
+          ;;
       esac
     else
       echo "BACKLOG_RECONCILE: $label: recorded backlog close could not be replayed: $FM_BACKLOG_TRANSITION_ERROR"
     fi
     fm_lock_release "$meta_lock"
+    fm_lock_release "$control_lock"
   done
 
   # A home that owns no records has nothing to pair, so it never pays for a

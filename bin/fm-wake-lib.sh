@@ -24,6 +24,14 @@ _fm_wake_require_classify() {
   . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 }
 
+# Load the bounded-execution owner only for callers that use the presentation
+# lock deadline. Most wake-library consumers need no timeout machinery.
+_fm_wake_require_timeout() {
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -258,6 +266,35 @@ fm_extension_owns_supervision() {  # <state> <root> [harness]
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
+}
+
+# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
+# (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
+# one-shot, so the watcher exits on EVERY wake and the daemon starts its
+# replacement. Between those cycles no watcher process holds the watch lock,
+# with nothing at all wrong - the supervisor is the daemon, and the watcher is
+# its restarting child.
+#
+# fm_afk_daemon_owns_supervision <state>
+# True when away mode is active AND a live, identity-matched daemon holds this
+# home's singleton daemon lock. The identity match is the same discipline the
+# watcher lock uses (fm_watcher_lock_matches_pid): a recycled pid, a lock left
+# by a killed daemon, or a daemon that never recorded its identity all fail it,
+# so only a daemon process that is genuinely still running counts as ownership.
+# This proves an OWNER, never freshness: callers keep their own beacon test, so
+# a daemon that stops restarting its watcher still fails supervision once the
+# beacon passes grace.
+fm_afk_daemon_owns_supervision() {
+  local state=$1 lockdir pid recorded current
+  [ -e "$state/.afk" ] || return 1
+  lockdir="$state/.supervise-daemon.lock"
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$recorded" ]
 }
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
@@ -930,6 +967,95 @@ fm_lock_acquire_wait() {
   while ! fm_lock_try_acquire "$lockdir"; do
     sleep 0.1
   done
+}
+
+# Acquire in the timed helper process, then transfer the lock record to the
+# waiting caller before exiting. The lock's ordinary stale-owner recovery makes
+# every interruption safe: before transfer the helper is the owner; after
+# transfer the still-live caller is the owner.
+_fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
+  local lockdir=$1 caller_pid=$2 ownerdir current back
+  case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$caller_pid" || return 1
+  trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
+  fm_lock_acquire_wait "$lockdir" || return 1
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
+      fm_lock_release "$lockdir"
+      return 1
+    }
+  else
+    ownerdir=$lockdir
+  fi
+  current=${BASHPID:-$$}
+  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  if [ "$back" != "$current" ] \
+    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  trap - TERM INT
+}
+
+# fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
+#
+# Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
+# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
+# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# Use it where a caller must refuse rather than block: wake presentation, and
+# the guarded remote link clear, whose whole contract is to return a
+# reconciliation refusal instead of wedging an unattended close.
+# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
+fm_lock_acquire_wait_bounded() {
+  local lockdir=$1 seconds=$2 caller_pid rc owner_pid
+  case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
+  _fm_wake_require_timeout || return 1
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+
+  caller_pid=${BASHPID:-$$}
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  if fm_run_timed "$seconds" env \
+    "FM_STATE_OVERRIDE=$STATE" \
+    "FM_ROOT_OVERRIDE=$FM_ROOT" \
+    "FM_LOCK_STALE_AFTER=$FM_LOCK_STALE_AFTER" \
+    bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3"' \
+      _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" \
+      </dev/null >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ "$owner_pid" = "$caller_pid" ]; then
+    return 0
+  fi
+  [ "$rc" -ne 0 ] || rc=1
+  # A deadline can kill the helper just after it acquired and before handoff.
+  # Give ordinary stale-owner recovery one final non-blocking chance so that
+  # helper cleanup cannot manufacture a false contention advisory.
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+  if [ "$rc" -eq 124 ]; then
+    owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$owner_pid" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
+          FM_LOCK_HELD_PID=$owner_pid
+          return 124
+        fi
+        ;;
+    esac
+    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
+    FM_LOCK_HELD_PID=
+    return 1
+  fi
+  return "$rc"
 }
 
 fm_lock_release() {

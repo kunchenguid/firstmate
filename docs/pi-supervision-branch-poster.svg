@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" width="1200" height="860" role="img" aria-labelledby="poster-title poster-desc">
   <title id="poster-title">Multi-brain agent architecture</title>
-  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: silent notes merge with zero turns; only the merge that matters wakes the main brain.</desc>
+  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: routine notes merge with zero turns, and the requested outcome persists visibly before a sequence-keyed processing turn.</desc>
   <defs>
     <pattern id="poster-grid" width="36" height="36" patternUnits="userSpaceOnUse">
       <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#8CAAE6" stroke-opacity="0.06" stroke-width="1"/>
@@ -16,7 +16,7 @@
     <text x="1152" y="56" text-anchor="end" fill="#8CA3C7" fill-opacity="0.7" font-size="14">fig. 1 - firstmate</text>
   </g>
   <g transform="translate(0 100)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (silent note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (silent note), and when CI goes green the supervision brain merges and one note wakes the main brain.</title>
+<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (routine note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (routine note), and when CI goes green the supervision brain persists the exact requested outcome visibly before main processes it.</title>
         <defs>
           <marker id="ah-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#56C8FF"></path>
@@ -43,7 +43,7 @@
         <text x="64" y="230" fill="#E6EDF3" opacity="0.6" font-size="16">talks with the captain</text>
         <text x="64" y="480" fill="#56C8FF" font-size="24" font-weight="700">SUPERVISION SESSION</text>
         <text x="64" y="510" fill="#E6EDF3" opacity="0.6" font-size="16">handles the routine,</text>
-        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides to wake main brain or not</text>
+        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides routine note or exact captain entry</text>
 
         <!-- ================= CROSS-LANE ARCS (all arrowed, drawn under chips) ================= -->
         <path id="arc-quiet-1" d="M 460 479 C 490 400, 520 300, 545 221" fill="none" stroke="#56C8FF" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" opacity="0.6" marker-end="url(#ah-cyan)"></path>
@@ -68,7 +68,7 @@
           <text x="800" y="296" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;flaky test: reran, passed&#8221;</text>
         </g>
         <g id="chip-wake">
-          <title>The outcome the captain asked for: this note wakes the main brain</title>
+          <title>The outcome the captain asked for: this exact entry persists visibly</title>
           <rect x="865" y="342" width="250" height="38" rx="6" fill="#0D1321" stroke="#FFB454" stroke-width="2"></rect>
           <text x="990" y="367" text-anchor="middle" fill="#FFB454" font-size="17" font-weight="600">&#8220;merged: your fix is in&#8221;</text>
         </g>
@@ -88,15 +88,15 @@
         </g>
         <text x="545" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
         <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
-        <!-- the merge commit that wakes the main brain -->
+        <!-- the merge commit that persists the exact captain outcome -->
         <g id="merge-commit">
-          <title>Merged and surfaced: the main brain is woken exactly once</title>
+          <title>Merged and surfaced: the exact captain outcome persists visibly once</title>
           <circle cx="1040" cy="210" r="13" fill="#FFB454"></circle>
           <circle cx="1040" cy="210" r="21" fill="none" stroke="#FFB454" stroke-width="1.5" opacity="0.5"></circle>
           <path d="M 1019 189 A 30 30 0 0 1 1061 189" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.8"></path>
           <path d="M 1011 181 A 41 41 0 0 1 1069 181" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.5"></path>
         </g>
-        <text x="1040" y="148" text-anchor="middle" fill="#FFB454" font-size="18" font-weight="700">wakes the main brain</text>
+        <text x="1040" y="148" text-anchor="middle" fill="#FFB454" font-size="18" font-weight="700">persists visibly</text>
 
         <!-- ================= BRANCH COMMITS + EVENT EXAMPLES ================= -->
         <g id="branch-commits">
@@ -120,6 +120,6 @@
         <text x="1128" y="665" fill="#8CA3C7" font-size="15">time</text>
 
         <!-- ================= MORAL ================= -->
-        <text x="560" y="700" text-anchor="middle" fill="#E6EDF3" opacity="0.6" font-size="18">Routine merges back silently. Only what needs you wakes the main brain.</text>
+        <text x="560" y="700" text-anchor="middle" fill="#E6EDF3" opacity="0.6" font-size="18">Routine outcomes stay quiet. What needs you persists visibly and exactly.</text>
   </g>
 </svg>

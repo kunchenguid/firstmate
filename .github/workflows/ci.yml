@@ -129,15 +129,15 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~42 min of serial work; the balanced shards
-    # are ~10.6 min each. Cap is a hang tripwire with roughly 2x margin, not the
-    # expected healthy end of the lane.
+    # Measured whole remainder is ~63 min of serial work; the balanced shards
+    # are ~12.7 min each. Cap is a hang tripwire with roughly 1.6x margin, not
+    # the expected healthy end of the lane.
     timeout-minutes: 20
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -377,16 +377,16 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 15 ] || {
-            echo "::error::expected 15 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 16 ] || {
+            echo "::error::expected 16 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 42 ] || {
-            echo "::error::expected 42 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 45 ] || {
+            echo "::error::expected 45 Bearings tests, got $bearings_count"
             exit 1
           }
 

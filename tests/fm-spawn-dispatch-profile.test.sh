@@ -133,7 +133,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -178,7 +178,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$id/launch-brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
@@ -207,7 +207,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -227,7 +227,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$absolute_id/launch-brief.md'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
@@ -255,7 +255,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$id/launch-brief.md'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }

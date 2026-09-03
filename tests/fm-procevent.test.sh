@@ -138,7 +138,7 @@ hold_source_lock_then_handle() {  # <home> <source-id> <sequence> <ready-file> <
 }
 
 # --- inert with nothing configured ------------------------------------------
-IDLE="$TMP_ROOT/idle"; new_home "$IDLE"
+IDLE="$TMP_ROOT/idle"; mkdir -p "$IDLE"
 out=$(pe "$IDLE" list)
 assert_contains "$out" "no sources registered" "an unconfigured home reports no sources"
 out=$(pe "$IDLE" reconcile)
@@ -151,7 +151,7 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- a blocking source completes into exactly one normalized event ----------
-H1="$TMP_ROOT/h1"; new_home "$H1"
+H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 TRIG="$TMP_ROOT/trigger-one"
 out=$(pe_register "$H1" lavish src-one -- "$BLOCKER" "$TRIG" "payload one")
 assert_contains "$out" "registered: src-one" "register records a source"
@@ -184,6 +184,30 @@ assert_contains "$mode" 600 "the captured result is private"
 assert_grep 'payload one' "$RESULT" "the captured result holds the source output verbatim"
 assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains its immutable adapter"
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
+
+# --- a home spelled through a symlinked ancestor still runs its sources ------
+# Such a home must run process-event sources exactly like a physically spelled
+# one: reconcile's detached runner discards its own stderr, so a refusal here is
+# invisible to the caller and the source simply never fires.
+HPHYS="$TMP_ROOT/symlinked-parent-target"
+mkdir -p "$HPHYS"
+ln -s "$HPHYS" "$TMP_ROOT/symlinked-parent"
+HSYM="$TMP_ROOT/symlinked-parent/home"; new_home "$HSYM"
+SYM_TRIGGER="$TMP_ROOT/symlink-trigger"
+pe_register "$HSYM" lavish symlinked-src -- "$BLOCKER" "$SYM_TRIGGER" "symlinked payload" >/dev/null
+pe "$HSYM" reconcile >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/symlinked-src.claim" \
+  || fail "a home reached through a symlinked ancestor never claimed its source"
+: > "$SYM_TRIGGER"
+wait_for "$HSYM/state/.wake-queue" \
+  || fail "a home reached through a symlinked ancestor published no event"
+assert_contains "$(wake_payloads "$HSYM")" "procevent lavish symlinked-src 1" \
+  "the symlinked-ancestor home publishes the committed result sequence"
+SYM_RESULT=$(first_result "$HSYM" symlinked-src || true)
+[ -n "$SYM_RESULT" ] || fail "the symlinked-ancestor home captured no durable result"
+assert_grep 'symlinked payload' "$SYM_RESULT" \
+  "the symlinked-ancestor home captures the source output verbatim"
+pass "a home reached through a symlinked ancestor runs its sources normally"
 
 # --- the public start boundary establishes generation group ownership -------
 HPG="$TMP_ROOT/hpg"; new_home "$HPG"

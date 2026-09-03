@@ -265,6 +265,31 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
+test_writer_retries_after_a_vanished_lock_collision() {
+  local state fakebin marker rec real_ln
+  state="$TMP_ROOT/vanished-lock-race/state"
+  fakebin="$TMP_ROOT/vanished-lock-race/fakebin"
+  marker="$TMP_ROOT/vanished-lock-race/first-ln-failed"
+  mkdir -p "$state" "$fakebin"
+  real_ln=$(command -v ln)
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$FM_FAKE_LN_MARKER" ]; then
+  : > "$FM_FAKE_LN_MARKER"
+  exit 1
+fi
+exec "$FM_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+
+  rec=$(PATH="$fakebin:$PATH" FM_REAL_LN="$real_ln" FM_FAKE_LN_MARKER="$marker" \
+    inbox_lib "$state" fm_task_inbox_write "$state" t1 "steer after collision") \
+    || fail "a writer abandoned an acquisition whose competing lock had already vanished"
+  [ -f "$rec" ] || fail "the retry after a vanished lock collision did not write its record"
+  pass "inbox: a writer retries when a competing lock vanishes after its failed claim"
+}
+
 test_ladder_writes_ignore_vanished_inbox() {
   local state rec
   state="$TMP_ROOT/vanished/state"; mkdir -p "$state"
@@ -502,6 +527,7 @@ test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-startup-network.sh - the deferred network stage of a session start.
+# fm-startup-network.sh - the deferred startup stage of a session start.
 #
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
 # BEFORE the digest printed, on a hook that blocks session initialization: `gh
@@ -10,25 +10,29 @@
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
 # a slow network into a startup that never printed the work queue at all.
 # This script runs exactly that work OFF the blocking path: the digest is
-# composed from local reads alone while these checks run concurrently in a
+# composed from bounded local reads while these checks run concurrently in a
 # detached worker, and their result is reported back inline when it finishes in
-# time, or as a durable wake when it does not.
+# time, or as a durable wake when it does not. The locked startup's bounded
+# inactive-outcome scan also runs here because its local current-state reads can
+# be just as slow; that scan publishes its own findings to the durable wake queue.
 #
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
-# owner of every one of these sweeps and still runs all of them, unchanged, via
-# its FM_BOOTSTRAP_NETWORK=only phase. Deferral changes WHEN they run, not
-# WHETHER, and three properties make the later run safe:
-#   - The sweeps are idempotent DETECTORS. A run whose report is lost (killed
+# owner of every network sweep and still runs all of them, unchanged, via its
+# FM_BOOTSTRAP_NETWORK=only phase. bin/fm-inactive-reconcile.sh remains the
+# owner of the startup scan and its separate watcher cadence. Deferral changes
+# WHEN they run, not WHETHER, and three properties make the later run safe:
+#   - The work is idempotent detection. A run whose report is lost (killed
 #     worker, truncated digest, crashed session) loses no finding: the next run
-#     re-derives the same dead secondmate, the same stuck clone, the same
-#     undelivered handoff. There is no once-only signal to miss.
-#   - The result is durable and always surfaces. It lands in
+#     re-derives the same inactive terminal child, dead secondmate, stuck clone,
+#     or undelivered handoff. There is no once-only signal to miss.
+#   - Results are durable and always surface. Network sweep output lands in
 #     state/.startup-network.report and reaches the agent either inline in the
 #     digest or, when it finishes too late for the digest to inline it, as a
-#     `check: startup-network` wake - but only when the late result is itself
-#     actionable (state is not "done", or bootstrap emitted something other
-#     than its explicit BOOTSTRAP_INFO no-action record; report_requires_wake
-#     owns that transport test). A late-finishing clean run is not captain-facing progress
+#     `check: startup-network` wake. Inactive-scan findings land directly in the
+#     ordinary durable wake queue. The report wakes only when the late result is
+#     itself actionable (state is not "done", or bootstrap emitted something
+#     other than its explicit BOOTSTRAP_INFO no-action record;
+#     report_requires_wake owns that transport test). A late-finishing clean run is not captain-facing progress
 #     (AGENTS.md section 8) and never becomes a wake row; it is still durable
 #     in the report file for `... report` to read on demand. Only a durable
 #     acknowledgement written after harvest prints the finished result
@@ -43,10 +47,14 @@
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
 #          Launch the detached worker and return immediately. Single-flight: a
-#          worker already running for the same lock owner is left alone. A new
-#          owner gets a distinct generation. --locked 1 asks
-#          for the mutating sweeps as well as the read-only probe; --locked 0
-#          asks for the probe only. --harvest-pid names the session-start process
+#          running worker is reused only when its phases cover this request and,
+#          for locked work, it belongs to the same lock owner. A probe-only
+#          worker therefore cannot satisfy a later locked request; the later
+#          request gets a distinct generation and runs the locked phases. A new
+#          owner also gets a distinct generation. --locked 1 asks
+#          for the inactive-outcome scan and mutating sweeps as well as the
+#          read-only probe; --locked 0 asks for the probe only. --harvest-pid
+#          names the session-start process
 #          that will try to print the result inline, so the worker can tell
 #          whether a wake is still needed.
 #        fm-startup-network.sh run --locked <0|1>
@@ -96,9 +104,9 @@
 #                             and the wake decision.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
-# aggregate deadline replacing the per-call unboundedness that used to be able to
-# wedge a startup. Hitting the bound is reported as an actionable NETWORK_CHECKS:
-# line, never as silence.
+# aggregate deadline covering both the inactive-outcome scan and network sweeps.
+# Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
+# silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,12 +197,19 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh with its drift reporting' ;;
+    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
 
 # --- start -------------------------------------------------------------------
+
+worker_covers_request() {  # <locked> <lock-pid>
+  local locked=$1 lock_pid=$2
+  [ "$locked" != 1 ] && return 0
+  [ "$(status_get lock_pid)" = "$lock_pid" ] \
+    && [ "$(status_get phases)" = probe,sweeps ]
+}
 
 cmd_start() {  # <locked> <harvest-pid>
   local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
@@ -209,10 +224,10 @@ cmd_start() {  # <locked> <harvest-pid>
 
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get state)" = running ] && worker_alive \
-    && { [ "$locked" != 1 ] || [ "$(status_get lock_pid)" = "$lock_pid" ]; }; then
-    # A worker from this or a previous session is still going. Starting a second
-    # one would run the same mutating sweeps concurrently, so leave it alone and
-    # let the harvest report its real state.
+    && worker_covers_request "$locked" "$lock_pid"; then
+    # A worker whose phases cover this request is still going. Starting another
+    # would duplicate its work and, for a locked request, race the same mutating
+    # sweeps, so leave it alone and let harvest report its real state.
     generation=$(status_get generation)
     printf '%s\t%s\n' "$generation" "$harvest_pid" > "$CLAIM_FILE" 2>/dev/null || true
     fm_lock_release "$PUBLISH_LOCK"
@@ -470,10 +485,20 @@ EOF
       downgraded=1
     fi
   fi
+  # One aggregate deadline covers both deferred operations. The inactive scan
+  # retains its own tighter per-scan bound inside this outer bound. Findings
+  # need no report translation: the scan writes its ordinary durable
+  # inactive-outcome wakes directly. A child shell composes the two executable
+  # owners only so fm_run_timed can govern them as one process group.
   if [ "$sweep_locked" -eq 1 ]; then
-    fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only \
-      FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
+    # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
+    fm_run_timed "$budget" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
+      bash -c '
+        script_dir=$1
+        "$script_dir/fm-inactive-reconcile.sh" scan --startup >/dev/null 2>&1 || true
+        exec "$script_dir/fm-bootstrap.sh"
+      ' _ "$SCRIPT_DIR" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
