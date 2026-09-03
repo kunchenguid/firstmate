@@ -240,7 +240,8 @@ Preventing that earlier requires scanning the locally generated title and descri
 
 The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment; three such trailers are already in merged history.
 It refuses the pointer shape rather than the word, so the 333 merged lines using "session" in its ordinary technical sense still pass.
-The same guard refuses the private per-task work-document shape `data/<id>/<file>`, which catches three merged leaks without refusing flat data files or the bare words `report` and `brief`.
+The same guard refuses two private work-document path shapes, `data/<id>/<file>` and `.lavish/<file>`, which catch three merged leaks without refusing flat data files, the bare words `report` and `brief`, or the 59 merged mentions of the bare word `Lavish`.
+Those two families are the whole of that coverage: `state/`, `config/`, `projects/`, `.no-mistakes/`, and `.env` paths all have legitimate merged mentions and are deliberately left out, with their counts recorded in the script's header.
 
 The script's header owns the rule set, the evidence behind each rule, and the rules that were rejected.
 The short version is that the admissible signal is the syntactic position of an address or a pointer rather than any vocabulary: this repo's own subject matter is the fleet, so `captain hold`, `captain intent`, the `/ahoy` skill, and `shipshape` are legitimate and must keep shipping.
