@@ -14,14 +14,15 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
-#       Append one lifecycle event: validate the gen against the armed
-#       sidecar, advance seq under the lock, atomically replace the record.
-#       Adapter wiring passes the exact --gen embedded at arm time, so a
-#       hook that outlives its incarnation fails closed here. The legacy
-#       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
-#       paths (fm-recovery) may pass --current-gen to bind to the incarnation
-#       armed right now.
+#         [--spawn-gen G --endpoint E] --source S --event E
+#       Append one lifecycle event: validate the busy gen against the armed
+#       sidecar and, when supplied, authenticate the writer to the exact
+#       spawn-generation and endpoint pair in the current task record. The
+#       OMP adapter supplies both bindings so a copied extension or late event
+#       from a replaced pane cannot mutate the replacement worker's state.
+#       The legacy Claude fm-send --key Escape path (fm-interrupt) and firstmate
+#       recovery paths (fm-recovery) may pass --current-gen to bind to the
+#       incarnation armed right now.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
@@ -38,7 +39,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) [--spawn-gen G --endpoint E] --source S --event E
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -64,6 +65,8 @@ case "$ID" in *[!A-Za-z0-9._-]*) echo "error: invalid task id" >&2; exit 1 ;; es
 
 NEW_STATE=
 GEN=
+SPAWN_GEN=
+ENDPOINT=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
@@ -79,6 +82,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --state) NEW_STATE=${2:-}; shift 2 || usage ;;
     --gen) GEN=${2:-}; shift 2 || usage ;;
+    --spawn-gen) SPAWN_GEN=${2:-}; shift 2 || usage ;;
+    --endpoint) ENDPOINT=${2:-}; shift 2 || usage ;;
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
@@ -89,6 +94,11 @@ if [ "$CMD" != retire ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ -n "$SPAWN_GEN" ] || [ -n "$ENDPOINT" ]; then
+  [ "$CMD" = apply ] && [ -n "$SPAWN_GEN" ] && [ -n "$ENDPOINT" ] || usage
+  fm_busy_token_valid "$SPAWN_GEN" || { echo "error: invalid --spawn-gen" >&2; exit 1; }
+  case "$ENDPOINT" in *$'\n'*|*$'\r'*|'') echo "error: invalid --endpoint" >&2; exit 1 ;; esac
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -197,6 +207,20 @@ if [ "$GEN" != "$CURRENT" ]; then
   umask "$old_umask"
   echo "error: stale busy-state gen for $ID (event rejected)" >&2
   exit 1
+fi
+if [ -n "$SPAWN_GEN" ]; then
+  META="$STATE/$ID.meta"
+  META_SPAWN_COUNT=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$META" 2>/dev/null) || META_SPAWN_COUNT=0
+  META_ENDPOINT_COUNT=$(LC_ALL=C awk -F= '$1 == "window" { count++ } END { print count + 0 }' "$META" 2>/dev/null) || META_ENDPOINT_COUNT=0
+  META_SPAWN=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { sub(/^[^=]*=/, ""); print }' "$META" 2>/dev/null) || META_SPAWN=
+  META_ENDPOINT=$(LC_ALL=C awk -F= '$1 == "window" { sub(/^[^=]*=/, ""); print }' "$META" 2>/dev/null) || META_ENDPOINT=
+  if [ "$META_SPAWN_COUNT" -ne 1 ] || [ "$META_ENDPOINT_COUNT" -ne 1 ] \
+     || [ "$META_SPAWN" != "$SPAWN_GEN" ] || [ "$META_ENDPOINT" != "$ENDPOINT" ]; then
+    lock_release
+    umask "$old_umask"
+    echo "error: stale or foreign worker binding for $ID (event rejected)" >&2
+    exit 1
+  fi
 fi
 if [ "$CMD" = retire ]; then
   rm -f "$GEN_FILE" "$REC" || {

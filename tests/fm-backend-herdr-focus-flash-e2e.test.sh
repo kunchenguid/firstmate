@@ -235,11 +235,12 @@ C_RIGHT_NEIGHBOUR=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -A1 -Fx "$C_DOOM
 C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS\$" | paste -sd, -) \
   || fail 'could not capture the Part C survivor order'
 
-# One persistent background child of the pane's shell, started outside any
+# One persistent foreground child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
-  || fail 'could not send the Part C persistent-child command'
-lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
+# Use Herdr's atomic run operation so concurrent API load cannot split literal
+# delivery from Enter and leave the fixture command unsubmitted. Keep sleep in
+# the foreground so the pane shell remains its stable parent.
+lab pane run "$C_DOOMED_PANE" 'cd / && sleep 3000' >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
 C_SHELL_PID=
 C_CHILD_ATTEMPT=0

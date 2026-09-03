@@ -68,6 +68,9 @@ test_repair_lines() {
   out=$(FM_HOME="$home" "$RENDER" --harness pi --repair-line)
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"
   assert_not_contains "$out" "extension command /fm-watch-arm-pi" "pi repair line still directs the model to the human slash command"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "OMP tool fm_watch_arm_omp" "OMP repair line does not direct the model to its extension-owned tool"
+  assert_contains "$out" ".omp/extensions/fm-primary-watch.ts" "OMP repair line did not render its distinct watcher path"
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
@@ -80,6 +83,13 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
   out=$("$RENDER" --harness pi --repair-line)
   assert_contains "$out" "fm_watch_arm_pi" "pi recovery line lost the extension-owned repair tool"
+  out=$("$RENDER" --harness omp)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "OMP extension already owns watcher continuity" "OMP ordinary-wake line does not leave continuity to its extension"
+  assert_not_contains "$ordinary" "fm_watch_arm_pi" "OMP ordinary-wake line aliases Pi's recovery tool"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "fm_watch_arm_omp" "OMP recovery line lost its distinct extension-owned repair tool"
+  assert_not_contains "$out" "fm_watch_arm_pi" "OMP recovery line aliases Pi"
 
   out=$("$RENDER" --harness opencode)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
@@ -177,6 +187,23 @@ test_pi_snippet_uses_effective_extension_path() {
   assert_not_contains "$out" "state/fm-primary-pi-watch.ts" "pi snippet kept the old generated state-relative extension path"
   pass "pi supervision snippet renders the effective extension path"
 }
+test_omp_snippet_uses_distinct_extension_paths() {
+  local out turnend watch
+  turnend="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  watch="$ROOT/.omp/extensions/fm-primary-watch.ts"
+  out=$("$RENDER" --harness omp)
+  assert_contains "$out" "--extension $turnend --extension $watch" \
+    "OMP snippet did not render both effective extension launch paths"
+  assert_contains "$out" "The turn-end guard extension lives at \`$turnend\`" \
+    "OMP snippet did not render its turn-end path"
+  assert_contains "$out" "The watcher extension lives at \`$watch\`" \
+    "OMP snippet did not render its watcher path"
+  assert_not_contains "$out" "__FM_OMP_EXT__" "renderer leaked the OMP watcher placeholder"
+  assert_not_contains "$out" "__FM_OMP_TURNEND_EXT__" "renderer leaked the OMP turn-end placeholder"
+  assert_not_contains "$out" ".pi/extensions" "OMP supervision snippet aliases Pi's primary bridge"
+  pass "OMP supervision renders distinct primary extension paths"
+}
+
 
 test_selected_harness_block_only
 test_unknown_fallback
@@ -187,3 +214,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_omp_snippet_uses_distinct_extension_paths

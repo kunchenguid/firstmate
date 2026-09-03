@@ -535,12 +535,12 @@ test_all_tmux_harness_composers_share_classification() {
   dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for harness in claude codex opencode pi pi-signed grok; do
+  for harness in claude codex opencode omp pi pi-signed grok; do
     case "$harness" in
       claude) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › \033[2mtip\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       opencode) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
-      pi|pi-signed) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
+      omp|pi|pi-signed) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
       grok) printf '╭────────────╮\n│ ❯ \033[38;2;50;47;70mType\033[0m     │\n╰────────────╯\n' > "$capture" ;;
     esac
     out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
@@ -550,7 +550,7 @@ test_all_tmux_harness_composers_share_classification() {
     case "$harness" in
       claude|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › fix      │\n╰────────────╯\n' > "$capture" ;;
-      opencode|pi|pi-signed) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
+      opencode|omp|pi|pi-signed) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
     esac
     out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")

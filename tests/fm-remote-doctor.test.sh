@@ -558,6 +558,19 @@ assert_contains "$DOCTOR_OUT" 'fix required-treehouse=failed:' \
 [ "$(cat "$CASE_HOME/.local/bin/treehouse")" = 'operator wrapper' ] \
   || fail "--fix overwrote an operator-owned wrapper"
 pass "--fix creates only owned version-manager wrappers and never clobbers an operator file"
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+MANAGER_BIN="$CASE_HOME/.nvm/versions/node/v24/bin"
+mkdir -p "$MANAGER_BIN"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/omp"
+chmod +x "$MANAGER_BIN/omp"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not recognize a discoverable OMP installation"
+assert_present "$CASE_HOME/.local/bin/omp" "--fix did not create the owned OMP wrapper"
+assert_grep "$MANAGER_BIN/omp" "$CASE_HOME/.local/bin/omp" \
+  "the OMP wrapper does not execute the discovered absolute target"
+pass "remote doctor treats OMP as a verified remote harness"
+
 
 new_case Linux with-herdr no-gui
 CASE_REMOTE_JOB_ACTIVE=

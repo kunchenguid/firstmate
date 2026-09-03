@@ -57,11 +57,24 @@ set -u
 # ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+HOST_BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
+REAL_PS=$(command -v ps) || fail "test needs ps"
+NEUTRAL_ANCESTRY_BIN=$(fm_fakebin "$TMP_ROOT/non-omp-ancestry")
+cat > "$NEUTRAL_ANCESTRY_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-o comm= -p "*|"-o args= -p "*) printf '%s\n' bash ;;
+  "-o ppid= -p "*) printf '%s\n' 1 ;;
+  *) exec "${FM_TEST_REAL_PS:?}" "$@" ;;
+esac
+SH
+chmod +x "$NEUTRAL_ANCESTRY_BIN/ps"
+BASE_PATH="$NEUTRAL_ANCESTRY_BIN:$HOST_BASE_PATH"
+export FM_TEST_REAL_PS="$REAL_PS"
 export FM_BACKEND=tmux
 
 # ===========================================================================
@@ -83,8 +96,10 @@ test_harness_resolution() {
     mkdir -p "$cfg"
     [ "$crew" = "-" ] || printf '%s\n' "$crew" > "$cfg/crew-harness"
     [ "$sm" = "-" ] || printf '%s\n' "$sm" > "$cfg/secondmate-harness"
-    got_sm=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
-    got_crew=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
+    got_sm=$(PATH="$BASE_PATH" CLAUDECODE=1 \
+      FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+    got_crew=$(PATH="$BASE_PATH" CLAUDECODE=1 \
+      FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
     [ "$got_sm" = "$exp_sm" ] || fail "$label: secondmate resolved '$got_sm', expected '$exp_sm'"
     [ "$got_crew" = "$exp_crew" ] || fail "$label: crew resolved '$got_crew', expected '$exp_crew'"
   done <<'ROWS'
@@ -93,6 +108,7 @@ crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
 crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
 crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
 signed Pi wrapper remains a distinct secondmate value^codex^pi-signed^pi-signed^codex
+OMP remains an exact secondmate value^codex^omp^omp^codex
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
@@ -120,6 +136,54 @@ SH
   [ "$got" != cursor ] || fail "an inexact Cursor marker value was accepted as Cursor Agent CLI"
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
+test_omp_identity_precedence_and_exactness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_OMP_SHAPE:-omp}" in
+  200:comm=:omp) printf '%s\n' /opt/bin/omp ;;
+  200:args=:omp) printf '%s\n' 'omp --auto-approve' ;;
+  200:comm=:decoy) printf '%s\n' /opt/bin/compass ;;
+  200:args=:decoy) printf '%s\n' compass ;;
+  200:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' bash ;;
+  *:ppid=:*) printf '%s\n' 200 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(OMPCODE=1 CLAUDECODE=1 PI_CODING_AGENT=true \
+    PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE=decoy "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "OMPCODE did not outrank shared Claude/Pi markers: $got"
+  got=$(env -u OMPCODE PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 PI_CODING_AGENT=true \
+    FM_TEST_OMP_SHAPE=omp "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "exact OMP ancestry did not outrank shared Claude/Pi markers: $got"
+  got=$(env -u OMPCODE -u CLAUDECODE PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true \
+    FM_TEST_OMP_SHAPE=decoy "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "OMP substring decoy changed Pi marker behavior: $got"
+
+  PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE=omp bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT" \
+    || fail "session-lock liveness rejected exact OMP"
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE=decoy bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT"; then
+    fail "session-lock liveness accepted an OMP-containing decoy"
+  fi
+  pass "OMP identity wins shared markers only from OMPCODE or exact ancestry"
+}
+
 
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
@@ -140,9 +204,9 @@ test_secondmate_model_effort_tokens() {
     cfg="$case_dir/config"
     mkdir -p "$cfg"
     [ "$line" = ABSENT ] || printf '%b\n' "$line" > "$cfg/secondmate-harness"
-    got_h=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
-    got_m=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model)
-    got_e=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort)
+    got_h=$(PATH="$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+    got_m=$(PATH="$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model)
+    got_e=$(PATH="$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort)
     [ "$got_h" = "$exp_harness" ] || fail "$label: harness resolved '$got_h', expected '$exp_harness'"
     [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
     [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
@@ -157,6 +221,25 @@ extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
 ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
+}
+
+test_secondmate_tokens_do_not_expand_or_ignore_fields() {
+  local case_dir cfg got err
+  case_dir="$TMP_ROOT/token-safety"
+  cfg="$case_dir/config"
+  mkdir -p "$cfg" "$case_dir/cwd"
+  : > "$case_dir/cwd/expanded-model"
+  printf 'omp * high\n' > "$cfg/secondmate-harness"
+  got=$(cd "$case_dir/cwd" && PATH="$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model)
+  [ "$got" = "*" ] || fail "model wildcard was pathname-expanded instead of parsed as one literal field: '$got'"
+
+  printf 'omp model high ignored\n' > "$cfg/secondmate-harness"
+  if err=$(PATH="$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate 2>&1); then
+    fail "secondmate-harness with an ignored fourth field unexpectedly parsed as '$err'"
+  fi
+  assert_contains "$err" "accepts at most harness, model, and effort fields" \
+    "extra secondmate-harness fields were not rejected"
+  pass "C1a secondmate model/thinking fields tokenize without glob expansion and reject trailing input"
 }
 
 # ===========================================================================
@@ -660,7 +743,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" pi
+  fm_fake_exit0 "$fakebin" omp pi
   printf '%s\n' "$fakebin"
 }
 
@@ -680,6 +763,41 @@ spawn_secondmate_capture() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
+test_spawn_omp_secondmate_uses_distinct_primary_contract() {
+  local w sm launchlog launch meta out status
+  w="$TMP_ROOT/spawn-omp-secondmate"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'omp anthropic/claude-opus-4-6 high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "OMP secondmate spawn should succeed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = omp ] || fail "OMP secondmate did not retain exact harness identity"
+  [ "$(meta_field "$meta" model)" = anthropic/claude-opus-4-6 ] || fail "OMP secondmate dropped model"
+  [ "$(meta_field "$meta" effort)" = high ] || fail "OMP secondmate dropped thinking level"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "'$w/tmux-sm/fakebin/omp' --auto-approve" \
+    "OMP secondmate did not resolve and launch the exact executable"
+  assert_contains "$launch" "--model 'anthropic/claude-opus-4-6'" \
+    "OMP secondmate did not map its model flag"
+  assert_contains "$launch" "--thinking 'high'" \
+    "OMP secondmate did not map its thinking flag"
+  assert_contains "$launch" "--extension '$sm/.omp/extensions/fm-primary-turnend-guard.ts'" \
+    "OMP secondmate did not load its turn-end guard"
+  assert_contains "$launch" "--extension '$sm/.omp/extensions/fm-primary-watch.ts'" \
+    "OMP secondmate did not load its watcher"
+  assert_contains "$launch" "FM_SUPERVISION_MODEL=extension FM_SUPERVISION_HARNESS=omp" \
+    "OMP secondmate did not pin distinct extension supervision ownership"
+  assert_contains "$launch" "env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT" \
+    "OMP launch boundary did not clear inherited foreign markers"
+  assert_not_contains "$launch" ".pi/extensions" "OMP was aliased to Pi's extensions"
+  assert_not_contains "$launch" "--tui-mode" "OMP received a Pi-only optional flag"
+  pass "OMP secondmates use exact identity, flags, marker sanitation, and distinct primary extensions"
+}
+
 
 test_spawn_backend_precedence_over_inherited_config() {
   local w sm meta launchlog out status
@@ -2549,7 +2667,9 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_omp_identity_precedence_and_exactness
 test_secondmate_model_effort_tokens
+test_secondmate_tokens_do_not_expand_or_ignore_fields
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
@@ -2559,6 +2679,7 @@ test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_cursor_secondmate_launches_with_its_primary_contract
+test_spawn_omp_secondmate_uses_distinct_primary_contract
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag

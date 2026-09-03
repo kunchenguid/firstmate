@@ -22,7 +22,7 @@
 #   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
 #     run this directly via that tool, so the daemon inherits the captain pane's
 #     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
+#   - Harnesses with NO native background mechanism (e.g. OMP or Pi) run this THROUGH
 #     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
 #     backend (herdr tab/workspace, tmux detached session) and passes the
 #     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the

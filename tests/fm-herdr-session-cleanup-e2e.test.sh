@@ -17,6 +17,12 @@ command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; 
 
 REAL_HERDR=$(command -v herdr)
 HERDR_ORIGINAL_PATH=$PATH
+# Herdr falls back to /bin/sh when SHELL is absent. On macOS that executable is
+# bash but keeps argv0 "sh", which correctly fails production's exact
+# name/argv0 idle-shell proof. Pin this childless-shell fixture to bash so the
+# restored pane has one unambiguous shell identity.
+SHELL=$(command -v bash)
+export SHELL
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-session-cleanup-e2e.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
 HOME_DIR="$TMP_ROOT/home"

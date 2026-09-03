@@ -226,6 +226,16 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"-t ttys999"*)
+    case "${FM_FAKE_TMUX_MODE:-}" in
+      ambiguous) printf '123 123 123 node\n' ;;
+      shell) printf '123 123 123 zsh\n' ;;
+      *) printf '123 123 123 pi\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+case "$*" in
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
@@ -341,6 +351,11 @@ case "${1:-}" in
       prev=$arg
       case "$arg" in '#{'*) format=$arg ;; esac
     done
+    if [ "$mode" != unreadable ]; then
+      case "$format" in
+        *pane_tty*) printf '/dev/ttys999\n'; exit 0 ;;
+      esac
+    fi
     if [ "${target#%}" != "$target" ]; then
       case "$format" in
         *pane_current_path*) printf '%s\n' "$mate_home" ;;
@@ -504,19 +519,17 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# The fake ancestry supplies the intended identity for each case.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u OMPCODE -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u PI_CODING_AGENT -u FM_PI_HARNESS PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -525,7 +538,8 @@ run_session_start() {
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u OMPCODE -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u PI_CODING_AGENT -u FM_PI_HARNESS PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -534,7 +548,8 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
 run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
   local harness=$1 home=$2 root=$3 path=$4
   shift 4
-  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"

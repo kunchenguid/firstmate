@@ -18,6 +18,21 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
+TEST_REAL_PS=$(command -v ps) || fail "test needs ps"
+
+make_neutral_ancestry_ps() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-o comm= -p "*|"-o args= -p "*) printf '%s\n' bash ;;
+  "-o ppid= -p "*) printf '%s\n' 1 ;;
+  *) exec "${FM_TEST_REAL_PS:?}" "$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
 
@@ -119,6 +134,7 @@ install_guard_scripts() {
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  make_neutral_ancestry_ps "$dir/test-bin"
 }
 
 mark_codex_hook_root() {
@@ -192,7 +208,11 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | env -u OMPCODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir/test-bin:$PATH" FM_TEST_REAL_PS="$TEST_REAL_PS" \
+      CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -369,7 +389,11 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' \
+    | env -u OMPCODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir/test-bin:$PATH" FM_TEST_REAL_PS="$TEST_REAL_PS" \
+      CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -417,7 +441,12 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' \
+    | env -u OMPCODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir/test-bin:$PATH" FM_TEST_REAL_PS="$TEST_REAL_PS" \
+      CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -1093,7 +1122,11 @@ EOF
 run_hook_claude() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" \
+    | env -u OMPCODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir/test-bin:$PATH" FM_TEST_REAL_PS="$TEST_REAL_PS" \
+      CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
 }
 
 seed_claude_failure() {
@@ -1265,7 +1298,9 @@ SH
   chmod +x "$fakebin/cat"
   (
     printf '{"stop_hook_active":true,"session_id":"sess-claude-mode"}' \
-      | PATH="$fakebin:$PATH" \
+      | env -u OMPCODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+        -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        PATH="$fakebin:$dir/test-bin:$PATH" FM_TEST_REAL_PS="$TEST_REAL_PS" \
         FM_TERMINAL_ROLE_PATH="$dir/state/.claude-autoarm.lock/role" \
         FM_TERMINAL_READY="$ready" \
         FM_TERMINAL_RELEASE="$release" \

@@ -524,6 +524,19 @@ jq '.providers += [{"provider":"meta","windows":[],"quotaSemantics":{"status":"k
 out=$(call_choose --snapshot "$MUSE_POSITIVE" --candidate muse:default)
 [ "$out" = "muse default" ] || fail "supported Muse candidate returned: $out"
 ok "Muse candidate is accepted"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:anthropic/claude-opus-4-6)
+[ "$out" = "omp anthropic/claude-opus-4-6" ] || fail "OMP Anthropic candidate did not use the real Claude quota row: $out"
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:anthropic/fable 2>/dev/null); then
+  fail "OMP Anthropic candidate bypassed its exhausted Claude model scope"
+fi
+[ "$out" = "none" ] || fail "exhausted OMP Anthropic model returned: $out"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai/gpt-5)
+[ "$out" = "omp openai/gpt-5" ] || fail "OMP OpenAI candidate did not use the real Codex quota row: $out"
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:unknown/model 2>/dev/null); then
+  fail "OMP candidate with an unknown vendor unexpectedly dispatched"
+fi
+[ "$out" = "none" ] || fail "unknown OMP vendor returned: $out"
+ok "OMP model vendors map to real quota providers and unknown vendors fail closed"
 
 jq '.providers += [{"provider":"meta","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]' \
   "$LAB/captured.json" > "$MUSE_EXHAUSTED"

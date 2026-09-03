@@ -1454,7 +1454,7 @@ test_control_registered_followon_is_guarded() {
 }
 
 test_rechain_delivers_second_post_on_same_thread() {
-  local parent log out posts command command_log
+  local parent log out posts command command_log needle prefix suffix
   parent=$(make_home rechain-parent)
   log="$parent/curl.log"; : > "$log"
   seed_repro_commitment "$parent" public-final-a req-rechain main scout-a
@@ -1485,8 +1485,14 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
-  command=${command//<value>/https://github.com/example/repo/pull/99}
+  needle="$ROOT/bin/fm-public-followup-emit.sh"
+  prefix=${command%%"$needle"*}
+  suffix=${command#*"$needle"}
+  command="${prefix}${parent}/fakebin/record-emit${suffix}"
+  needle='<value>'
+  prefix=${command%%"$needle"*}
+  suffix=${command#*"$needle"}
+  command="${prefix}https://github.com/example/repo/pull/99${suffix}"
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"
   assert_grep '--deliverable' "$command_log" \

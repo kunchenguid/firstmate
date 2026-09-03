@@ -1536,7 +1536,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc thlog teardown_bin test_root
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1553,6 +1553,7 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 
   teardown_bin=$TEARDOWN
+  test_root=$ROOT
   case "$mode" in
     missing-adapter|missing-parser|missing-explicit-close-helper)
       mkdir -p "$case_dir/test-root"
@@ -1569,15 +1570,16 @@ SH
         rm -f "$case_dir/test-root/bin/backends/herdr.sh.bak"
       fi
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
+      test_root="$case_dir/test-root"
       ;;
   esac
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_ROOT_OVERRIDE="$test_root" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
+  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight; stderr=$(cat "$case_dir/stderr")"
   assert_grep "nothing was changed" "$case_dir/stderr" \
     "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
   [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"

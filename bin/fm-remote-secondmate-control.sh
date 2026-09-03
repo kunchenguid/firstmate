@@ -141,7 +141,7 @@ cmd_launch() {
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
@@ -168,7 +168,7 @@ cmd_launch() {
     esac
   fi
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
-  [ "$model" = - ] || ARGS+=(--model "$model")
+  [ "$model" = - ] || ARGS+=("--model=$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \

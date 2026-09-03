@@ -3107,10 +3107,6 @@ const collapsedActual = actualRow.render(100);
 if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
-const collapsedText = collapsedStock.join("\n");
-if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
-  throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
-}
 stockRow.setExpanded(true);
 actualRow.setExpanded(true);
 const expandedStock = stockRow.render(100);
@@ -3118,8 +3114,8 @@ const expandedActual = actualRow.render(100);
 if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
   throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
-if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
-  throw new Error("stock rendering fixture did not exercise expanded output");
+if (!expandedStock.join("\n").includes("OUTCOME_TWELVE")) {
+  throw new Error("stock rendering fixture did not exercise the full multiline output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();

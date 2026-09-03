@@ -688,7 +688,7 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     release="$home/mark-delivered.release"
     fm_pending_reply_mark_delivered() {
       local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
-      printf '%s\n' "$BASHPID" >> "$calls"
+      printf 'called\n' >> "$calls"
       : > "$entered"
       while [ ! -e "$release" ]; do /bin/sleep 0.01; done
       pending_rec=$(fm_pending_reply_path "$pending_state" "$pending_corr")

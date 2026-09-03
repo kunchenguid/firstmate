@@ -53,6 +53,8 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/omp"
+ln -s "$SLEEP_BIN" "$LAB/bin/compass"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
@@ -154,6 +156,13 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+new_window omp "$LAB/bin/omp" 900
+wait_for_state "$SESSION:omp" alive \
+  || fail "an exact OMP foreground process must classify alive"
+new_window compass "$LAB/bin/compass" 900
+wait_for_state "$SESSION:compass" ambiguous \
+  || fail "a command merely containing omp must remain ambiguous"
+pass "tmux liveness: exact OMP is alive without widening ordinary names"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

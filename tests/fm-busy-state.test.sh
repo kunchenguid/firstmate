@@ -218,7 +218,7 @@ test_stale_gen_record_unknown() {
 test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode omp pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
@@ -268,6 +268,13 @@ test_source_mismatch_cross_adapter() {
   [ "$out" = "unknown source-mismatch" ] || fail "pi-ext record on a claude task must be untrusted, got '$out'"
   out=$(fm_busy_classify tmux w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "pi-ext record on a pi task must classify, got '$out'"
+  out=$(fm_busy_classify tmux w1 omp t1 "$state")
+  [ "$out" = "unknown source-mismatch" ] || fail "OMP must not trust Pi's source, got '$out'"
+  "$EV" apply "$state" t1 busy --gen "$gen" --source omp-ext --event agent-start
+  out=$(fm_busy_classify tmux w1 omp t1 "$state")
+  [ "$out" = "busy omp-ext" ] || fail "omp-ext record on an OMP task must classify, got '$out'"
+  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  [ "$out" = "unknown source-mismatch" ] || fail "Pi must not trust OMP's source, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state")
   [ "$out" = "unknown source-mismatch" ] || fail "grok trusts no semantic source, got '$out'"
   pass "a record is trusted only by the adapter whose source wrote it"
@@ -280,7 +287,7 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode omp pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done
@@ -355,24 +362,54 @@ test_cursor_ignores_rendered_and_native_signals() {
   pass "cursor classifies only from its transcript fold, never rendered text or native state"
 }
 
+test_apply_exact_worker_binding() {
+  local state gen before
+  state=$(new_state_dir exact-worker-binding)
+  gen=$("$EV" arm "$state" t1)
+  cat > "$state/t1.meta" <<EOF
+window=firstmate:fm-t1
+spawn_gen=spawn-one
+EOF
+  "$EV" apply "$state" t1 busy --gen "$gen" \
+    --spawn-gen spawn-one --endpoint firstmate:fm-t1 \
+    --source omp-ext --event agent-start
+  before=$(cat "$state/t1.busy-state")
+  if "$EV" apply "$state" t1 idle --gen "$gen" \
+      --spawn-gen spawn-two --endpoint firstmate:fm-t1 \
+      --source omp-ext --event agent-end >/dev/null 2>&1; then
+    fail "foreign spawn generation unexpectedly changed busy state"
+  fi
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] \
+    || fail "foreign spawn generation mutated the record before refusal"
+  if "$EV" apply "$state" t1 idle --gen "$gen" \
+      --spawn-gen spawn-one --endpoint firstmate:other \
+      --source omp-ext --event agent-end >/dev/null 2>&1; then
+    fail "foreign endpoint unexpectedly changed busy state"
+  fi
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] \
+    || fail "foreign endpoint mutated the record before refusal"
+  pass "OMP busy events authenticate the exact spawn generation and endpoint"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
   local state gen out
   state=$(new_state_dir dead)
   gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source omp-ext --event agent-end
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 1; }
-  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
-  [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
+  out=$(fm_busy_classify_live tmux w1 omp t1 "$state")
+  [ "$out" = "dead endpoint-gone" ] || fail "gone OMP endpoint must classify dead, got '$out'"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 0; }
-  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
-  [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
-  out=$(fm_busy_classify_live tmux '' claude t1 "$state")
+  out=$(fm_busy_classify_live tmux w1 omp t1 "$state")
+  [ "$out" = "idle omp-ext" ] || fail "live OMP endpoint must fall through to semantic state, got '$out'"
+  out=$(fm_busy_classify_live tmux '' omp t1 "$state")
   [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
   unset -f fm_backend_target_exists
-  pass "endpoint death is the only process-level override and yields dead, never busy"
+  pass "endpoint death overrides OMP semantic state"
 }
 
 test_herdr_native_busy_only() {
@@ -457,6 +494,7 @@ test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
+test_apply_exact_worker_binding
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

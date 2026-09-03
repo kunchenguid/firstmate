@@ -176,21 +176,35 @@ test_tmux_classifies_cursor_pane_without_inferring_dead() {
 # --- 3. Detection ordering ---------------------------------------------------
 
 test_cursor_marker_outranks_inherited_claudecode() {
-  local out
+  local dir fakebin out
+  dir="$TMP_ROOT/marker-precedence"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'ppid='*) printf '%s\n' 1 ;;
+  *) printf '%s\n' bash ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
   # This is the exact hazard: cursor does NOT clear an inherited CLAUDECODE, so
-  # a cursor worker under a claude primary carries both markers.
-  out=$(CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  # a cursor worker under a claude primary carries both markers. The fake
+  # ancestry stops at a neutral shell so an ambient OMP parent cannot outrank
+  # the marker combination each assertion supplies.
+  out=$(env -u OMPCODE PATH="$fakebin:$PATH" CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_AGENT must detect cursor, got '$out'"
-  out=$(CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  out=$(env -u OMPCODE PATH="$fakebin:$PATH" CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_INVOKED_AS must detect cursor, got '$out'"
   # Both cursor markers stand alone, and neither steals a plain claude session.
-  out=$(env -u CLAUDECODE CURSOR_AGENT=1 "$HARNESS")
+  out=$(env -u OMPCODE -u CLAUDECODE PATH="$fakebin:$PATH" CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT alone must detect cursor, got '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
+  out=$(env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    PATH="$fakebin:$PATH" CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # A CURSOR_* variable that is not the invocation identity proves nothing.
-  out=$(env -u CURSOR_AGENT CLAUDECODE=1 CURSOR_API_ENDPOINT=https://example \
-        CURSOR_INVOKED_AS=something-else "$HARNESS")
+  out=$(env -u OMPCODE -u CURSOR_AGENT PATH="$fakebin:$PATH" CLAUDECODE=1 \
+        CURSOR_API_ENDPOINT=https://example CURSOR_INVOKED_AS=something-else "$HARNESS")
   [ "$out" = claude ] \
     || fail "an unrelated CURSOR_* setting must not claim the cursor identity, got '$out'"
   pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE"

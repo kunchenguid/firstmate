@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" omp pi opencode claude codex)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -60,23 +60,136 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
-const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
-switch (process.env.MODE) {
+const mode = process.env.MODE;
+const ctx = mode === "settle-missing"
+  ? {}
+  : { isIdle: () => {
+      if (mode === "settle-throws") throw new Error("unreadable idle state");
+      return mode !== "settle-continuing";
+    } };
+switch (mode) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
-  case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
-  case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-idle":
+  case "settle-missing":
+  case "settle-throws":
+  case "settle-continuing":
+    await handlers["agent_settled"]({}, ctx);
+    break;
   case "settle-then-start":
     await handlers["agent_settled"]({}, ctx);
     await handlers["agent_start"]({}, ctx);
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
-  default: throw new Error("unknown mode " + process.env.MODE);
+  default: throw new Error("unknown mode " + mode);
 }
 if (process.env.MODE === "turn-end") {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
 }
+# drive_omp_ext <ext-path> <mode>: exercise OMP's distinct agent_end contract.
+drive_omp_ext() {
+  EXT_PATH="$1" MODE="$2" node --experimental-strip-types --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const mode = process.env.MODE;
+const sessionA = { sessionManager: { getSessionFile: () => "session-a.jsonl" } };
+const sessionB = { sessionManager: { getSessionFile: () => "session-b.jsonl" } };
+await handlers.session_start({ type: "session_start" }, sessionA);
+switch (mode) {
+  case "agent-start":
+    await handlers.agent_start({}, sessionA);
+    break;
+  case "agent-end":
+  case "nonidle":
+  case "pending":
+    await handlers.agent_start({}, sessionA);
+    await handlers.agent_end(mode === "agent-end" ? {} : { willContinue: false }, sessionA);
+    break;
+  case "continuing":
+    await handlers.agent_start({}, sessionA);
+    await handlers.agent_end({ willContinue: true }, sessionA);
+    break;
+  case "foreign":
+    await handlers.agent_start({}, sessionA);
+    await handlers.agent_end({ willContinue: false }, sessionB);
+    break;
+  case "turn-end":
+    await handlers.agent_start({}, sessionA);
+    await handlers.agent_end({ willContinue: false }, sessionA);
+    await handlers.turn_end({}, sessionA);
+    break;
+  case "shutdown":
+    await handlers.session_shutdown({}, sessionA);
+    break;
+  default: throw new Error("unknown mode " + mode);
+}
+EOF
+}
+
+test_omp_extension_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "OMP spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  assert_present "$ext" "OMP spawn did not write its distinct per-task extension"
+  [ "$(classify omp "$id" "$state")" = "busy fm-spawn" ] || fail "OMP spawn seed must be busy"
+
+  rm -f "$state/$id.turn-ended"
+  drive_omp_ext "$ext" turn-end >/dev/null || fail "OMP turn_end drive failed"
+  assert_present "$state/$id.turn-ended" "OMP turn_end did not touch its notification marker"
+  [ "$(classify omp "$id" "$state")" = "idle omp-ext" ] || fail "OMP turn_end changed the terminal semantic state"
+
+  for mode in agent-start continuing foreign; do
+    drive_omp_ext "$ext" "$mode" >/dev/null || fail "OMP $mode drive failed"
+    [ "$(classify omp "$id" "$state")" = "busy omp-ext" ] \
+      || fail "OMP $mode lifecycle must remain busy"
+  done
+  for mode in nonidle pending agent-end; do
+    drive_omp_ext "$ext" "$mode" >/dev/null || fail "OMP $mode terminal drive failed"
+    [ "$(classify omp "$id" "$state")" = "idle omp-ext" ] \
+      || fail "OMP $mode terminal agent_end did not classify idle"
+  done
+  drive_omp_ext "$ext" shutdown >/dev/null || fail "OMP session_shutdown cleanup drive failed"
+  pass "OMP uses willContinue for settlement, binds events to one session, and cleans up on shutdown"
+}
+
+test_omp_extension_stale_and_foreign_events_fail_closed() {
+  local rec id=busy-omp-2 state ext gen out before meta original_spawn
+  rec=$(make_spawn_case omp-stale omp "$id")
+  read_case_record "$rec"
+  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "OMP spawn should succeed"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  meta="$state/$id.meta"
+  before=$(cat "$state/$id.busy-state")
+  original_spawn=$(sed -n 's/^spawn_gen=//p' "$meta")
+  awk -F= '$1 == "spawn_gen" { print "spawn_gen=foreign-generation"; next } { print }' "$meta" > "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+  drive_omp_ext "$ext" agent-start >/dev/null || fail "foreign-generation OMP event drive failed"
+  [ "$(cat "$state/$id.busy-state")" = "$before" ] \
+    || fail "OMP event from a foreign spawn generation changed state"
+  awk -F= -v original="$original_spawn" '$1 == "spawn_gen" { print "spawn_gen=" original; next } { print }' "$meta" > "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  drive_omp_ext "$ext" agent-end >/dev/null || fail "stale OMP event drive failed"
+  [ "$(classify omp "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "stale OMP extension event changed state"
+  gen=$(cat "$state/$id.busy-gen")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle \
+    --gen "$gen" --source pi-ext --event agent-settled >/dev/null
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "unknown source-mismatch" ] \
+    || fail "OMP trusted foreign Pi source: $out"
+  pass "OMP rejects stale generations and foreign adapter sources"
+}
+
 
 test_pi_extension_semantic_lifecycle() {
   local rec id=busy-pi-1 out state ext
@@ -108,11 +221,16 @@ test_pi_extension_semantic_lifecycle() {
   out=$(drive_pi_ext "$ext" settle-continuing) || fail "continuing settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy pi-ext" ] || fail "a settle while another run continues must stay busy, got '$out'"
+  for mode in settle-missing settle-throws; do
+    out=$(drive_pi_ext "$ext" "$mode") || fail "$mode drive failed: $out"
+    out=$(classify pi "$id" "$state")
+    [ "$out" = "busy pi-ext" ] || fail "$mode must fail closed as busy, got '$out'"
+  done
 
   out=$(drive_pi_ext "$ext" settle-idle) || fail "final settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
-  pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+  pass "pi extension requires a readable true ctx.isIdle(), fails closed otherwise, and keeps turn_end a notification"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -312,6 +430,8 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_omp_extension_semantic_lifecycle
+test_omp_extension_stale_and_foreign_events_fail_closed
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected

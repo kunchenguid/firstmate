@@ -616,7 +616,7 @@ test_view_renders_dead_secondmate_agent_status() {
     "projects=alpha, beta"
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
-  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  view=$(PATH="$fakebin:$PATH" FM_FAKE_DIR="$fakebin" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
   assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \

@@ -97,8 +97,13 @@ fm_test_cleanup() {
 }
 
 fm_test_tmproot() {
-  local prefix=${1:-fm-test} root
+  local prefix=${1:-fm-test} root canonical
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX") || return 1
+  canonical=$(cd -P -- "$root" 2>/dev/null && pwd -P) || {
+    rm -rf "$root"
+    return 1
+  }
+  root=$canonical
   if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
     ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
     rm -rf "$root"

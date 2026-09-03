@@ -47,6 +47,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  fm_fake_exit0 "$fakebin" omp
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -92,6 +93,7 @@ run_spawn() {
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    OMPCODE="${FM_TEST_OMPCODE-${OMPCODE:-}}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -131,25 +133,25 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
-test_non_cursor_launch_clears_inherited_cursor_markers() {
+test_launch_clears_inherited_harness_markers() {
   local rec id out status launch
   id=profile-claude-cursor-markers-z1b
   rec=$(make_spawn_case profile-claude-cursor-markers claude "$id")
   read_case_record "$rec"
 
-  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
+  out=$(FM_TEST_OMPCODE=1 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
+  expect_code 0 "$status" "claude spawn under inherited harness markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
-    "non-cursor launch must clear both inherited Cursor identity markers"
-  pass "non-cursor launches clear inherited Cursor identity markers"
+  assert_contains "$launch" "env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+    "non-cursor launch must clear every inherited harness identity marker"
+  pass "non-cursor launches clear every inherited harness identity marker"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -373,14 +375,15 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+  out=$(FM_TEST_OMPCODE=1 run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS custom-agent --flag" ] \
+    || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -577,6 +580,86 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_omp_threads_distinct_model_thinking_and_extension_contract() {
+  local rec id out status launch
+  id=profile-omp-z8
+  rec=$(make_spawn_case profile-omp omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-opus-4-6 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with model and thinking should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" omp anthropic/claude-opus-4-6 xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT" \
+    "OMP launch did not sanitize inherited shared markers"
+  assert_contains "$launch" "'$FAKEBIN_DIR/omp' --auto-approve --model 'anthropic/claude-opus-4-6' --thinking 'xhigh' --extension '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "OMP launch did not use its distinct executable, flags, and extension"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "OMP launch lost the single typed positional launch brief"
+  assert_not_contains "$launch" ".pi-ext.ts" "OMP launch was aliased to Pi's worker extension"
+  assert_not_contains "$launch" "--tui-mode" "OMP launch received a Pi-only optional flag"
+  assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP launch did not write its lifecycle extension"
+  assert_absent "$HOME_DIR/state/$id.pi-ext.ts" "OMP launch wrote Pi's lifecycle extension"
+  pass "OMP receives distinct launch flags, marker sanitation, and lifecycle wiring"
+}
+
+test_omp_model_argument_is_one_shell_word() {
+  local rec id out status launch model sentinel argv_log parsed
+  id=profile-omp-quoted-z8
+  rec=$(make_spawn_case profile-omp-quoted omp "$id")
+  read_case_record "$rec"
+  sentinel="$CASE_DIR/injected"
+  argv_log="$CASE_DIR/omp-argv"
+  model="anthropic/model with spaces & semicolon; touch $sentinel; quote'part"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model "$model" --effort high)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with whitespace and shell metacharacters should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  cat > "$FAKEBIN_DIR/omp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "${FM_TEST_OMP_ARGV:?}"
+SH
+  chmod +x "$FAKEBIN_DIR/omp"
+  FM_TEST_OMP_ARGV="$argv_log" SHELL=/bin/true bash -c "$launch" >/dev/null \
+    || fail "the generated OMP launch command did not parse"
+  [ ! -e "$sentinel" ] || fail "OMP model text executed as shell syntax"
+  parsed=$(MODEL_VALUE="$model" ARGV_LOG="$argv_log" python3 - <<'PY'
+import os
+args = open(os.environ["ARGV_LOG"], "rb").read().split(b"\0")[:-1]
+model = os.environ["MODEL_VALUE"].encode()
+print("ok" if b"--model" in args and args[args.index(b"--model") + 1] == model else "bad")
+PY
+)
+  [ "$parsed" = ok ] || fail "OMP --model value was split or changed by the launch template"
+  pass "OMP launch quotes whitespace and shell metacharacters as one model argument"
+}
+
+test_omp_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-omp-missing-z8
+  rec=$(make_spawn_case profile-omp-missing omp "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/omp"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing OMP executable should refuse the spawn"
+  assert_contains "$out" "omp executable not found on PATH" \
+    "missing OMP refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing OMP refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing OMP refusal typed a launch command"
+  pass "OMP refuses before endpoint creation when its selected executable is unavailable"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -625,7 +708,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
   assert_contains "$ext" 'pi.on("agent_settled"' "pi extension lost the semantic agent_settled idle edge"
   assert_contains "$ext" 'ctx.isIdle()' "pi extension no longer confirms idle with ctx.isIdle()"
-  assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
+  assert_contains "$ext" "const busyGeneration = \"$gen\";" "pi extension does not carry the armed incarnation gen"
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
@@ -736,8 +819,8 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "claude launch did not forward its config directory and sanitize inherited harness markers"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
 
@@ -793,7 +876,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
-test_non_cursor_launch_clears_inherited_cursor_markers
+test_launch_clears_inherited_harness_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
@@ -814,6 +897,9 @@ test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_omp_threads_distinct_model_thinking_and_extension_contract
+test_omp_model_argument_is_one_shell_word
+test_omp_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

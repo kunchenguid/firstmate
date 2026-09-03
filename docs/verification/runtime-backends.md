@@ -50,6 +50,7 @@ Observed identities, and the resulting verdict:
 | claude | 2.1.220 | `2.1.220` | `claude` | alive |
 | codex | codex-cli 0.146.0 | `codex` | `codex` | alive |
 | opencode | 1.18.11 | `opencode` | `opencode` | alive |
+| omp | 18.1.2 | `omp` | `omp` | alive |
 | pi | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
 | pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
 | grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
@@ -168,7 +169,7 @@ Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both work
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
 Backend applicability was reviewed across every spawn adapter.
-Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
+Tmux needs the exact `omp`, `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness; substring OMP lookalikes remain ambiguous.
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
@@ -202,7 +203,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, OMP, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
 
@@ -601,7 +602,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
-- Pi uses content between complete separator rows and requires exact native Pi identity.
+- OMP and Pi use content between complete separator rows and require their exact native identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.

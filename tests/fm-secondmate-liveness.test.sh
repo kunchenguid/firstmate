@@ -97,7 +97,7 @@ SH
 test_tmux_agent_state_classifies() {
   local fb out
 
-  for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi; do
+  for harness in claude codex opencode grok kimi omp pi pi-signed pi-launcher Pi; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-$harness" "$harness")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
     [ "$out" = alive ] || fail "a live $harness foreground process should classify as alive, got '$out'"
@@ -106,14 +106,14 @@ test_tmux_agent_state_classifies() {
   for shell in zsh bash -zsh; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-${shell#-}" "$shell")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
-    [ "$out" = dead ] || fail "a bare $shell foreground process should classify as dead, got '$out'"
+    [ "$out" = unreadable ] || fail "a bare $shell title without a readable foreground group must stay unreadable, got '$out'"
   done
 
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-node" node)
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
-  [ "$out" = ambiguous ] || fail "an existing node process should classify as ambiguous, got '$out'"
+  [ "$out" = unreadable ] || fail "an existing node title without a readable foreground group must stay unreadable"
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:win' "$ROOT")" = unknown ] \
-    || fail "the compatibility view must keep an existing node process unknown"
+    || fail "the compatibility view must keep an unreadable node process unknown"
 
   fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-missing" missing)
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
@@ -275,6 +275,11 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *pane_tty*)
+          [ "$mode" = node ] || exit 1
+          printf '/dev/ttys999\n'
+          exit 0
+          ;;
         *pane_current_command*)
           case "$mode" in
             missing) printf '%s\n' node; exit 0 ;;
@@ -304,7 +309,27 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"-t ttys999"*)
+    [ "${FM_TEST_PANE_CMD:-}" = node ] || exit 1
+    printf '123 123 123 node\n'
+    ;;
+  *"-p 123 -o args="*)
+    printf '/usr/bin/node\n'
+    ;;
+  *"comm="*)
+    printf '/usr/local/bin/codex\n'
+    ;;
+  *"args="*)
+    printf 'codex\n'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/ps"
   printf '%s\n' "$fakebin"
 }
 
@@ -348,8 +373,9 @@ add_sm_home() {
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
-    FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
-    env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
+    FM_FAKE_DIR="${fb%%:*}" FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
+    env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
 test_sweep_respawns_confirmed_dead_secondmate() {

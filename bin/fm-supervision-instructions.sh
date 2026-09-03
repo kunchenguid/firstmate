@@ -81,7 +81,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok|cursor) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|omp|pi|grok|cursor) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -90,6 +90,8 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+omp_ext="$FM_ROOT/.omp/extensions/fm-primary-watch.ts"
+omp_turnend_ext="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
 
 shell_quote() {
@@ -109,6 +111,8 @@ render_snippet() {
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
+    line=${line//__FM_OMP_EXT__/$omp_ext}
+    line=${line//__FM_OMP_TURNEND_EXT__/$omp_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     printf '%s\n' "$line"
@@ -140,6 +144,9 @@ repair_line() {
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
       ;;
+    omp)
+      printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the OMP tool fm_watch_arm_omp, or restart OMP with --extension ' "$omp_turnend_ext" ' --extension ' "$omp_ext" ' if the extensions are not loaded.'
+      ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
       ;;
@@ -165,6 +172,9 @@ ordinary_wake_line() {
       ;;
     codex)
       printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      ;;
+    omp)
+      printf '%s\n' '- Ordinary wake: the OMP extension already owns watcher continuity; do not arm another cycle.'
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'

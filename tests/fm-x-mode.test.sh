@@ -886,7 +886,7 @@ test_reply_text_file_and_stdin() {
 }
 
 test_bootstrap_opt_out_cleanup() {
-  local home out
+  local home fakebin out
   home="$TMP_ROOT/boot-optout"; mkdir -p "$home"
   # Opt in, artifacts appear.
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
@@ -894,8 +894,13 @@ test_bootstrap_opt_out_cleanup() {
   assert_present "$home/state/x-watch.check.sh" "opt-in must create the shim"
   assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
+  # Stub process ancestry so this fixture's explicit Claude marker is not
+  # overridden when the suite itself runs below OMP.
+  fakebin=$(fm_fakebin "$home")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
-  out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(env -u OMPCODE CLAUDECODE=1 PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
   assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "opt-out remediation must use neutral automatic-recovery guidance"
   assert_not_contains "$out" "is broken" "opt-out remediation claimed an unverified mechanism failure"

@@ -10,14 +10,43 @@ set -u
 
 # Run the whole suite beneath one long-lived fixture harness, matching the real
 # lifecycle in which startup and later clear/compact hooks share one harness
-# ancestor. This also prevents a developer's ambient harness from making the
-# portable regression pass locally while failing on a harness-free CI runner.
+# ancestor. The PATH-local ps fixture terminates ancestry at that process, so a
+# developer's ambient OMP ancestor cannot outrank the harness markers each case
+# deliberately supplies.
 if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
   HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
   ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  cat > "$HARNESS_FIXTURE/ps" <<'EOF'
+#!/usr/bin/env bash
+args=("$@")
+format=
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) format=${2%=}; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "${FM_SESSIONSTART_TEST_HARNESS_PID:-}" ] \
+  && [ "$pid" = "$FM_SESSIONSTART_TEST_HARNESS_PID" ]; then
+  case "$format" in
+    comm|args) printf 'codex\n'; exit 0 ;;
+    ppid) printf '1\n'; exit 0 ;;
+  esac
+fi
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+exec ps "${args[@]}"
+EOF
+  chmod +x "$HARNESS_FIXTURE/ps" || exit 1
   # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
-  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
-    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
+  env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_SESSIONSTART_TEST_HARNESS=1 FM_SESSIONSTART_TEST_FAKEBIN="$HARNESS_FIXTURE" \
+    PATH="$HARNESS_FIXTURE:$PATH" "$HARNESS_FIXTURE/codex" \
+    -c 'FM_SESSIONSTART_TEST_HARNESS_PID=$$; export FM_SESSIONSTART_TEST_HARNESS_PID; "$@"; rc=$?; :; exit "$rc"' \
+    _ "$0" "$@"
   HARNESS_STATUS=$?
   rm -rf "$HARNESS_FIXTURE"
   exit "$HARNESS_STATUS"
@@ -177,7 +206,7 @@ EOF
 # behaves, plus the home directories the digest reads. The deliberately bare
 # PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
 # instead of reaching the host's real gh/tmux/tasks-axi.
-RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+RUN_PATH=${FM_SESSIONSTART_TEST_FAKEBIN:+$FM_SESSIONSTART_TEST_FAKEBIN:}${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 make_run_primary() {
   local dir=$1
@@ -190,15 +219,18 @@ make_run_primary() {
 run_hook() {  # <root> [args...]
   local root=$1
   shift
-  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
-    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+  env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh

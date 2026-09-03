@@ -14,16 +14,51 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. Muse is
-# markerless, so an inherited Cursor/Claude/Pi/Grok marker would outrank the
+# markerless, so an inherited OMP/Cursor/Claude/Pi/Grok marker would outrank the
 # versioned muse-bin ancestor these detection cases launch. Drop the ambient
 # markers so the asserted verdict does not depend on which harness launched
 # the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-muse-harness)
+MUSE_REAL_PS=$(command -v ps) || fail "test needs ps"
+make_omp_masking_ps() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-o comm= -p "*)
+    out=$("$MUSE_REAL_PS" "$@") || exit $?
+    case "$(basename -- "$out")" in omp) out=bash ;; esac
+    printf '%s\n' "$out"
+    ;;
+  "-o args= -p "*)
+    out=$("$MUSE_REAL_PS" "$@") || exit $?
+    argv0=${out%%[[:space:]]*}
+    case "$(basename -- "${argv0:-/}")" in omp) out=bash ;; esac
+    printf '%s\n' "$out"
+    ;;
+  *) exec "$MUSE_REAL_PS" "$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+make_synthetic_ancestry_ps() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-o comm= -p "*|"-o args= -p "*) printf '%s\n' "$MUSE_FAKE_COMM" ;;
+  "-o ppid= -p "*) printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
 
 # --- session-log fixtures ---------------------------------------------------
 
@@ -90,9 +125,7 @@ case "${1:-}" in
       if [ "$prev" = -l ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" = 1 ]; then
-          case "$arg" in
-            *"$FM_FAKE_MUSE_EXECUTABLE"*) (cd "$FM_FAKE_PANE_PATH" && bash -c "$arg") ;;
-          esac
+          (cd "$FM_FAKE_PANE_PATH" && bash -c "$arg")
         fi
         break
       fi
@@ -104,15 +137,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_HARNESS_RESULT:-}" ] || exit 0
-exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
+MUSE_FAKE_COMM=muse-bin-test-version "$FM_FAKE_HARNESS_PROBE" \
+  > "$FM_FAKE_HARNESS_RESULT"
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  make_synthetic_ancestry_ps "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -135,13 +169,12 @@ make_spawn_case() {
 run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
   local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5
   shift 5
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" OMPCODE="${FM_TEST_OMPCODE-${OMPCODE:-}}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
     FM_FAKE_MUSE_EXECUTABLE="$fakebin/muse" \
-    FM_FAKE_MUSE_VERSIONED="$fakebin/muse-bin-test-version" \
     FM_FAKE_HARNESS_PROBE="$HARNESS" \
     FM_FAKE_EXECUTE_MUSE_LAUNCH="${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" \
     FM_FAKE_HARNESS_RESULT="${FM_FAKE_HARNESS_RESULT:-}" \
@@ -149,35 +182,27 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     META_API_KEY="${FM_TEST_MUSE_KEY-test-key}" \
     XDG_CONFIG_HOME="${FM_TEST_MUSE_CONFIG_HOME-$home/xdgconfig}" \
     XDG_DATA_HOME="${FM_TEST_MUSE_DATA_HOME-$home/xdgdata}" \
+    MUSE_REAL_PS="$MUSE_REAL_PS" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" muse "$@" 2>&1
 }
 
 # --- detection --------------------------------------------------------------
 
-# The installed muse launcher execs a VERSION-SUFFIXED binary
-# (~/.local/bin/muse-bin-<version>), so the name in the process tree changes on
-# every auto-update. Detection must follow a real running process rather than a
-# string, so each case launches an actual renamed executable and asks
-# fm-harness.sh from a child of it.
-#
-# The foreign env markers, including Cursor's, are cleared because muse is
-# markerless and the marker layer deliberately outranks ancestry: with one
-# retained, these cases would assert the marker's verdict instead of the
-# ancestry match they exist to pin.
-# The command substitution around the probe is load-bearing: a bare `-c <cmd>`
-# lets the shell exec the probe in place, which REPLACES the muse-bin-* process
-# name the walk is supposed to find. Real muse keeps its TUI process alive and
-# runs tools as children, so forcing a fork is what reproduces that shape.
+# The installed muse launcher execs a version-suffixed binary
+# (`muse-bin-<version>`), so the name in the process tree changes on updates.
+# A synthetic one-hop ancestry keeps this process-name contract deterministic:
+# copying bash under another filename does not preserve that filename in
+# `ps comm` on every supported OS, and ambient agent ancestry is irrelevant.
 test_detects_versioned_process_ancestor() {
   local dir bin out
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
+  make_synthetic_ancestry_ps "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+    out=$(env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
+      -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir:$PATH" MUSE_FAKE_COMM="$bin" "$HARNESS")
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
   done
   pass "muse is detected through any versioned muse-bin ancestor"
@@ -189,11 +214,11 @@ test_detection_is_anchored() {
   local dir bin out
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
+  make_synthetic_ancestry_ps "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+    out=$(env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
+      -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$dir:$PATH" MUSE_FAKE_COMM="$bin" "$HARNESS")
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
   pass "muse detection does not claim unrelated muse-containing commands"
@@ -206,8 +231,7 @@ test_spawn_clears_inherited_foreign_harness_markers() {
 $rec
 EOF
   result="$case_dir/harness-result"
-  out=$(CLAUDECODE=1 PI_CODING_AGENT=true GROK_AGENT=1 FM_PI_HARNESS=pi-signed \
-    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
+  out=$(FM_TEST_OMPCODE=1 \
     FM_FAKE_EXECUTE_MUSE_LAUNCH=1 FM_FAKE_HARNESS_RESULT="$result" \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -215,7 +239,7 @@ EOF
   [ -f "$result" ] || fail "the generated muse launch never executed its harness probe"
   [ "$(cat "$result")" = muse ] \
     || fail "muse worker inherited a foreign harness identity: $(cat "$result")"
-  pass "muse launch clears foreign harness markers before ancestry detection"
+  pass "muse launch clears every inherited harness marker before ancestry detection"
 }
 
 # --- spawn ------------------------------------------------------------------

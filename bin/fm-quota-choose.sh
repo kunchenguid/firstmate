@@ -6,8 +6,9 @@
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
 # provided file, or from stdin when --snapshot is omitted. For each --candidate
-# in order, it maps <harness> to its primary provider family, then applies the
-# provider-wide scopes and exact model or product scopes for <model>. A candidate
+# in order, it maps <harness> and, for OMP, the model's explicit vendor prefix
+# to a quota-axi provider family, then applies the provider-wide scopes and
+# exact model or product scopes for <model>. A candidate
 # is eligible only when no applicable runway is `exhausted_now` and its known
 # effective percent remaining is greater than zero. The first eligible
 # candidate is printed as "<harness> <model>" and the script exits 0.
@@ -23,17 +24,13 @@
 # reasoning-class or runway-feasibility gates; it only answers which ordered
 # candidate remains eligible under the captured quota evidence.
 #
-# Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (see provider_for_harness below) and checks quota for that
-# family only. Some harnesses can run models from several providers - for
-# example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
-# candidate whose established provider differs from the harness's primary family
-# is checked against the wrong quota row. This is an accepted limitation of the
-# optional helper. Authoritative multi-provider routing - including provider
-# discovery from the harness catalog and quota matching by that explicit
-# provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
-# not by this helper. Use this helper only when the brief already fixed the
-# candidate order and every candidate's provider is the harness's primary family.
+# Multi-provider limitation: this helper maps most harnesses to one primary
+# provider family. OMP is the exception because its canonical model ids include
+# the provider (`anthropic/...`, `openai/...`, and so on), so using a fabricated
+# `omp` provider would make every real quota-axi snapshot look unknown. For
+# other multi-provider harnesses, use this helper only when its candidate order and every candidate's provider is the harness's primary family.
+# Authoritative routing, including catalog-backed provider discovery, is owned
+# by AGENTS.md section 4 and the quota-array-dispatch skill.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -298,13 +295,28 @@ fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
-# provider_for_harness <harness>
-# Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. Authoritative multi-provider routing is owned by
-# AGENTS.md section 4 and the quota-array-dispatch skill, not this helper.
-provider_for_harness() {
-  case "$1" in
+# provider_for_candidate <harness> <model>
+# Map a candidate to the provider names quota-axi actually emits. OMP has no
+# provider row of its own: its canonical `vendor/model` id supplies the family.
+# An unknown OMP vendor prints nothing so the candidate fails closed.
+provider_for_candidate() {
+  local harness=$1 model=${2:-default} vendor
+  if [ "$harness" = omp ]; then
+    model=${model#model:}
+    case "$model" in
+      */*) vendor=${model%%/*} ;;
+      *) return 0 ;;
+    esac
+    case "$vendor" in
+      anthropic) printf 'claude\n' ;;
+      openai) printf 'codex\n' ;;
+      xai) printf 'grok\n' ;;
+      kimi|moonshot|moonshotai) printf 'kimi\n' ;;
+      meta) printf 'meta\n' ;;
+    esac
+    return 0
+  fi
+  case "$harness" in
     claude)       printf 'claude\n' ;;
     codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;
@@ -315,6 +327,15 @@ provider_for_harness() {
     muse)         printf 'meta\n' ;;
     *)            return 1 ;;
   esac
+}
+
+quota_model_for_candidate() {
+  local harness=$1 model=${2:-default}
+  model=${model#model:}
+  if [ "$harness" = omp ]; then
+    case "$model" in */*) model=${model#*/} ;; esac
+  fi
+  printf '%s\n' "$model"
 }
 
 # effective_for_provider_model <provider> <model>
@@ -352,7 +373,7 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" >/dev/null || die "unknown harness: $harness"
+  provider_for_candidate "$harness" "$model" >/dev/null || die "unknown harness: $harness"
 done
 
 chosen="none"
@@ -360,8 +381,9 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness")
-  effective=$(effective_for_provider_model "$provider" "$model")
+  provider=$(provider_for_candidate "$harness" "$model")
+  quota_model=$(quota_model_for_candidate "$harness" "$model")
+  effective=$(effective_for_provider_model "$provider" "$quota_model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue
   fi

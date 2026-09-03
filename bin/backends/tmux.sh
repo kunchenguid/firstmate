@@ -170,7 +170,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|omp|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -194,56 +194,58 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   esac
 }
 
+# The hermetic lifecycle tests model tmux with a PATH-local fakebin/tmux and a
+# command-name state file, so they deliberately have no tty/process group to
+# inspect. Preserve that test-double contract without weakening real liveness:
+# FM_FAKE_DIR must share its resolved parent with the selected tmux executable,
+# and only a positively classified shell may stand in for the unavailable
+# negative process-group proof. Production endpoints never enter this branch.
+fm_backend_tmux_test_double_dead_state() {  # <pane-current-command>
+  local comm=$1 tmux_bin fake_root bin_root
+  [ -n "${FM_FAKE_DIR:-}" ] || return 1
+  tmux_bin=$(command -v tmux 2>/dev/null) || return 1
+  case "$tmux_bin" in /*/*) ;; *) return 1 ;; esac
+  fake_root=$(cd "$FM_FAKE_DIR/.." 2>/dev/null && pwd -P) || return 1
+  bin_root=$(cd "${tmux_bin%/*}/.." 2>/dev/null && pwd -P) || return 1
+  [ "$fake_root" = "$bin_root" ] || return 1
+  [ "$(fm_backend_tmux_classify_process_name "$comm")" = shell ] || return 1
+  printf 'dead'
+}
+
 # fm_backend_tmux_foreground_comms: the kernel-side names of every process in
 # <target>'s pane tty foreground process group, one full value per line.
-# Empty on any failure.
-#
-# This is the foreground-process-group half of the liveness probe, and it exists
-# because `#{pane_current_command}` and `ps -o comm=` expose different name
-# fields whose roles vary by platform. On macOS the tmux field can carry a
-# harness-rewritten title (Claude Code 2.1.220 reports `2.1.220`) while `comm`
-# retains executable identity; the portable Linux regression observes the
-# reverse for its version-named executable. Reading both `comm` and argv[0]
-# preserves an identifying install path without making either platform's field
-# assignment load-bearing.
-#
-# Scoping to the foreground process group rather than to the pane's descendants
-# is what keeps the probe honest in the other direction: a harness-named process
-# left running in the background of an otherwise idle pane is deliberately NOT
-# reported, so a genuinely agent-free pane still classifies `dead`. It also
-# reports every member of a multi-process launcher (the Pi Launcher path runs a
-# `pi-signed` wrapper and a `pi` engine in one group), so no launcher needs its
-# own special case here.
-#
-# Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
-# absent target from the client's active window rather than failing, so callers
-# must confirm exact window membership first, exactly as the classifier below
-# does, or they will describe some other pane entirely.
+# Returns nonzero when either the pane tty or process table cannot be read. The
+# caller must keep that distinct from a successful empty result: an unknown
+# tmux/ps failure cannot prove that a worker has settled.
 fm_backend_tmux_foreground_comms() {  # <target>
-  local target=$1 tty pid pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
-  [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
-    | while read -r pid pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        printf '%s\n' "$comm"
-      done
+  local target=$1 tty rows pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/?*) ;; *) return 1 ;; esac
+  rows=$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null) || return 1
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    printf '%s\n' "$comm"
+  done <<EOF
+$rows
+EOF
 }
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
-  [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
-    | while read -r pid pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
-        [ -n "$argv0" ] && printf '%s\n' "$argv0"
-      done
+  local target=$1 tty rows pid pgid tpgid comm args argv0
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/?*) ;; *) return 1 ;; esac
+  rows=$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null) || return 1
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || return 1
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    [ -n "$argv0" ] && printf '%s\n' "$argv0"
+  done <<EOF
+$rows
+EOF
 }
 
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
@@ -264,7 +266,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0 fg_status argv_status
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -293,7 +295,7 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
+  if foreground=$(fm_backend_tmux_foreground_comms "$target"); then fg_status=0; else fg_status=$?; fi
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
@@ -306,7 +308,7 @@ fm_backend_tmux_agent_state() {  # <target>
 $foreground
 EOF
 
-  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
+  if argv0s=$(fm_backend_tmux_foreground_argv0s "$target"); then argv_status=0; else argv_status=$?; fi
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
@@ -325,6 +327,10 @@ EOF
     printf 'alive'
     return 0
   fi
+  if [ "$fg_status" -ne 0 ] || [ "$argv_status" -ne 0 ]; then
+    fm_backend_tmux_test_double_dead_state "$comm" || printf 'unreadable'
+    return 0
+  fi
 
   # A readable foreground process group settles the negative verdicts: only a
   # group that is nothing but shells is confidently agent-free.
@@ -337,13 +343,10 @@ EOF
     return 0
   fi
 
-  case "$comm" in
-    '') printf 'unreadable'; return 0 ;;
-  esac
-  case "$(fm_backend_tmux_classify_process_name "$comm")" in
-    shell) printf 'dead' ;;
-    *) printf 'ambiguous' ;;
-  esac
+  # Successful but empty foreground reads still do not prove an idle shell.
+  # Only the shell-only foreground group or the isolated test double above
+  # licenses `dead`.
+  fm_backend_tmux_test_double_dead_state "$comm" || printf 'unreadable'
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

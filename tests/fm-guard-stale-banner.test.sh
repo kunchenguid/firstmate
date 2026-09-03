@@ -74,15 +74,17 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
-# The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
-# down on every actionable wake and spawns the replacement itself, so the lock is
-# legitimately unheld during a hand-off.
+# The extension model tears the watcher down on each actionable wake and
+# restores the replacement itself, so the lock is legitimately unheld during a
+# hand-off. Pi is the default harness for the shared fixture; OMP cases override
+# FM_SUPERVISION_HARNESS explicitly.
 run_guard_case_extension() {
   local dir=$1
   FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=999 \
     FM_SUPERVISION_MODEL=extension \
+    FM_SUPERVISION_HARNESS=pi \
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
@@ -111,7 +113,7 @@ record_pi_extension_session() {
     if [ "$drift" = "${pair##*:}" ]; then
       version="sha256:0000000000000000000000000000000000000000000000000000000000000000"
     else
-      version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+      version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
     printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
@@ -119,6 +121,52 @@ record_pi_extension_session() {
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0
 }
+record_omp_extension_session() {
+  local dir=$1 session_pid=$2 home root pair source marker version
+  home=$(case_home "$dir")
+  root=$(case_root "$dir")
+  mkdir -p "$root/.omp/extensions"
+  for pair in \
+    "fm-primary-watch.ts:.omp-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"; do
+    source=${pair%%:*}
+    marker=${pair#*:}
+    printf '// OMP fixture %s\n' "$source" > "$root/.omp/extensions/$source"
+    version=$(bash -c '. "$1"; fm_extension_version "$2"' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$root/.omp/extensions/$source") || return 1
+    printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+  done
+  printf '%s\n' "$session_pid" > "$home/state/.lock"
+}
+
+run_guard_case_omp_extension() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=extension \
+    FM_SUPERVISION_HARNESS=omp \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+test_omp_extension_ownership_is_distinct() {
+  local dir home out pid
+  dir=$(make_guard_case omp-extension-ownership)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_omp_extension_session "$dir" "$pid" || fail "could not record OMP extension ownership"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case_omp_extension "$dir")
+  [ -z "$out" ] || fail "healthy OMP extension hand-off alarmed: $out"
+  out=$(run_guard_case_extension "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "Pi supervision trusted OMP ownership markers"
+  pass "OMP extension ownership is healthy only for the exact OMP harness"
+}
+
 
 count_text() {
   local haystack=$1 needle=$2
@@ -655,19 +703,29 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
 # a real Pi home. The foreign markers are cleared because fm-harness.sh tests them
 # ahead of Pi, and the host running this suite may carry one.
 test_pi_harness_routes_itself_to_the_extension_model() {
-  local dir home out pid harness
+  local dir home fakebin out pid harness
   local -a pi_env
   for harness in pi pi-signed; do
     pi_env=(PI_CODING_AGENT=true)
     [ "$harness" = pi ] || pi_env+=(FM_PI_HARNESS=pi-signed)
     dir=$(make_guard_case "harness-routing-$harness")
     home=$(case_home "$dir")
+    fakebin=$(fm_fakebin "$dir/non-omp-ancestry")
+    cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'ppid='*) printf '%s\n' 1 ;;
+  *) printf '%s\n' bash ;;
+esac
+SH
+    chmod +x "$fakebin/ps"
     sleep 60 &
     pid=$!
     record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
     touch "$home/state/.last-watcher-beat"
-    out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
-      "${pi_env[@]}" \
+    out=$(env -u OMPCODE -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u GROK_AGENT -u FM_SUPERVISION_MODEL -u FM_SUPERVISION_HARNESS \
+      PATH="$fakebin:$PATH" "${pi_env[@]}" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \
       FM_GUARD_GRACE=999 \
@@ -679,7 +737,29 @@ test_pi_harness_routes_itself_to_the_extension_model() {
   done
   pass "fm-guard stale banner: Pi and pi-signed primaries route themselves to the extension model"
 }
+test_omp_harness_routes_itself_to_the_extension_model() {
+  local dir home out pid
+  dir=$(make_guard_case harness-routing-omp)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_omp_extension_session "$dir" "$pid" || fail "could not record the OMP extension session"
+  touch "$home/state/.last-watcher-beat"
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL -u FM_SUPERVISION_HARNESS \
+    OMPCODE=1 CLAUDECODE=1 PI_CODING_AGENT=true \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$home" \
+    FM_GUARD_GRACE=999 \
+    "$ROOT/bin/fm-guard.sh" 2>&1)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] || fail "an OMP primary must route itself to extension supervision, got: $out"
+  pass "fm-guard stale banner: OMP routes itself to its distinct extension model"
+}
 
+
+test_omp_extension_ownership_is_distinct
+test_omp_harness_routes_itself_to_the_extension_model
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model

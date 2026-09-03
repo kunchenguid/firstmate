@@ -75,7 +75,7 @@ case "\${1:-}" in
   display-message)
     case "\$*" in
       *'#{pane_current_path}'*) cut -d'|' -f2- "\$state" ;;
-      *'#{pane_current_command}'*) printf 'codex\n' ;;
+      *'#{pane_current_command}'*) printf 'omp\n' ;;
       *'#{cursor_y}'*) printf '0\n' ;;
       *'#S'*) printf 'firstmate\n' ;;
       *) printf '%%1\n' ;;
@@ -85,11 +85,16 @@ case "\${1:-}" in
   capture-pane) printf '❯\n'; exit 0 ;;
   send-keys) exit 0 ;;
   kill-window) rm -f -- "\$state"; exit 0 ;;
-  list-panes) printf 'codex\n'; exit 0 ;;
+  list-panes) printf 'omp\n'; exit 0 ;;
 esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+cat > "$REMOTE_ROOT/bin/omp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$REMOTE_ROOT/bin/omp"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -120,9 +125,9 @@ exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
 
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+printf 'omp\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
-printf 'codex\n' > "$PARENT/config/crew-harness"
+printf 'omp\n' > "$PARENT/config/crew-harness"
 printf '## In flight\n\n## Queued\n\n## Done\n' > "$PARENT/data/backlog.md"
 
 remote_env() {
@@ -171,6 +176,15 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
+[ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = omp ] \
+  || fail "remote route did not preserve OMP as an exact first-class harness"
+grep -Eq "omp.*--auto-approve.*--extension.*\\.omp/extensions/fm-primary-turnend-guard\\.ts.*--extension.*\\.omp/extensions/fm-primary-watch\\.ts" "$HERDR_LOG" \
+  || fail "remote OMP route did not use its distinct secondmate launch contract"
+assert_grep 'env -u OMPCODE -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS' "$HERDR_LOG" \
+  "remote OMP launch did not clear inherited harness identity markers"
+if grep -Eq 'CLAUDE_CONFIG_DIR|PI_CODING_AGENT_DIR|ANTHROPIC_API_KEY|OPENAI_API_KEY' "$HERDR_LOG"; then
+  fail "remote OMP launch transmitted a local credential or provider configuration surface"
+fi
 ! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
   || fail "default-off remote spawn must not export a carrier into the remote pane"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \

@@ -28,6 +28,32 @@ fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
 
+# Bash 3.2 has no BASHPID, and $$ deliberately remains the invoking shell's pid
+# inside a subshell. Lock ownership needs the actual process pid so a child can
+# never authenticate as its parent. On that legacy path, ask a direct child for
+# its PPID; unlike command substitution, the direct child's parent is the shell
+# frame whose ownership we are recording or checking.
+fm_lock_write_current_pid() {  # <file>
+  local file=$1
+  if [ -n "${BASHPID:-}" ]; then
+    printf '%s\n' "$BASHPID" > "$file"
+  else
+    /bin/sh -c 'printf "%s\n" "$PPID" > "$1"' _ "$file"
+  fi
+}
+
+fm_lock_current_process_is() {  # <pid>
+  local pid=$1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -n "${BASHPID:-}" ]; then
+    [ "$pid" = "$BASHPID" ]
+  else
+    /bin/sh -c '[ "$PPID" = "$1" ]' _ "$pid"
+  fi
+}
+
 fm_pid_alive() {
   local pid=$1
   case "$pid" in
@@ -153,11 +179,11 @@ fm_watcher_healthy() {
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
 #               watcher process is the healthy state.
-#   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
-#               continuity. It tears the watcher down on every actionable wake and
-#               spawns the replacement itself, so a genuinely unheld singleton lock
-#               is healthy during that hand-off only with extension ownership and a
-#               fresh beacon. Any held but unhealthy lock remains down.
+#   extension   OMP, Pi, and pi-signed: tracked project extensions own continuity.
+#               They tear the watcher down on every actionable wake and spawn the
+#               replacement themselves, so a genuinely unheld singleton lock is
+#               healthy during that hand-off only with harness-matched extension
+#               ownership and a fresh beacon. Any held unhealthy lock remains down.
 #   persistent  every other harness (codex foreground checkpoint, opencode/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
@@ -172,23 +198,15 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
+    omp|pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
 
-# Pi primary supervision evidence. The Pi extensions record, in their state
-# markers, the exact build they loaded and the session process that loaded it, so
-# "a live Pi session owns supervision" is provable from durable state without a
-# watcher process and without reading any vendor-rendered surface.
-#
-# fm_pi_extension_version <file>
-# Print the marker version string the Pi extensions record for <file>. Must stay
-# byte-identical to the "sha256:<hex>" digest .pi/extensions/fm-primary-pi-watch.ts
-# and .pi/extensions/fm-primary-turnend-guard.ts compute for themselves; a host
-# with no SHA-256 tool falls back to a form no marker can match, which keeps every
-# consumer loud rather than silently satisfied.
-fm_pi_extension_version() {
+# Extension-owned primary supervision evidence. Each supported extension adapter
+# records the exact build it loaded and the owning session pid. These helpers are
+# harness-neutral so Pi and OMP cannot trust each other's markers.
+fm_extension_version() {  # <file>
   local file=$1
   [ -f "$file" ] || return 1
   if command -v shasum >/dev/null 2>&1; then
@@ -200,10 +218,7 @@ fm_pi_extension_version() {
   fi
 }
 
-# fm_pi_extension_loaded <marker> <expected-version> <session-lock>
-# True when <marker> records <expected-version> and names the session process in
-# <session-lock>, i.e. the session holding this home loaded exactly this build.
-fm_pi_extension_loaded() {
+fm_extension_loaded() {  # <marker> <expected-version> <session-lock>
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
@@ -213,23 +228,33 @@ fm_pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
-# fm_pi_extension_owns_supervision <state> <root>
-# True when a LIVE Pi session owns supervision continuity for this home: both
-# primary extensions are loaded at their current on-disk builds by the process
-# recorded in this home's session lock, and that process is still alive.
-# Requiring the turn-end guard extension too is deliberate - it is the structural
-# backstop that catches a cycle the watch extension failed to restore, so a home
-# missing it has no benign hand-off to tolerate.
-fm_pi_extension_owns_supervision() {
-  local state=$1 root=$2 lock session_pid pair source marker version
+fm_extension_owns_supervision() {  # <state> <root> [harness]
+  local state=$1 root=$2 harness=${3:-${FM_SUPERVISION_HARNESS:-}}
+  local lock session_pid pair source marker version extension_root
+  if [ -z "$harness" ]; then
+    harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  fi
+  case "$harness" in
+    pi|pi-signed)
+      extension_root="$root/.pi/extensions"
+      set -- \
+        "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
+        "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
+      ;;
+    omp)
+      extension_root="$root/.omp/extensions"
+      set -- \
+        "fm-primary-watch.ts:.omp-watch-extension-loaded" \
+        "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
+      ;;
+    *) return 1 ;;
+  esac
   lock="$state/.lock"
-  for pair in \
-    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
-    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+  for pair in "$@"; do
     source=${pair%%:*}
     marker=${pair#*:}
-    version=$(fm_pi_extension_version "$root/.pi/extensions/$source") || return 1
-    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
+    version=$(fm_extension_version "$extension_root/$source") || return 1
+    fm_extension_loaded "$state/$marker" "$version" "$lock" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
@@ -248,13 +273,13 @@ fm_pi_extension_owns_supervision() {
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
-# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
-# extension's own tear-down-and-respawn hand-off, which it retries and escalates
-# itself. A lock with any recorded pid remains down if the strict health check fails.
-# Without ownership proof an unheld lock is down exactly as before, so an unloaded,
-# version-drifted, or exited Pi session still alarms immediately, and a cycle the
-# extension never restores still alarms once the beacon passes grace.
+# genuinely unheld lock is also healthy while the beacon is fresh and the detected
+# extension harness proves ownership of its current watcher and turn-end guard
+# builds. That is the extension's own tear-down-and-respawn hand-off, which it
+# retries and escalates itself. A lock with any recorded pid remains down if strict
+# health fails. Missing, drifted, foreign, or dead-session markers never satisfy
+# the hand-off exception, and a cycle the extension never restores still alarms
+# once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -283,7 +308,7 @@ fm_watcher_supervision_verdict() {
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
+      && fm_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else
@@ -306,14 +331,13 @@ fm_lock_clean_known_files() {
 }
 
 fm_lock_set_role() {
-  local lockdir=$1 role=$2 current pid back
+  local lockdir=$1 role=$2 pid back
   case "$role" in
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 1
+  fm_lock_current_process_is "$pid" || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
   back=$(cat "$lockdir/role" 2>/dev/null || true)
   [ "$back" = "$role" ]
@@ -339,10 +363,10 @@ fm_lock_owner_dir() {
 
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
-  printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
+  fm_lock_write_current_pid "$ownerdir/pid" 2>/dev/null || return 1
+  mypid=$(cat "$ownerdir/pid" 2>/dev/null || true)
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ -n "$mypid" ] && [ "$back" = "$mypid" ]
 }
 
 fm_lock_link_owner() {
@@ -387,12 +411,20 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
-  if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid=${4:-} back
+  if [ -z "$mypid" ]; then
+    if ! fm_lock_write_current_pid "$ownerdir/pid" 2>/dev/null; then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
+    mypid=$(cat "$ownerdir/pid" 2>/dev/null || true)
   fi
+  case "$mypid" in
+    ''|*[!0-9]*)
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+      ;;
+  esac
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$mypid" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -413,7 +445,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir prepared_pid
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -424,8 +456,9 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  prepared_pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner" "$prepared_pid"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
     fi
@@ -801,10 +834,8 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if fm_lock_current_process_is "$pid"; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -813,6 +844,8 @@ fm_lock_try_acquire() {
     # interrupted frame. Spinning here deadlocks the exit path against itself
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
+    # fm_lock_current_process_is distinguishes a Bash 3.2 subshell from its
+    # parent even though both expand $$ to the parent's pid.
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0
@@ -900,20 +933,19 @@ fm_lock_acquire_wait() {
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  local lockdir=$1 pid ownerdir
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
     pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
-    [ "$pid" = "$current" ] || return 0
+    fm_lock_current_process_is "$pid" || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 0
+  fm_lock_current_process_is "$pid" || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
 }
@@ -955,7 +987,7 @@ fm_task_set_lock_path() {  # <state-dir>
 }
 
 fm_failure_episode_reset() {
-  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  local state=$1 mode=${2:-acquire} lock pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
   case "$mode" in
     acquire)
@@ -963,9 +995,8 @@ fm_failure_episode_reset() {
       acquired=1
       ;;
     held)
-      current=${BASHPID:-$$}
       pid=$(cat "$lock/pid" 2>/dev/null || true)
-      [ "$pid" = "$current" ] || return 1
+      fm_lock_current_process_is "$pid" || return 1
       ;;
     *) return 1 ;;
   esac

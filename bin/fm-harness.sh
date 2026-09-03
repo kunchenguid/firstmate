@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -30,14 +30,29 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 
+# OMP shares Pi's PI_CODING_AGENT marker and can also inherit CLAUDECODE. Exact
+# OMP ancestry therefore has to be resolved before either shared marker. Keep
+# this match exact: ordinary process names and paths containing "omp" are not
+# harness evidence.
+omp_ancestor_present() {
+  local pid=$$ comm args argv0 base
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    base=$(basename -- "$comm")
+    argv0=${args%% *}
+    if [ "$base" = omp ] || [ "$(basename -- "${argv0:-/}")" = omp ]; then
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  return 1
+}
+
 detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Layer 1: unambiguous environment markers, then the exact OMP ancestry
+  # discriminator required before OMP's shared Claude/Pi markers.
   # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
   # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
   # carries BOTH markers and whichever is tested first wins. Cursor's own
@@ -50,6 +65,8 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
+  omp_ancestor_present && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -85,6 +102,7 @@ detect_own() {
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
+      omp) echo omp; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
@@ -95,9 +113,11 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
+      node*|bun*|python*)
+        # Bare interpreter: match only an exact harness script basename for OMP;
+        # the older adapters retain their verified path signatures.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
+        case "${args%% *}" in */omp|omp) echo omp; return ;; esac
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
@@ -140,18 +160,25 @@ secondmate_line() {
   done < "$CONFIG/secondmate-harness"
 }
 
-# Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort) of
-# the resolved secondmate_line, or nothing if the line or that field is absent.
+# Print the 1-based whitespace-separated field (1=harness, 2=model, 3=effort)
+# of the resolved secondmate_line, or nothing if the line or that field is
+# absent. `read` tokenizes without pathname expansion, so wildcard characters
+# in a model id remain data instead of expanding against the caller's cwd.
 secondmate_field() {
-  local idx=$1 line
+  local idx=$1 line harness model effort extra
   line=$(secondmate_line)
   [ -n "$line" ] || return 0
-  # shellcheck disable=SC2086  # deliberate word-splitting: tokenizing the line into fields
-  set -- $line
+  read -r harness model effort extra <<EOF
+$line
+EOF
+  [ -z "${extra:-}" ] || {
+    echo "error: config/secondmate-harness accepts at most harness, model, and effort fields" >&2
+    return 1
+  }
   case "$idx" in
-    1) printf '%s\n' "${1:-}" ;;
-    2) printf '%s\n' "${2:-}" ;;
-    3) printf '%s\n' "${3:-}" ;;
+    1) printf '%s\n' "${harness:-}" ;;
+    2) printf '%s\n' "${model:-}" ;;
+    3) printf '%s\n' "${effort:-}" ;;
   esac
 }
 
@@ -163,7 +190,7 @@ secondmate_field() {
 # setting and is never inherited downstream - secondmates do not spawn secondmates.
 resolve_secondmate() {
   local sm
-  sm=$(secondmate_field 1)
+  sm=$(secondmate_field 1) || return
   if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
 }
 
@@ -172,7 +199,7 @@ resolve_secondmate() {
 # today) or when no model token is present.
 resolve_secondmate_model() {
   local sm
-  sm=$(secondmate_field 1)
+  sm=$(secondmate_field 1) || return
   [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
   secondmate_field 2
 }
@@ -181,7 +208,7 @@ resolve_secondmate_model() {
 # the same way.
 resolve_secondmate_effort() {
   local sm
-  sm=$(secondmate_field 1)
+  sm=$(secondmate_field 1) || return
   [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
   secondmate_field 3
 }
