@@ -465,6 +465,77 @@ test_cursor_agent_refuses_brief_before_verified_empty_composer() {
   pass "cursor-agent refuses brief delivery before a verified empty composer"
 }
 
+test_worker_push_policy_refuses_protected_destinations_and_allows_task_branch() {
+  local case_dir="$TMP_ROOT/push-policy" home proj wt bare fakebin id out status base task project_hooks_log task_tmp protected_out master_out normal_out protected_status master_status
+  local -a worker_git
+  id="agent-push-policy-z4"
+  TASK_TMP_ROOTS+=("/tmp/fm-$id")
+  rm -rf "/tmp/fm-$id"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/worktree"
+  bare="$proj.origin.git"
+  project_hooks_log="$case_dir/project-pre-push.log"
+  fakebin=$(make_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$proj" branch main HEAD
+  git -C "$proj" push -q origin main:refs/heads/main
+  base=$(git --git-dir="$bare" rev-parse refs/heads/main)
+  printf 'task content\n' > "$wt/task.txt"
+  git -C "$wt" add task.txt
+  git -C "$wt" -c user.name=test -c user.email=test@example.invalid commit -qm 'task change'
+  task=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" branch --set-upstream-to=origin/main "fm/$id" >/dev/null
+  git -C "$wt" config push.default upstream
+  mkdir -p "$wt/.project-hooks"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'cat >> %q\n' "$project_hooks_log"
+  } > "$wt/.project-hooks/pre-push"
+  chmod 700 "$wt/.project-hooks/pre-push"
+  git -C "$wt" config core.hooksPath .project-hooks
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_FILE="$case_dir/launch" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "worker push-policy fixture should launch: $out"
+  task_tmp="/tmp/fm-$id"
+  worker_git=(env GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath \
+    GIT_CONFIG_VALUE_0="$task_tmp/git-hooks" GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current)
+  [ "$("${worker_git[@]}" git -C "$wt" config --get push.default)" = current ] ||
+    fail "worker did not receive worktree-scoped push.default=current"
+  protected_out=$("${worker_git[@]}" git -C "$wt" push origin HEAD:refs/heads/main 2>&1)
+  protected_status=$?
+  expect_code 1 "$protected_status" "explicit protected-destination push must be refused: $protected_out"
+  assert_contains "$protected_out" 'refusing worker push to protected destination refs/heads/main' \
+    "protected-destination refusal did not name main"
+  master_out=$("${worker_git[@]}" git -C "$wt" push origin HEAD:refs/heads/master 2>&1)
+  master_status=$?
+  expect_code 1 "$master_status" "explicit master-destination push must be refused: $master_out"
+  assert_contains "$master_out" 'refusing worker push to protected destination refs/heads/master' \
+    "protected-destination refusal did not name master"
+  normal_out=$("${worker_git[@]}" git -C "$wt" push 2>&1)
+  status=$?
+  expect_code 0 "$status" "ordinary task-branch push must succeed: $normal_out"
+  [ "$(git --git-dir="$bare" rev-parse refs/heads/main)" = "$base" ] ||
+    fail "protected-destination push advanced remote main"
+  [ "$(git --git-dir="$bare" rev-parse "refs/heads/fm/$id")" = "$task" ] ||
+    fail "ordinary task-branch push did not reach its task destination"
+  assert_grep "refs/heads/fm/$id" "$project_hooks_log" \
+    "project pre-push hook did not receive the ordinary task-branch update"
+  [ "$(git -C "$wt" config --local --get push.default)" = upstream ] ||
+    fail "worker-safe push default mutated shared repository configuration"
+  rm -rf "/tmp/fm-$id"
+  pass "worker push policy rejects protected destinations and preserves ordinary task pushes"
+}
+
 test_sanitizer_catalog_removes_all_documented_agent_coauthors() {
   local case_dir="$TMP_ROOT/catalog" message actual
   case_dir="$TMP_ROOT/catalog"
@@ -510,6 +581,7 @@ EOF
 test_installation_failure_refuses_worker_launch
 test_commit_msg_composition_without_precommit_relay
 test_worker_amend_removes_only_agent_coauthors
+test_worker_push_policy_refuses_protected_destinations_and_allows_task_branch
 test_sanitizer_catalog_removes_all_documented_agent_coauthors
 test_every_verified_harness_reaches_task_local_sanitizer
 test_cursor_agent_refuses_brief_before_verified_empty_composer

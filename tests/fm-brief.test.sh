@@ -635,7 +635,9 @@ test_direct_pr_dod_requires_review_ready_pr() {
     "direct-PR DOD allowed an opened but unready PR to count as complete"
   assert_grep "after the PR reaches that ready state, append \`done: PR {url}\`" "$brief" \
     "direct-PR DOD reported done before the PR reached its review-ready state"
-  pass "fm-brief.sh: direct-PR completion requires a review-ready PR"
+  assert_grep "git push <fork-remote> HEAD:refs/heads/fm/$id" "$brief" \
+    "direct-PR DOD did not require an explicit task-branch publication refspec"
+  pass "fm-brief.sh: direct-PR completion requires a review-ready PR and explicit publication refspec"
 }
 
 test_direct_pr_template_inspection_fails_closed() {

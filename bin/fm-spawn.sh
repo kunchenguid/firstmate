@@ -3707,11 +3707,13 @@ OWNED_TASK_TMP=$TASK_TMP
 # Every supported worker harness inherits this launch-scoped Git configuration.
 # The relay lives under the task temp root, never in the project, composes every
 # pre-existing executable project hook, and Git reads it only in the worker
-# process tree.  An invalid inherited Git config or a relay-install failure is
-# mandatory: installation or runtime failure refuses the commit so a forbidden
-# agent trailer cannot enter permanent history.
+# process tree.
+# Writer workers also receive push.default=current in that same scoped config,
+# so no shared repository or global Git configuration is changed.
+# An invalid inherited Git config or a relay-install failure is mandatory:
+# installation or runtime failure refuses a commit or protected-destination push.
 install_agent_coauthor_sanitizer() {
-  local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook original relay
+  local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook prepush original relay launch=$LAUNCH
   local -a task_git
   if [ "$ACCESS" = reader ]; then
     task_git=(git --git-dir="$WT/repo.git")
@@ -3723,7 +3725,9 @@ install_agent_coauthor_sanitizer() {
   # relay is composed, nor leak into the worker's launch environment.
   prior_count=0
   next_count=1
+  [ "$ACCESS" = reader ] || next_count=2
   hook=$hooks/commit-msg
+  prepush=$hooks/pre-push
   original_hooks=$(GIT_CONFIG_COUNT=0 "${task_git[@]}" config --path --get core.hooksPath 2>/dev/null || true)
   if [ -z "$original_hooks" ]; then
     original_hooks=$(GIT_CONFIG_COUNT=0 "${task_git[@]}" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
@@ -3755,6 +3759,7 @@ install_agent_coauthor_sanitizer() {
   for original in "$original_hooks"/*; do
     [ -f "$original" ] && [ -x "$original" ] || continue
     [ "${original##*/}" != commit-msg ] || continue
+    [ "${original##*/}" != pre-push ] || continue
     relay=$hooks/${original##*/}
     if ! {
       printf '%s\n' '#!/usr/bin/env bash'
@@ -3780,7 +3785,39 @@ install_agent_coauthor_sanitizer() {
     echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
     return 1
   fi
-  LAUNCH="GIT_CONFIG_COUNT=$(shell_quote "$next_count") GIT_CONFIG_KEY_${prior_count}=core.hooksPath GIT_CONFIG_VALUE_${prior_count}=$(shell_quote "$hooks") $LAUNCH"
+  if ! {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -eu'
+    # shellcheck disable=SC2016
+    printf 'updates=$(mktemp %s) || { echo %s >&2; exit 1; }\n' \
+      "$(shell_quote "$hooks/pre-push.XXXXXXXX")" \
+      "$(shell_quote 'error: worker push policy could not stage updates; refusing push')"
+    # shellcheck disable=SC2016
+    printf '%s\n' 'cleanup() { rm -f "$updates"; }' 'trap cleanup EXIT' 'cat > "$updates"'
+    # shellcheck disable=SC2016
+    printf '%s\n' 'while IFS=" " read -r local_ref local_oid remote_ref remote_oid; do' \
+      '  case "$remote_ref" in' \
+      '    refs/heads/main|refs/heads/master)' \
+      '      echo "error: refusing worker push to protected destination $remote_ref" >&2' \
+      '      exit 1' \
+      '      ;;' \
+      '  esac' \
+      'done < "$updates"'
+    if [ -x "$original_hooks/pre-push" ]; then
+      # shellcheck disable=SC2016
+      printf 'if ! %s "$@" < "$updates"; then\n' "$(shell_quote "$original_hooks/pre-push")"
+      printf '%s\n' '  exit 1' 'fi'
+    fi
+    printf '%s\n' 'exit 0'
+  } > "$prepush" \
+    || ! chmod 700 "$prepush"; then
+    echo "error: worker push policy installation failed; refusing worker launch" >&2
+    return 1
+  fi
+  LAUNCH="GIT_CONFIG_COUNT=$(shell_quote "$next_count") GIT_CONFIG_KEY_${prior_count}=core.hooksPath GIT_CONFIG_VALUE_${prior_count}=$(shell_quote "$hooks")"
+  if [ "$ACCESS" != reader ]; then
+    LAUNCH="$LAUNCH GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current"
+  fi
+  LAUNCH="$LAUNCH $launch"
 }
 
 # Per-harness turn-end hook where enabled: a file that touches
