@@ -59,6 +59,10 @@ case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
+  "session list")
+    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s/fake.sock"}]}\n' \
+      "$(dirname "$STATE")"
+    ;;
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
     ;;
@@ -122,8 +126,13 @@ case "$cmd $sub" in
     ;;
   "pane get")
     pane=${3:-}
-    printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
-      "$pane" "${FM_FAKE_FOREGROUND_CWD:-/tmp}"
+    pane_row=$(jq_state -c --arg p "$pane" '.tabs[] | select(.pane_id == $p)' | head -n1)
+    if [ -z "$pane_row" ]; then
+      printf '{"error":{"code":"pane_not_found","message":"pane target %s not found"}}\n' "$pane"
+    else
+      printf '%s' "$pane_row" | jq -c --arg cwd "${FM_FAKE_FOREGROUND_CWD:-/tmp}" \
+        '{result:{pane:{pane_id:.pane_id,tab_id:.tab_id,workspace_id:.workspace_id,foreground_cwd:$cwd}}}'
+    fi
     ;;
   *) : ;;
 esac
@@ -210,7 +219,8 @@ test_delayed_shell_success_precedes_treehouse_get() {
 }
 
 # The core safety property: a pane whose shell never renders the marker must
-# fail the spawn and MUST NOT have `treehouse get` submitted.
+# fail the spawn, MUST NOT have `treehouse get` submitted, and must remove the
+# otherwise-unrecorded flat task pane through abort cleanup.
 test_permanent_busy_pane_never_receives_treehouse_get() {
   local rec id out status runlog
   id=herdr-ready-timeout-z1
@@ -228,7 +238,11 @@ test_permanent_busy_pane_never_receives_treehouse_get() {
     "the readiness probe printf was never submitted to the pane"
   assert_no_grep "treehouse get" "$runlog" \
     "treehouse get was submitted into a pane whose shell never became ready - the exact race this barrier prevents"
-  pass "fm-spawn (herdr): a permanently busy pane fails the spawn and never receives treehouse get"
+  if jq -e --arg label "fm-$id" '.tabs[] | select(.label == $label)' \
+      "$FAKEBIN_DIR/../state.json" >/dev/null; then
+    fail "readiness failure left the flat task pane running without task metadata"
+  fi
+  pass "fm-spawn (herdr): a permanently busy pane fails before treehouse get and abort cleanup removes it"
 }
 
 # Error propagation is authoritative: the barrier's non-zero return becomes a
