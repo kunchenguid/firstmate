@@ -148,6 +148,20 @@ Captain, this also removes the second copy.') || rc=$?
   rc=0; out=$(fm_voice_text 'fix(bin): bound the scan. Captain, the second copy is gone too.') || rc=$?
   expect_code 1 "$rc" "an address after a sentence boundary was not refused"
 
+  rc=0; out=$(fm_voice_text 'fix(ci): Captain - fixed the scan') || rc=$?
+  expect_code 1 "$rc" "a spaced-dash address after a commit prefix was not refused"
+  assert_contains "$out" "captain-address-opening" "spaced-dash address named the wrong rule"
+
+  rc=0; out=$(fm_voice_text 'fix(ci): Captain. Fixed the scan') || rc=$?
+  expect_code 1 "$rc" "a period address after a commit prefix was not refused"
+
+  rc=0; out=$(fm_voice_text 'Captain - fixed the scan') || rc=$?
+  expect_code 1 "$rc" "a line-start spaced-dash address was not refused"
+  assert_contains "$out" "captain-address-line" "line-start spaced-dash address named the wrong rule"
+
+  rc=0; out=$(fm_voice_text 'Captain. Fixed the scan') || rc=$?
+  expect_code 1 "$rc" "a line-start period address was not refused"
+
   rc=0; out=$(fm_voice_text 'Ahoy captain, the branch is ready') || rc=$?
   expect_code 1 "$rc" "a greeting address was not refused"
   assert_contains "$out" "captain-address-greeting" "greeting address named the wrong rule"
@@ -172,11 +186,27 @@ Claude-Session: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=
   expect_code 1 "$rc" "a session trailer was not refused"
   assert_contains "$out" "internal-session-pointer" "session trailer named the wrong rule"
 
+  rc=0
+  out=$(fm_voice_text 'Codex-Session: https://example.invalid/internal-session') || rc=$?
+  expect_code 1 "$rc" "a runtime-prefixed session trailer was not refused"
+  assert_contains "$out" "matched: Codex-Session: https://" \
+    "refusal did not name the generalized trailer key"
+
+  rc=0
+  out=$(fm_voice_text 'Session-Link: https://example.invalid/internal-session') || rc=$?
+  expect_code 1 "$rc" "a suffixed session trailer was not refused"
+
   # The same pointer moved into prose, where the trailer rule cannot see it.
   rc=0
   out=$(fm_voice_text 'Context for reviewers: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
   expect_code 1 "$rc" "a session link in prose was not refused"
   assert_contains "$out" "internal-session-link" "session link named the wrong rule"
+
+  rc=0
+  out=$(fm_voice_text 'Context for reviewers: https://example.invalid/session-01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  expect_code 1 "$rc" "a non-vendor session path link was not refused"
+  assert_contains "$out" "session-01AJfonRT1YLcHJCJ2UYwc3J" \
+    "refusal did not name the generalized session path token"
 
   # An opaque id with no URL is still a pointer.
   rc=0
@@ -197,7 +227,10 @@ test_passes_ordinary_uses_of_the_word_session() {
     'feat(pi): start a fresh supervision branch for every main session' \
     'docs: explain how session start drains the wake queue' \
     'refs https://github.com/kunchenguid/firstmate/pull/3600' \
-    'fix(bin): rename create_session_id to match its record'
+    'fix(bin): rename create_session_id to match its record' \
+    'Discussion: https://example.invalid/internal-session' \
+    'Regression: https://example.invalid/internal-session' \
+    'refs https://example.invalid/docs?topic=session'
   do
     fm_voice_commit "$tmp/repo" "$message"
   done
@@ -352,6 +385,47 @@ SH
   pass "fails closed when the commit list cannot be enumerated"
 }
 
+test_fails_closed_when_the_scanner_errors() {
+  local tmp fakebin out rc=0
+  tmp=$(fm_test_tmproot fm-voice-grep-error)
+  fakebin=$(fm_fakebin "$tmp")
+  cat > "$fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+exit 2
+SH
+  chmod +x "$fakebin/grep"
+
+  out=$(printf 'fix(ci): Captain, hidden by scanner failure\n' | \
+    PATH="$fakebin:$PATH" "$GUARD" --text - 2>&1) || rc=$?
+  expect_code 3 "$rc" "a scanner error was reported as clean or as a match"$'\n'"$out"
+  assert_contains "$out" "scanner failed for rule captain-address-opening (grep exit 2)" \
+    "scanner error did not name the rule and failure"
+  pass "fails closed when the scanner errors"
+}
+
+test_fails_closed_when_a_commit_message_cannot_be_read() {
+  local tmp fakebin out rc=0
+  tmp=$(fm_test_tmproot fm-voice-message-error)
+  mkdir -p "$tmp/repo"
+  fakebin=$(fm_fakebin "$tmp")
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "rev-parse --is-inside-work-tree") printf 'true\n'; exit 0 ;;
+  "rev-parse --verify -q HEAD^{commit}") printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'; exit 0 ;;
+  "log -1 --format=%B deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") exit 128 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(cd "$tmp/repo" && PATH="$fakebin:$PATH" "$GUARD" --commit HEAD 2>&1) || rc=$?
+  expect_code 3 "$rc" "an unreadable commit message was skipped"$'\n'"$out"
+  assert_contains "$out" "cannot read commit message for deadbeefdead" \
+    "commit-message error did not name the unreadable commit"
+  pass "fails closed when a commit message cannot be read"
+}
+
 test_base_override_bounds_the_range() {
   local tmp out rc=0 base
   tmp=$(fm_test_tmproot fm-voice-base)
@@ -491,6 +565,8 @@ test_scans_only_unpublished_commits
 test_prefers_origin_main_over_an_ahead_local_main
 test_fails_closed_when_the_range_cannot_be_determined
 test_fails_closed_when_the_commit_list_is_unusable
+test_fails_closed_when_the_scanner_errors
+test_fails_closed_when_a_commit_message_cannot_be_read
 test_base_override_bounds_the_range
 test_explicit_range_and_commit_selectors
 test_text_mode_reads_a_pull_request_description
