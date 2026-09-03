@@ -2555,6 +2555,77 @@ EOF
   pass "supervision-reset safely aborts active work, rotates history, releases ownership, and re-anchors the next branch"
 }
 
+test_repeated_supervision_reset_before_the_next_wake_releases_the_absent_grant_vacuously() {
+  local repo home out status
+  repo="$TMP_ROOT/repeated-reset-root"
+  home="$TMP_ROOT/repeated-reset-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, commands, registryModels, mainEntries, mainSessionManager, notices, home }; })()`);
+const { fire, dispatch, settle, makeCtx, commands, registryModels, mainEntries, mainSessionManager, notices, home } = globalThis.__t;
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+
+registryModels.push({ provider: "anthropic", id: "main-model", api: "anthropic-messages" });
+fire("session_start", {}, makeCtx({ sessionManager: mainSessionManager }));
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+globalThis.__fmAbortAction = () => releasePrompt();
+if (!dispatch("signal: repeated reset probe").accepted) throw new Error("repeated-reset fixture was not accepted");
+await settle(() => globalThis.__fmSessions?.[0]?.isStreaming === true, "active branch prompt");
+if (!existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("repeated-reset fixture published no row grant");
+if (!existsSync(`${home}/state/.branch-eligible-owner`)) throw new Error("repeated-reset fixture activated no grant owner");
+mainEntries.push({ type: "message", message: { role: "assistant", content: "tail before the first reset" } });
+
+const command = commands.get("supervision-reset");
+if (!command) throw new Error("the supervision-reset command was not registered");
+const resetCompletions = () =>
+  notices.filter((notice) => notice.type === "info" && notice.message.includes("next supervision wake")).length;
+await command.handler("", makeCtx({ sessionManager: mainSessionManager }));
+if (resetCompletions() !== 1) throw new Error(`the first reset did not complete: ${JSON.stringify(notices)}`);
+if (existsSync(`${home}/state/.branch-eligible-rows`) || existsSync(`${home}/state/.branch-eligible-owner`)) {
+  throw new Error("the first reset left grant files behind");
+}
+
+mainEntries.push({ type: "message", message: { role: "assistant", content: "newer tail between resets" } });
+await command.handler("", makeCtx({ sessionManager: mainSessionManager }));
+if (notices.some((notice) => notice.type === "error")) {
+  throw new Error(`a repeated reset before any new wake failed: ${JSON.stringify(notices)}`);
+}
+if (resetCompletions() !== 2) throw new Error(`the repeated reset did not complete: ${JSON.stringify(notices)}`);
+if (existsSync(`${home}/state/.branch-eligible-rows`) || existsSync(`${home}/state/.branch-eligible-owner`)) {
+  throw new Error("the repeated reset left grant files behind");
+}
+if (existsSync(`${home}/state/.branch-session`)) throw new Error("the repeated reset recreated a session pointer");
+const cursor = JSON.parse(readFileSync(`${home}/state/.branch-mirror-cursor`, "utf8"));
+if (cursor.file !== `${home}/main.jsonl` || cursor.index !== mainEntries.length) {
+  throw new Error(`the repeated reset lost the mirror anchor: ${JSON.stringify(cursor)}`);
+}
+const archives = readdirSync(`${home}/state/branch-session`).filter((name) => name.includes(".reset-") && name.endsWith(".archived"));
+if (archives.length !== 1) throw new Error(`the repeated reset touched the archived history: ${JSON.stringify(archives)}`);
+
+writeFileSync(`${home}/state/.wake-queue`, "");
+delete globalThis.__fmAbortAction;
+globalThis.__fmPromptGate = new Promise(() => {});
+fire("turn_end", {}, makeCtx({ sessionManager: mainSessionManager }));
+if (!dispatch("signal: fresh work after repeated reset", undefined, undefined, undefined, 2).accepted) {
+  throw new Error("the wake after a repeated reset was not accepted");
+}
+await settle(() => globalThis.__fmSessions?.length === 2 && globalThis.__fmSessions[1].isStreaming === true, "fresh branch prompt");
+if (!existsSync(`${home}/state/.branch-eligible-rows`) || !existsSync(`${home}/state/.branch-eligible-owner`)) {
+  throw new Error("the fresh wake after a repeated reset did not acquire a row grant");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a repeated supervision reset before any new wake must release the absent grant vacuously and stay healthy: $out"
+  pass "a repeated supervision reset before any new wake releases the absent grant vacuously"
+}
+
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default() {
   local repo home out status
   repo="$TMP_ROOT/modelpin-root"
@@ -4282,6 +4353,7 @@ test_codex_branch_initializes_only_the_compat_package_before_prompting
 test_non_codex_branch_does_not_depend_on_the_compat_package
 test_codex_compat_package_failures_return_the_wake_to_main
 test_supervision_reset_aborts_rotates_and_reanchors_without_touching_main_or_feishu
+test_repeated_supervision_reset_before_the_next_wake_releases_the_absent_grant_vacuously
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
 test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch

@@ -1637,7 +1637,10 @@ ${context.command}
           staleBranch.session.dispose();
         }
         if (lockOwnership() !== "owned") throw new Error("this Pi session lost the Firstmate lock");
-        if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(resetGeneration))) {
+        if (
+          readLiveEligibleRows(state) !== null &&
+          !releaseEligibleRowsSnapshot(state, wakeGrantScript, String(resetGeneration))
+        ) {
           throw new Error("could not release the branch's wake-row grant");
         }
         if (!releaseBranchLeasesWhileOwned()) throw new Error("could not release branch task leases");
