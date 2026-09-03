@@ -206,8 +206,8 @@ test_bin_only_advance_never_restarts() {
   pass "T3b a bin/-only advance steers the secondmate instead of restarting it"
 }
 
-# --- T3c: an unverifiable runtime stays out of both action sets -------------
-test_unprovable_runtime_gets_no_action() {
+# --- T3c: an unverifiable runtime receives the fallback nudge ----------------
+test_unprovable_runtime_gets_fallback_nudge() {
   local w out
   w=$(new_world t3c)
   # zellij has no recovery-grade agent-state classifier, so no restart there can
@@ -218,8 +218,8 @@ test_unprovable_runtime_gets_no_action() {
   out=$(run_update "$w")
 
   assert_contains "$out" "restart-secondmates: none" "an unprovable runtime must stay out of the restart set"
-  assert_contains "$out" "nudge-secondmates: none" "a runtime without a positive alive state must not be steered"
-  pass "T3c an unverifiable secondmate stays out of both action sets"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "an unverifiable runtime must retain the fallback re-read nudge"
+  pass "T3c an unverifiable secondmate receives the fallback nudge"
 }
 
 # --- T3d: an already-stopped mate is left to startup recovery ---------------
@@ -442,7 +442,7 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_never_restarts
-test_unprovable_runtime_gets_no_action
+test_unprovable_runtime_gets_fallback_nudge
 test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_is_nudged
 test_dirty_secondmate_skipped

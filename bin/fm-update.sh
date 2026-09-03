@@ -95,25 +95,27 @@ remove_secondmate_action() {  # <id>
   FF_NUDGE_WINDOWS=$next
 }
 
-secondmate_agent_is_alive() {  # <id>
-  local id=$1 meta="$STATE/$1.meta" remote_host state
+secondmate_agent_may_be_alive() {  # <id>
+  local id=$1 meta="$STATE/$1.meta" remote_host state=unreadable
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     state=$("$SCRIPT_DIR/fm-on.sh" "$id" \
-      fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || return 1
-  else
-    fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+      fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state=unreadable
+  elif fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
     state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
-      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || return 1
+      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || state=unreadable
   fi
-  [ "$state" = alive ]
+  case "$state" in
+    dead|missing) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # Classify one advanced local secondmate. bin/fm-ff-lib.sh calls this for each
 # home that advanced with a changed instruction surface and a live endpoint.
 fm_ff_after_instruction_update() {  # <id> <home> <window> <instr>
   local id=$1 instr=$4
-  if ! secondmate_agent_is_alive "$id"; then
+  if ! secondmate_agent_may_be_alive "$id"; then
     remove_secondmate_action "$id"
     return 0
   fi
@@ -164,7 +166,7 @@ if [ -f "$SECONDMATES_MD" ]; then
               echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
             fi
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta" \
-              && secondmate_agent_is_alive "$id"; then
+              && secondmate_agent_may_be_alive "$id"; then
               if [ "$remote_instr_known" -eq 0 ]; then
                 FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
               elif [ -n "$remote_instr" ]; then
