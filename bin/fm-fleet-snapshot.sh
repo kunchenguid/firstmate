@@ -79,6 +79,10 @@
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
+# Large scalar and JSON payloads cross jq boundaries through input streams
+# instead of argv so fleet size cannot hit Linux's per-argument limit. Each JSON
+# payload is independently exact-one validated, and any producer failure stops
+# the snapshot instead of shifting or omitting fields.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -232,7 +236,7 @@ bool_json() {
 path_present_json() {  # <path>
   local present=0
   [ -e "$1" ] && present=1
-  jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
+  jq -n --rawfile path <(printf '%s' "$1") --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
 }
 
@@ -242,7 +246,7 @@ meta_value() {  # <meta-file> <key>
 
 last_nonempty_line() {  # <file>
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  awk '/[^[:space:]]/ { line=$0 } END { if (line != "") print line }' "$1"
 }
 
 # A local crew-state read is bounded so one slow child cannot extend this
@@ -276,7 +280,11 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
+  jq -n \
+    --rawfile raw <(printf '%s' "$raw") \
+    --rawfile state <(printf '%s' "$state") \
+    --rawfile source <(printf '%s' "$source") \
+    --rawfile detail <(printf '%s' "$detail") \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
@@ -284,22 +292,27 @@ status_event_json() {  # <status-log>
   local log=$1 present=0 raw='' verb='' note=''
   if [ -f "$log" ]; then
     present=1
-    raw=$(last_nonempty_line "$log" || true)
-    verb=$(status_line_verb "$raw")
-    note=$(status_line_note "$raw")
+    raw=$(last_nonempty_line "$log") || return 1
+    verb=$(status_line_verb "$raw") || return 1
+    note=$(status_line_note "$raw") || return 1
   fi
   jq -n \
-    --arg path "$log" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
+    --rawfile path <(printf '%s' "$log") \
+    --rawfile raw <(printf '%s' "$raw") \
+    --rawfile verb <(printf '%s' "$verb") \
+    --rawfile note <(printf '%s' "$note") \
     --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
 }
 
 first_pr_url_in_file() {  # <file>
-  [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
+  [ -f "$1" ] || return 0
+  awk '
+    match($0, /https?:\/\/[^[:space:])"]+\/pull\/[0-9]+/) {
+      print substr($0, RSTART, RLENGTH)
+      exit
+    }
+  ' "$1"
 }
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
@@ -462,8 +475,9 @@ task_json_lines() {
   local remote_host remote_root
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json task_row task_rows_file rc
 
+  task_rows_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -492,7 +506,8 @@ task_json_lines() {
     pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
+      pr_from_status=$(first_pr_url_in_file "$status_log") \
+        || { rm -f "$task_rows_file"; return 1; }
       pr=$pr_from_status
       pr_source=status_event
     fi
@@ -503,14 +518,20 @@ task_json_lines() {
     if [ -n "$remote_host" ]; then
       # Remote endpoint liveness belongs to supervision. The snapshot never
       # probes a persistent remote endpoint while assembling parent inventory.
-      current_json=$(jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}')
+      current_json=$(jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}') \
+        || { rm -f "$task_rows_file"; return 1; }
     else
-      current_json=$(crew_state_json "$id")
+      current_json=$(crew_state_json "$id") \
+        || { rm -f "$task_rows_file"; return 1; }
     fi
-    event_json=$(status_event_json "$status_log")
-    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    event_json=$(status_event_json "$status_log") \
+      || { rm -f "$task_rows_file"; return 1; }
+    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""') \
+      || { rm -f "$task_rows_file"; return 1; }
+    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""') \
+      || { rm -f "$task_rows_file"; return 1; }
+    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""') \
+      || { rm -f "$task_rows_file"; return 1; }
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -529,7 +550,8 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
+    open_decisions_tsv=$(status_open_decisions "$status_log") \
+      || { rm -f "$task_rows_file"; return 1; }
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
@@ -539,9 +561,11 @@ task_json_lines() {
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-        | select(. != null) ]')
-    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+        | select(. != null) ]') || { rm -f "$task_rows_file"; return 1; }
+    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end') \
+      || { rm -f "$task_rows_file"; return 1; }
+    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end') \
+      || { rm -f "$task_rows_file"; return 1; }
 
     endpoint_exists=null
     agent_alive=not_checked
@@ -561,50 +585,71 @@ task_json_lines() {
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
-    meta_json=$(path_present_json "$meta")
+    meta_json=$(path_present_json "$meta") \
+      || { rm -f "$task_rows_file"; return 1; }
     status_json=$event_json
-    report_json=$(path_present_json "$report_path")
-    if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
-    if [ -n "$home" ] && [ -n "$remote_host" ]; then
-      home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
-    elif [ -n "$home" ]; then
-      home_json=$(path_present_json "$home")
+    report_json=$(path_present_json "$report_path") \
+      || { rm -f "$task_rows_file"; return 1; }
+    if [ -n "$worktree" ]; then
+      worktree_json=$(path_present_json "$worktree") \
+        || { rm -f "$task_rows_file"; return 1; }
     else
-      home_json=$(jq -n '{path:null,present:false}')
+      worktree_json=$(jq -n '{path:null,present:false}') \
+        || { rm -f "$task_rows_file"; return 1; }
+    fi
+    if [ -n "$home" ] && [ -n "$remote_host" ]; then
+      home_json=$(jq -n --rawfile path <(printf '%s' "$home") '{path:$path,present:null}') \
+        || { rm -f "$task_rows_file"; return 1; }
+    elif [ -n "$home" ]; then
+      home_json=$(path_present_json "$home") \
+        || { rm -f "$task_rows_file"; return 1; }
+    else
+      home_json=$(jq -n '{path:null,present:false}') \
+        || { rm -f "$task_rows_file"; return 1; }
     fi
 
-    jq -n \
-      --arg id "$id" \
-      --arg kind "$kind" \
-      --arg harness "$harness" \
-      --arg mode "$mode" \
-      --arg yolo "$yolo" \
-      --arg project "$project" \
-      --arg worktree "$worktree" \
-      --arg home "$home" \
-      --arg projects "$projects" \
-      --arg spawn_gen "$spawn_gen" \
-      --arg backend "$backend" \
-      --arg target "$target" \
-      --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
-      --arg pr "$pr" \
-      --arg pr_source "$pr_source" \
-      --arg agent_alive "$agent_alive" \
-      --arg observed_at "$SNAPSHOT_NOW" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
-      --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
-      --argjson report "$report_json" \
-      --argjson worktree_path "$worktree_json" \
-      --argjson home_path "$home_json" \
+    task_row=$(jq -n \
+      --rawfile id <(printf '%s' "$id") \
+      --rawfile kind <(printf '%s' "$kind") \
+      --rawfile harness <(printf '%s' "$harness") \
+      --rawfile mode <(printf '%s' "$mode") \
+      --rawfile yolo <(printf '%s' "$yolo") \
+      --rawfile project <(printf '%s' "$project") \
+      --rawfile worktree <(printf '%s' "$worktree") \
+      --rawfile home <(printf '%s' "$home") \
+      --rawfile projects <(printf '%s' "$projects") \
+      --rawfile spawn_gen <(printf '%s' "$spawn_gen") \
+      --rawfile backend <(printf '%s' "$backend") \
+      --rawfile target <(printf '%s' "$target") \
+      --rawfile remote_host <(printf '%s' "$remote_host") \
+      --rawfile remote_root <(printf '%s' "$remote_root") \
+      --rawfile pr <(printf '%s' "$pr") \
+      --rawfile pr_source <(printf '%s' "$pr_source") \
+      --rawfile agent_alive <(printf '%s' "$agent_alive") \
+      --rawfile observed_at <(printf '%s' "$SNAPSHOT_NOW") \
+      --rawfile last_event_raw <(printf '%s' "$last_event_raw") \
+      --slurpfile current_state_payload <(printf '%s' "$current_json") \
+      --slurpfile meta_path_payload <(printf '%s' "$meta_json") \
+      --slurpfile status_log_payload <(printf '%s' "$status_json") \
+      --slurpfile report_payload <(printf '%s' "$report_json") \
+      --slurpfile worktree_path_payload <(printf '%s' "$worktree_json") \
+      --slurpfile home_path_payload <(printf '%s' "$home_json") \
       --argjson endpoint_exists "$endpoint_exists" \
-      --argjson open_decisions "$open_decisions_json" \
+      --slurpfile open_decisions_payload <(printf '%s' "$open_decisions_json") \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
-      '{
+      'def one($name; $payload):
+        if ($payload | length) == 1 then $payload[0]
+        else error("\($name) payload must contain exactly one JSON value") end;
+      one("current_state"; $current_state_payload) as $current_state
+      | one("meta_path"; $meta_path_payload) as $meta_path
+      | one("status_log"; $status_log_payload) as $status_log
+      | one("report"; $report_payload) as $report
+      | one("worktree_path"; $worktree_path_payload) as $worktree_path
+      | one("home_path"; $home_path_payload) as $home_path
+      | one("open_decisions"; $open_decisions_payload) as $open_decisions
+      | {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
@@ -646,8 +691,14 @@ task_json_lines() {
              steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
-      }'
-  done | jq -s 'sort_by(.id)'
+      }') || { rm -f "$task_rows_file"; return 1; }
+    printf '%s\n' "$task_row" >> "$task_rows_file" \
+      || { rm -f "$task_rows_file"; return 1; }
+  done
+  jq -s 'sort_by(.id)' "$task_rows_file"
+  rc=$?
+  rm -f "$task_rows_file"
+  return "$rc"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -656,9 +707,14 @@ task_json_lines() {
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
 main_inventory_json() {  # <backlog-json> <tasks-json>
   jq -n \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
-    ([ $backlog.records[]?
+    --slurpfile backlog_payload <(printf '%s' "$1") \
+    --slurpfile tasks_payload <(printf '%s' "$2") '
+    def one($name; $payload):
+      if ($payload | length) == 1 then $payload[0]
+      else error("\($name) payload must contain exactly one JSON value") end;
+    one("backlog"; $backlog_payload) as $backlog
+    | one("tasks"; $tasks_payload) as $tasks
+    | ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]?
          | select(.state == "in_flight" and .structured and .requires_child_metadata) ]) as $owned_in_flight
@@ -691,9 +747,14 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
-    def trunc($n):
+    --slurpfile backlog_payload <(printf '%s' "$1") \
+    --slurpfile tasks_payload <(printf '%s' "$2") '
+    def one($name; $payload):
+      if ($payload | length) == 1 then $payload[0]
+      else error("\($name) payload must contain exactly one JSON value") end;
+    one("backlog"; $backlog_payload) as $backlog
+    | one("tasks"; $tasks_payload) as $tasks
+    | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
     ([ $backlog.records[]?
@@ -1083,9 +1144,9 @@ JQ
     | select((.home | type) == "string" and (.home | startswith("/")) and (.home | test("[[:cntrl:]]") | not))') || return 1
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    id=$(printf '%s' "$row" | jq -r '.id')
-    home=$(printf '%s' "$row" | jq -r '.home')
-    host=$(printf '%s' "$row" | jq -r '.host')
+    id=$(printf '%s' "$row" | jq -r '.id') || return 1
+    home=$(printf '%s' "$row" | jq -r '.home') || return 1
+    host=$(printf '%s' "$row" | jq -r '.host') || return 1
     cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
     slot=$((slot + 1))
     jq -cn --arg id "$id" --arg home "$home" --arg cache "$cache_path" --argjson slot "$slot" \
@@ -1224,8 +1285,8 @@ bounded_parent_activities_json() {  # <status-file>
     else
       lines_in_window=0
     fi
-    records=$(printf "%s\n" "$window" | status_open_activities - \
-      | jq -R -s '[splits("\n") | select(length > 0)
+    activity_rows=$(_fm_status_open_activities_stream <<< "$window") || exit 3
+    records=$(printf "%s" "$activity_rows" | jq -R -s '[splits("\n") | select(length > 0)
           | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
           | select(. != null)]') || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
@@ -1269,16 +1330,16 @@ BASH
 
 terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradicts>
   local task=$1 note=$2 evidence_contradicts=$3 backend target exists expected out rc clean bytes lines seen=false contradiction=false reason='' remote_host
-  backend=$(printf '%s' "$task" | jq -r '.backend // ""')
-  target=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
-  exists=$(printf '%s' "$task" | jq -r '.endpoint.exists // "unknown"')
-  remote_host=$(printf '%s' "$task" | jq -r '.remote.host // ""')
+  backend=$(printf '%s' "$task" | jq -r '.backend // ""') || return 1
+  target=$(printf '%s' "$task" | jq -r '.endpoint.target // ""') || return 1
+  exists=$(printf '%s' "$task" | jq -r '.endpoint.exists // "unknown"') || return 1
+  remote_host=$(printf '%s' "$task" | jq -r '.remote.host // ""') || return 1
   if [ -n "$remote_host" ]; then
     jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "remote terminal evidence is not collected by the primary" \
       '{provenance:"remote-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
     return 0
   fi
-  expected=$(printf '%s' "$task" | jq -r '"fm-" + (.id // "")')
+  expected=$(printf '%s' "$task" | jq -r '"fm-" + (.id // "")') || return 1
   if [ -z "$target" ] || [ "$exists" = false ]; then
     [ "$exists" = false ] && reason="recorded endpoint is absent" || reason="no recorded endpoint"
     jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
@@ -1322,8 +1383,17 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
 }
 
 parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <decisions-json>
-  jq -n --argjson summary "$1" --argjson activities "$2" --argjson decisions "$3" '
-    def keyed: . != null and . != "" and . != "default";
+  jq -n \
+    --slurpfile summary_payload <(printf '%s' "$1") \
+    --slurpfile activities_payload <(printf '%s' "$2") \
+    --slurpfile decisions_payload <(printf '%s' "$3") '
+    def one($name; $payload):
+      if ($payload | length) == 1 then $payload[0]
+      else error("\($name) payload must contain exactly one JSON value") end;
+    one("summary"; $summary_payload) as $summary
+    | one("activities"; $activities_payload) as $activities
+    | one("decisions"; $decisions_payload) as $decisions
+    | def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
       $e + {
         verdict:(if ($e.key | keyed | not) then "inconclusive"
@@ -1384,12 +1454,19 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction terminal_has_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
-  union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
-    ($registry.records // []) as $registered
+  union=$(jq -n \
+    --slurpfile registry_payload <(printf '%s' "$registry") \
+    --slurpfile tasks_payload <(printf '%s' "$tasks") '
+    def one($name; $payload):
+      if ($payload | length) == 1 then $payload[0]
+      else error("\($name) payload must contain exactly one JSON value") end;
+    one("registry"; $registry_payload) as $registry
+    | one("tasks"; $tasks_payload) as $tasks
+    | ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
     | ([ $registered[] as $r
          | $r + {parent_task:([$tasks[] | select(.id == $r.id)][0] // null)} ]
@@ -1403,10 +1480,15 @@ secondmate_current_json() {  # <parent-tasks-json>
               parent_task:$t} ])
     | sort_by(.id)
     | {registry:$registry,records:.}') || return 1
-  total_registered=$(printf '%s' "$union" | jq '[.records[] | select(.registered)] | length')
-  total=$(printf '%s' "$union" | jq '.records | length')
-  rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
-  shown=$(printf '%s\n' "$rows" | grep -c . || true)
+  total_registered=$(printf '%s' "$union" | jq '[.records[] | select(.registered)] | length') || return 1
+  total=$(printf '%s' "$union" | jq '.records | length') || return 1
+  rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]') \
+    || return 1
+  if [ -n "$rows" ]; then
+    shown=$(printf '%s\n' "$rows" | grep -c .) || return 1
+  else
+    shown=0
+  fi
   truncated=$((total - shown))
   if [ -n "$rows" ]; then
     prepare_remote_summary_collection "$rows" || return 1
@@ -1414,20 +1496,20 @@ secondmate_current_json() {  # <parent-tasks-json>
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    id=$(printf '%s' "$row" | jq -r '.id')
-    home=$(printf '%s' "$row" | jq -r '.home // ""')
-    host=$(printf '%s' "$row" | jq -r '.host // ""')
-    remote=$(printf '%s' "$row" | jq -r '.remote // false')
-    registered=$(printf '%s' "$row" | jq -r '.registered')
-    registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
-    task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
-    sampled_spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""')
-    status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
-    event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
-    event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
-    activity_scan=$(bounded_parent_activities_json "$status_file")
-    activities=$(printf '%s' "$activity_scan" | jq -c '.records')
-    decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
+    id=$(printf '%s' "$row" | jq -r '.id') || return 1
+    home=$(printf '%s' "$row" | jq -r '.home // ""') || return 1
+    host=$(printf '%s' "$row" | jq -r '.host // ""') || return 1
+    remote=$(printf '%s' "$row" | jq -r '.remote // false') || return 1
+    registered=$(printf '%s' "$row" | jq -r '.registered') || return 1
+    registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""') || return 1
+    task=$(printf '%s' "$row" | jq -c '.parent_task // {}') || return 1
+    sampled_spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""') || return 1
+    status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""') || return 1
+    event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""') || return 1
+    event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""') || return 1
+    activity_scan=$(bounded_parent_activities_json "$status_file") || return 1
+    activities=$(printf '%s' "$activity_scan" | jq -c '.records') || return 1
+    decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []') || return 1
     event_epoch=$(file_mtime_epoch "$status_file")
     event_age=null
     if [ -n "$event_epoch" ]; then
@@ -1470,7 +1552,8 @@ secondmate_current_json() {  # <parent-tasks-json>
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
         cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
-        collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
+        collection_slot=$(jq -sr --arg id "$id" 'map(select(.id == $id) | .slot)[0] // empty' \
+          "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null) || return 1
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)
         if summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home"); then
           summary_source='remote-ledger'
@@ -1493,20 +1576,20 @@ secondmate_current_json() {  # <parent-tasks-json>
         reason="structured home ledger is missing, unreadable, or invalid"
       fi
       if [ -z "$reason" ]; then
-        summary_age=$(snapshot_summary_age "$summary")
-        summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
+        summary_age=$(snapshot_summary_age "$summary") || return 1
+        summary_observed=$(printf '%s' "$summary" | jq -r '.generated') || return 1
       fi
     fi
     # Failed command substitutions clear their assignment target. Keep the
-    # unsampled record's --argjson input valid without retaining any rejected
-    # or oversized summary fragment.
+    # unsampled record's JSON payload valid without retaining any rejected or
+    # oversized summary fragment.
     if [ -n "$reason" ]; then summary='{}'; fi
     if [ -z "$reason" ]; then
       summary_sampled=true
-      summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
+      summary_valid=$(printf '%s' "$summary" | jq -r '.valid') || return 1
       if [ "$summary_valid" != true ]; then
-        summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
-        summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
+        summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"') || return 1
+        summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"') || return 1
         case "$summary_invalidity" in
           child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
           *) reason="structured home state invalid: $summary_reason" ;;
@@ -1515,31 +1598,57 @@ secondmate_current_json() {  # <parent-tasks-json>
     fi
 
     if [ -z "$reason" ]; then
-      state=$(printf '%s' "$summary" | jq -r '.state')
+      state=$(printf '%s' "$summary" | jq -r '.state') || return 1
       current_reason=
       if [ "$summary_valid" != true ]; then
-        current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
+        current_reason="structured home state invalid: $summary_reason"
       fi
-      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
-      contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
-      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
-        any(.activities[]; .verdict == "contradicts" and .summary == $note)')
+      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions") || return 1
+      contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction') || return 1
+      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --rawfile note <(printf '%s' "$event_note") '
+        any(.activities[]; .verdict == "contradicts" and .summary == $note)') || return 1
       if [ "$terminal_contradiction" = true ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" true)
+        terminal=$(terminal_evidence_json "$task" "$event_note" true) || return 1
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
-          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
+          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}') || return 1
       fi
-      if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
+      terminal_has_contradiction=$(printf '%s' "$terminal" | jq -r '.contradiction == true') || return 1
+      if [ "$terminal_has_contradiction" = true ]; then contradiction=true; fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$summary_observed" \
-        --arg summary_source "$summary_source" --arg summary_freshness "$summary_freshness" --argjson summary_age "$summary_age" \
-        --arg spawn_gen "$sampled_spawn_gen" \
-        --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
-        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        --rawfile id <(printf '%s' "$id") \
+        --rawfile home <(printf '%s' "$home") \
+        --rawfile host <(printf '%s' "$host") \
+        --argjson remote "$remote" \
+        --rawfile state <(printf '%s' "$state") \
+        --rawfile current_reason <(printf '%s' "$current_reason") \
+        --rawfile observed <(printf '%s' "$summary_observed") \
+        --rawfile summary_source <(printf '%s' "$summary_source") \
+        --rawfile summary_freshness <(printf '%s' "$summary_freshness") \
+        --argjson summary_age "$summary_age" \
+        --rawfile spawn_gen <(printf '%s' "$sampled_spawn_gen") \
+        --argjson registered "$registered" \
+        --slurpfile summary_payload <(printf '%s' "$summary") \
+        --argjson summary_valid "$summary_valid" \
+        --slurpfile decisions_payload <(printf '%s' "$decisions") \
+        --slurpfile activities_payload <(printf '%s' "$activities") \
+        --slurpfile activity_scan_payload <(printf '%s' "$activity_scan") \
+        --slurpfile reconciliation_payload <(printf '%s' "$reconciliation") \
+        --slurpfile terminal_payload <(printf '%s' "$terminal") \
+        --argjson contradiction "$contradiction" \
+        --rawfile event_raw <(printf '%s' "$event_raw") \
+        --rawfile event_note <(printf '%s' "$event_note") \
+        --argjson event_age "$event_age" '
+        def one($name; $payload):
+          if ($payload | length) == 1 then $payload[0]
+          else error("\($name) payload must contain exactly one JSON value") end;
+        one("summary"; $summary_payload) as $summary
+        | one("decisions"; $decisions_payload) as $decisions
+        | one("activities"; $activities_payload) as $activities
+        | one("activity_scan"; $activity_scan_payload) as $activity_scan
+        | one("reconciliation"; $reconciliation_payload) as $reconciliation
+        | one("terminal"; $terminal_payload) as $terminal
+        | {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          reconcile_inventory:$summary.invalidity,
@@ -1550,7 +1659,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
-         terminal_evidence:$terminal,contradiction:$contradiction}')
+         terminal_evidence:$terminal,contradiction:$contradiction}') || return 1
     else
       if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
@@ -1560,18 +1669,40 @@ secondmate_current_json() {  # <parent-tasks-json>
         freshness=unknown
       fi
       if [ -n "$event_raw" ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" false)
+        terminal=$(terminal_evidence_json "$task" "$event_note" false) || return 1
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
-          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
+          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}') || return 1
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
-        --arg spawn_gen "$sampled_spawn_gen" \
-        --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" --argjson summary "$summary" --argjson summary_sampled "$summary_sampled" '
-        {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        --rawfile id <(printf '%s' "$id") \
+        --rawfile home <(printf '%s' "$home") \
+        --rawfile host <(printf '%s' "$host") \
+        --argjson remote "$remote" \
+        --rawfile reason <(printf '%s' "$reason") \
+        --rawfile observed <(printf '%s' "$SNAPSHOT_NOW") \
+        --rawfile spawn_gen <(printf '%s' "$sampled_spawn_gen") \
+        --rawfile provenance <(printf '%s' "$provenance") \
+        --rawfile freshness <(printf '%s' "$freshness") \
+        --rawfile event_raw <(printf '%s' "$event_raw") \
+        --rawfile event_note <(printf '%s' "$event_note") \
+        --argjson registered "$registered" \
+        --argjson event_age "$event_age" \
+        --slurpfile activities_payload <(printf '%s' "$activities") \
+        --slurpfile activity_scan_payload <(printf '%s' "$activity_scan") \
+        --slurpfile decisions_payload <(printf '%s' "$decisions") \
+        --slurpfile terminal_payload <(printf '%s' "$terminal") \
+        --slurpfile summary_payload <(printf '%s' "$summary") \
+        --argjson summary_sampled "$summary_sampled" '
+        def one($name; $payload):
+          if ($payload | length) == 1 then $payload[0]
+          else error("\($name) payload must contain exactly one JSON value") end;
+        one("activities"; $activities_payload) as $activities
+        | one("activity_scan"; $activity_scan_payload) as $activity_scan
+        | one("decisions"; $decisions_payload) as $decisions
+        | one("terminal"; $terminal_payload) as $terminal
+        | one("summary"; $summary_payload) as $summary
+        | {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
          current:{state:"unknown",reason:$reason},invalidity:null,
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
@@ -1579,26 +1710,37 @@ secondmate_current_json() {  # <parent-tasks-json>
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
-         terminal_evidence:$terminal,contradiction:false}')
+         terminal_evidence:$terminal,contradiction:false}') || return 1
     fi
-    records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')
+    records=$(jq -n \
+      --slurpfile records_payload <(printf '%s' "$records") \
+      --slurpfile record_payload <(printf '%s' "$record") '
+      def one($name; $payload):
+        if ($payload | length) == 1 then $payload[0]
+        else error("\($name) payload must contain exactly one JSON value") end;
+      one("records"; $records_payload) + [one("record"; $record_payload)]') || return 1
   done <<EOF
 $rows
 EOF
   snapshot_collection_cleanup
   jq -n \
-    --argjson registry "$(printf '%s' "$union" | jq '.registry')" \
-    --argjson records "$records" \
+    --slurpfile registry_payload <(printf '%s' "$union" | jq '.registry') \
+    --slurpfile records_payload <(printf '%s' "$records") \
     --argjson total_registered "$total_registered" \
     --argjson total "$total" \
     --argjson shown "$shown" \
-    --argjson truncated "$truncated" \
-    '{registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
+    --argjson truncated "$truncated" '
+    def one($name; $payload):
+      if ($payload | length) == 1 then $payload[0]
+      else error("\($name) payload must contain exactly one JSON value") end;
+    {registry:one("registry"; $registry_payload),records:one("records"; $records_payload),
+     total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
 }
 
 secondmate_landed_from_current_json() {  # <secondmate-current-json>
-  jq -n --argjson current "$1" '
-    {records:[ $current.records[]
+  printf '%s\n' "$1" | jq '
+    . as $current
+    | {records:[ $current.records[]
       | select(.provenance.selected == "structured-home") as $mate
       | $mate.landed[]
       | . + {home:$mate.home,home_id:$mate.id}],
@@ -1615,18 +1757,31 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
 }
 
 scout_report_lines() {
-  local report id
+  local report id row paths_file rows_file rc
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
   fi
-  LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
-    | sort \
-    | while IFS= read -r report; do
-      id=$(basename "$(dirname "$report")")
-      jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}'
-    done \
-    | jq -s 'sort_by(.id)'
+  paths_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-fleet-scout-paths.XXXXXX") || return 1
+  rows_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-fleet-scout-rows.XXXXXX") \
+    || { rm -f "$paths_file"; return 1; }
+  LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print > "$paths_file" \
+    || { rm -f "$paths_file" "$rows_file"; return 1; }
+  LC_ALL=C sort -o "$paths_file" "$paths_file" \
+    || { rm -f "$paths_file" "$rows_file"; return 1; }
+  rc=0
+  while IFS= read -r report; do
+    id=$(basename "$(dirname "$report")") || { rc=1; break; }
+    row=$(jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}') \
+      || { rc=1; break; }
+    printf '%s\n' "$row" >> "$rows_file" || { rc=1; break; }
+  done < "$paths_file"
+  if [ "$rc" -eq 0 ]; then
+    jq -s 'sort_by(.id)' "$rows_file"
+    rc=$?
+  fi
+  rm -f "$paths_file" "$rows_file"
+  return "$rc"
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
@@ -1638,7 +1793,8 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   exit 0
 fi
 
-SCOUT_REPORTS_JSON=$(scout_report_lines)
+SCOUT_REPORTS_JSON=$(scout_report_lines) \
+  || { echo "fm-fleet-snapshot: scout report snapshot failed" >&2; exit 1; }
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
@@ -1654,13 +1810,22 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --argjson backlog "$BACKLOG_JSON" \
-  --argjson tasks "$TASKS_JSON" \
-  --argjson main_inventory "$MAIN_INVENTORY_JSON" \
-  --argjson scout_reports "$SCOUT_REPORTS_JSON" \
-  --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
-  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
-  'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+  --slurpfile backlog_payload <(printf '%s' "$BACKLOG_JSON") \
+  --slurpfile tasks_payload <(printf '%s' "$TASKS_JSON") \
+  --slurpfile main_inventory_payload <(printf '%s' "$MAIN_INVENTORY_JSON") \
+  --slurpfile scout_reports_payload <(printf '%s' "$SCOUT_REPORTS_JSON") \
+  --slurpfile secondmate_current_payload <(printf '%s' "$SECONDMATE_CURRENT_JSON") \
+  --slurpfile secondmate_landed_payload <(printf '%s' "$SECONDMATE_LANDED_JSON") \
+  'def one($name; $payload):
+     if ($payload | length) == 1 then $payload[0]
+     else error("\($name) payload must contain exactly one JSON value") end;
+   one("backlog"; $backlog_payload) as $backlog
+   | one("tasks"; $tasks_payload) as $tasks
+   | one("main_inventory"; $main_inventory_payload) as $main_inventory
+   | one("scout_reports"; $scout_reports_payload) as $scout_reports
+   | one("secondmate_current"; $secondmate_current_payload) as $secondmate_current
+   | one("secondmate_landed"; $secondmate_landed_payload) as $secondmate_landed
+   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
    {

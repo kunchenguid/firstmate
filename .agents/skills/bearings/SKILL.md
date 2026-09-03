@@ -40,6 +40,9 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    The default performs bounded concurrent remote-ledger reads for registered remote homes under one shared snapshot budget and may refresh the parent-side cache.
    Only pass `--include-prs` when the captain asks for live GitHub PR enrichment.
+   Treat only snapshot `landed` rows as landing evidence.
+   Keep a terminal ship with no such row under Underway as `awaiting_landing`, using its supplied source-attributed detail and merge-state clause without upgrading terminal worker state into a landing claim.
+   A live PR may affect that task only when the snapshot matched it through the task's own durable PR record; use the snapshot's `merge_ready` verdict rather than recombining raw review, checks, and mergeability fields.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`); every due, unblocked captain-held task appears under `decisions_open`, whatever its kind.
@@ -138,9 +141,11 @@ Rules that keep the contract unambiguous:
 - Every section ALWAYS renders, even when empty, with its short empty-state sentence; never omit a section.
 - Every chat digest and file-mode report is a complete current snapshot, never a delta against a prior report.
 - Recently Landed always renders the bounded current baseline, even when the same completions appeared in an earlier report.
-- The four buckets are mutually exclusive per item: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
+- The four buckets are mutually exclusive per item: needs-your-action is Captain's Call, a snapshot `landed` row is Recently Landed, self-progressing work and terminal work still awaiting verified landing are Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
 - A secondmate home can contribute to more than one section at once. Each active child is an Underway row regardless of the home-level `bearings_state`, while that same home's due captain hold is Captain's Call and its queued or external holds stay Charted Next. Do not hide active children because the home also has an open captain hold.
-- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
+- The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a terminal ship whose landing is unverified, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
+- Under live PR enrichment, only a `candidate_prs` row carrying `durable_task_match: true` and `merge_ready: true` promotes that PR to Captain's Call; use its `durable_task_id` as the task identity, and keep an approved and green but conflicting or unknown-mergeability PR Underway for repair.
+- A snapshot `landed` row outranks a leftover live-state claim and remains Recently Landed with the contradiction disclosed, while a verified open PR outranks a contradictory main Done row and keeps the item Underway as `awaiting_landing`.
 - A secondmate's own home-level row is not an Underway unit: `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown` or its `invalidity` reports an inventory mismatch.
 - Include the required direct address to the captain inside one item or empty-state sentence.

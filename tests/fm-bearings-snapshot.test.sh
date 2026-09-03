@@ -32,6 +32,18 @@ make_fakebin() {  # <dir>
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ] && [ -n "${FAKE_NM_TERMINAL_BRANCH:-}" ]; then
+  cat <<EOF
+run:
+  id: "01BEARINGS"
+  branch: $FAKE_NM_TERMINAL_BRANCH
+  status: completed
+  head: "$FAKE_NM_TERMINAL_HEAD"
+  pr: "https://github.com/kunchenguid/firstmate/pull/9"
+  findings: none
+outcome: ${FAKE_NM_OUTCOME:-passed}
+EOF
+fi
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -58,8 +70,15 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
-cat <<'JSON'
-[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
+if [ "${FAKE_GH_REPO_AWARE:-0}" = 1 ]; then
+  case "$*" in
+    *'--repo acme/queried'*) printf '%s\n' '[]' ;;
+    *) exit 91 ;;
+  esac
+  exit 0
+fi
+cat <<JSON
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"${FAKE_GH_REVIEW:-APPROVED}","mergeable":"${FAKE_GH_MERGEABLE:-MERGEABLE}","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
 SH
   cat > "$fb/gh-axi" <<'SH'
@@ -406,7 +425,7 @@ SH
 }
 
 test_parent_activity_evidence_is_bounded_and_disclosed() {
-  local home mate fakebin canonical json i
+  local home mate fakebin canonical json i real_jq out rc
   home=$(make_home bounded-parent-activity)
   mate="$TMP_ROOT/bounded-parent-activity-home"
   write_domain_alpha_fixture "$home" "$mate"
@@ -435,7 +454,36 @@ test_parent_activity_evidence_is_bounded_and_disclosed() {
   printf '%s' "$json" | jq -e '
     .omitted | any(.surface == "secondmate parent activity evidence truncated for 1 record(s)")
   ' >/dev/null || fail "bearings did not disclose bounded parent activity evidence: $json"
-  pass "parent activity evidence is bounded and disclosed"
+
+  real_jq=$(command -v jq)
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "${PARENT_PAYLOAD_FAULT:-}" in
+  activity) case "$last" in *'[splits("\n")'*) exit 9 ;; esac ;;
+  row) [ "$last" = '.home // ""' ] && exit 9 ;;
+esac
+exec "$REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  canonical=$(REAL_JQ="$real_jq" PARENT_PAYLOAD_FAULT=activity \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | "$real_jq" -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .parent_event.activity_scan.available == false
+      and .parent_event.activity_scan.reasons == ["read_failed"]
+  ' >/dev/null || fail "parent activity producer failure was not explicitly unavailable: $canonical"
+
+  rc=0
+  out=$(REAL_JQ="$real_jq" PARENT_PAYLOAD_FAULT=row \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "secondmate row extraction failure emitted a successful snapshot: $out"
+  assert_contains "$out" "fm-fleet-snapshot: registered secondmate aggregation failed" \
+    "secondmate row extraction failure lacked a boundary diagnostic"
+  case "$out" in *'"schema": "fm-fleet-snapshot.v1"'*) fail "secondmate row failure emitted a partial snapshot: $out" ;; esac
+  pass "parent activity failures disclose unavailability and row failures fail closed"
 }
 
 test_active_child_overrides_old_parent_event() {
@@ -1009,6 +1057,409 @@ EOF
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
 }
 
+setup_terminal_ship_home() {  # <name>
+  local wt
+  TS_HOME=$(make_home "$1")
+  wt="$TS_HOME/projects/terminal-ship"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -qb fm/terminal-ship
+  TS_HEAD=$(git -C "$wt" rev-parse HEAD)
+  cat > "$TS_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] terminal-ship - Terminal validation is not landing (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  : > "$TS_HOME/data/secondmates.md"
+  fm_write_meta "$TS_HOME/state/terminal-ship.meta" \
+    "window=firstmate:fm-terminal-ship" \
+    "worktree=$wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  printf 'done: PR 9 updated\n' > "$TS_HOME/state/terminal-ship.status"
+  TS_FAKEBIN=$(make_fakebin "$TS_HOME")
+  : > "$TS_HOME/net.log"
+}
+
+test_terminal_ship_keeps_merge_state_unverified_without_landing_evidence() {
+  local canonical json live
+  setup_terminal_ship_home terminal-ship-unverified
+  canonical=$(FAKE_NM_TERMINAL_BRANCH=fm/terminal-ship FAKE_NM_TERMINAL_HEAD="$TS_HEAD" \
+    PATH="$TS_FAKEBIN:$PATH" FM_HOME="$TS_HOME" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$TS_HOME/net.log" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .tasks | any(.[]; .id == "terminal-ship"
+      and .current_state.state == "done"
+      and .current_state.source == "run-step"
+      and .current_state.detail == "run passed: PR merged/closed")
+  ' >/dev/null || fail "fixture did not reproduce the terminal run-step path: $canonical"
+
+  json=$(FAKE_NM_TERMINAL_BRANCH=fm/terminal-ship FAKE_NM_TERMINAL_HEAD="$TS_HEAD" \
+    run "$TS_HOME" "$TS_FAKEBIN" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.[]; .id == "terminal-ship"
+      and .state == "awaiting_landing"
+      and .doing == "Final working state reached (run reported: run passed: PR merged/closed); merge state not verified"))
+      and (.landed | any(.[]; .id == "terminal-ship") | not)
+  ' >/dev/null || fail "terminal work was reported as landed or lost its source detail: $json"
+  [ ! -s "$TS_HOME/net.log" ] || fail "terminal-state safeguard made a network call: $(cat "$TS_HOME/net.log")"
+
+  live=$(FAKE_NM_TERMINAL_BRANCH=fm/terminal-ship FAKE_NM_TERMINAL_HEAD="$TS_HEAD" \
+    run "$TS_HOME" "$TS_FAKEBIN" --include-prs --json)
+  printf '%s' "$live" | jq -e '
+    (.in_flight | any(.[]; .id == "terminal-ship"
+      and .state == "awaiting_landing"
+      and (.doing | endswith("; PR open, checks passing, mergeable MERGEABLE; not merged"))))
+      and (.candidate_prs | any(.[]; .url == "https://github.com/kunchenguid/firstmate/pull/9"
+        and .merge_ready == true and .durable_task_match == true
+        and .durable_task_id == "terminal-ship"))
+  ' >/dev/null || fail "live PR evidence did not report the recorded open PR honestly: $live"
+  pass "terminal ship state stays unlanded while retaining source detail and exact live PR evidence"
+}
+
+test_live_pr_merge_state_requires_durable_provenance_and_mergeability() {
+  local home fakebin json doing
+  setup_terminal_ship_home terminal-ship-conflicting
+  json=$(FAKE_GH_MERGEABLE=CONFLICTING \
+    FAKE_NM_TERMINAL_BRANCH=fm/terminal-ship FAKE_NM_TERMINAL_HEAD="$TS_HEAD" \
+    run "$TS_HOME" "$TS_FAKEBIN" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.candidate_prs | any(.[]; .url == "https://github.com/kunchenguid/firstmate/pull/9"
+      and .review == "APPROVED" and .checks == "passing"
+      and .mergeable == "CONFLICTING" and .merge_ready == false))
+      and (.in_flight | any(.[]; .id == "terminal-ship"
+        and .state == "awaiting_landing"
+        and (.doing | endswith("; PR open, checks passing, mergeable CONFLICTING; not merged"))))
+  ' >/dev/null || fail "a conflicting PR was reported merge-ready: $json"
+
+  home=$(make_home status-only-pr)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] status-only - Terminal task without a recorded PR (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/wt"
+  fm_write_meta "$home/state/status-only.meta" \
+    "window=firstmate:fm-status-only" "worktree=$home/projects/wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=manual"
+  record_claude_state "$home/state" status-only idle
+  printf 'done: review ready; see https://github.com/kunchenguid/firstmate/pull/9 for context\n' \
+    > "$home/state/status-only.status"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  doing=$(printf '%s' "$json" | jq -r '.in_flight[] | select(.id == "status-only") | .doing')
+  [ "${doing%; merge state not verified}" != "$doing" ] \
+    || fail "status-only PR task did not keep merge state unverified: $doing"
+  case "$doing" in *"PR open"*) fail "status-only PR text coloured merge state: $doing" ;; esac
+  printf '%s' "$json" | jq -e '(.recorded_prs | length) == 0' >/dev/null \
+    || fail "status text was promoted into a durable PR record: $json"
+  pass "live PR evidence requires both durable task provenance and a mergeable PR"
+}
+
+test_merge_ready_candidate_keeps_uncapped_durable_task_proof() {
+  local home fakebin json i id
+  home=$(make_home uncapped-pr-proof)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] z-captain-call - Merge-ready candidate beyond the display cap (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  i=1
+  while [ "$i" -le 20 ]; do
+    id=$(printf 'a-recorded-%02d' "$i")
+    fm_write_meta "$home/state/$id.meta" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=manual" \
+      "pr=https://github.com/kunchenguid/firstmate/pull/$((100 + i))"
+    i=$((i + 1))
+  done
+  fm_write_meta "$home/state/z-captain-call.meta" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=manual" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.recorded_prs | length) == 20
+      and (.recorded_prs | any(.url == "https://github.com/kunchenguid/firstmate/pull/9") | not)
+      and (.candidate_prs | any(.[];
+        .url == "https://github.com/kunchenguid/firstmate/pull/9"
+        and .merge_ready == true
+        and .durable_task_match == true
+        and .durable_task_id == "z-captain-call"))
+  ' >/dev/null || fail "display cap hid the candidate's durable Captain's Call proof: $json"
+  pass "merge-ready candidates retain durable Captain's Call proof beyond display caps"
+}
+
+test_verified_open_pr_outranks_a_contradictory_done_row() {
+  local home fakebin json
+  home=$(make_home pr-over-done)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] pr-open-ship - Claimed landed https://github.com/kunchenguid/firstmate/pull/9 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+- [x] done-live - Structured Done row with a stale live child (repo: firstmate) (kind: ship) (merged 2026-07-09)
+- [x] done-captain - Completed captain-held task with stale metadata (repo: firstmate) (kind: captain) (hold: old captain choice) (hold-kind: captain) (merged 2026-07-08)
+EOF
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/wt"
+  fm_write_meta "$home/state/pr-open-ship.meta" \
+    "worktree=$home/projects/wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=manual" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  printf 'done: merged\n' > "$home/state/pr-open-ship.status"
+  fm_write_meta "$home/state/done-live.meta" \
+    "window=firstmate:fm-done-live" "worktree=$home/projects/wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=manual"
+  record_claude_state "$home/state" done-live busy
+  printf 'working: stale child still claims work\n' > "$home/state/done-live.status"
+  fm_write_meta "$home/state/done-captain.meta" \
+    "window=firstmate:fm-done-captain" "worktree=$home/projects/wt" "project=firstmate" \
+    "harness=claude" "kind=captain" "mode=manual"
+  record_claude_state "$home/state" done-captain busy
+  printf 'working: stale captain task still claims work\n' > "$home/state/done-captain.status"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.[]; .id == "pr-open-ship"))
+      and (.landed | any(.[]; .id == "done-live"))
+      and (.landed | any(.[]; .id == "done-captain") | not)
+      and (.in_flight | any(.[]; .id == "pr-open-ship" or .id == "done-live" or .id == "done-captain") | not)
+      and (.omitted | any(.[]; .surface
+        == "main Done backlog row(s) contradicted by a live child state: 3 (done-captain=working, done-live=working, pr-open-ship=unknown)"))
+  ' >/dev/null || fail "structured Done rows did not outrank weaker live-state claims: $json"
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.[]; .id == "pr-open-ship") | not)
+      and (.landed | any(.[]; .id == "done-live"))
+      and (.landed | any(.[]; .id == "done-captain") | not)
+      and (.in_flight | any(.[]; .id == "done-live" or .id == "done-captain") | not)
+      and (.in_flight | any(.[]; .id == "pr-open-ship"
+        and .state == "awaiting_landing"
+        and .doing == "Worker state unknown (no backend target recorded); PR open, checks passing, mergeable MERGEABLE; not merged"))
+      and (.omitted | any(.[]; .surface
+        == "main Done backlog row(s) contradicted by a verified open PR: 1 (pr-open-ship)"))
+  ' >/dev/null || fail "verified open PR evidence did not outrank the contradictory Done row: $json"
+  pass "Done rows stay exclusive unless a verified open PR supplies stronger evidence"
+}
+
+test_bulk_payloads_bypass_exec_argument_limit() {
+  local home fakebin canonical summary bearings padding i backlog_bytes project_bytes registry_bytes
+  home=$(make_home bulk-payloads)
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+  padding=$(printf '%0120d' 0 | tr '0' x)
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 1800 ]; do
+      printf -- '- [ ] bulk-%04d - Bulk queue item %04d %s (repo: firstmate) (kind: ship)\n' \
+        "$i" "$i" "$padding"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  {
+    printf 'kind=ship\nbackend=tmux\nproject='
+    LC_ALL=C head -c 262144 /dev/zero | tr '\0' x
+    printf '\n'
+  } > "$home/state/bulk-task.meta"
+  {
+    i=1
+    while [ "$i" -le 1800 ]; do
+      printf -- '- mate-%04d - fixture (home: %s/mates/domain-with-a-deliberately-long-name-for-argument-limit-coverage/mate-%04d; scope: fixture; projects: firstmate; added 2026-08-26)\n' \
+        "$i" "$home" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/secondmates.md"
+  backlog_bytes=$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')
+  project_bytes=$(LC_ALL=C tail -n 1 "$home/state/bulk-task.meta" | cut -d= -f2- | wc -c | tr -d ' ')
+  registry_bytes=$(LC_ALL=C wc -c < "$home/data/secondmates.md" | tr -d ' ')
+  [ "$backlog_bytes" -gt 262144 ] || fail "bulk backlog fixture did not exceed 256 KB: $backlog_bytes"
+  [ "$project_bytes" -gt 262144 ] || fail "bulk task fixture did not exceed 256 KB: $project_bytes"
+  [ "$registry_bytes" -gt 262144 ] || fail "bulk registry fixture did not exceed 256 KB: $registry_bytes"
+
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+    FM_SNAPSHOT_NOW=2026-08-26T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1787702400 \
+    FM_SNAPSHOT_REGISTRY_BYTES=500000 FM_SNAPSHOT_REGISTRY_LINES=3000 \
+    FM_SNAPSHOT_REGISTRY_RECORDS=3000 FM_SNAPSHOT_SECONDMATES=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "canonical snapshot rejected bulk payloads"
+  printf '%s' "$canonical" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 1800
+      and (.tasks | length) == 1
+      and (.tasks[0].project | length) == 262144
+      and .secondmate_current.total_registered == 1800
+  ' >/dev/null || fail "canonical snapshot lost bulk payload data"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+    FM_SNAPSHOT_NOW=2026-08-26T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1787702400 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate summary rejected bulk payloads"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .counts.queued == 1800
+      and .counts.endpoints == 1
+  ' >/dev/null || fail "secondmate summary lost bulk payload data"
+
+  bearings=$(FM_SNAPSHOT_REGISTRY_BYTES=500000 FM_SNAPSHOT_REGISTRY_LINES=3000 \
+    FM_SNAPSHOT_REGISTRY_RECORDS=3000 FM_SNAPSHOT_SECONDMATES=1 \
+    run "$home" "$fakebin" --json) || fail "bearings snapshot rejected bulk payloads"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+    || fail "bearings snapshot did not preserve its JSON contract for bulk payloads"
+  [ ! -s "$home/net.log" ] || fail "bulk local snapshot made a network call: $(cat "$home/net.log")"
+  pass "bulk backlog, task, and registry payloads bypass the exec argument limit"
+}
+
+test_empty_snapshot_producer_fails_loudly_without_payload_shift() {
+  local home fakebin real_jq real_find mode out rc
+  home=$(make_home empty-payload-failure)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/data/scout-fault"
+  printf '# Report\n' > "$home/data/scout-fault/report.md"
+  fakebin=$(make_fakebin "$home")
+  real_jq=$(command -v jq)
+  real_find=$(command -v find)
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "${SCOUT_FAULT:-}" = final ] && [ "$#" -eq 3 ] && [ "$1" = -s ] \
+  && [ "$2" = 'sort_by(.id)' ]; then
+  case "$3" in */fm-fleet-scout-rows.*) exit 0 ;; esac
+fi
+if [ "${SCOUT_FAULT:-}" = row ] && [ "$last" = '{id:$id,path:$path}' ]; then
+  exit 9
+fi
+exec "$REAL_JQ" "$@"
+SH
+  cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+if [ "${SCOUT_FAULT:-}" = find ]; then
+  printf '%s\n' "$SCOUT_PARTIAL_REPORT"
+  exit 9
+fi
+exec "$REAL_FIND" "$@"
+SH
+  chmod +x "$fakebin/jq" "$fakebin/find"
+  : > "$home/net.log"
+  for mode in final row find; do
+    rc=0
+    out=$(REAL_JQ="$real_jq" REAL_FIND="$real_find" SCOUT_FAULT="$mode" \
+      SCOUT_PARTIAL_REPORT="$home/data/scout-fault/report.md" \
+      PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode scout-report failure emitted a successful snapshot: $out"
+    if [ "$mode" = final ]; then
+      assert_contains "$out" "scout_reports payload must contain exactly one JSON value" \
+        "empty final producer must fail at its independent binding"
+    else
+      assert_contains "$out" "fm-fleet-snapshot: scout report snapshot failed" \
+        "$mode scout producer failure did not reach the executable boundary"
+    fi
+    case "$out" in *'"schema": "fm-fleet-snapshot.v1"'*) fail "$mode scout failure emitted a partial snapshot: $out" ;; esac
+  done
+  pass "scout discovery, row, and final failures cannot emit partial snapshots"
+}
+
+test_invalid_task_payloads_fail_without_omitting_the_task() {
+  local home fakebin real_jq real_awk mode out rc
+  home=$(make_home invalid-task-payload)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] payload-task - Task payload validation fixture (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/payload-task.meta" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=manual"
+  fakebin=$(make_fakebin "$home")
+  real_jq=$(command -v jq)
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = '{path:$path,present:$present}' ]; then
+  case "${TASK_PAYLOAD_FAULT:-}" in
+    empty) exit 0 ;;
+    malformed) printf '{malformed\n'; exit 0 ;;
+  esac
+fi
+exec "$REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  : > "$home/net.log"
+
+  for mode in empty malformed; do
+    rc=0
+    out=$(REAL_JQ="$real_jq" TASK_PAYLOAD_FAULT="$mode" \
+      PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode task payload silently omitted its task: $out"
+    assert_contains "$out" "fm-fleet-snapshot: task snapshot failed" \
+      "$mode task payload did not fail at the task boundary"
+    case "$out" in *'"schema": "fm-fleet-snapshot.v1"'*) fail "$mode task payload emitted a snapshot: $out" ;; esac
+  done
+
+  real_awk=$(command -v awk)
+  cat > "$fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+case "${TASK_READER_FAULT:-}" in
+  pr) case "$*" in *'match($0'*) exit 9 ;; esac ;;
+  status) case "$*" in *'/[^[:space:]]/'*) exit 9 ;; esac ;;
+esac
+exec "$REAL_AWK" "$@"
+SH
+  chmod +x "$fakebin/awk"
+  printf 'done: https://github.com/kunchenguid/firstmate/pull/91\n' > "$home/state/payload-task.status"
+  for mode in pr status; do
+    if [ "$mode" = status ]; then
+      fm_write_meta "$home/state/payload-task.meta" \
+        "project=firstmate" "harness=claude" "kind=ship" "mode=manual" \
+        "pr=https://github.com/kunchenguid/firstmate/pull/91"
+    else
+      fm_write_meta "$home/state/payload-task.meta" \
+        "project=firstmate" "harness=claude" "kind=ship" "mode=manual"
+    fi
+    rc=0
+    out=$(REAL_JQ="$real_jq" REAL_AWK="$real_awk" TASK_READER_FAULT="$mode" \
+      PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode reader failure emitted a successful snapshot: $out"
+    assert_contains "$out" "fm-fleet-snapshot: task snapshot failed" \
+      "$mode reader failure did not reach the task boundary"
+    case "$out" in *'"schema": "fm-fleet-snapshot.v1"'*) fail "$mode reader failure emitted a partial snapshot: $out" ;; esac
+  done
+  pass "task payload and evidence-reader failures cannot omit task state"
+}
+
 test_default_is_bounded_and_local_only() {
   local home fakebin toon json backlog
   home=$(make_home bounded); write_fixture "$home"
@@ -1289,6 +1740,53 @@ test_per_repository_pr_cap_is_disclosed() {
   pass "per-repository open-PR caps are disclosed with an expansion knob"
 }
 
+test_pr_discovery_caps_cannot_turn_unknown_done_rows_into_landings() {
+  local home fakebin json
+  home=$(make_home pr-cap-done-safety)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] row-capped - Open PR beyond its repository result cap (repo: sample) (kind: ship) (merged 2026-07-10)
+- [x] repo-complete - Landed task in a fully queried repository (repo: sample) (kind: ship) (merged 2026-07-09)
+- [x] repo-omitted - PR state hidden by the repository cap (repo: sample) (kind: ship) (merged 2026-07-08)
+EOF
+  : > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/row-capped.meta" \
+    "project=sample" "harness=claude" "kind=ship" "mode=manual" \
+    "pr=https://github.com/acme/repo/pull/3"
+  fm_write_meta "$home/state/repo-complete.meta" \
+    "project=sample" "harness=claude" "kind=ship" "mode=manual" \
+    "pr=https://github.com/acme/queried/pull/10"
+  fm_write_meta "$home/state/repo-omitted.meta" \
+    "project=sample" "harness=claude" "kind=ship" "mode=manual" \
+    "pr=https://github.com/zeta/omitted/pull/20"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+
+  json=$(FM_BEARINGS_PR_LIMIT=2 FAKE_GH_MANY=1 \
+    run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.id == "row-capped") | not)
+      and (.in_flight | any(.id == "row-capped" and .state == "awaiting_landing"
+        and (.doing | contains("live PR state unavailable"))))
+      and (.omitted | any(.surface == "main Done backlog row(s) with unresolved live PR state: 3 (repo-complete, repo-omitted, row-capped)"))
+  ' >/dev/null || fail "a per-repository cap converted unknown Done rows into landings: $json"
+
+  json=$(FM_BEARINGS_PR_REPOS=1 FAKE_GH_REPO_AWARE=1 \
+    run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.id == "repo-complete"))
+      and (.landed | any(.id == "repo-omitted") | not)
+      and (.in_flight | any(.id == "repo-omitted" and .state == "awaiting_landing"
+        and (.doing | contains("live PR state unavailable"))))
+      and (.omitted | any(.surface == "main Done backlog row(s) with unresolved live PR state: 2 (repo-omitted, row-capped)"))
+  ' >/dev/null || fail "a repository cap converted an unknown Done row into a landing: $json"
+  pass "bounded PR discovery keeps affected Done rows explicitly unlanded until their PR state is known"
+}
+
 install_failing_jq() {  # <fakebin> <model|toon>
   local fakebin=$1 phase=$2 real
   real=$(command -v jq)
@@ -1304,7 +1802,7 @@ SH
 }
 
 test_projection_and_toon_fail_closed() {
-  local home fakebin out err rc
+  local home fakebin out err rc real_jq real_sed json
   home=$(make_home fail-closed); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   install_failing_jq "$fakebin" model
@@ -1319,7 +1817,51 @@ test_projection_and_toon_fail_closed() {
   [ "$rc" -ne 0 ] || fail "TOON rendering failure exited successfully"
   [ -z "$out" ] || fail "TOON rendering failure emitted output"
   grep -F 'TOON rendering failed' "$err" >/dev/null || fail "TOON failure lacked a diagnostic"
-  pass "projection and TOON rendering failures exit nonzero with diagnostics"
+
+  real_jq=$(command -v jq)
+  real_sed=$(command -v sed)
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "${BEARINGS_DISCOVERY_FAULT:-}" in
+  inventory) [ "$last" = '.tasks[].pr.url // empty' ] && exit 9 ;;
+  append) [ "$last" = '$a + $b' ] && exit 9 ;;
+esac
+exec "$REAL_JQ" "$@"
+SH
+  cat > "$fakebin/sed" <<'SH'
+#!/usr/bin/env bash
+if [ "${BEARINGS_DISCOVERY_FAULT:-}" = slug ]; then
+  case "$*" in *'github\.com'*) exit 9 ;; esac
+fi
+exec "$REAL_SED" "$@"
+SH
+  chmod +x "$fakebin/jq" "$fakebin/sed"
+
+  rc=0
+  out=$(REAL_JQ="$real_jq" REAL_SED="$real_sed" BEARINGS_DISCOVERY_FAULT=inventory \
+    run "$home" "$fakebin" --include-prs --json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "PR inventory extraction failure emitted a successful snapshot: $out"
+  assert_contains "$out" "recorded PR repository discovery failed" \
+    "PR inventory extraction failure lacked a diagnostic"
+  case "$out" in *'"schema": "fm-bearings.v1"'*) fail "PR inventory failure emitted a partial model: $out" ;; esac
+
+  rc=0
+  out=$(REAL_JQ="$real_jq" REAL_SED="$real_sed" BEARINGS_DISCOVERY_FAULT=slug \
+    run "$home" "$fakebin" --include-prs --json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "repository parser failure emitted a successful snapshot: $out"
+  assert_contains "$out" "PR repository parsing failed" \
+    "repository parser failure lacked a diagnostic"
+  case "$out" in *'"schema": "fm-bearings.v1"'*) fail "repository parser failure emitted a partial model: $out" ;; esac
+
+  json=$(REAL_JQ="$real_jq" REAL_SED="$real_sed" BEARINGS_DISCOVERY_FAULT=append \
+    run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | "$real_jq" -e '
+    .schema == "fm-bearings.v1"
+      and (.candidate_prs | length) == 0
+      and (.prs | contains("1 repo(s) unavailable"))
+  ' >/dev/null || fail "candidate append failure retained a partial candidate array: $json"
+  pass "projection and discovery failures fail closed or disclose unavailable repositories"
 }
 
 # The Lavish-103 defect, end to end: a COMPLETED scout that raised a decision and
@@ -2298,6 +2840,13 @@ test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
+test_terminal_ship_keeps_merge_state_unverified_without_landing_evidence
+test_live_pr_merge_state_requires_durable_provenance_and_mergeability
+test_merge_ready_candidate_keeps_uncapped_durable_task_proof
+test_verified_open_pr_outranks_a_contradictory_done_row
+test_bulk_payloads_bypass_exec_argument_limit
+test_empty_snapshot_producer_fails_loudly_without_payload_shift
+test_invalid_task_payloads_fail_without_omitting_the_task
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
@@ -2327,4 +2876,5 @@ test_section_caps_and_expansion_flags
 test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
+test_pr_discovery_caps_cannot_turn_unknown_done_rows_into_landings
 test_projection_and_toon_fail_closed

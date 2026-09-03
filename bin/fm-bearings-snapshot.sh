@@ -41,6 +41,19 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
+# Run and status claims never supply landing evidence. Eligible structured backlog
+# Done records do, except that completed captain-hold records stay out of the landed
+# baseline and a matching live open PR proves a contradictory Done record unlanded.
+# A terminal ship with no projected landing row remains in_flight as
+# awaiting_landing; its source-attributed terminal detail is retained and an
+# explicit merge-state clause is appended. Under --include-prs, only a live PR
+# matched through that task's own durable meta record may colour merge state or
+# outrank a contradictory Done row. A cap, omitted repository, or failed repository
+# leaves affected durable PR records explicitly unresolved rather than landed.
+# Candidate PRs expose one merge_ready verdict
+# that requires APPROVED, passing, and MERGEABLE together; renderers must not
+# recombine those fields independently. Every contradiction is disclosed.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
@@ -87,6 +100,7 @@ FM_BEARINGS_GATES=${FM_BEARINGS_GATES:-20}
 FM_BEARINGS_REPORTS=${FM_BEARINGS_REPORTS:-20}
 FM_BEARINGS_RECORDED_PRS=${FM_BEARINGS_RECORDED_PRS:-20}
 FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
+FM_BEARINGS_CONTRADICTIONS=${FM_BEARINGS_CONTRADICTIONS:-6}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
@@ -103,6 +117,7 @@ validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
 validate_bound FM_BEARINGS_REPORTS "$FM_BEARINGS_REPORTS"
 validate_bound FM_BEARINGS_RECORDED_PRS "$FM_BEARINGS_RECORDED_PRS"
 validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
+validate_bound FM_BEARINGS_CONTRADICTIONS "$FM_BEARINGS_CONTRADICTIONS"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
@@ -138,8 +153,12 @@ For every registered secondmate, readable structured facts from its own home are
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
-  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
-Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+  --all-unhealthy, --all-pr-repos, --include-prs.
+--include-prs adds candidate_prs{num,repo,task,url,review,mergeable,checks,merge_ready,durable_task_match,durable_task_id}.
+Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results;
+  capped, omitted, and unavailable repositories leave affected Done rows unlanded.
+Raise FM_BEARINGS_CONTRADICTIONS to list more contradicted Done-row ids in omitted[];
+  the disclosure always states the total, so raising it only widens the id list.
 EOF
 }
 
@@ -199,6 +218,7 @@ HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[
 # --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
 CANDIDATE_PRS='[]'
+PR_COMPLETE_REPOS='[]'
 PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
@@ -206,7 +226,9 @@ PR_ROWS_MIN_TOTAL=0
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
-  printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
+  local slug
+  slug=$(printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p') || return 1
+  printf '%s' "$slug" | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
 }
 
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
@@ -222,25 +244,33 @@ if [ "$INCLUDE_PRS" = 1 ]; then
   else
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
     repos=""
+    recorded_pr_urls=$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty') \
+      || { echo "fm-bearings-snapshot: recorded PR repository discovery failed" >&2; exit 1; }
     while IFS= read -r u; do
       [ -n "$u" ] || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
+      s=$(repo_slug "$u") \
+        || { echo "fm-bearings-snapshot: PR repository parsing failed" >&2; exit 1; }
+      [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
+$recorded_pr_urls
 EOF
+    worktree_paths=$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty') \
+      || { echo "fm-bearings-snapshot: worktree repository discovery failed" >&2; exit 1; }
     while IFS= read -r wt; do
       [ -n "$wt" ] || continue
       [ -d "$wt" ] || continue
       u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
+      s=$(repo_slug "$u") \
+        || { echo "fm-bearings-snapshot: worktree repository parsing failed" >&2; exit 1; }
+      [ -n "$s" ] || continue
       case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
     done <<EOF
-$(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
+$worktree_paths
 EOF
 
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
-    nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
+    nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'; complete_repos='[]'
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
     for repo in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
@@ -263,18 +293,34 @@ EOF
               elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
               elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
               else "passing" end)
-        } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
-      returned=$(printf '%s' "$repo_result" | jq '.returned')
-      repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
-      cnt=$(printf '%s' "$repo_rows" | jq 'length')
-      [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
+        }
+        | . + {merge_ready:(.review == "APPROVED" and .checks == "passing" and .mergeable == "MERGEABLE")}
+        ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
+      returned=$(printf '%s' "$repo_result" | jq -er '
+        .returned | select(type == "number" and . >= 0 and floor == .)') \
+        || { nwarn=$((nwarn + 1)); continue; }
+      repo_rows=$(printf '%s' "$repo_result" | jq -ce '.rows | arrays') \
+        || { nwarn=$((nwarn + 1)); continue; }
+      cnt=$(printf '%s' "$repo_rows" | jq -er 'length') \
+        || { nwarn=$((nwarn + 1)); continue; }
+      next_rows=$(jq -cen --argjson a "$rows" --argjson b "$repo_rows" '$a + $b') \
+        || { nwarn=$((nwarn + 1)); continue; }
+      next_complete_repos=$complete_repos
+      if [ "$returned" -le "$FM_BEARINGS_PR_LIMIT" ]; then
+        next_complete_repos=$(jq -cen --argjson a "$complete_repos" --arg repo "$repo" '$a + [$repo]') \
+          || { nwarn=$((nwarn + 1)); continue; }
+      else
+        ncapped=$((ncapped + 1))
+      fi
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$next_rows
+      complete_repos=$next_complete_repos
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
     PR_ROWS_MIN_TOTAL=$((npr + ncapped))
     CANDIDATE_PRS=$rows
+    PR_COMPLETE_REPOS=$complete_repos
     warnnote=""
     [ "$nwarn" -gt 0 ] && warnnote="; ${nwarn} repo(s) unavailable"
     cappednote=""
@@ -308,6 +354,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson reports_n "$FM_BEARINGS_REPORTS" \
   --argjson recorded_prs_n "$FM_BEARINGS_RECORDED_PRS" \
   --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
+  --argjson contradictions_n "$FM_BEARINGS_CONTRADICTIONS" \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
   --argjson all_decisions "$ALL_DECISIONS" \
@@ -321,9 +368,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --argjson candidate_prs "$CANDIDATE_PRS" \
+  --argjson pr_complete_repos "$PR_COMPLETE_REPOS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def durable_pr_url: if (.pr.source // "") == "meta" then .pr.url else null end;
+  def github_repo:
+    try (capture("github\\.com[:/](?<repo>[^/]+/[^/]+)").repo | sub("\\.git$"; "")) catch null;
+  def detail_attribution($src):
+    if $src == "run-step" then "run reported: "
+    elif $src == "status-log" then "status log reported: "
+    elif $src == "pane" then "pane observed: "
+    elif $src == "remote-endpoint" then "remote endpoint reported: "
+    else "" end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -335,8 +392,39 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured and .hold_kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ([ .tasks[]
+       | select(.kind != "secondmate")
+       | (durable_pr_url) as $url
+       | select($url != null)
+       | {id, url:$url, repo:($url | github_repo)} ]) as $durable_pr_records
+  | ([ $candidate_prs[] as $candidate
+       | ([ $durable_pr_records[] | select(.url == $candidate.url) | .id ] | sort) as $task_ids
+       | $candidate + {
+           durable_task_match:(($task_ids | length) == 1),
+           durable_task_id:(if ($task_ids | length) == 1 then $task_ids[0] else null end)
+         } ]) as $matched_candidate_prs
+  | ([ $durable_pr_records[]
+       | . as $record
+       | select($include_prs == 1 and ($matched_candidate_prs | any(.url == $record.url)))
+       | .id ]) as $open_pr_ids
+  | ([ $durable_pr_records[]
+       | . as $record
+       | select($include_prs == 1)
+       | select(($matched_candidate_prs | any(.url == $record.url)) | not)
+       | select($record.repo == null or ($pr_complete_repos | index($record.repo)) == null)
+       | .id ]) as $unknown_pr_ids
+  | ([ .backlog.records[] | select(.state == "done" and .structured)
+       | {id, title, pr_url, report_path, local_note, completion, hold_kind,
+          home:"(main)", home_id:"(main)"} ]) as $main_done_all_rows
+  | ([ $main_done_all_rows[] | select(.hold_kind != "captain") ]) as $main_done_rows
+  | ([ $main_done_all_rows[] | . as $row | select(($open_pr_ids | index($row.id)) != null) ]) as $main_done_pr_open
+  | ([ $main_done_rows[] | . as $row | select(($unknown_pr_ids | index($row.id)) != null) ] | sort_by(.id)) as $main_done_pr_unknown
+  | ([ $main_done_rows[] | . as $row
+       | select(($open_pr_ids | index($row.id)) == null and ($unknown_pr_ids | index($row.id)) == null) ]) as $main_done
+  | ([ $main_done_all_rows[] | . as $row
+       | select(.hold_kind == "captain" or
+           (($open_pr_ids | index($row.id)) == null and ($unknown_pr_ids | index($row.id)) == null))
+       | .id ]) as $main_done_exclusion_ids
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
@@ -393,13 +481,53 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
+       | select(.backlog.current_role == "done" and .current_state.state != "done")
+       | {id, live_state:.current_state.state} ]) as $done_row_live
+  | ([ .tasks[]
+       | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | . as $task
+       | select(($main_done_exclusion_ids | index($task.id)) == null)
+       | ($task | durable_pr_url) as $durable_pr_url
+       | (if $durable_pr_url == null then null
+          else ($matched_candidate_prs
+                | map(select(.url == $durable_pr_url and .durable_task_match))
+                | .[0] // null) end) as $open_pr
+       | (($unknown_pr_ids | index($task.id)) != null) as $pr_unknown
+       | ((.current_state.detail // "")) as $state_detail
+       | (if ($state_detail | length) > 0
+          then $state_detail else (.hints.last_event_text // "") end) as $detail
+       | (if ($state_detail | length) > 0
+          then (.current_state.source // "none") else "status-log" end) as $detail_source
        | {id, kind,
-        state: .current_state.state,
+        state: (if .kind == "ship" and ($open_pr != null or $pr_unknown or .current_state.state == "done")
+                then "awaiting_landing" else .current_state.state end),
         repo:(.backlog.repo // .project // null),
-        doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+        doing: (if .kind == "ship" and $pr_unknown then
+                  ((if .current_state.state == "done" then
+                       (if ($detail | length) > 0
+                        then "Final working state reached (\(detail_attribution($detail_source))\($detail | trunc(60)))"
+                        else "Final working state reached" end)
+                     elif ($detail | length) > 0 then
+                       "Worker state \(.current_state.state) (\(detail_attribution($detail_source))\($detail | trunc(60)))"
+                     else "Worker state \(.current_state.state)" end)
+                   + "; live PR state unavailable; not confirmed merged")
+                elif .kind == "ship" and $open_pr != null then
+                  ((if .current_state.state == "done" then
+                       (if ($detail | length) > 0
+                        then "Final working state reached (\(detail_attribution($detail_source))\($detail | trunc(60)))"
+                        else "Final working state reached" end)
+                     elif ($detail | length) > 0 then
+                       "Worker state \(.current_state.state) (\(detail_attribution($detail_source))\($detail | trunc(60)))"
+                     else "Worker state \(.current_state.state)" end)
+                   + "; PR open, checks \($open_pr.checks), mergeable \($open_pr.mergeable); not merged")
+                elif .kind == "ship" and .current_state.state == "done" then
+                  ((if ($detail | length) > 0
+                    then "Final working state reached (\(detail_attribution($detail_source))\($detail | trunc(60)))"
+                    else "Final working state reached" end)
+                   + "; merge state not verified")
+                else ($detail | trunc(90)) end)
       } ]
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
@@ -480,7 +608,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)
-  | . + (if $include_prs == 1 then {candidate_prs:$candidate_prs} else {} end)
+  | . + (if $include_prs == 1 then {candidate_prs:$matched_candidate_prs} else {} end)
   | . + (if $f_bodies then {bodies:[ $snap.backlog.records[] | select(.structured and (.state == "queued" or .state == "done")) | {id, body:((.body_excerpt // .raw // "-") | trunc(200))} ]} else {} end)
   | . + (if $f_paths then {paths:[ $snap.tasks[] | {id, worktree:(.paths.worktree.path // "-"), home:(.paths.home.path // "-"), status:.paths.status_log.path, report:.paths.report.path} ]} else {} end)
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)
@@ -500,6 +628,21 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
+        (($done_row_live | length) as $n
+         | ($done_row_live[:$contradictions_n] | map("\(.id | trunc(60))=\(.live_state)") | join(", ")) as $ids
+         | if $n > 0 then {surface:("main Done backlog row(s) contradicted by a live child state: \($n)"
+             + (if $n > $contradictions_n then " (showing \($contradictions_n): \($ids))" else " (\($ids))" end)),
+            reveal:"inspect main data/backlog.md Done rows against current task state"} else empty end),
+        (($main_done_pr_open | length) as $n
+         | ($main_done_pr_open[:$contradictions_n] | map(.id | trunc(60)) | join(", ")) as $ids
+         | if $n > 0 then {surface:("main Done backlog row(s) contradicted by a verified open PR: \($n)"
+             + (if $n > $contradictions_n then " (showing \($contradictions_n): \($ids))" else " (\($ids))" end)),
+            reveal:"inspect main data/backlog.md Done rows against the recorded open PR"} else empty end),
+        (($main_done_pr_unknown | length) as $n
+         | ($main_done_pr_unknown[:$contradictions_n] | map(.id | trunc(60)) | join(", ")) as $ids
+         | if $n > 0 then {surface:("main Done backlog row(s) with unresolved live PR state: \($n)"
+             + (if $n > $contradictions_n then " (showing \($contradictions_n): \($ids))" else " (\($ids))" end)),
+            reveal:"raise PR discovery caps or retry unavailable repositories"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (($snap.secondmate_current.records // [])[] as $m
          | ([($m.omitted // [])[] | select(.surface == "active_children") | .count] | add // 0) as $n
@@ -521,7 +664,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),
         (if $all_unhealthy == 0 and ($unhealthy_all | length) > $unhealthy_n then {surface:("unhealthy_endpoints showing \($unhealthy_n) of \($unhealthy_all | length)"), reveal:"--all-unhealthy"} else empty end),
         (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then {surface:("PR repositories showing \($pr_repos_shown) of \($pr_repos_total)"), reveal:"--all-pr-repos"} else empty end),
-        (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
+        (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($matched_candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
 
