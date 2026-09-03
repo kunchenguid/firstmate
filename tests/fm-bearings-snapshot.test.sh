@@ -2283,6 +2283,39 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_oversized_backlog_reaches_snapshot_without_argv_limit() {
+  local home backlog long_reason small large normalized i
+  home=$(make_home oversized-backlog)
+  backlog="$home/data/backlog.md"
+  small="$home/small.json"
+  large="$home/large.json"
+  normalized="$home/large-normalized.json"
+  long_reason=$(printf '%4096s' '' | tr ' ' x)
+  {
+    printf '%s\n' '## In flight' '' '## Queued'
+    printf -- '- [ ] held-1 - Held item 1 (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: external)\n' "$long_reason"
+  } > "$backlog"
+  FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-03T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788393600 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$small" \
+    || fail "small backlog snapshot failed"
+  i=2
+  while [ "$i" -le 61 ]; do
+    printf -- '- [ ] held-%s - Held item %s (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: external)\n' \
+      "$i" "$i" "$long_reason" >> "$backlog"
+    i=$((i + 1))
+  done
+  FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-03T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788393600 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$large" \
+    || fail "oversized backlog snapshot failed"
+  jq -e '(.backlog.records | length) == 61 and all(.backlog.records[]; .state == "queued" and .structured)' \
+    "$large" >/dev/null || fail "oversized backlog rows were not preserved"
+  jq '.backlog.records = .backlog.records[:1]' "$large" > "$normalized"
+  cmp -s "$small" "$normalized" \
+    || fail "oversized backlog changed snapshot bytes beyond its additional rows"
+  pass "oversized backlog reaches jq outside argv and preserves snapshot output"
+}
+
+test_oversized_backlog_reaches_snapshot_without_argv_limit
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
