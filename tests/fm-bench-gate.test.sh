@@ -566,7 +566,7 @@ write_evaluator() {  # <bench-dir> [captures]
   cat > "$bench/scoring/evaluator.sh" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2
-sed '1d' "$2"
+sed 's/"schema":"fm-bench-evaluator-input.v1","fixture":/"schema":"fm-bench-evaluator-output.v1","result":/' "$2"
 EOF
   chmod +x "$bench/scoring/evaluator.sh"
   cat > "$e/lock.json" <<'EOF'
@@ -639,7 +639,7 @@ import hashlib, json, sys
 from pathlib import Path
 bench, path, program = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 evaluator = bench / "evaluator"
-inputs = {}
+records = {}
 for record in [
     evaluator / "determinism" / "run-1.json",
     evaluator / "determinism" / "run-2.json",
@@ -647,17 +647,33 @@ for record in [
     *sorted((evaluator / "captures").glob("*.json")),
 ]:
     relative = record.relative_to(evaluator)
-    frozen = bench / "ground-truth" / "evaluator-inputs" / relative
-    frozen.parent.mkdir(parents=True, exist_ok=True)
-    frozen.write_bytes(b"FM_BENCH_EVALUATOR_INPUT\n" + record.read_bytes())
-    inputs[relative.as_posix()] = {
-        "path": frozen.relative_to(bench).as_posix(),
-        "sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(),
+    result = json.loads(record.read_text())
+    input_path = bench / "ground-truth" / "evaluator-inputs" / relative
+    output_path = bench / "ground-truth" / "evaluator-outputs" / relative
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text(json.dumps({
+        "schema": "fm-bench-evaluator-input.v1",
+        "fixture": result,
+    }, separators=(",", ":")) + "\n")
+    output_path.write_text(json.dumps({
+        "schema": "fm-bench-evaluator-output.v1",
+        "result": result,
+    }, separators=(",", ":")) + "\n")
+    records[relative.as_posix()] = {
+        "input": {
+            "path": input_path.relative_to(bench).as_posix(),
+            "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        },
+        "expected_output": {
+            "path": output_path.relative_to(bench).as_posix(),
+            "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+        },
     }
 json.dump({
     "program": "scoring/evaluator.sh",
     "sha256": hashlib.sha256(program.read_bytes()).hexdigest(),
-    "inputs": inputs,
+    "records": records,
 }, path.open("w"), indent=2, sort_keys=True)
 PY
 }
@@ -1161,10 +1177,20 @@ record = json.loads(path.read_text())
 record["dimension_deltas"]["fidelity"] = -2.0
 path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 input_path = bench / "ground-truth" / "evaluator-inputs" / "mutations" / "fidelity.json"
-input_path.write_bytes(b"FM_BENCH_EVALUATOR_INPUT\n" + path.read_bytes())
+input_path.write_text(json.dumps({
+    "schema": "fm-bench-evaluator-input.v1",
+    "fixture": record,
+}, separators=(",", ":")) + "\n")
+output_path = bench / "ground-truth" / "evaluator-outputs" / "mutations" / "fidelity.json"
+output_path.write_text(json.dumps({
+    "schema": "fm-bench-evaluator-output.v1",
+    "result": record,
+}, separators=(",", ":")) + "\n")
 contract_path = bench / "evaluator" / "execution.json"
 contract = json.loads(contract_path.read_text())
-contract["inputs"]["mutations/fidelity.json"]["sha256"] = hashlib.sha256(input_path.read_bytes()).hexdigest()
+execution = contract["records"]["mutations/fidelity.json"]
+execution["input"]["sha256"] = hashlib.sha256(input_path.read_bytes()).hexdigest()
+execution["expected_output"]["sha256"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
 contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
 PY
   run_gate "$BENCH" freeze >/dev/null
@@ -1188,8 +1214,28 @@ PY
   run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
   expect_code 1 "$status" "a content-addressed cat evaluator that echoes frozen input is refused"
-  assert_contains "$out" "evaluator output for run-1.json is invalid" \
-    "expected records cannot be supplied as evaluator inputs"
+  assert_contains "$out" "did not derive determinism/run-1.json from its frozen input" \
+    "input and expected output schemas stay distinct even when their payloads match"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+frozen = bench / "ground-truth"
+output_path = frozen / "evaluator-outputs" / "determinism" / "run-1.json"
+input_path = frozen / "evaluator-inputs" / "determinism" / "run-1.json"
+input_path.write_bytes(output_path.read_bytes())
+contract_path = bench / "evaluator" / "execution.json"
+contract = json.loads(contract_path.read_text())
+contract["records"]["determinism/run-1.json"]["input"]["sha256"] = hashlib.sha256(
+    input_path.read_bytes()
+).hexdigest()
+contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "a frozen input chosen to equal its expected output is refused"
+  assert_contains "$out" "determinism/run-1.json input and expected output are not structurally distinct" \
+    "no choice of fixture bytes lets an echoing evaluator reproduce its expected output"
   pass "preflight evaluator evidence is generated by the frozen executable"
 fi
 
@@ -1639,10 +1685,9 @@ shutil.copytree(source, target)
 terminal = sorted(path for path in target.iterdir() if path.is_dir())[0]
 manifest_path = terminal / "manifest.json"
 manifest = json.loads(manifest_path.read_text())
-manifest["attempt"]["supersedes"] = "attempt-void"
+manifest["attempt"]["id"] = "attempt-scored"
+manifest["attempt"]["supersedes"] = "attempt-void-2"
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-void = target / f"{terminal.name}-void"
-void.mkdir()
 timing = {
     "intervals": {
         "dispatch_accepted_to_first_valid_final_commit": 1200,
@@ -1651,24 +1696,27 @@ timing = {
     "failure": {"status": "void", "blocker_class": False, "class": "provider_outage"},
 }
 payload = (json.dumps(timing, indent=2, sort_keys=True) + "\n").encode()
-(void / "timing.json").write_bytes(payload)
-(void / "manifest.json").write_text(json.dumps({
-    "schema": "fm-bench-archive.v1",
-    "sample": void.name,
-    "identity": manifest["identity"],
-    "attempt": {"id": "attempt-void", "status": "void", "supersedes": None},
-    "groups": {"failure_and_timing": ["timing.json"]},
-    "files": {"timing.json": hashlib.sha256(payload).hexdigest()},
-    "tree_binding": {},
-}, indent=2, sort_keys=True) + "\n")
+for number, supersedes in ((1, None), (2, "attempt-void-1")):
+    void = target / f"{terminal.name}-void-{number}"
+    void.mkdir()
+    (void / "timing.json").write_bytes(payload)
+    (void / "manifest.json").write_text(json.dumps({
+        "schema": "fm-bench-archive.v1",
+        "sample": void.name,
+        "identity": manifest["identity"],
+        "attempt": {"id": f"attempt-void-{number}", "status": "void", "supersedes": supersedes},
+        "groups": {"failure_and_timing": ["timing.json"]},
+        "files": {"timing.json": hashlib.sha256(payload).hexdigest()},
+        "tree_binding": {},
+    }, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$ATTEMPT_BENCH" archive-verify) \
   || fail "a retained void plus its linked terminal rerun must verify: $out"
 assert_contains "$out" "void attempt preserves only content-addressed failure and timing evidence" \
   "void attempts require no fabricated judging or capture facts"
-assert_contains "$out" "one terminal scored attempt" \
+assert_contains "$out" "terminal scored attempt for each of" \
   "prior void attempts do not inflate planned sample coverage"
-pass "archive identity preserves linked void and rerun attempts separately"
+pass "archive identity preserves a void-to-void-to-scored attempt chain"
 
 UNLINKED_ATTEMPT_BENCH="$TMP_ROOT/archive-unlinked-attempt"
 write_plan "$UNLINKED_ATTEMPT_BENCH"
@@ -1685,8 +1733,86 @@ manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$UNLINKED_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
 expect_code 1 "$status" "a retained void without an explicit rerun link is refused"
-assert_contains "$out" "unlinked void attempts" "the unlinked attempt is named"
+assert_contains "$out" "unresolved void attempts attempt-void-2" "the unlinked attempt is named"
 pass "every retained void must be linked to its scored rerun"
+
+FORKED_ATTEMPT_BENCH="$TMP_ROOT/archive-forked-attempt"
+write_plan "$FORKED_ATTEMPT_BENCH"
+python3 - "$ATTEMPT_BENCH/archive" "$FORKED_ATTEMPT_BENCH/archive" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+shutil.copytree(source, target)
+def chain_sample(root, attempt_id):
+    for path in sorted(root.iterdir()):
+        if not path.is_dir():
+            continue
+        document = json.loads((path / "manifest.json").read_text())
+        if document["attempt"]["id"] == attempt_id:
+            return path
+    raise SystemExit(f"no archived sample carries attempt {attempt_id}")
+
+terminal = chain_sample(target, "attempt-scored")
+manifest_path = terminal / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["attempt"]["supersedes"] = "attempt-void-1"
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$FORKED_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "two reruns cannot fork from one void attempt"
+assert_contains "$out" "forked void attempts attempt-void-1" "the forked attempt is named"
+pass "archive attempt chains refuse forks"
+
+DANGLING_ATTEMPT_BENCH="$TMP_ROOT/archive-dangling-attempt"
+write_plan "$DANGLING_ATTEMPT_BENCH"
+python3 - "$ATTEMPT_BENCH/archive" "$DANGLING_ATTEMPT_BENCH/archive" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+shutil.copytree(source, target)
+def chain_sample(root, attempt_id):
+    for path in sorted(root.iterdir()):
+        if not path.is_dir():
+            continue
+        document = json.loads((path / "manifest.json").read_text())
+        if document["attempt"]["id"] == attempt_id:
+            return path
+    raise SystemExit(f"no archived sample carries attempt {attempt_id}")
+
+terminal = chain_sample(target, "attempt-scored")
+manifest_path = terminal / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["attempt"]["supersedes"] = "absent-attempt"
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$DANGLING_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "a rerun cannot supersede an absent attempt"
+assert_contains "$out" "dangling supersession links attempt-scored->absent-attempt" \
+  "the dangling link is named"
+pass "archive attempt chains refuse dangling links"
+
+CYCLIC_ATTEMPT_BENCH="$TMP_ROOT/archive-cyclic-attempt"
+write_plan "$CYCLIC_ATTEMPT_BENCH"
+python3 - "$ATTEMPT_BENCH/archive" "$CYCLIC_ATTEMPT_BENCH/archive" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+shutil.copytree(source, target)
+first_void = next(
+    path
+    for path in sorted(target.iterdir())
+    if path.is_dir() and json.loads((path / "manifest.json").read_text())["attempt"]["id"] == "attempt-void-1"
+)
+manifest_path = first_void / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["attempt"]["supersedes"] = "attempt-void-2"
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$CYCLIC_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "void attempts cannot form a supersession cycle"
+assert_contains "$out" "cyclic attempt links attempt-void-1, attempt-void-2" \
+  "the cyclic attempts are named"
+pass "archive attempt chains refuse cycles"
 
 copy_archive_fixture() {  # <source-bench> <target-bench>
   local source=$1 target=$2
@@ -2720,7 +2846,18 @@ if archive.is_dir():
 archive.mkdir()
 winners = {"A": "Fable 5 High", "B": "Terra 5.6 High", "C": "GPT 5.6 Sol High"}
 
-def write(track, packet, candidate, role, composite, status="scored", blocker=False, suffix="", supersedes=None):
+def write(
+    track,
+    packet,
+    candidate,
+    role,
+    composite,
+    status="scored",
+    blocker=False,
+    suffix="",
+    supersedes=None,
+    attempt_id=None,
+):
     slug = f"{track}-{packet}-{candidate}{suffix}".lower().replace(" ", "-").replace(".", "-")
     sample = archive / slug
     sample.mkdir()
@@ -2750,7 +2887,7 @@ def write(track, packet, candidate, role, composite, status="scored", blocker=Fa
     (sample / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
         "identity": {"track": track, "packet": packet, "candidate": candidate, "role": role},
-        "attempt": {"id": "attempt-void" if status == "void" else "attempt-1",
+        "attempt": {"id": attempt_id or ("attempt-void" if status == "void" else "attempt-1"),
                     "status": status, "supersedes": supersedes},
         "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {},
         "files": files,
@@ -2782,9 +2919,44 @@ for name in sorted(plan["tracks"]):
             if win and mode == "outofscale":
                 score = 11.0
             supersedes = "attempt-void" if win and mode == "void" and index == 0 else None
-            write(name, packet, entrant["name"], "entrant", score, blocker=blocker, supersedes=supersedes)
+            attempt_id = None
+            if win and mode == "void_chain" and index == 0:
+                supersedes = "attempt-void-2"
+                attempt_id = "attempt-scored"
+            write(
+                name,
+                packet,
+                entrant["name"],
+                "entrant",
+                score,
+                blocker=blocker,
+                supersedes=supersedes,
+                attempt_id=attempt_id,
+            )
         if win and mode == "void":
             write(name, ids[0], entrant["name"], "entrant", 0.0, status="void", suffix="-void")
+        if win and mode == "void_chain":
+            write(
+                name,
+                ids[0],
+                entrant["name"],
+                "entrant",
+                0.0,
+                status="void",
+                suffix="-void-1",
+                attempt_id="attempt-void-1",
+            )
+            write(
+                name,
+                ids[0],
+                entrant["name"],
+                "entrant",
+                0.0,
+                status="void",
+                suffix="-void-2",
+                supersedes="attempt-void-1",
+                attempt_id="attempt-void-2",
+            )
         if win and mode == "ninth":
             write(name, ids[0], entrant["name"], "entrant", 9.0, suffix="-rerun")
     if "baseline" in track:
@@ -2921,16 +3093,36 @@ BENCH="$TMP_ROOT/promote-replaced-void"
 write_plan "$BENCH"
 write_results "$BENCH" void
 out=$(run_gate "$BENCH" promote-evaluate) || fail "a void with a scored replacement must remain promotable: $out"
-assert_contains "$out" "all 1 voided attempts have explicitly linked scored replacements" \
+assert_contains "$out" "all 1 voided attempts resolve through finite chains to one terminal scored result" \
   "the scored rerun names the void attempt it supersedes"
 assert_contains "$out" "standing route eligible" "a replaced void does not make the field permanently incomplete"
 pass "a void is retained as evidence and credited when its rerun scores"
+
+BENCH="$TMP_ROOT/promote-void-chain"
+write_plan "$BENCH"
+write_results "$BENCH" void_chain
+out=$(run_gate "$BENCH" promote-evaluate) \
+  || fail "two consecutive voids resolved by one scored rerun must remain promotable: $out"
+assert_contains "$out" "all 2 voided attempts resolve through finite chains to one terminal scored result" \
+  "a void-to-void-to-scored chain resolves to its single terminal attempt"
+assert_contains "$out" "standing route eligible" "a second void on one packet does not deadlock the field"
+pass "an arbitrarily long finite void chain resolves to one terminal scored attempt"
+
+BENCH="$TMP_ROOT/promote-void-no-result"
+write_plan "$BENCH"
+write_results "$BENCH" void
+rm -f "$BENCH/results/a-a1-fable-5-high-void.json"
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "an archived void with no result record must refuse promotion"
+assert_contains "$out" "archived void attempts have no result records: a-a1-fable-5-high-void" \
+  "the unaccounted void sample is named"
+pass "every archived void attempt must carry its own result record"
 
 BENCH="$TMP_ROOT/promote-replaced-baseline-void"
 write_plan "$BENCH"
 write_results "$BENCH" baseline_void
 out=$(run_gate "$BENCH" promote-evaluate) || fail "a baseline void with a scored replacement must remain promotable: $out"
-assert_contains "$out" "explicitly linked scored replacements" \
+assert_contains "$out" "resolve through finite chains to one terminal scored result" \
   "the baseline rerun reconciles its retained void"
 assert_contains "$out" "standing route eligible" "a replaced baseline void does not make the field incomplete"
 pass "baseline void evidence is credited when the same baseline sample reruns"
@@ -2986,7 +3178,7 @@ refuses_promotion "a margin under the predeclared bar" thin "below the predeclar
 refuses_promotion "a score outside the frozen common scale" outofscale "has no finite numeric composite"
 refuses_promotion "a baseline regression" veto "regression veto fired"
 refuses_promotion "a negative baseline mean" negative_mean "below the declared floor 0.000"
-refuses_promotion "a void with no scored replacement" unreplaced_void "without scored replacements"
+refuses_promotion "a void with no scored replacement" unreplaced_void "do not resolve to one terminal scored result"
 refuses_promotion "a baseline void with no scored replacement" baseline_unreplaced_void "baseline:"
 refuses_promotion "an extra sample beyond the approved six" ninth "no adaptive extension"
 pass "five of six, blockers, thin margins, regressions, all-role unreplaced voids, and seventh samples refuse"
