@@ -1,24 +1,16 @@
 {
-  "firstmate-sessionstart": {
+  "mascot-hooks": {
+    "enabled": true,
     "PreInvocation": [
       {
         "type": "command",
-        "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-sessionstart-agy-nudge.sh\" ] && exec bash \"$d/fm-sessionstart-agy-nudge.sh\"; done",
-        "timeout": 30
+        "command": "curl -s -X POST http://127.0.0.1:8787/state -H \"Content-Type: application/json\" -d \"{\\\"state\\\":\\\"salute\\\",\\\"follow\\\":\\\"working\\\",\\\"after\\\":2.6}\" >/dev/null 2>&1 || true"
       }
-    ]
-  },
-  "firstmate-subagent": {
-    "PreToolUse": [
+    ],
+    "Stop": [
       {
-        "matcher": "invoke_subagent|define_subagent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-subagent-pretool-check.sh\" ] && exec bash \"$d/fm-subagent-pretool-check.sh\"; done",
-            "timeout": 10
-          }
-        ]
+        "type": "command",
+        "command": "curl -s -X POST http://127.0.0.1:8787/state -H \"Content-Type: application/json\" -d \"{\\\"state\\\":\\\"salute\\\",\\\"follow\\\":\\\"idle\\\",\\\"after\\\":2.6}\" >/dev/null 2>&1 || true"
       }
     ]
   }

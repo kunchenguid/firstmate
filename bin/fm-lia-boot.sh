@@ -10,6 +10,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+export FM_ROOT
 LIA_SCRIPT="$FM_ROOT/projects/lia/scripts/boot.py"
 
 if [ ! -f "$LIA_SCRIPT" ]; then

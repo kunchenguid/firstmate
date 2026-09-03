@@ -965,6 +965,9 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi
   fi
+  if [ -x "$SCRIPT_DIR/fm-lia-boot.sh" ]; then
+    "$SCRIPT_DIR/fm-lia-boot.sh" >/dev/null 2>&1 &
+  fi
 fi
 
 exit 0

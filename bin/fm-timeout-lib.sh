@@ -30,7 +30,7 @@ set -u
 fm_timeout_mechanism() {
   if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
     printf 'bash\n'
-  elif command -v timeout >/dev/null 2>&1; then
+  elif command -v timeout >/dev/null 2>&1 && timeout -k 1 1 true >/dev/null 2>&1; then
     printf 'timeout\n'
   elif command -v gtimeout >/dev/null 2>&1; then
     printf 'gtimeout\n'
