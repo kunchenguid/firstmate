@@ -136,6 +136,19 @@
 # Records written by the retired fm-decision-hold.sh (routed, declined,
 # answered, repaired) are recognized everywhere a record is read, so nothing
 # already closed needs rewriting.
+#
+# Parent channel: inside a secondmate home a task held for the captain, and its
+# answer, are captain-facing facts the moment they are recorded, so `hold`
+# publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
+# `answers`) the matching `resolved` line on the parent channel through
+# bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
+# <n> is the count of resolution records the body already carries plus one, so
+# a released and re-held task opens and closes a distinct parent decision with
+# no new persisted state, and an exact retry republishes the same line, which
+# the channel deduplicates. A main home has no channel and publishes nothing.
+# The hold or answer is already durable in the backlog, so a channel that
+# cannot be written is reported as `actionable:` on stderr rather than undoing
+# the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,6 +173,19 @@ CAPTAIN_BACKLOG_FILE=$(fm_backlog_file "$DATA" 2>/dev/null) \
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+
+publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
+  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+  fm_parent_channel_report "$FM_HOME" "$STATE" \
+    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
+  case "$rc" in
+    0|1) ;;
+    *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
+  esac
+}
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -364,6 +390,14 @@ recorded_decision_digest() {  # <task-body>
   printf '%s' "$rest"
 }
 
+# How many resolution records the shown body carries, in either record format.
+resolution_record_count() {  # <task-body>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" \
+    | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
+}
+
 # The newest record's `Resolution mode:` value; empty for a record predating it.
 recorded_resolution_mode() {  # <task-body>
   local rest=$1
@@ -418,7 +452,7 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -483,6 +517,8 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
 
@@ -518,7 +554,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -538,6 +574,9 @@ command_answer() {
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
+  # The occurrence the parent line names: the record about to be written is
+  # one past those already in the body, and a retry names the newest one.
+  occurrence=$(( $(resolution_record_count "$body") + 1 ))
 
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
@@ -549,6 +588,11 @@ command_answer() {
         || fail "task $id records this answer with mode released; a closed task cannot replay that release"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      if [ "$recorded_mode" = repaired ]; then
+        publish_parent_hold "$id" $((occurrence - 1)) resolved "answered (repaired)"
+      else
+        publish_parent_hold "$id" $((occurrence - 1)) resolved answered
+      fi
       printf 'answered: %s\n' "$id"
       return 0
     fi
@@ -563,6 +607,7 @@ command_answer() {
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -582,6 +627,7 @@ command_answer() {
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
       close_answered "$id" "$release"
+      publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
@@ -590,6 +636,7 @@ command_answer() {
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    publish_parent_hold "$id" "$occurrence" resolved "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
@@ -601,6 +648,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    publish_parent_hold "$id" $((occurrence - 1)) resolved released
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -700,7 +748,7 @@ sanitize_field() {  # <text>
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -779,6 +827,12 @@ command_answers() {
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
+        occurrence=$(resolution_record_count "$body")
+        case "$recorded_mode" in
+          repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
+          released) publish_parent_hold "$id" "$occurrence" resolved released ;;
+          *) publish_parent_hold "$id" "$occurrence" resolved answered ;;
+        esac
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
         continue
@@ -796,6 +850,9 @@ command_answers() {
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
     if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
+      # A parent-channel delivery problem is reported on stderr by the answer
+      # path even when the close succeeded; keep it visible.
+      [ ! -s "$err" ] || cat "$err" >&2
       printf 'closed: %s\n' "$id"
       closed=$((closed + 1))
     else
