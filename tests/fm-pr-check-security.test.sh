@@ -1562,6 +1562,56 @@ test_merged_poll_retires_once() {
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
 
+# A poll exists to observe a terminal outcome, so a close without merge retires
+# on exactly the same condition a merge does: the outcome having been recorded.
+# The case that matters is a close with NO standing claim, which is ordinary -
+# the poll is armed at PR registration, long before any worker claims anything -
+# and which writes no verdict at all. Gating retirement on a verdict left that
+# poll asking the forge once per watcher interval forever.
+test_closed_unmerged_poll_retires_without_a_claim_to_contradict() {
+  local dir state rc first second
+  dir=$(make_case closed-unmerged-retirement)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+  # The worker is still working: it has asserted nothing for the close to
+  # contradict, so no verdict is written for this outcome.
+  printf 'working: still going\n' > "$state/task-a.status"
+
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "closed-unmerged retirement watcher failed: $(cat "$dir/watch-1.err")"
+  first=$(cat "$dir/watch-1.out")
+  case "$first" in
+    check:*task-a.check.sh:*closed-unmerged) ;;
+    *) fail "the close notification was not preserved: $first" ;;
+  esac
+  [ ! -e "$state/task-a.done-verdict" ] \
+    || fail "a close with no claim on record invented a verdict"
+  ack_watcher_cycle "$state" || fail "close notification handling acknowledgement failed"
+  assert_poll_absent "$state" task-a
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
+  second=$(cat "$dir/watch-2.out")
+  case "$second" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "second cycle did not reach the control check: $second" ;;
+  esac
+  ! grep -F 'task-a.check.sh: closed-unmerged' "$dir/watch-2.out" >/dev/null \
+    || fail "a retired closed-unmerged poll asked the forge again"
+  pass "a closed-unmerged poll retires even when it had no claim to contradict"
+}
+
 # A poll's own retirement state is scoped to ONE registration, so it cannot by
 # itself catch a poll re-registered for a task whose merge was already
 # surfaced (e.g. bin/fm-pr-check.sh re-armed after the fact). The per-task
@@ -2034,9 +2084,11 @@ test_external_merge_transition_retires_only_terminal_poll() {
   done
 
   # A pull request CLOSED without merging is not silence: it contradicts a task
-  # record that already claims done, so it wakes. It is also not terminal for
-  # the poll, because the pull request can still be reopened and merged, so the
-  # armed poll is left exactly as it was and the contradiction is reported once.
+  # record that already claims done, so it wakes. It is terminal for the poll
+  # too - the outcome is on the record, and a poll has nothing left to observe
+  # once that is true - so the poll retires exactly as a merge retires it. A
+  # reopen that goes on to merge is reported through a poll re-armed at
+  # re-registration, which the last leg of this case exercises.
   rm -f "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -2048,9 +2100,8 @@ test_external_merge_transition_retires_only_terminal_poll() {
     check:*task-a.check.sh:*closed-unmerged) ;;
     *) fail "a pull request closed without merging did not wake: $(cat "$dir/closed-unmerged.out")" ;;
   esac
-  [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] \
-    || fail "a close without merge retired or altered the armed poll"
   ack_watcher_cycle "$state" || fail "closed-unmerged wake acknowledgement failed"
+  assert_poll_absent "$state" task-a
 
   rm -f "$state/.last-check"
   set +e
@@ -2065,15 +2116,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   esac
   ack_watcher_cycle "$state" || fail "second closed-unmerged control wake acknowledgement failed"
 
-  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
-  set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
-  case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
-  assert_poll_absent "$state" task-a
-  pass "open/red, malformed, and forge errors stay silent, a close wakes once and stays armed, and only a merge retires the poll"
+  # A later merge of the same PR is reported through a poll re-armed at
+  # re-registration, and the notification marker records WHICH outcome was
+  # delivered so the close cannot suppress it. That handover is pinned on the
+  # marker's own surface by test_marker_distinguishes_the_two_terminal_outcomes
+  # in tests/fm-done-verified.test.sh, which is where the marker contract lives.
+  pass "open/red, malformed, and forge errors stay silent, and a close wakes once and retires its poll"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -2262,6 +2310,7 @@ test_parser_matrix
 test_registration_arms_claim_verification_without_blocking
 test_gitlab_merge_watch
 test_merged_poll_retires_once
+test_closed_unmerged_poll_retires_without_a_claim_to_contradict
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome

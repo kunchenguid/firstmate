@@ -64,8 +64,8 @@
 #        and a directory symlink both fail, an honest claim still verifies
 #   (am) a later `failed:` line withdraws a claim; `blocked:` and
 #        `needs-decision:` do not, and a later `done:` re-asserts one
-#   (an) a close reports whether it durably recorded its contradiction, which is
-#        what decides whether its poll retires or stays armed
+#   (an) only the task itself withdraws its claim: a routed or child sub-event
+#        carrying a key or a correlation token has no authority to retract it
 #   (aj) a whitespace-only line inside a partly held-back span retires nothing:
 #        the span index and the byte counter agree about what counts as a line
 #   (ak) a verdict write that fails never suppresses the outcome report, which
@@ -1140,10 +1140,23 @@ test_a_scout_claim_on_another_tasks_report_is_not_verified() {
   result=$(verify "$dir")
   [ "${result%%$'\t'*}" != 0 ] \
     || fail "a scout claim walking out of its own directory was verified: $result"
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "an unresolvable spelling was not unverified: $result"
   case "${result#*$'\t'}" in
-    *"walks out of its own directory"*) ;;
-    *) fail "the traversing spelling was not refused as one: $result" ;;
+    *"names an upward walk"*) ;;
+    *) fail "the refusal did not say what it actually observed: $result" ;;
   esac
+
+  # The same spelling over a report that really is this task's own: still
+  # refused, and still never called false, because refusing to resolve a path
+  # establishes nothing about where it ends up.
+  dir=$(make_world scout-inward-walk scout scout)
+  mkdir -p "$dir/data/task-v/sub"
+  printf 'my own findings\n' > "$dir/data/task-v/report.md"
+  printf 'done: report=data/task-v/sub/../report.md - shipped\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a walk that resolves inside this task's own directory was not unverified: $result"
 
   # A directory symlink is the other way to name a real file somewhere else. It
   # is absence of evidence rather than falsity - the link is refused as evidence
@@ -1190,6 +1203,30 @@ test_a_later_failed_line_withdraws_the_claim() {
   [ -z "$FM_DONE_CLAIM_LINE" ] \
     || fail "a withdrawn claim was still returned as the line under test"
   pass "a later failed line withdraws a terminal claim"
+}
+
+# A retraction is an act of authority, not a formatting accident. `status_line_verb`
+# reads through a routed `[key=...]` and through a correlation token, so a
+# SUB-EVENT's verb is `failed` too - and these are written by code, not only by
+# prose: a secondmate home publishes a child's outcome as
+# `failed [key=child-outcome-<id>-...]` into the PARENT's status. Nothing about
+# one routed phase or one child may withdraw the task's own terminal assertion.
+test_only_the_task_itself_may_withdraw_its_claim() {
+  local dir state line
+  for line in \
+    'failed [key=docs-pass]: that routed phase did not land' \
+    'failed [key=child-outcome-task-c-failed-abc123]: child task-c failed: no work landed' \
+    'failed corr=0123456789abcdef: the answered request did not land'; do
+    dir="$TMP_ROOT/claim-subevent-$RANDOM"
+    state="$dir/state"
+    mkdir -p "$state"
+    printf 'done: pr=%s head=%s - shipped\n' "$PR_A" "$HEAD_A" > "$state/task-v.status"
+    printf '%s\n' "$line" >> "$state/task-v.status"
+    fm_done_claim_status "$state" task-v
+    [ "$FM_DONE_CLAIM_STATE" != none ] \
+      || fail "a sub-event withdrew the task's own terminal claim: $line"
+  done
+  pass "only the task speaking for itself withdraws its claim, never a sub-event"
 }
 
 # Deliberately narrow: only `failed:` retracts. A task that is merely stuck is
@@ -1334,43 +1371,6 @@ test_a_failed_verdict_write_still_publishes_the_outcome() {
     *) fail "a blocked verdict write suppressed the close report entirely: $out" ;;
   esac
   pass "a failed verdict write never suppresses the outcome report it follows"
-}
-
-# A poll exists to observe a terminal outcome, so bin/fm-watch.sh retires a close
-# once its contradiction is durably RECORDED - and leaves it armed when it is
-# not, because an outcome nothing has corrected is exactly the one that must come
-# back. This is the signal the watcher branches on.
-test_a_close_reports_whether_it_recorded_its_contradiction() {
-  local claim dir
-  claim="done: pr=$PR_A head=$HEAD_A - shipped"
-  dir=$(make_claim_world close-recorded "$claim" verified "the PR is open at the claimed head") \
-    || fail "the established-claim fixture failed"
-  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
-    || fail "the close outcome could not be published"
-  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = true ] \
-    || fail "a recorded contradiction did not report itself as recorded"
-
-  # A blocked verdict path: the close is still published, but nothing has
-  # corrected the record, so the poll must stay armed.
-  dir=$(make_claim_world close-unrecorded "$claim" verified "the PR is open at the claimed head") \
-    || fail "the established-claim fixture failed"
-  rm -f "$dir/state/task-v.done-verdict"
-  ln -s /dev/null "$dir/state/task-v.done-verdict" \
-    || fail "the fixture could not block the verdict path"
-  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
-    && fail "a blocked verdict write was reported as a clean outcome"
-  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = false ] \
-    || fail "a contradiction that was never written reported itself as recorded"
-
-  # No claim on record is nothing to contradict, so nothing is recorded and the
-  # poll stays armed for a reopen the worker has not yet claimed anything about.
-  dir=$(make_claim_world close-no-claim 'working: still going') \
-    || fail "the no-claim fixture failed"
-  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
-    || fail "the no-claim close could not be published"
-  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = false ] \
-    || fail "a close with no claim on record reported a recorded contradiction"
-  pass "a close reports whether its contradiction was durably recorded"
 }
 
 # The precedence itself, driven through the record's owner. Each incoming
@@ -1554,17 +1554,33 @@ test_the_omitted_unrecognised_count_carries_its_header() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
     || fail "bootstrap drain failed while priming the cursor"
 
-  printf 'Migration syntax: OK\n' >> "$status"
-  printf -- '- ruff check on all changed files: all passed\n' >> "$status"
-  # Opting out of the surface must not leave a bare counter with nothing to
-  # say what it is counting.
+  {
+    printf 'Migration syntax: OK\n'
+    printf -- '- ruff check on all changed files: all passed\n'
+    printf 'note: the answer you asked for\n'
+  } >> "$status"
+  # A cap of 0 is clamped to 1, because the cap and the cursor are coupled: at 0
+  # the first line of every span is held, the cursor freezes in front of it, and
+  # the span never advances. So one line is shown, the rest are counted under
+  # their own header, and the drain makes progress.
   FM_DRAIN_UNRECOGNISED_MAX=0 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed with the unrecognised surface capped at zero"
-  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) held for the next drain' "$out" \
+  assert_grep 'Migration syntax: OK' "$out" \
+    "a cap of zero showed the worker nothing at all: $(cat "$out")"
+  assert_grep 'UNREAD STATUS: 1 more unrecognised line(s) held for the next drain' "$out" \
     "the omitted unrecognised lines were not counted: $(cat "$out")"
   assert_grep 'UNREAD STATUS (new since last drain' "$out" \
     "the omitted count was printed without its section header: $(cat "$out")"
-  pass "the omitted-unrecognised count is never printed as a bare orphan line"
+
+  # The cursor moved, so the next drain shows what was held rather than
+  # re-presenting the same span forever.
+  FM_DRAIN_UNRECOGNISED_MAX=0 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/second.out" \
+    || fail "the second capped drain failed"
+  assert_grep 'ruff check on all changed files' "$dir/second.out" \
+    "a cap of zero wedged the cursor and never showed the held line: $(cat "$dir/second.out")"
+  assert_no_grep 'Migration syntax: OK' "$dir/second.out" \
+    "a presented line was replayed after the clamped drain"
+  pass "a cap of zero is clamped so the drain shows something and keeps moving"
 }
 
 # The cap bounds one drain; it must not cost the worker's words. What the cap
@@ -1651,11 +1667,11 @@ test_a_direct_pr_claim_on_this_task_branch_verifies
 test_a_scout_claim_on_another_tasks_report_is_not_verified
 test_a_later_failed_line_withdraws_the_claim
 test_only_a_failed_line_withdraws_the_claim
+test_only_the_task_itself_may_withdraw_its_claim
 test_a_merge_marks_an_established_claim_stale
 test_a_close_contradicts_an_established_claim_in_the_record
 test_a_terminal_outcome_invents_no_verdict_without_a_claim
 test_a_failed_verdict_write_still_publishes_the_outcome
-test_a_close_reports_whether_it_recorded_its_contradiction
 test_verdict_write_precedence_keeps_the_stronger_statement
 test_a_held_back_span_with_multibyte_prose_presents_no_fragment
 test_the_unrecognised_cap_is_per_task_not_per_drain

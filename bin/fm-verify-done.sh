@@ -217,11 +217,15 @@ if [ "$KIND" = scout ]; then
   # A `..` component makes the spelling of a path and its location two different
   # things, and every containment test below is about the location. Refused
   # outright rather than normalised away: a scout report path has no legitimate
-  # reason to walk upward, and the claim naming one is itself the observation.
+  # reason to walk upward.
+  #
+  # Refusing to resolve a path is a refusal to READ, though, not a finding that
+  # the claim is false - `data/<id>/sub/../report.md` names a report that really
+  # is this task's own - so it reads unverified and says only what was observed:
+  # the claim was refused for the walk it names, not for where it ends up.
   case "/$FM_DONE_CLAIM_REPORT/" in
     */../*)
-      verdict_is contradicted "the claimed report walks out of its own directory: $FM_DONE_CLAIM_REPORT" \
-        "$FM_DONE_CLAIM_REPORT"
+      verdict_is unverified "the claimed report names an upward walk, which is not resolved as evidence: $FM_DONE_CLAIM_REPORT"
       finish
       ;;
   esac

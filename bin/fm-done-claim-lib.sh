@@ -151,11 +151,24 @@ fm_done_claim_has_identity() {
 # an append-only event log, so the newest `done:` is the one under test; earlier
 # claims were superseded by whatever the worker did next.
 #
-# A later `failed:` line WITHDRAWS the claim, and the task then has none. That is
-# the whole of the supersession rule and it is deliberately narrow: only
-# `failed:` retracts. `blocked:` and `needs-decision:` must not, because they say
-# the work is ongoing, not that the assertion is withdrawn, and a task sitting on
-# a claim it still makes should stay refused while it is merely stuck.
+# A later `failed:` line WITHDRAWS the claim, and the task then has none. Two
+# things have to be true of that line, and the second is an AUTHORITY rule, not a
+# formatting one.
+#
+# WHAT may retract: only `failed:`. `blocked:` and `needs-decision:` must not,
+# because they say the work is ongoing, not that the assertion is withdrawn, and
+# a task sitting on a claim it still makes should stay refused while it is merely
+# stuck.
+#
+# WHO may retract: only the task speaking for itself, which means the line must
+# carry no correlation token and no routed `[key=...]`. A decorated line is a
+# SUB-EVENT - one routed phase, or one child's outcome - and a sub-event has no
+# authority over the task's own terminal assertion. This is not hypothetical
+# tidiness: bin/fm-brief.sh instructs workers to close routed phases with keyed
+# lines, and report_child_ledger_locked publishes `failed [key=child-outcome-...]`
+# into a PARENT home's status through bin/fm-parent-channel-lib.sh, so without
+# this a child's failure would retract its mate task's own claim. Do not
+# "simplify" this back to any-failed-line: the point is who is speaking.
 #
 # Why the rule exists at all, so it is not "simplified" back: without it a task
 # whose PR was abandoned is held forever to an assertion it has already
@@ -186,7 +199,11 @@ fm_done_claim_last() {  # <status-file>
         last=$line
         ;;
       failed*)
-        [ "$(status_line_verb "$line")" = "failed" ] || continue
+        # Compared BEFORE any decoration is stripped, which is the authority test
+        # itself: status_line_verb reads through a `[key=...]` and through a
+        # correlation token, so a sub-event's verb is `failed` too. Only a line
+        # whose whole prefix is the bare verb is the task speaking for itself.
+        [ "${trimmed%%:*}" = "failed" ] || continue
         last=
         ;;
     esac

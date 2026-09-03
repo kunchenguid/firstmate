@@ -1669,10 +1669,14 @@ while :; do
         # merged - the recorded contradiction now carries that instead, and a
         # reopen that goes on to merge still reaches the merged path through the
         # poll re-armed at re-registration.
-        # `merged` retires on the report alone, as it always has. A close retires
-        # only once the contradiction is durably recorded, because an unrecorded
-        # close is an outcome nothing has yet corrected: leaving its poll armed is
-        # what brings it back.
+        # Both retire on the same condition, which is the emitter returning 0:
+        # that IS the outcome being recorded, marker and publication together.
+        # An outcome that could not be recorded exits above without retiring, so
+        # its poll stays armed and brings it back. Nothing narrower belongs here -
+        # a close with no standing claim writes no verdict and is still fully
+        # recorded (the poll is armed at PR registration, long before any claim
+        # exists), and gating on the verdict would leave that ordinary case
+        # polling forever and would deny the close the retry the merge arm gets.
         if [ "$is_pr_poll" -eq 1 ] && { [ "$out" = merged ] || [ "$out" = closed-unmerged ]; }; then
           merge_outcome_rc=0
           fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll "$out" \
@@ -1681,11 +1685,7 @@ while :; do
             triage_log "PR $out outcome for $id could not be recorded (rc=$merge_outcome_rc)"
             exit 1
           fi
-          if [ "$out" = merged ]; then
-            retire_terminal_pr_poll "$id" merged
-          elif [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = true ]; then
-            retire_terminal_pr_poll "$id" "$out"
-          fi
+          retire_terminal_pr_poll "$id" "$out"
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate $out PR poll result for $id"

@@ -356,8 +356,16 @@ EOF
 # drain. The count still says how many were held back, and the
 # presentation cursor is held at the last line this drain actually showed, so
 # the rest re-present on the next drain rather than being skipped past.
+#
+# At least 1, always. The cap and the cursor are coupled: a held-back line freezes
+# the presentation cursor at the line before it so the remainder re-presents, so a
+# cap of 0 holds the FIRST line of every span and the cursor can never advance
+# past it - a `note:` after one line of prose would then re-present on every drain
+# forever while the prose itself was never shown. One line per task per drain is
+# the smallest budget that still makes progress.
 UNRECOGNISED_STATUS_MAX=${FM_DRAIN_UNRECOGNISED_MAX:-10}
 case "$UNRECOGNISED_STATUS_MAX" in ''|*[!0-9]*) UNRECOGNISED_STATUS_MAX=10 ;; esac
+[ "$UNRECOGNISED_STATUS_MAX" -ge 1 ] || UNRECOGNISED_STATUS_MAX=1
 
 # Print still-unread informational status lines (note: answers, pending-reply
 # resolutions, and lines carrying no recognised verb) that the OPEN DECISIONS
