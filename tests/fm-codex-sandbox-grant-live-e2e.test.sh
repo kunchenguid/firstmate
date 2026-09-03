@@ -67,7 +67,14 @@ PROJECT="$LAB/project"
 WT="$LAB/wt"
 ID=codex-grant-live
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/$ID" "$HOME_DIR/config" "$HOME_DIR/projects"
-printf 'brief\n' > "$HOME_DIR/data/$ID/brief.md"
+cat > "$HOME_DIR/data/$ID/brief.md" <<EOF
+# Task
+## Captain's intent
+Prove the codex sandbox honors the granted writable roots.
+
+## Firstmate spec
+Exercise the granted roots against the real codex binary.
+EOF
 printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
 touch "$HOME_DIR/state/.last-watcher-beat"
 
@@ -277,7 +284,14 @@ printf 'ok - %s admits the captain-hold completion gate under the granted roots 
 SHIP_ID=codex-grant-live-ship
 SHIP_WT="$LAB/wt-ship"
 mkdir -p "$HOME_DIR/data/$SHIP_ID"
-printf 'brief\n' > "$HOME_DIR/data/$SHIP_ID/brief.md"
+cat > "$HOME_DIR/data/$SHIP_ID/brief.md" <<EOF
+# Task
+## Captain's intent
+Prove the file form of a granted writable root.
+
+## Firstmate spec
+Exercise the ship grant's single-file roots against the real codex binary.
+EOF
 git -C "$PROJECT" worktree add -q -b "fm/$SHIP_ID" "$SHIP_WT"
 # Section 3 gave this home a backlog, so from here on every spawn needs a row of
 # its own; the scout above ran before one existed. Firstmate owns backlog state,
