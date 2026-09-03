@@ -4,8 +4,9 @@
 # gating, the two-stage noise filter's second stage (verdict-driven delivery
 # into main), store-first durability through the real bin/fm-branch-outcome.sh,
 # the byte-stable tool order and per-home prompt_cache_key hook, the dialog
-# mirror, and branch-session persistence. The Pi SDK is stubbed (scriptable
-# in-process sessions); every fleet-record behavior runs the REAL bin scripts.
+# mirror, and the per-main-session branch conversation. The Pi SDK is stubbed
+# (scriptable in-process sessions); every fleet-record behavior runs the REAL
+# bin scripts.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -111,7 +112,7 @@ export class SessionManager {
   }
   static create(cwd, dir) {
     globalThis.__fmCreateCount = (globalThis.__fmCreateCount ?? 0) + 1;
-    const sm = new SessionManager(`${dir}/created-${globalThis.__fmCreateCount}.jsonl`);
+    const sm = new SessionManager(`${dir}/created-${process.pid}-${globalThis.__fmCreateCount}.jsonl`);
     sm.created = true;
     writeFileSync(sm.file, "");
     (globalThis.__fmSessionManagers ??= []).push(sm);
@@ -2163,38 +2164,171 @@ EOF
   pass "dialog mirror filters tool and operational traffic, lands before wakes, and keeps a durable cursor"
 }
 
-test_branch_session_persists_across_process_restarts() {
+test_branch_mirror_reanchors_for_the_new_session_branch_conversation() {
   local repo home out status
-  repo="$TMP_ROOT/persist-root"
-  home="$TMP_ROOT/persist-home"
+  repo="$TMP_ROOT/mirror-reanchor-root"
+  home="$TMP_ROOT/mirror-reanchor-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  run_once() {
-    PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle }; })()`);
-const { dispatch, settle } = globalThis.__t;
-dispatch("signal: persistence probe");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
-const sm = globalThis.__fmSessionManagers[0];
-console.log(`${sm.opened ? "opened" : "created"} ${sm.getSessionFile()}`);
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, home }; })()`);
+const { fire, dispatch, settle, makeCtx, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+// One main session file throughout: a /resume or reload keeps main's own
+// session, which is exactly the case where the durable cursor would otherwise
+// hide already-mirrored dialog from the session's new branch conversation.
+const entries = [{ type: "message", message: { role: "user", content: "standing order: never merge task-7" } }];
+const ctx = makeCtx({
+  sessionManager: { getSessionFile: () => `${home}/main-1.jsonl`, getEntries: () => entries },
+});
+const mirrorsOf = (session) => session.ops.filter((op) => op.kind === "custom").map((op) => op.message.content);
+
+fire("session_start", {}, ctx);
+fire("turn_end", {}, ctx);
+dispatch("signal: first session");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "first branch build");
+const first = globalThis.__fmSessions[0];
+if (JSON.stringify(mirrorsOf(first)) !== JSON.stringify(["[captain] standing order: never merge task-7"])) {
+  throw new Error(`the first branch conversation did not receive the session's dialog: ${JSON.stringify(mirrorsOf(first))}`);
+}
+const cursor = JSON.parse(readFileSync(`${home}/state/.branch-mirror-cursor`, "utf8"));
+if (cursor.file !== `${home}/main-1.jsonl` || cursor.index !== entries.length) {
+  throw new Error(`the durable cursor did not advance with delivery: ${JSON.stringify(cursor)}`);
+}
+
+// The reload starts a new branch conversation, so the mirror re-anchors to the
+// current main session's start and that conversation receives the whole
+// session's dialog, not only what arrived after the cursor.
+entries.push({ type: "message", message: { role: "user", content: "and hold task-9 too" } });
+fire("session_shutdown", {});
+fire("session_start", {}, ctx);
+fire("turn_end", {}, ctx);
+dispatch("signal: second session");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "second branch build");
+const second = globalThis.__fmSessions[1];
+if (second.options.sessionManager.opened) throw new Error("the reload continued the previous branch conversation");
+const expected = ["[captain] standing order: never merge task-7", "[captain] and hold task-9 too"];
+if (JSON.stringify(mirrorsOf(second)) !== JSON.stringify(expected)) {
+  throw new Error(`the new branch conversation lost the session's earlier dialog: ${JSON.stringify(mirrorsOf(second))}`);
+}
+
+// Inside that session the cursor keeps working: later dialog mirrors once.
+entries.push({ type: "message", message: { role: "user", content: "task-9 may merge when green" } });
+fire("turn_end", {}, ctx);
+await settle(() => mirrorsOf(second).length === 3, "incremental mirror after the re-anchor");
+if (mirrorsOf(second)[2] !== "[captain] task-9 may merge when green") {
+  throw new Error(`the incremental mirror re-sent dialog or lost the new line: ${JSON.stringify(mirrorsOf(second))}`);
+}
+await settle(
+  () => JSON.parse(readFileSync(`${home}/state/.branch-mirror-cursor`, "utf8")).index === entries.length,
+  "durable cursor after the re-anchor",
+);
 process.exit(0);
 EOF
-  }
-  out=$(run_once) || fail "first branch session run failed: $out"
-  # Path.join normalizes the doubled slash macOS TMPDIR introduces, so match
-  # on the home-relative tail rather than the raw $home prefix.
-  case "$out" in
-    "created "*"/persist-home/state/branch-session/"*.jsonl) ;;
-    *) fail "first run did not create a session under state/branch-session: $out" ;;
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a new session's branch conversation must receive that session's dialog from its start: $out"
+  pass "the dialog mirror re-anchors for each session's new branch conversation and stays incremental within it"
+}
+
+test_branch_session_is_new_at_every_main_session_start() {
+  local repo home out status first_pointer
+  repo="$TMP_ROOT/fresh-session-root"
+  home="$TMP_ROOT/fresh-session-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, home }; })()`);
+const { fire, dispatch, settle, makeCtx, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+const pointerFile = `${home}/state/.branch-session`;
+const readPointer = () => readFileSync(pointerFile, "utf8").trim();
+
+// 1. The first wake of a session opens the branch conversation and records it.
+fire("session_start", {}, makeCtx());
+dispatch("signal: first session probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "first branch build");
+const first = globalThis.__fmSessions[0].options.sessionManager;
+if (first.opened) throw new Error("the first branch build reopened a recorded conversation");
+if (readPointer() !== first.getSessionFile()) {
+  throw new Error(`the pointer does not name the live branch conversation: ${readPointer()}`);
+}
+
+// 2. WITHIN one main session the conversation persists: a model or effort
+// change drops the live branch and the next wake continues the same file.
+fire("thinking_level_select", { level: "high", previousLevel: "medium" });
+await settle(() => globalThis.__fmSessions[0].disposed, "live branch release inside the session");
+dispatch("signal: same session probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "same-session rebuild");
+const continued = globalThis.__fmSessions[1].options.sessionManager;
+if (!continued.opened || continued.getSessionFile() !== first.getSessionFile()) {
+  throw new Error(`a rebuild inside one session must continue that session's conversation: ${continued.getSessionFile()}`);
+}
+
+// 3. A main session start - /new here, and identically /resume, /fork, or a
+// reload - starts a NEW branch conversation. The recorded pointer is not
+// reopened, and it follows the new conversation instead.
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: new session probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 3, "post-session-start branch build");
+const replacement = globalThis.__fmSessions[2].options.sessionManager;
+if (replacement.opened) throw new Error("a main session start reopened the previous branch conversation");
+if (replacement.getSessionFile() === first.getSessionFile()) {
+  throw new Error("a main session start reused the previous branch conversation file");
+}
+if (readPointer() !== replacement.getSessionFile()) {
+  throw new Error(`the pointer did not follow the new branch conversation: ${readPointer()}`);
+}
+console.log(readPointer());
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a main session start must start a new branch conversation: $out"
+  first_pointer=$(tail -n 1 "$TMP_ROOT/node-output")
+  case "$first_pointer" in
+    */fresh-session-home/state/branch-session/*.jsonl) ;;
+    *) fail "the branch conversation was not recorded under state/branch-session: $first_pointer" ;;
   esac
-  first_file=${out#created }
-  [ -f "$home/state/.branch-session" ] || fail "branch session pointer was not recorded"
-  out=$(run_once) || fail "second branch session run failed: $out"
-  [ "$out" = "opened $first_file" ] \
-    || fail "restart did not reopen the persistent branch session (got: $out; want: opened $first_file)"
-  pass "branch session persists across process restarts through the recorded pointer"
+  # A restart is a main session start too: the recorded conversation from the
+  # previous process is left on disk and never becomes the live one.
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_PRIOR_POINTER="$first_pointer" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, home }; })()`);
+const { fire, dispatch, settle, makeCtx, home } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+
+const prior = process.env.FM_TEST_PRIOR_POINTER;
+if (!existsSync(prior)) throw new Error("the previous process left no recorded branch conversation to guard against");
+if (readFileSync(`${home}/state/.branch-session`, "utf8").trim() !== prior) {
+  throw new Error("the restart did not start from the previous process's recorded pointer");
+}
+
+fire("session_start", {}, makeCtx());
+dispatch("signal: restart probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "restart branch build");
+const restarted = globalThis.__fmSessions[0].options.sessionManager;
+if (restarted.opened) throw new Error("the restart reopened the recorded branch conversation");
+if (restarted.getSessionFile() === prior) throw new Error("the restart reused the recorded branch conversation file");
+if (readFileSync(`${home}/state/.branch-session`, "utf8").trim() !== restarted.getSessionFile()) {
+  throw new Error("the restart did not repoint the record at its new branch conversation");
+}
+if (!existsSync(prior)) throw new Error("the previous conversation file was destroyed instead of left behind");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a restart must start a new branch conversation instead of reopening the recorded one: $out"
+  pass "every main session start begins a new branch conversation while one session keeps its own"
 }
 
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default() {
@@ -2245,33 +2379,31 @@ if (!pinned || pinned.provider !== "openai" || pinned.id !== "cheap-1") {
   throw new Error(`pinned build did not use the pinned model: ${JSON.stringify(pinned)}`);
 }
 
-// 4. The reopen path (/new, /resume, /fork, reload all replace the session
-// in-process) reopens the SAME persistent branch conversation and still
-// applies the pin.
+// 4. The session-replacement path (/new, /resume, /fork, reload all replace
+// the session in-process) builds a NEW branch conversation and still applies
+// the pin.
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
-dispatch("signal: reopened probe");
-await settle(() => (globalThis.__fmSessions ?? []).length === 4, "reopened branch build");
-const reopened = globalThis.__fmSessions[3].options.model;
-if (!reopened || reopened.provider !== "openai" || reopened.id !== "cheap-1") {
-  throw new Error(`reopened build did not use the pinned model: ${JSON.stringify(reopened)}`);
+dispatch("signal: replacement probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 4, "replacement branch build");
+const replaced = globalThis.__fmSessions[3].options.model;
+if (!replaced || replaced.provider !== "openai" || replaced.id !== "cheap-1") {
+  throw new Error(`the replacement build did not use the pinned model: ${JSON.stringify(replaced)}`);
 }
 const manager = globalThis.__fmSessions[3].options.sessionManager;
-if (!manager.opened) throw new Error("reopen did not continue the persistent branch conversation");
+if (manager.opened) throw new Error("a session replacement continued the previous branch conversation");
 
-// 5. Clearing the pin makes the REOPENED branch follow main again. This is
-// the case Pi's own session restore would otherwise get wrong: the branch
-// conversation still records the pinned model, so only an explicit override
-// keeps "follow main" honest.
+// 5. Clearing the pin makes the next branch follow main again. Pi's own
+// session restore is what would otherwise get this wrong wherever a branch
+// conversation IS continued (a model or effort change inside one session),
+// because that conversation still records the pinned model, so only an
+// explicit override keeps "follow main" honest.
 rmSync(`${home}/config/supervision-branch-model`);
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
 dispatch("signal: unpinned again");
 await settle(() => (globalThis.__fmSessions ?? []).length === 5, "post-clear branch build");
 const cleared = globalThis.__fmSessions[4];
-if (!cleared.options.sessionManager.opened) {
-  throw new Error("the post-clear build must still reopen the persistent branch conversation");
-}
 if (cleared.options.model?.id === "cheap-1") {
   throw new Error("clearing the pin left the branch on the previously pinned model");
 }
@@ -2283,7 +2415,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the current pin state must decide the model on every branch build: $out"
-  pass "the current pin state binds every branch create and reopen, and clearing it returns the branch to main's model"
+  pass "the current pin state binds every branch build, and clearing it returns the branch to main's model"
 }
 
 test_unpinned_branch_follows_main_model_changes_live() {
@@ -2543,14 +2675,14 @@ if (effortOnly.model?.id !== "main-model") {
   throw new Error(`an effort-only pin must leave the model following main: ${JSON.stringify(effortOnly.model)}`);
 }
 
-// 3. The reopen path applies the effort pin too, over whatever the restored
-// branch conversation recorded.
-await rebuild("effort pin reopen", 3);
+// 3. A session replacement applies the effort pin too, on the new branch
+// conversation it starts.
+await rebuild("effort pin replacement", 3);
 if (globalThis.__fmSessions[2].options.thinkingLevel !== "low") {
-  throw new Error(`the reopened build dropped the effort pin: ${globalThis.__fmSessions[2].options.thinkingLevel}`);
+  throw new Error(`the replacement build dropped the effort pin: ${globalThis.__fmSessions[2].options.thinkingLevel}`);
 }
-if (!globalThis.__fmSessions[2].options.sessionManager.opened) {
-  throw new Error("the effort-pinned reopen must continue the persistent branch conversation");
+if (globalThis.__fmSessions[2].options.sessionManager.opened) {
+  throw new Error("a session replacement continued the previous branch conversation");
 }
 
 // 4. A model-only pin leaves the effort following main, the mirror image of
@@ -2617,7 +2749,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the current effort pin state must decide the branch effort on every build: $out"
-  pass "the effort pin binds every branch create and reopen, and clearing it returns the branch to main's effort"
+  pass "the effort pin binds every branch build, and clearing it returns the branch to main's effort"
 }
 
 test_unpinned_branch_follows_main_effort_changes_live() {
@@ -2935,7 +3067,7 @@ if (globalThis.__fmSessions[1].options.thinkingLevel !== "high") {
 }
 
 // When main's model cannot be resolved, the effort step derives Pi's level
-// set from the model recorded by the persistent branch conversation.
+// set from the model recorded by the most recent branch conversation.
 uiSelections.push("openai/shallow-1", "max");
 await command.handler("", makeCtx());
 dispatch("signal: record shallow branch model");
@@ -3764,7 +3896,8 @@ test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
-test_branch_session_persists_across_process_restarts
+test_branch_mirror_reanchors_for_the_new_session_branch_conversation
+test_branch_session_is_new_at_every_main_session_start
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
 test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch
