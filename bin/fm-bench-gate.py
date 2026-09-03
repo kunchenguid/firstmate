@@ -66,6 +66,7 @@ EVIDENCE_TREES = (
     "provenance",
     "evaluator",
 )
+UNUSABLE_EVIDENCE_KINDS = ("symlink", "special", "unreadable")
 MAX_PNG_RASTER_BYTES = 128 * 1024 * 1024
 NORMALIZED_RUN_TIME_NS = 1_600_000_000_000_000_000
 
@@ -184,6 +185,19 @@ class GateError(Exception):
     """A usage-level failure: the gate could not be evaluated at all."""
 
 
+def single_line(text: str) -> str:
+    """Collapse text into one printable line.
+
+    Check identities and details are built from declared plan and archive
+    strings, from restored candidate paths, and from confined output, so a
+    newline or control character anywhere in them would forge an extra status
+    line in the gate's line-oriented report.
+    """
+    return " ".join(
+        "".join(character if character.isprintable() else " " for character in text).split()
+    )
+
+
 class Report:
     """Deterministic accumulator for one subcommand's checks."""
 
@@ -196,7 +210,7 @@ class Report:
 
     def _emit(self, check: str, status: str, detail: str) -> None:
         if not self.quiet:
-            print(f"BENCH_CHECK {check} {status} {detail}")
+            print(f"BENCH_CHECK {single_line(check)} {status} {single_line(detail)}")
 
     def ok(self, check: str, detail: str) -> None:
         self.total += 1
@@ -1349,8 +1363,7 @@ def bounded_detail(text: str, limit: int = CONFINEMENT_STDERR_LIMIT) -> str:
     line-oriented BENCH_CHECK contract, so a newline in that output would forge
     a status line and an unbounded tail would flood the report.
     """
-    text = "".join(character if character.isprintable() else " " for character in text)
-    text = " ".join(text.split())
+    text = single_line(text)
     if len(text) > limit:
         text = text[:limit] + "..."
     return text
@@ -4396,6 +4409,19 @@ def evidence_entries(root: Path) -> list[tuple[str, str, int, str]]:
     return sorted(entries)
 
 
+def unusable_evidence(entries: list[tuple[str, str, int, str]]) -> list[str]:
+    """Launch artifacts the spawn boundary refuses whatever their bytes say.
+
+    Preflight and the launch check share this predicate, so a clearance can
+    never be minted over material the spawn boundary is guaranteed to reject.
+    """
+    return sorted(
+        relative
+        for relative, kind, _mode, _digest in entries
+        if kind in UNUSABLE_EVIDENCE_KINDS
+    )
+
+
 def evidence_digest(root: Path) -> str:
     payload = "\n".join(
         f"{relative}\t{kind}\t{mode:o}\t{digest}" for relative, kind, mode, digest in evidence_entries(root)
@@ -4422,11 +4448,7 @@ def check_launch_evidence(root: Path, report: Report) -> None:
         )
         return
     entries = evidence_entries(root)
-    unusable = sorted(
-        relative
-        for relative, kind, _mode, _digest in entries
-        if kind in ("symlink", "special", "unreadable")
-    )
+    unusable = unusable_evidence(entries)
     if unusable:
         report.fail(
             "launch.evidence",
@@ -4566,13 +4588,12 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
             print("BENCH_NOTE preflight no entrant may launch")
     else:
         entries = evidence_entries(root)
-        unreadable = sorted(
-            relative for relative, kind, _mode, _digest in entries if kind == "unreadable"
-        )
-        if unreadable:
+        unusable = unusable_evidence(entries)
+        if unusable:
             report.fail(
                 "launch.evidence",
-                "launch evidence cannot be read, so no clearance can bind it: " + ", ".join(unreadable),
+                "launch evidence is unreadable, symlinked, or a special file, so no clearance "
+                "can bind it: " + ", ".join(unusable),
             )
             receipt.unlink(missing_ok=True)
             print("BENCH_NOTE preflight no entrant may launch")
