@@ -1519,13 +1519,13 @@ fi
 
 # Shared by both the first-notification and already-notified paths below so
 # the retirement sequence (bin/fm-pr-lib.sh) is stated once.
-retire_merged_pr_poll() {  # <id>
-  local id=$1
-  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+retire_terminal_pr_poll() {  # <id> <outcome>
+  local id=$1 outcome=$2
+  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$outcome"; then
     fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "merged PR poll retirement remains recoverable for $id"
+      || triage_log "$outcome PR poll retirement remains recoverable for $id"
   else
-    triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+    triage_log "$outcome PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
 }
 
@@ -1662,9 +1662,17 @@ while :; do
         reason="check: $c: $out"
         # Both PR-poll terminal outcomes publish through the one owner
         # (bin/fm-merge-outcome-lib.sh), which dedupes on PR identity AND
-        # outcome. Only `merged` retires the poll: a PR closed without merging
-        # contradicts the task's done record but is not final, because it can
-        # still be reopened and merged, so its poll stays armed to report that.
+        # outcome, and both retire the poll once their outcome is RECORDED. A
+        # poll exists to observe a terminal outcome; once that outcome is durably
+        # on record its job is finished and asking the forge again is pure waste.
+        # A close used to keep polling on the ground that it can be reopened and
+        # merged - the recorded contradiction now carries that instead, and a
+        # reopen that goes on to merge still reaches the merged path through the
+        # poll re-armed at re-registration.
+        # `merged` retires on the report alone, as it always has. A close retires
+        # only once the contradiction is durably recorded, because an unrecorded
+        # close is an outcome nothing has yet corrected: leaving its poll armed is
+        # what brings it back.
         if [ "$is_pr_poll" -eq 1 ] && { [ "$out" = merged ] || [ "$out" = closed-unmerged ]; }; then
           merge_outcome_rc=0
           fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll "$out" \
@@ -1673,7 +1681,11 @@ while :; do
             triage_log "PR $out outcome for $id could not be recorded (rc=$merge_outcome_rc)"
             exit 1
           fi
-          [ "$out" != merged ] || retire_merged_pr_poll "$id"
+          if [ "$out" = merged ]; then
+            retire_terminal_pr_poll "$id" merged
+          elif [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = true ]; then
+            retire_terminal_pr_poll "$id" "$out"
+          fi
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate $out PR poll result for $id"

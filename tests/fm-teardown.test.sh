@@ -51,6 +51,8 @@
 #   (z7) same blinded world with NO record standing     -> REFUSE (unverified)
 #   (z8) a `stale` record, verifier blinded             -> REFUSE (not established)
 #   (z9) verified record, then the PR closed unmerged   -> REFUSE (contradicted)
+#   (z10) false claim, then a `failed:` line withdrawing it -> ALLOW (no claim)
+#   (z11) false claim + `blocked:`/`needs-decision:`       -> REFUSE (still claimed)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -2909,6 +2911,56 @@ seed_verdict_record() {  # <case-dir> <verdict> <reason>
 # `stale` is not established. The record-first gate must fall through to the
 # verifier for it, which is the whole point: the expensive check is deferred to
 # the gate that actually needs the answer, and here that check cannot be made.
+# The exit from a false claim is withdrawing it, not overriding the guard. A
+# task whose PR was abandoned and which says so honestly has no claim left to
+# verify, so the claim gate has nothing to hold it to - while its landed-work
+# gates, which are separate, still apply.
+test_a_withdrawn_claim_no_longer_holds_up_cleanup() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-withdrawn "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse 'HEAD~1')
+  # A claim that is false: it names a commit that is not the branch tip.
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "setup error: the false claim was not refused in the first place"
+
+  printf 'failed: the PR was abandoned, nothing landed\n' >> "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" \
+    "a claim the task withdrew still held up cleanup: $(cat "$case_dir/stderr2")"
+  pass "withdrawing a false claim is a way out that does not need --force"
+}
+
+# The other half, so the exit above is narrow rather than a hole: a task that is
+# merely stuck is still making its claim and stays held to it.
+test_a_blocked_task_is_still_held_to_its_standing_claim() {
+  local case_dir rc=0 head verb
+  for verb in blocked needs-decision; do
+    case_dir=$(make_claim_case "claim-standing-$verb" "placeholder")
+    head=$(git -C "$case_dir/wt" rev-parse 'HEAD~1')
+    printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+      > "$case_dir/state/task-x1.status"
+    printf '%s: waiting on the captain\n' "$verb" >> "$case_dir/state/task-x1.status"
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+      || fail "a $verb line let a task out of a claim it is still making"
+    [ -e "$case_dir/state/task-x1.meta" ] \
+      || fail "the $verb refusal erased the durable task record"
+  done
+  pass "a task that is merely stuck stays held to the claim it still makes"
+}
+
 test_a_stale_record_does_not_carry_a_task_through_cleanup() {
   local case_dir rc=0 head
   case_dir=$(make_claim_case claim-stale "placeholder")
@@ -2999,6 +3051,8 @@ test_established_claim_allows_teardown
 test_force_overrides_a_contradicted_claim
 test_an_established_claim_survives_losing_the_verifier_sources
 test_an_unestablished_claim_still_refuses_without_a_record
+test_a_withdrawn_claim_no_longer_holds_up_cleanup
+test_a_blocked_task_is_still_held_to_its_standing_claim
 test_a_stale_record_does_not_carry_a_task_through_cleanup
 test_a_closed_pr_stops_its_own_done_record_carrying_cleanup
 test_local_only_fork_remote_allows

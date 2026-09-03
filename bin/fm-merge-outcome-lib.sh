@@ -56,6 +56,12 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+# true only when this call durably recorded a verdict for the task's standing
+# claim. A caller that retires the poll on the strength of the outcome having
+# been RECORDED reads this rather than the return code, which is also 0 when
+# there was no claim to record anything about.
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+FM_MERGE_OUTCOME_VERDICT_RECORDED=false
 
 # fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [<outcome>]
 #
@@ -80,6 +86,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
+  # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+  FM_MERGE_OUTCOME_VERDICT_RECORDED=false
   case "$origin" in self|poll) ;; *) return 2 ;; esac
   fm_pr_poll_outcome_valid "$outcome" || return 2
   fm_pr_task_id_valid "$id" || return 2
@@ -190,8 +198,12 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # duplicate. A failure here still sets status, so the retry happens; it simply
   # no longer has a veto over the report.
   if [ -n "$claim_verdict" ]; then
-    fm_done_verdict_write "$state" "$id" "$claim_verdict" "$claim_hash" "$claim_reason" \
-      || status=1
+    if fm_done_verdict_write "$state" "$id" "$claim_verdict" "$claim_hash" "$claim_reason"; then
+      # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+      FM_MERGE_OUTCOME_VERDICT_RECORDED=true
+    else
+      status=1
+    fi
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

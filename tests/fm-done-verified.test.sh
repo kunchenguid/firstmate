@@ -60,6 +60,12 @@
 #        and merge the brief itself instructs - is not verified, at either arm
 #   (ai) a direct-PR claim is bound to this task's own branch, and a scout claim
 #        to this task's own report directory: a real PR or file is not authorship
+#   (al) the scout binding holds on the LOCATION, not the spelling: a `..` walk
+#        and a directory symlink both fail, an honest claim still verifies
+#   (am) a later `failed:` line withdraws a claim; `blocked:` and
+#        `needs-decision:` do not, and a later `done:` re-asserts one
+#   (an) a close reports whether it durably recorded its contradiction, which is
+#        what decides whether its poll retires or stays armed
 #   (aj) a whitespace-only line inside a partly held-back span retires nothing:
 #        the span index and the byte counter agree about what counts as a line
 #   (ak) a verdict write that fails never suppresses the outcome report, which
@@ -786,7 +792,7 @@ test_help_prints_the_whole_header() {
   out=$("$VERIFY" --help) || fail "fm-verify-done.sh --help did not exit 0"
   last=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
   case "$last" in
-    *"invalidates it rather than inheriting its verdict.") ;;
+    *"(see fm_done_claim_last in bin/fm-done-claim-lib.sh).") ;;
     *) fail "--help truncated its own header; it ends at: $last" ;;
   esac
   case "$out" in
@@ -1124,7 +1130,100 @@ test_a_scout_claim_on_another_tasks_report_is_not_verified() {
     *"not this task's own"*) ;;
     *) fail "the refusal did not say whose report it was: $result" ;;
   esac
-  pass "a scout claim naming another task's report is not verified"
+  # The same substitution written as a walk out of this task's own directory.
+  # A prefix match tests the SPELLING of a location; this tests the location.
+  dir=$(make_world scout-traversal scout scout)
+  mkdir -p "$dir/data/task-other" "$dir/data/task-v"
+  printf 'somebody elses findings\n' > "$dir/data/task-other/report.md"
+  printf 'done: report=data/task-v/../task-other/report.md - shipped\n' \
+    > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" != 0 ] \
+    || fail "a scout claim walking out of its own directory was verified: $result"
+  case "${result#*$'\t'}" in
+    *"walks out of its own directory"*) ;;
+    *) fail "the traversing spelling was not refused as one: $result" ;;
+  esac
+
+  # A directory symlink is the other way to name a real file somewhere else. It
+  # is absence of evidence rather than falsity - the link is refused as evidence
+  # rather than followed - so it reads unverified, never verified.
+  dir=$(make_world scout-dir-symlink scout scout)
+  mkdir -p "$dir/data/task-other"
+  printf 'somebody elses findings\n' > "$dir/data/task-other/report.md"
+  ln -s "$dir/data/task-other" "$dir/data/task-v" \
+    || fail "the fixture could not link the task directory elsewhere"
+  printf 'done: report=data/task-v/report.md - shipped\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a scout claim reaching another task's directory through a link was not unverified: $result"
+
+  # And the honest case, so none of the above is vacuous.
+  dir=$(make_world scout-own scout scout)
+  mkdir -p "$dir/data/task-v"
+  printf 'my own findings\n' > "$dir/data/task-v/report.md"
+  printf 'done: report=data/task-v/report.md - shipped\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "a scout claim naming this task's own report was not verified: $result"
+  pass "a scout claim is bound to this task's own report by location, not spelling"
+}
+
+# --- withdrawing a claim, rather than overriding the guard --------------------
+# A claim the task has retracted is not a claim. Without this a task whose PR was
+# abandoned stays held to an assertion it has already disowned, and the only exit
+# left is the flag AGENTS.md ties to explicit discard authority.
+test_a_later_failed_line_withdraws_the_claim() {
+  local dir state
+  dir="$TMP_ROOT/claim-withdrawn"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf 'done: pr=%s head=%s - shipped\n' "$PR_A" "$HEAD_A" > "$state/task-v.status"
+  fm_done_claim_status "$state" task-v
+  [ "$FM_DONE_CLAIM_STATE" != none ] \
+    || fail "setup error: the standing claim was not seen at all"
+
+  printf 'failed: the PR was abandoned, no work landed\n' >> "$state/task-v.status"
+  fm_done_claim_status "$state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = none ] \
+    || fail "a claim withdrawn by a later failed line still stands as $FM_DONE_CLAIM_STATE"
+  [ -z "$FM_DONE_CLAIM_LINE" ] \
+    || fail "a withdrawn claim was still returned as the line under test"
+  pass "a later failed line withdraws a terminal claim"
+}
+
+# Deliberately narrow: only `failed:` retracts. A task that is merely stuck is
+# still making its claim, and must stay held to it.
+test_only_a_failed_line_withdraws_the_claim() {
+  local dir state verb
+  for verb in blocked needs-decision; do
+    dir="$TMP_ROOT/claim-standing-$verb"
+    state="$dir/state"
+    mkdir -p "$state"
+    printf 'done: pr=%s head=%s - shipped\n' "$PR_A" "$HEAD_A" > "$state/task-v.status"
+    printf '%s: waiting on something\n' "$verb" >> "$state/task-v.status"
+    fm_done_claim_status "$state" task-v
+    [ "$FM_DONE_CLAIM_STATE" != none ] \
+      || fail "a $verb line withdrew a claim the task is still making"
+  done
+
+  # A `done:` appended after a retraction is a fresh claim, not a revival.
+  dir="$TMP_ROOT/claim-reasserted"
+  state="$dir/state"
+  mkdir -p "$state"
+  {
+    printf 'done: pr=%s head=%s - first try\n' "$PR_A" "$HEAD_A"
+    printf 'failed: the PR was abandoned\n'
+    printf 'done: pr=%s head=%s - second try\n' "$PR_A" "$HEAD_A"
+  } > "$state/task-v.status"
+  fm_done_claim_status "$state" task-v
+  [ "$FM_DONE_CLAIM_STATE" != none ] \
+    || fail "a claim re-asserted after a retraction did not stand"
+  case "$FM_DONE_CLAIM_LINE" in
+    *"second try"*) ;;
+    *) fail "the re-asserted claim was not the line under test: $FM_DONE_CLAIM_LINE" ;;
+  esac
+  pass "only a failed line withdraws a claim, and a later done re-asserts one"
 }
 
 # --- the three shapes of terminal evidence -----------------------------------
@@ -1235,6 +1334,43 @@ test_a_failed_verdict_write_still_publishes_the_outcome() {
     *) fail "a blocked verdict write suppressed the close report entirely: $out" ;;
   esac
   pass "a failed verdict write never suppresses the outcome report it follows"
+}
+
+# A poll exists to observe a terminal outcome, so bin/fm-watch.sh retires a close
+# once its contradiction is durably RECORDED - and leaves it armed when it is
+# not, because an outcome nothing has corrected is exactly the one that must come
+# back. This is the signal the watcher branches on.
+test_a_close_reports_whether_it_recorded_its_contradiction() {
+  local claim dir
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  dir=$(make_claim_world close-recorded "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = true ] \
+    || fail "a recorded contradiction did not report itself as recorded"
+
+  # A blocked verdict path: the close is still published, but nothing has
+  # corrected the record, so the poll must stay armed.
+  dir=$(make_claim_world close-unrecorded "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  rm -f "$dir/state/task-v.done-verdict"
+  ln -s /dev/null "$dir/state/task-v.done-verdict" \
+    || fail "the fixture could not block the verdict path"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    && fail "a blocked verdict write was reported as a clean outcome"
+  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = false ] \
+    || fail "a contradiction that was never written reported itself as recorded"
+
+  # No claim on record is nothing to contradict, so nothing is recorded and the
+  # poll stays armed for a reopen the worker has not yet claimed anything about.
+  dir=$(make_claim_world close-no-claim 'working: still going') \
+    || fail "the no-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    || fail "the no-claim close could not be published"
+  [ "$FM_MERGE_OUTCOME_VERDICT_RECORDED" = false ] \
+    || fail "a close with no claim on record reported a recorded contradiction"
+  pass "a close reports whether its contradiction was durably recorded"
 }
 
 # The precedence itself, driven through the record's owner. Each incoming
@@ -1513,10 +1649,13 @@ test_a_retired_branch_claim_on_work_never_made_is_not_verified
 test_a_direct_pr_claim_on_another_branch_is_not_verified
 test_a_direct_pr_claim_on_this_task_branch_verifies
 test_a_scout_claim_on_another_tasks_report_is_not_verified
+test_a_later_failed_line_withdraws_the_claim
+test_only_a_failed_line_withdraws_the_claim
 test_a_merge_marks_an_established_claim_stale
 test_a_close_contradicts_an_established_claim_in_the_record
 test_a_terminal_outcome_invents_no_verdict_without_a_claim
 test_a_failed_verdict_write_still_publishes_the_outcome
+test_a_close_reports_whether_it_recorded_its_contradiction
 test_verdict_write_precedence_keeps_the_stronger_statement
 test_a_held_back_span_with_multibyte_prose_presents_no_fragment
 test_the_unrecognised_cap_is_per_task_not_per_drain

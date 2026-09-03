@@ -57,12 +57,16 @@
 #     - the claimed report= exists as a non-empty regular file INSIDE this task's
 #       own directory under the home's data root. A file existing is not this
 #       task having produced it, so the path is bound to <data>/<task-id>/ the
-#       same way the local-only arm is bound to fm/<task-id>. An absolute path is
-#       used as given (what bin/fm-brief.sh renders into a scout brief); a
-#       relative one is resolved against the data root, so a relocated
-#       FM_DATA_OVERRIDE resolves the same claim as an unrelocated one. A leading
-#       `data/` is the home-relative spelling of that root and names it rather
-#       than a directory beneath it.
+#       same way the local-only arm is bound to fm/<task-id>. That binding is
+#       made on the real location, not on the spelling of one: a `report=`
+#       carrying a `..` component is refused outright, and the containing
+#       directory is then resolved physically before it is compared, so neither
+#       an upward walk nor a directory symlink can present another task's
+#       deliverable as this one's. An absolute path is used as given (what
+#       bin/fm-brief.sh renders into a scout brief); a relative one is resolved
+#       against the data root, so a relocated FM_DATA_OVERRIDE resolves the same
+#       claim as an unrelocated one. A leading `data/` is the home-relative
+#       spelling of that root and names it rather than a directory beneath it.
 #
 # A task whose meta records no mode= - the population spawned before mode= was
 # recorded - is routed by the shape of its own claim, because an absent record is
@@ -99,7 +103,10 @@
 # for the three shapes and the write precedence that keeps them apart.
 #
 # The verdict record binds to the exact claim line it judged, so appending a new
-# `done:` line invalidates it rather than inheriting its verdict.
+# `done:` line invalidates it rather than inheriting its verdict. A task whose
+# claim a later `failed:` line has withdrawn has no claim to verify and exits 2:
+# withdrawing a claim, not overriding the gate, is the way out of a false one
+# (see fm_done_claim_last in bin/fm-done-claim-lib.sh).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -207,6 +214,17 @@ if [ "$KIND" = scout ]; then
     verdict_is contradicted 'scout claim names no report' "$FM_DONE_CLAIM_LINE"
     finish
   fi
+  # A `..` component makes the spelling of a path and its location two different
+  # things, and every containment test below is about the location. Refused
+  # outright rather than normalised away: a scout report path has no legitimate
+  # reason to walk upward, and the claim naming one is itself the observation.
+  case "/$FM_DONE_CLAIM_REPORT/" in
+    */../*)
+      verdict_is contradicted "the claimed report walks out of its own directory: $FM_DONE_CLAIM_REPORT" \
+        "$FM_DONE_CLAIM_REPORT"
+      finish
+      ;;
+  esac
   case "$REPORT" in
     /*) ;;
     data/*) REPORT="$DATA/${REPORT#data/}" ;;
@@ -216,6 +234,13 @@ if [ "$KIND" = scout ]; then
   # under the home's data root in the task's own directory, so a claim resolving
   # anywhere else names someone else's deliverable however real that file is -
   # the same binding the local-only arm makes by requiring branch = fm/<id>.
+  #
+  # Tested twice, on the spelling and then on the real location, because a prefix
+  # match alone tests only how a path is written: this same binding was added to
+  # stop a substitution and shipped with `..` walking straight through it. The
+  # second test resolves both sides physically, so a directory symlink cannot
+  # stand in for the walk either. A path that will not resolve is left to the
+  # existence checks below, which report it as missing rather than as foreign.
   case "$REPORT" in
     "$DATA/$ID/"?*) ;;
     *)
@@ -224,6 +249,26 @@ if [ "$KIND" = scout ]; then
       finish
       ;;
   esac
+  # The task's own directory has to BE a directory for containment in it to mean
+  # anything: a link there points containment wherever the link does. Refusing to
+  # read it is not proof the claim is false, so it names the link and reads
+  # unverified, exactly as the report symlink below does.
+  if [ -L "$DATA/$ID" ]; then
+    verdict_is unverified "this task's report directory is a symlink, which is not read as evidence: $DATA/$ID"
+    finish
+  fi
+  REPORT_DIR=$(cd "$(dirname "$REPORT")" 2>/dev/null && pwd -P) || REPORT_DIR=
+  OWN_DIR=$(cd "$DATA/$ID" 2>/dev/null && pwd -P) || OWN_DIR=
+  if [ -n "$REPORT_DIR" ] && [ -n "$OWN_DIR" ]; then
+    case "$REPORT_DIR/" in
+      "$OWN_DIR/"*) ;;
+      *)
+        verdict_is contradicted "the claimed report is not this task's own: $FM_DONE_CLAIM_REPORT is really in $REPORT_DIR, outside $OWN_DIR" \
+          "$REPORT_DIR"
+        finish
+        ;;
+    esac
+  fi
   # A symlink is refused as evidence rather than followed, but refusing to read
   # something is not proof that it is false: the report may be perfectly present
   # behind the link. That is absence of evidence, so it names the link and reads
@@ -426,7 +471,7 @@ if [ "$MODE" = local-only ]; then
       verdict_is unverified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT, but its own history records no commit it made, so nothing establishes that this task authored that commit rather than inheriting it"
       finish
     fi
-    verdict_is verified "the local copy is at the claimed $HEAD_CLAIM, which it committed at $AUTHORED_AT, and it is on $DEFAULT; its branch $BRANCH has been retired"
+    verdict_is verified "the local copy is at the claimed $HEAD_CLAIM, its own history records a commit it made at $AUTHORED_AT, and the claim is on $DEFAULT; its branch $BRANCH has been retired"
     finish
   fi
   DEFAULT_TIP=$(git -C "$WT" rev-parse --verify --quiet "$DEFAULT_REF" 2>/dev/null || true)

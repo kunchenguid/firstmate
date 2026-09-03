@@ -146,10 +146,11 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
-  *"state,headRefOid,url,statusCheckRollup"*)
+  *"state,headRefOid,headRefName,url,statusCheckRollup"*)
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
-      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" SUCCESS
+    printf '%s\t%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      "${FM_TEST_GH_HEAD_BRANCH:-fm/task-a}" SUCCESS
     ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
@@ -2097,6 +2098,23 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
       && fail "nonterminal result '$result' received retirement authority"
   done
   [ "$(state_snapshot "$state")" = "$before" ] || fail "nonterminal result changed canonical artifacts"
+
+  # A close without merge is terminal too: once its contradiction is recorded the
+  # poll has nothing left to observe, so it retires on the same receipt the merge
+  # path uses, carrying the outcome that actually retired it.
+  dir=$(make_case retirement-closed-unmerged)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/7
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" || fail "could not snapshot close fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" closed-unmerged \
+    || fail "a recorded close could not retire its own poll"
+  fm_pr_poll_retirement_parse "$state/task-a.pr-poll-retirement" \
+    || fail "the close retirement receipt did not parse"
+  fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" \
+    || fail "the close retirement receipt was not recoverable"
+  [ ! -e "$state/task-a.check.sh" ] \
+    || fail "the close retirement left the poll's runnable check armed"
 
   printf '# tamper\n' >> "$state/task-a.check.sh"
   before=$(state_snapshot "$state")

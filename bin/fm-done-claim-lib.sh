@@ -31,7 +31,8 @@
 #   <epoch seconds when it was established>
 #   <single-line reason>
 # The claim hash binds a verdict to one exact claim, so appending a new `done:`
-# line invalidates the old verdict instead of inheriting it.
+# line invalidates the old verdict instead of inheriting it, and a later
+# `failed:` line withdraws the claim entirely (see fm_done_claim_last).
 #
 # THE THREE SHAPES OF TERMINAL EVIDENCE. Evidence about a standing claim comes in
 # three shapes, not two, and conflating the third with the first is what let a
@@ -146,24 +147,49 @@ fm_done_claim_has_identity() {
   [ -n "$FM_DONE_CLAIM_REPORT" ]
 }
 
-# The last `done:` line in a status log, or empty. A status log is an
-# append-only event log, so the newest claim is the one under test; earlier
+# The task's STANDING terminal claim, or empty when it has none. A status log is
+# an append-only event log, so the newest `done:` is the one under test; earlier
 # claims were superseded by whatever the worker did next.
+#
+# A later `failed:` line WITHDRAWS the claim, and the task then has none. That is
+# the whole of the supersession rule and it is deliberately narrow: only
+# `failed:` retracts. `blocked:` and `needs-decision:` must not, because they say
+# the work is ongoing, not that the assertion is withdrawn, and a task sitting on
+# a claim it still makes should stay refused while it is merely stuck.
+#
+# Why the rule exists at all, so it is not "simplified" back: without it a task
+# whose PR was abandoned is held forever to an assertion it has already
+# disowned - the claim gate refuses, and the only remaining instrument is
+# `--force`, which AGENTS.md ties to explicit discard authority. Nothing is
+# weakened by letting honesty out: a task that still CLAIMS done cannot be
+# cleaned up on a false claim, and unlanded work stays protected by teardown's
+# own landed-work gates, which are separate and untouched. The point of the shape
+# is which exit it puts within reach. Make the way out of a false claim
+# withdrawing it and people withdraw it; make it force and they learn to reach
+# for force.
 #
 # This runs per task on every current-state read and every session-start digest,
 # so the leading-verb test is only paid for by lines that could possibly carry
-# it. `status_line_verb` costs a fork per call, and a line whose verb is `done`
-# always begins with `done` after its leading whitespace - a correlation token
-# or a `[key=...]` only ever follows the verb word - so the fork-free prefix
-# test below is exact, not an approximation, and skips it for every other line.
+# one of the two verbs. `status_line_verb` costs a fork per call, and a line
+# whose verb is `done` or `failed` always begins with that word after its leading
+# whitespace - a correlation token or a `[key=...]` only ever follows the verb
+# word - so the fork-free prefix test below is exact, not an approximation, and
+# skips it for every other line.
 fm_done_claim_last() {  # <status-file>
   local f=${1:-} line trimmed last=
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     trimmed=${line#"${line%%[![:space:]]*}"}
-    case "$trimmed" in done*) ;; *) continue ;; esac
-    [ "$(status_line_verb "$line")" = "done" ] || continue
-    last=$line
+    case "$trimmed" in
+      done*)
+        [ "$(status_line_verb "$line")" = "done" ] || continue
+        last=$line
+        ;;
+      failed*)
+        [ "$(status_line_verb "$line")" = "failed" ] || continue
+        last=
+        ;;
+    esac
   done < "$f"
   printf '%s' "$last"
 }
@@ -332,7 +358,8 @@ fm_done_verdict_read() {  # <state> <task-id>
 # test, empty when the task has never claimed done), FM_DONE_CLAIM_STATE, and
 # FM_DONE_CLAIM_REASON, plus the parsed claim fields.
 #
-#   none          the task has made no terminal claim; nothing to verify.
+#   none          the task has no standing terminal claim: it never made one, or
+#                 it made one and a later `failed:` line withdrew it.
 #   verified      a matching verdict record establishes the claim.
 #   unverified    the claim cannot be established: no commit identity (every
 #                 legacy claim), no verdict yet, a verdict for a superseded

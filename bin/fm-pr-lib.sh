@@ -703,7 +703,7 @@ fm_pr_poll_retirement_parse() {
   [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ "$reg_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$reg_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-  [ "$result" = merged ] || return 1
+  fm_pr_poll_outcome_valid "$result" || return 1
   FM_PR_RETIRE_ID=$id
   FM_PR_RETIRE_PROVIDER=$provider
   FM_PR_RETIRE_URL=$url
@@ -850,7 +850,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
-  [ "$result" = merged ] || return 1
+  fm_pr_poll_outcome_valid "$result" || return 1
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   receipt="$state/$id.pr-poll-retirement"
@@ -872,7 +872,7 @@ fm_pr_poll_retirement_publish() {
       "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" \
       "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
       "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" \
-      merged > "$tmp" \
+      "$result" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \
@@ -987,18 +987,12 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
     && [ "$number" = "$expected_number" ]
 }
 
-# The terminal outcomes bin/fm-pr-poll.sh may report. `merged` retires the poll;
-# `closed-unmerged` contradicts a done record and deliberately leaves the poll
-# armed, because a closed PR can still be reopened and merged.
-#
-# The standing cost of that, named rather than glossed: a PR closed and never
-# reopened leaves its poll armed indefinitely, asking the forge once per watcher
-# interval forever. The notification marker keeps it from waking anyone twice, so
-# it is silent cost rather than noise, but it has no end state - bin/fm-teardown's
-# claim gate refuses that task as contradicted, which leaves `--force` as the
-# only instrument that stops the poll, and AGENTS.md ties `--force` to explicit
-# discard authority. That is the wrong instrument for retiring a poll. This is
-# known and tracked separately, not fine.
+# The terminal outcomes bin/fm-pr-poll.sh may report, and the outcomes a
+# retirement receipt may record. Both retire the poll, because a poll exists to
+# OBSERVE a terminal outcome and has nothing left to do once that outcome is on
+# record: `merged` on the report, `closed-unmerged` once its contradiction is
+# durably recorded (bin/fm-watch.sh owns that distinction). A close that could
+# not be recorded keeps its poll armed, which is what brings it back.
 fm_pr_poll_outcome_valid() {  # <outcome>
   case "${1:-}" in merged|closed-unmerged) return 0 ;; esac
   return 1
