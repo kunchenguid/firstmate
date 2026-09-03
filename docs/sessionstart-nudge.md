@@ -79,9 +79,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Cursor compaction | Uncovered | None. | Cursor's `preCompact` response can return only `user_message` and is absent from Cursor's `additional_context` step set, so it cannot inject a re-emit digest. Delivering one needs its own design and is deliberately deferred to a follow-up; a Cursor primary does not re-emit its digest after a compaction. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
-Copilot also reads `.claude/settings.json`, so those compatibility entries stand down when `COPILOT_CLI=1` and the native `.github/hooks/` registration owns the event.
-Firstmate clears that marker from every non-Copilot worker launch so a child adapter cannot lose its own session-start path.
-The native adapter also requires `COPILOT_CLI=1`, so the same committed `.github/hooks/` file is inert when a Copilot cloud-agent job clones this repository.
+Copilot also reads `.claude/settings.json`, but the session-start compatibility boundary is the verified actual-host rule in [`configuration.md`](configuration.md#harness-support), so the native `.github/hooks/` registration remains the only session-start owner for a real Copilot host.
 Cursor's compaction surface is uncovered in the same sense as Codex's interactive TUI above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.

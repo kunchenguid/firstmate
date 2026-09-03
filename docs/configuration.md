@@ -298,6 +298,10 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, copilot, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 A Copilot secondmate or primary uses tracked `.github/hooks/fm-primary.json` for session start, command and delegation protections, and the turn-end backstop.
+A first interactive Copilot session may prompt to trust the repository before those hooks and project instructions load.
+Copilot also reads tracked `.claude/settings.json` entries.
+Those compatibility entries resolve Firstmate from `CLAUDE_PROJECT_DIR` when present or from the physical hook cwd otherwise, verify that root before executing any helper, and stand down whenever the actual hook host is Copilot, so a real Claude session launched from a Copilot shell still keeps Claude's own lifecycle hooks.
+Non-Copilot Firstmate launches still clear inherited Copilot markers before starting a child runtime, and the committed `.github/hooks/fm-primary.json` adapter itself exits unless the actual host process ancestry is Copilot, so non-Copilot runtimes and cloud-agent jobs remain inert.
 [`docs/supervision-protocols/copilot.md`](supervision-protocols/copilot.md) owns its attached asynchronous supervision protocol.
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
@@ -332,7 +336,8 @@ The inherited-local-material contract is owned by [`secondmate-provisioning`](..
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Copilot crews and scouts, `fm-spawn.sh` writes a git-excluded `.github/hooks/fm-busy-state.json` into the task worktree.
+For Copilot crews and scouts, `fm-spawn.sh` writes a git-excluded `.github/hooks/fm-busy-state-<task-id>.json` into the task worktree.
+That install refuses a symlinked or non-directory `.github` or `.github/hooks` path and refuses any pre-existing destination file, so a repository cannot redirect or reuse Firstmate's generated worker hook.
 Its `userPromptSubmitted`, `agentStop`, and `sessionEnd` hooks maintain semantic busy state, and `agentStop` also touches the task's turn-end notification marker.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
