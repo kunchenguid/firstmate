@@ -65,6 +65,10 @@
 #   (ae) path introduced by a merge commit's own resolution     -> REFUSE (not missed)
 #   (af) default branch unrefreshable, so the check cannot run  -> REFUSE + says why
 #   (ag) merged PR missing one not-on-a-remote commit           -> REFUSE + names it
+#   (ah) merged PR resolved but its head could not be fetched   -> REFUSE, and the
+#        refusal must NOT claim the head lacks the work (nothing was compared)
+#   (ai) a second safety pass whose own PR lookup fails         -> REFUSE without
+#        reprinting the PR the first pass resolved
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -373,6 +377,65 @@ assert_refusal_retained_task_state() {
     || fail "$label: refusal moved the task branch off the unlanded commit"
   [ -e "$case_dir/state/task-x1.meta" ] \
     || fail "$label: refusal erased the durable task record"
+}
+
+# Report PR 7 as merged with the supplied head until <marker> exists, and fail
+# every lookup once it does. Lets one teardown process run a first safety pass
+# that resolves the PR and a later one whose own lookup fails.
+add_gh_pr_merged_until_marker() {
+  local case_dir=$1 head=$2 marker=$3
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ -e "$marker" ]; then
+  echo "error: gh unavailable" >&2
+  exit 1
+fi
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# add_lock_aware_treehouse, plus dropping <marker> on the first return attempt -
+# which is after the pre-return safety pass and before the one the stale-lock
+# cleanup runs, so a marker-keyed stub can behave differently in each.
+add_marking_lock_aware_treehouse() {
+  local case_dir=$1 marker=$2
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then
+  : > "$marker"
+  shift
+  wt=""
+  for a in "\$@"; do
+    case "\$a" in
+      --force) ;;
+      *) wt=\$a ;;
+    esac
+  done
+  lock=\$(git -C "\$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "\$lock" in
+    /*|'') ;;
+    *) lock="\$wt/\$lock" ;;
+  esac
+  if [ -n "\$lock" ] && [ -e "\$lock" ]; then
+    echo "fatal: Unable to create '\$lock': File exists." >&2
+    exit 128
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
 }
 
 append_pr_meta_for_current_head() {
@@ -1388,6 +1451,82 @@ test_refusal_names_commits_a_merged_pr_does_not_contain() {
   assert_grep 'add extra, never reviewed' "$case_dir/stderr" \
     "pr-unmatched-evidence: the refusal did not name the commit the PR does not contain"
   pass "a refusal names the commits a merged PR head does not contain"
+}
+
+# (ah) the PR resolves as merged but its head object cannot be produced, so the
+# patch comparison never runs -> REFUSE, and the refusal must say the comparison
+# could not run. Claiming "its head does not contain this work" here would be an
+# unverified negative, and that is what sends an operator to --force.
+test_refusal_never_claims_an_uncompared_pr_head_lacks_the_work() {
+  local case_dir rc stderr
+  case_dir=$(make_case pr-head-unfetchable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  # PR 7 is merged, but its head object is not in this repository and origin has
+  # no refs/pull/7/head to fetch it from, so nothing can be compared against it.
+  add_gh_pr_merged_for_head "$case_dir" 0123456789abcdef0123456789abcdef01234567
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$rc" "pr-head-unfetchable: teardown should refuse when the work is not in the default branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "pr-head-unfetchable: no REFUSED line in stderr"
+  assert_not_contains "$stderr" "does not contain this work" \
+    "pr-head-unfetchable: the refusal asserted a PR-head verdict that was never computed"
+  assert_grep 'merged PR https://github.com/example/repo/pull/7: its head 0123456789abcdef0123456789abcdef01234567 is not available locally' \
+    "$case_dir/stderr" \
+    "pr-head-unfetchable: the refusal did not say why the PR head could not be compared"
+  assert_grep 'feature.txt' "$case_dir/stderr" \
+    "pr-head-unfetchable: the refusal did not name the path the default branch is missing"
+  pass "a merged PR whose head could not be fetched is reported as uncompared, never as lacking the work"
+}
+
+# (ai) one process runs the safety check twice: once before the worktree return
+# and again after the stale-lock cleanup. The first pass resolves merged PR 7;
+# the second's own lookup fails, so its refusal must name no PR at all.
+test_second_safety_pass_does_not_reprint_the_first_passes_pr() {
+  local case_dir rc lock marker stderr
+  case_dir=$(make_case pr-ref-not-carried-over)
+  write_meta "$case_dir" no-mistakes ship
+  # The work is on no remote and never lands in the default branch, so the second
+  # pass has nothing but the PR evidence to fall back on.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  marker="$case_dir/gh-offline"
+  add_gh_pr_merged_until_marker "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)" "$marker"
+  add_marking_lock_aware_treehouse "$case_dir" "$marker"
+  add_lsof_no_holder "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$rc" "pr-ref-not-carried-over: teardown should refuse on the post-cleanup safety pass"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "pr-ref-not-carried-over: the stale lock was never cleared, so only one safety pass ran"
+  grep -q REFUSED "$case_dir/stderr" || fail "pr-ref-not-carried-over: no REFUSED line in stderr"
+  assert_grep 'feature.txt' "$case_dir/stderr" \
+    "pr-ref-not-carried-over: the refusal did not name the path the default branch is missing"
+  assert_not_contains "$stderr" "merged PR" \
+    "pr-ref-not-carried-over: the refusal named a PR this pass never resolved"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "pr-ref-not-carried-over: teardown completed despite the refusal"
+  pass "a safety pass whose own PR lookup fails reports no PR from an earlier pass"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -3976,6 +4115,8 @@ test_unlanded_deletion_refuses
 test_merge_commit_own_content_is_not_missed
 test_unreachable_default_branch_refuses_and_says_so
 test_refusal_names_commits_a_merged_pr_does_not_contain
+test_refusal_never_claims_an_uncompared_pr_head_lacks_the_work
+test_second_safety_pass_does_not_reprint_the_first_passes_pr
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
