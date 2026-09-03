@@ -37,8 +37,9 @@ document:
 commands:
   lint: 'bin/fm-lint.sh'
 
-# Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
+# Publishing each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR is off by captain order of 2026-09-02 until the upstream redaction fix lands.
+# Turn it back on deliberately when that fix lands rather than leaving it off by accident.
 # The evidence is not committed to the feature or default branch.
 test:
   evidence:
-    store_in_repo: true
+    store_in_repo: false
