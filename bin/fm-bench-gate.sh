@@ -20,14 +20,14 @@
 #   fm-bench-gate.sh --help
 #
 # Pre-launch gates, all of which `preflight` composes:
-#   plan-check        six distinct packets, the six-task sweep rule, a common
-#                     neutral judge panel, no adaptive ninth sample, and the
-#                     captain's fixed isolation and discard rulings
+#   plan-check        explicit track capabilities, six distinct packets, the
+#                     six-task sweep rule, a common neutral judge panel, no
+#                     adaptive ninth sample, and the captain's fixed rulings
 #   freeze / freeze-check
 #                     freeze every input before labels exist, then prove the
 #                     frozen inputs are unchanged
-#   provenance-check  positive identification of every original participant
-#                     before a historical packet is replayed
+#   provenance-check  positive coverage of every original author, reviewer,
+#                     and judge before a historical packet is replayed
 #   isolation-verify  run the sibling-access probe set inside each entrant's
 #                     confinement, prove its in-root private paths are ignored
 #                     by Git, and refuse unless every probe is denied
@@ -40,12 +40,13 @@
 #   preflight         all of the above; writes preflight.receipt on a pass
 #
 # Post-run gates:
-#   promote-evaluate  apply the six-task sweep, margin, and baseline regression
-#                     veto to recorded results
+#   promote-evaluate  reconcile void reruns, then apply the six-task sweep,
+#                     margin, and declared baseline veto to recorded results
 #   archive-verify    recompute every archived content address
 #   restore-drill     restore each bundle into a fresh repository, rebind its
 #                     tree, then rerun a deterministic archived evaluator twice
-#                     in confined, independent, blinded scratch copies
+#                     with its declared structured perturbation in confined,
+#                     independent, blinded scratch copies
 #   cleanup-gate      authorise candidate and snapshot cleanup only from a
 #                     passing drill still bound to the archive as it stands
 #

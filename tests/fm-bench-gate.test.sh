@@ -46,7 +46,8 @@ import json, sys
 path, mutation = sys.argv[1], sys.argv[2]
 
 def candidate(name, family, harness, model, effort="high", **extra):
-    row = {"name": name, "family": family, "harness": harness, "model": model, "effort": effort}
+    row = {"name": name, "family": family, "harness": harness, "model": model,
+           "effort": effort, "metered_provider": False}
     row.update(extra)
     return row
 
@@ -68,6 +69,9 @@ def track(prefix, entrants, judges, baseline, cost_class, kinds, **extra):
         "judges": judges,
         "judge_call_unit": "per-candidate-output-per-judge",
         "run_cost_class": cost_class,
+        "baseline_required": baseline is not None,
+        "capture_required": False,
+        "specification_required": False,
     }
     if baseline:
         row["baseline"] = baseline
@@ -143,6 +147,7 @@ plan = {
             "implementation_run",
             ["synthetic"] * 6,
             capture_required=True,
+            specification_required=True,
             wave="single-complete",
             spec_author={
                 "name": "Fable 5",
@@ -178,6 +183,7 @@ write_provenance() {  # <bench-dir> <packet> <mode>
     cat > "$bench/provenance/$packet.json" <<EOF
 {"schema":"fm-bench-provenance.v1","packet":"$packet","source":"replayed history",
  "checked_families":["anthropic","openai"],
+ "role_absences":{"judge":"the original work had no judge"},
  "participants":[
   {"task_id":"$packet-author","role":"author","model_id":"zai/glm-5.3-flash","family":"zai","session_id":"pi-1"},
   {"task_id":"$packet-review","role":"reviewer","model_id":"zai/glm-5.3","family":"zai","session_id":"pi-2"}]}
@@ -186,6 +192,7 @@ EOF
     cat > "$bench/provenance/$packet.json" <<EOF
 {"schema":"fm-bench-provenance.v1","packet":"$packet","source":"replayed history",
  "checked_families":["anthropic","openai"],
+ "role_absences":{"reviewer":"the review record is unavailable","judge":"the original work had no judge"},
  "participants":[
   {"task_id":"$packet-author","role":"author","model_id":"no record found","family":"unknown","session_id":"unavailable"}]}
 EOF
@@ -206,12 +213,18 @@ out=$(run_gate "$BENCH" plan-check) || fail "the corrected plan must pass plan-c
 assert_contains "$out" "BENCH_RESULT plan-check ok" "corrected plan passes"
 assert_contains "$out" "6 distinct frozen packets, one sample each" "packets are distinct, not repeated runs"
 assert_contains "$out" "a standing route needs 6/6" "the sweep rule is the promotion bar"
-assert_contains "$out" "track.A.spec_seat ok no specification-required design seat" \
+assert_contains "$out" "track.A.spec_seat ok specification explicitly not required" \
   "a track without a design seat reports that decision"
-assert_contains "$out" "track.B.spec_seat ok specification-required design seat" \
+assert_contains "$out" "track.B.spec_seat ok specification-required design seat fully evaluated" \
   "a specification-requiring track reports its evaluated seat"
-assert_contains "$out" "track.C.spec_seat ok no specification-required design seat" \
+assert_contains "$out" "track.C.spec_seat ok specification explicitly not required" \
   "every track reports its spec-seat scope"
+assert_contains "$out" "track.A.capture_scope ok neutral capture explicitly not required" \
+  "a non-capture track reports that decision"
+assert_contains "$out" "track.B.capture_scope ok neutral capture explicitly required" \
+  "the capture track reports that decision"
+assert_contains "$out" "plan.capture_scope ok the positively declared capture field produces exactly 30 UI records" \
+  "the complete capture field is required by the plan"
 pass "a plan carrying the whole correction set passes plan-check"
 
 # Each refusal below is one correction the review demanded, proven to bite.
@@ -243,6 +256,30 @@ refuses "a baseline treated as a competing peer" \
 refuses "an unstratified baseline subset" \
   'plan["tracks"]["A"]["baseline_packets"] = ["A1", "A2", "A3"]' \
   "preregistered stratified subset"
+refuses "an undeclared baseline capability" \
+  'plan["tracks"]["A"].pop("baseline_required")' \
+  "track.A.baseline_scope fail baseline_required must explicitly declare true or false"
+refuses "a baseline contradicting its declared capability" \
+  'plan["tracks"]["A"]["baseline_required"] = False' \
+  "baseline_required false conflicts with a baseline or baseline_packets"
+refuses "an undeclared neutral-capture capability" \
+  'plan["tracks"]["A"].pop("capture_required")' \
+  "track.A.capture_scope fail capture_required must explicitly declare true or false"
+refuses "a capture wave contradicting its declared capability" \
+  'plan["tracks"]["A"]["wave"] = "single-complete"' \
+  "wave may be declared only when capture_required is true"
+refuses "an undeclared specification capability" \
+  'plan["tracks"]["A"].pop("specification_required")' \
+  "track.A.spec_seat fail specification_required must explicitly declare true or false"
+refuses "a design seat contradicting its declared capability" \
+  'plan["tracks"]["A"]["spec_author"] = {"name": "Design Author", "family": "mistral"}' \
+  "specification_required false conflicts with neutral capture or design-seat fields"
+refuses "a field with no complete capture track" \
+  'plan["tracks"]["B"]["capture_required"] = False; plan["tracks"]["B"].pop("wave")' \
+  "plan.capture_scope fail"
+refuses "a capture track that opts out of its specification seat" \
+  'track = plan["tracks"]["B"]; track["specification_required"] = False; track.pop("spec_author"); track.pop("spec_audit")' \
+  "specification_required false conflicts with neutral capture or design-seat fields: capture_required"
 refuses "a judge whose family fields an entrant" \
   'plan["tracks"]["A"]["judges"] = [{"name": "Terra", "family": "openai"}, {"name": "GLM", "family": "zai"}]' \
   "judge families also field candidates here"
@@ -252,9 +289,6 @@ refuses "candidate-specific judge exclusions" \
 refuses "a one-judge panel" \
   'plan["tracks"]["A"]["judges"] = [{"name": "GLM 5.3 Max", "family": "zai"}]' \
   "at least two common neutral-family judges"
-refuses "a specification-requiring track with no author" \
-  'plan["tracks"]["B"].pop("spec_author")' \
-  "track.B.spec_seat fail track requires a specification"
 refuses "the design author also judging its own specification" \
   'plan["tracks"]["B"]["judges"] = [{"name": "Fable 5", "family": "anthropic"}, {"name": "Nova 3", "family": "cohere"}]' \
   "may not interpret its own unstated intent"
@@ -262,7 +296,7 @@ refuses "an unaudited specification" \
   'plan["tracks"]["B"]["spec_audit"][2]["pre_freeze"] = False' \
   "not independent, pre-freeze, or accepted"
 refuses "an unaudited specification outside the capture track" \
-  'track = plan["tracks"]["A"]; track["spec_author"] = {"name": "Design Author", "family": "mistral"}; track["spec_audit"] = [{"packet": packet["id"], "auditor": "Independent Auditor", "auditor_family": "cohere", "pre_freeze": True, "verdict": "accepted"} for packet in track["packets"]]; track["spec_audit"][2]["pre_freeze"] = False' \
+  'track = plan["tracks"]["A"]; track["specification_required"] = True; track["spec_author"] = {"name": "Design Author", "family": "mistral"}; track["spec_audit"] = [{"packet": packet["id"], "auditor": "Independent Auditor", "auditor_family": "cohere", "pre_freeze": True, "verdict": "accepted"} for packet in track["packets"]]; track["spec_audit"][2]["pre_freeze"] = False' \
   "track.A.spec_audit_independent fail"
 refuses "a specification audit with no auditor family" \
   'plan["tracks"]["B"]["spec_audit"][2]["auditor_family"] = ""' \
@@ -285,10 +319,45 @@ refuses "a partial wave on the capture track" \
 refuses "an entrant with no pinned effort" \
   'plan["tracks"]["A"]["entrants"][0]["effort"] = None' \
   "pins no effort"
+refuses "an entrant with no metering declaration" \
+  'plan["tracks"]["A"]["entrants"][0].pop("metered_provider")' \
+  "must explicitly declare a metered provider name or false"
+refuses "a Cursor entrant declared unmetered" \
+  'plan["tracks"]["B"]["entrants"][1]["metered_provider"] = False' \
+  "uses Cursor but declares no metered provider"
 refuses "an outcome-dependent implementation probe" \
   'plan["tracks"]["A"]["optional_probe"] = "A2 only"' \
   "preregistered for all samples"
 pass "every refused plan names the correction it violates"
+
+BENCH="$TMP_ROOT/spec-author-absent"
+write_plan "$BENCH" 'plan["tracks"]["B"].pop("spec_author")'
+out=$(run_gate "$BENCH" plan-check) && status=0 || status=$?
+expect_code 1 "$status" "a specification-requiring track without an author is refused"
+assert_contains "$out" "track.B.spec_seat fail track requires a specification but spec_author must name an author and family" \
+  "the missing author is named accurately"
+assert_not_contains "$out" "track.B.spec_author_not_judge" "an absent author is not accused of judging"
+assert_not_contains "$out" "track.B.spec_author_not_entrant" "an absent author is not accused of entering"
+assert_not_contains "$out" "track.B.spec_audit_independent" "author-dependent audit checks are not misreported"
+pass "a missing specification author produces one accurate seat refusal"
+
+BENCH="$TMP_ROOT/evaluator-scope-absent"
+write_plan "$BENCH" 'plan["tracks"]["A"].pop("capture_required")'
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "evaluator verification refuses an undeclared capture scope"
+assert_contains "$out" "evaluator.scope fail capture_required must explicitly declare true or false for tracks: A" \
+  "evaluator verification owns the capture declaration too"
+pass "direct evaluator verification cannot bypass a missing capture declaration"
+
+BENCH="$TMP_ROOT/evaluator-scope-empty"
+write_plan "$BENCH" 'plan["tracks"]["B"]["capture_required"] = False; plan["tracks"]["B"].pop("wave")'
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "evaluator verification refuses an explicitly empty benchmark capture field"
+assert_contains "$out" "evaluator.scope fail the frozen plan must positively declare a complete 30-record UI capture field, got 0" \
+  "an explicit per-track opt-out cannot remove the captain-fixed complete field"
+assert_not_contains "$out" "evaluator.scope ok no track requires neutral capture" \
+  "an empty field never passes through a silent scope exemption"
+pass "direct evaluator verification requires the complete capture field"
 
 # --- positive provenance before a historical replay -------------------------
 
@@ -299,9 +368,46 @@ write_provenance "$BENCH" C1 absent
 out=$(run_gate "$BENCH" provenance-check) && status=0 || status=$?
 expect_code 3 "$status" "an unclearable historical packet is a captain call"
 assert_contains "$out" "BENCH_CHECK provenance.A1 ok" "a positively identified packet clears"
+assert_contains "$out" "1 roles positively absent" "a reasoned absent role completes provenance explicitly"
 assert_contains "$out" "missing model_id/family/session_id" "an absent record never clears a replay"
 assert_contains "$out" "never a substitution" "a replacement packet stays a captain call"
 pass "provenance clears only on positive identification, and failing both is a captain call"
+
+BENCH="$TMP_ROOT/prov-missing-role"
+write_plan "$BENCH"
+write_provenance "$BENCH" A1 cleared
+write_provenance "$BENCH" C1 cleared
+python3 - "$BENCH/provenance/A1.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["participants"] = [participant for participant in record["participants"] if participant["role"] != "reviewer"]
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" provenance-check) && status=0 || status=$?
+expect_code 3 "$status" "an undeclared original reviewer keeps a historical track stopped"
+assert_contains "$out" "identify or positively declare absent: reviewer" \
+  "every original participant role must be covered"
+pass "historical provenance refuses a silently omitted participant role"
+
+BENCH="$TMP_ROOT/prov-empty-role-reason"
+write_plan "$BENCH"
+write_provenance "$BENCH" A1 cleared
+write_provenance "$BENCH" C1 cleared
+python3 - "$BENCH/provenance/A1.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["role_absences"]["judge"] = "unknown"
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" provenance-check) && status=0 || status=$?
+expect_code 3 "$status" "an empty-value role declaration cannot clear provenance"
+assert_contains "$out" "role absence declarations are malformed" \
+  "a positive absence requires a real reason"
+pass "historical provenance rejects an absent role with no reason"
 
 BENCH="$TMP_ROOT/prov-contaminated"
 write_plan "$BENCH"
@@ -314,6 +420,8 @@ for packet in ("A1", "C1"):
     (bench / "provenance" / f"{packet}.json").write_text(json.dumps({
         "schema": "fm-bench-provenance.v1", "packet": packet, "source": "history",
         "checked_families": ["anthropic", "openai"],
+        "role_absences": {"reviewer": "the original work had no reviewer",
+                          "judge": "the original work had no judge"},
         "participants": [{"task_id": f"{packet}-a", "role": "author",
                           "model_id": "claude-fable-5", "family": "anthropic",
                           "session_id": "cc-1"}]}, indent=2) + "\n")
@@ -1144,7 +1252,7 @@ shutil.rmtree(root, ignore_errors=True)
 for track_name, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
     (src / ".ignored-by-evaluator").write_text("not scored\n")
-    (src / "work.txt").write_text(slug + "\n")
+    (src / "work.json").write_text(json.dumps({"value": slug}, separators=(",", ":")) + "\n")
     git("add", "-A")
     git("commit", "-q", "-m", slug)
     sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -1167,7 +1275,12 @@ if [ -r {shlex.quote(str(operator_secret))} ] || [ -r {shlex.quote(str(repo_root
   printf 'unconfined host access\\n'
   exit 0
 fi
-cat "$1/work.txt"
+value=$(sed -n 's/^{{"value":"\\([^"]*\\)"}}$/\\1/p' "$1/work.json")
+if [ -z "$value" ]; then
+  printf 'invalid structured input\n' >&2
+  exit 9
+fi
+printf '%s\n' "$value"
 """
     put("scoring.py", scoring)
     (out / "scoring.py").chmod(0o755)
@@ -1188,7 +1301,8 @@ cat "$1/work.txt"
         "tree_binding": {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                          "neutral_tree": tree, "base_tree": base_tree,
                          "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
-        "evaluator_rerun": {"argv": ["scoring.py"], "scored_inputs": ["work.txt"],
+        "evaluator_rerun": {"argv": ["scoring.py"], "scored_inputs": ["work.json"],
+                             "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}},
                              "result_hash": hashlib.sha256((slug + "\n").encode()).hexdigest()},
     }, indent=2, sort_keys=True) + "\n")
 PY
@@ -1393,7 +1507,12 @@ record = json.loads(manifest.read_text())
 (sample / "scoring.sh").chmod(0o755)
 record["files"]["scoring.sh"] = hashlib.sha256((sample / "scoring.sh").read_bytes()).hexdigest()
 record["groups"]["capture_and_scoring"] = ["capture.json", "scoring.sh"]
-record["evaluator_rerun"] = {"argv": ["scoring.sh"], "scored_inputs": ["work.txt"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
+record["evaluator_rerun"] = {
+    "argv": ["scoring.sh"],
+    "scored_inputs": ["work.json"],
+    "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}},
+    "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest(),
+}
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
@@ -1479,9 +1598,9 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "recognising an old perturbation marker cannot impersonate evaluation"
-assert_contains "$out" "ignored its declared scored inputs" "fresh opaque perturbation bytes reveal the marker-sniffing no-op"
+assert_contains "$out" "ignored its declared scored inputs" "fresh structured perturbation reveals the marker-sniffing no-op"
 assert_absent "$BENCH/archive/restore-drill.json" "a marker-sniffing evaluator writes no cleanup receipt"
-pass "differential perturbations carry no fixed recognizable marker"
+pass "structured differential perturbations carry no fixed recognizable marker"
 
 fi
 
@@ -1502,6 +1621,60 @@ assert_contains "$out" "scored_inputs must name at least one" "an empty scored-i
 assert_absent "$BENCH/archive/restore-drill.json" "an input-free evaluator writes no cleanup receipt"
 pass "every archived evaluator declares a non-empty scored-input set"
 
+BENCH="$TMP_ROOT/archive-no-perturbation-contract"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-perturbation-contract"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"].pop("input_perturbations")
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an evaluator must declare how each scored input stays valid under perturbation"
+assert_contains "$out" "input_perturbations must define every scored input exactly once" \
+  "the form-preserving perturbation contract is mandatory"
+assert_absent "$BENCH/archive/restore-drill.json" "an undeclared perturbation writes no cleanup receipt"
+pass "every archived evaluator declares its scored-input perturbation contract"
+
+BENCH="$TMP_ROOT/archive-duplicate-scored-input"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-duplicate-scored-input"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["scored_inputs"] = ["work.json", "work.json"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a scored input cannot reuse one perturbation declaration twice"
+assert_contains "$out" "input_perturbations must define every scored input exactly once" \
+  "the perturbation contract is one-to-one"
+assert_absent "$BENCH/archive/restore-drill.json" "a duplicate scored input writes no cleanup receipt"
+pass "scored-input perturbation declarations are one-to-one"
+
+BENCH="$TMP_ROOT/archive-invalid-perturbation-pointer"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-invalid-perturbation-pointer"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["input_perturbations"]["work.json"]["pointer"] = "/missing"
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a perturbation pointer must resolve in the scored input"
+assert_contains "$out" "scored input perturbation is invalid for work.json" \
+  "the gate proves the declared mutation applies to the restored input"
+assert_absent "$BENCH/archive/restore-drill.json" "an invalid perturbation pointer writes no cleanup receipt"
+pass "scored-input perturbation pointers are validated against restored content"
+
 BENCH="$TMP_ROOT/archive-escaping-scored-input"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-escaping-scored-input"
@@ -1511,6 +1684,9 @@ from pathlib import Path
 p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
 d = json.loads(p.read_text())
 d["evaluator_rerun"]["scored_inputs"] = ["../outside.txt"]
+d["evaluator_rerun"]["input_perturbations"] = {
+    "../outside.txt": {"kind": "json-value", "pointer": "/value"}
+}
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
@@ -1520,6 +1696,38 @@ assert_absent "$BENCH/archive/restore-drill.json" "an escaping scored-input decl
 pass "declared scored inputs stay inside the restored candidate"
 
 if [ -n "$RESTORE_MECHANISM" ]; then
+
+BENCH="$TMP_ROOT/archive-perturbation-inconclusive"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-perturbation-inconclusive"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, shlex, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+scoring = sample / "scoring.py"
+expected = shlex.quote(record["sample"])
+scoring.write_text(f"""#!/bin/sh
+value=$(sed -n 's/^{{\"value\":\"\\([^\"]*\\)\"}}$/\\1/p' \"$1/work.json\")
+if [ \"$value\" != {expected} ]; then
+  printf 'valid JSON but unsupported value\n' >&2
+  exit 9
+fi
+printf '%s\n' \"$value\"
+""")
+scoring.chmod(0o755)
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a rejected form-preserving perturbation is inconclusive"
+assert_contains "$out" "perturbed evaluator run was inconclusive" \
+  "a parser rejection is distinguished from input invariance"
+assert_not_contains "$out" "ignored its declared scored inputs" \
+  "a failed perturbation is not mislabeled as a no-op evaluator"
+assert_absent "$BENCH/archive/restore-drill.json" "an inconclusive perturbation writes no cleanup receipt"
+pass "perturbation failures are inconclusive rather than invariant"
 
 BENCH="$TMP_ROOT/archive-scratch-evaluator"
 write_plan "$BENCH"
@@ -1531,7 +1739,7 @@ sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
 scoring.write_text("""#!/bin/sh
 printf 'scratch\\n' > scratch-only.txt
-cat "$1/work.txt"
+sed -n 's/^{"value":"\\([^"]*\\)"}$/\\1/p' "$1/work.json"
 cat scratch-only.txt
 """)
 scoring.chmod(0o755)
@@ -1558,7 +1766,7 @@ sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
 scoring.write_text(f"""#!/bin/sh
 printf 'dirty\\n' > {shlex.quote(str(sample / 'archive-dirty.txt'))}
-cat "$1/work.txt"
+sed -n 's/^{{"value":"\\([^"]*\\)"}}$/\\1/p' "$1/work.json"
 """)
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
@@ -1581,7 +1789,7 @@ import hashlib, json, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "stability-wait-evaluator.sh"
-scoring.write_text("#!/bin/sh\nsleep 3\ncat \"$1/work.txt\"\n")
+scoring.write_text("#!/bin/sh\nsleep 3\nsed -n 's/^{\"value\":\"\\([^\"]*\\)\"}$/\\1/p' \"$1/work.json\"\n")
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
@@ -1754,6 +1962,9 @@ for name in sorted(plan["tracks"]):
     for entrant in track["entrants"]:
         win = entrant["name"] == winners[name]
         for index, packet in enumerate(ids):
+            if win and mode == "unreplaced_void" and index == 0:
+                write(name, packet, entrant["name"], "entrant", 0.0, status="void")
+                continue
             score = 9.0 if win else 7.0
             blocker = False
             if win and mode == "split" and index == 2:
@@ -1768,8 +1979,13 @@ for name in sorted(plan["tracks"]):
         if win and mode == "ninth":
             write(name, ids[0], entrant["name"], "entrant", 9.0, suffix="-rerun")
     if "baseline" in track:
-        for packet in track["baseline_packets"]:
-            base = 9.5 if mode == "veto" else 7.5
+        for index, packet in enumerate(track["baseline_packets"]):
+            if mode == "tolerance":
+                base = 10.2 if index == 0 else 8.0
+            elif mode == "lossbound":
+                base = 9.5 if index == 0 else 7.5
+            else:
+                base = 9.5 if mode == "veto" else 7.5
             write(name, packet, track["baseline"]["name"], "baseline", base)
 PY
 }
@@ -1783,6 +1999,30 @@ assert_contains "$out" "standing route eligible" "a sweep with margin is eligibl
 assert_contains "$out" "subject to the captain's explicit word" "promotion still needs the captain"
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
+
+BENCH="$TMP_ROOT/promote-replaced-void"
+write_plan "$BENCH"
+write_results "$BENCH" void
+out=$(run_gate "$BENCH" promote-evaluate) || fail "a void with a scored replacement must remain promotable: $out"
+assert_contains "$out" "all 1 voided samples have scored replacements on the same entrant and packet" \
+  "the scored rerun reconciles its void"
+assert_contains "$out" "standing route eligible" "a replaced void does not make the field permanently incomplete"
+pass "a void is retained as evidence and credited when its rerun scores"
+
+BENCH="$TMP_ROOT/promote-declared-tolerance"
+write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_negative_mean_quality_delta"] = -0.5'
+write_results "$BENCH" tolerance
+out=$(run_gate "$BENCH" promote-evaluate) || fail "the declared baseline tolerance must be honoured: $out"
+assert_contains "$out" "mean delta 0.267 >= -0.500" "the veto reads its declared mean-delta floor"
+pass "promotion honours the frozen baseline quality tolerance"
+
+BENCH="$TMP_ROOT/promote-declared-loss-bound"
+write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_losses_of_three"] = 0'
+write_results "$BENCH" lossbound
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "a loss beyond the declared zero-loss bound refuses promotion"
+assert_contains "$out" "above the declared maximum 0" "the veto reads its declared loss bound"
+pass "promotion enforces the frozen baseline loss limit"
 
 refuses_promotion() {  # <label> <mode> <expected>
   local label=$1 mode=$2 expected=$3
@@ -1799,6 +2039,6 @@ refuses_promotion "five of six wins" split "no standing route"
 refuses_promotion "a blocker-class failure" blocker "carries a blocker-class failure"
 refuses_promotion "a margin under the predeclared bar" thin "below the predeclared bar"
 refuses_promotion "a baseline regression" veto "regression veto fired"
-refuses_promotion "a void with no scored replacement" void "no scored replacement"
+refuses_promotion "a void with no scored replacement" unreplaced_void "without scored replacements"
 refuses_promotion "an extra sample beyond the approved six" ninth "no adaptive extension"
-pass "five of six, a blocker, a thin margin, a regression, a void, and a seventh sample all refuse"
+pass "five of six, blockers, thin margins, regressions, unreplaced voids, and seventh samples refuse"
