@@ -266,7 +266,7 @@ write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [
 }
 
 test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
-  local dir root state other fakebin json bad_json
+  local dir root state other fakebin json bad_json tool
   dir="$TMP_ROOT/daemon-spawned-by"
   root="$dir/home"
   state="$root/state"
@@ -276,8 +276,15 @@ test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
 
   fakebin=$(fm_fakebin "$dir/good")
   write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700
+  for tool in python3 jq; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+    chmod +x "$fakebin/$tool"
+  done
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'" \
-    || fail "a Claude daemon spawned by the foreground lock owner did not claim the home"
+    || fail "a Claude daemon spawned by the foreground lock owner did not claim the home without python3 or jq"
   if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'"; then
     fail "the daemon bridge accepted spawned-by metadata without a resolved project root"
   fi

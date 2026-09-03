@@ -1167,8 +1167,10 @@ fm_failure_episode_reset() {
 #   - NO mutex is ever held across a blocking step. The owner lock
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
-#     operations); a holder that dies inside the hold is reclaimed by
-#     fm_lock_try_acquire's ordinary dead-owner steal.
+#     operations), while state/.claude-autoarm-transition.lock orders those
+#     writes with independent failure publication; a holder that dies inside
+#     either hold is reclaimed by fm_lock_try_acquire's ordinary dead-owner
+#     steal.
 #   - A superseded owner goes COMPLETELY silent - cleanup only. Ownership is
 #     re-verified before every side effect: each arm invocation, each
 #     episode-state mutation, each ledger write, and each continuation.
@@ -1283,7 +1285,8 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 # 1 when the micro-mutex is contended, the mandatory identity cannot be
 # computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity tmp
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} transition lock epoch pid gen identity tmp
+  transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
@@ -1293,9 +1296,14 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   pid=${BASHPID:-$$}
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
-  fm_lock_try_acquire "$lock" || return 1
+  fm_lock_try_acquire "$transition" || return 1
+  if ! fm_lock_try_acquire "$lock"; then
+    fm_lock_release "$transition"
+    return 1
+  fi
   if fm_autoarm_claim_open "$state" "$grace"; then
     fm_lock_release "$lock"
+    fm_lock_release "$transition"
     return 2
   fi
   gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
@@ -1309,9 +1317,11 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
     || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
+    fm_lock_release "$transition"
     return 1
   fi
   fm_lock_release "$lock"
+  fm_lock_release "$transition"
   # shellcheck disable=SC2034 # Read by callers after the claim succeeds.
   FM_AUTOARM_MY_GEN=$gen
   return 0
@@ -1428,8 +1438,8 @@ fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
 }
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock failure_dir failure pid failure_epoch tmp current i marker_rc
-  lock="$state/.claude-autoarm.lock"
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current i marker_rc
+  transition="$state/.claude-autoarm-transition.lock"
   failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || return 1
   failure_dir=${failure%/*}
   case "$outcome" in
@@ -1438,18 +1448,24 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   esac
   pid=${BASHPID:-$$}
   i=0
-  while [ -e "$lock" ] && [ "$i" -lt 20 ]; do
-    current=$(fm_autoarm_claim_signature "$state")
-    [ "$current" = "$baseline" ] || return 2
+  while ! fm_lock_try_acquire "$transition"; do
+    [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
   done
   current=$(fm_autoarm_claim_signature "$state")
-  [ "$current" = "$baseline" ] || return 2
+  if [ "$current" != "$baseline" ]; then
+    fm_lock_release "$transition"
+    return 2
+  fi
   if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
-    [ -d "$failure_dir" ] && [ ! -L "$failure_dir" ] || return 1
+    if [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; then
+      fm_lock_release "$transition"
+      return 1
+    fi
   elif ! mkdir "$failure_dir" 2>/dev/null \
     && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
+    fm_lock_release "$transition"
     return 1
   fi
   failure_epoch="$(date +%s)${pid}"
@@ -1457,20 +1473,29 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   if ! printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
       "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$transition"
     return 1
   fi
   if ! ln "$tmp" "$failure" 2>/dev/null \
     && { [ ! -f "$failure" ] || [ -L "$failure" ]; }; then
     rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$transition"
     return 1
   fi
   rm -f "$tmp" 2>/dev/null || true
-  fm_autoarm_failure_ledger_read "$state" "$failure" || return 1
-  [ "$FM_AUTOARM_FAILURE_BASELINE" = "$baseline" ] || return 1
+  if ! fm_autoarm_failure_ledger_read "$state" "$failure" \
+    || [ "$FM_AUTOARM_FAILURE_BASELINE" != "$baseline" ]; then
+    fm_lock_release "$transition"
+    return 1
+  fi
   failure_epoch=$FM_AUTOARM_FAILURE_EPOCH
-  [ -n "$marker" ] || return 0
+  if [ -z "$marker" ]; then
+    fm_lock_release "$transition"
+    return 0
+  fi
   fm_autoarm_failure_notice_claim "$marker" "$failure_epoch"
   marker_rc=$?
+  fm_lock_release "$transition"
   case "$marker_rc" in
     0) return 0 ;;
     2) return 3 ;;
@@ -1487,12 +1512,19 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
 # Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
 # unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i marker_rc
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} transition lock epoch pid identity tmp i marker_rc
+  transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
   i=0
-  while ! fm_lock_try_acquire "$lock"; do
+  while :; do
+    if fm_lock_try_acquire "$transition"; then
+      if fm_lock_try_acquire "$lock"; then
+        break
+      fi
+      fm_lock_release "$transition"
+    fi
     [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
@@ -1500,6 +1532,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
     fm_lock_release "$lock"
+    fm_lock_release "$transition"
     return 2
   fi
   identity=$FM_AUTOARM_IDENTITY
@@ -1511,6 +1544,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
+    fm_lock_release "$transition"
     return 1
   fi
   if [ -n "$marker" ]; then
@@ -1518,10 +1552,12 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     marker_rc=$?
     if [ "$marker_rc" -ne 0 ]; then
       fm_lock_release "$lock"
+      fm_lock_release "$transition"
       return 2
     fi
   fi
   fm_lock_release "$lock"
+  fm_lock_release "$transition"
   return 0
 }
 

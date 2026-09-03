@@ -147,120 +147,160 @@ fm_session_resolve_dir() {  # <dir>
   CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
 }
 
-fm_claude_spawned_by_json() {  # <process-pid>
-  local pid=$1
+fm_claude_process_argv_json() {  # <process-pid>
+  local pid=$1 proc_path platform
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$pid" <<'PY'
-import ctypes
-import json
-import os
-import struct
-import sys
+  command -v node >/dev/null 2>&1 || return 1
+  if [ -n "${FM_PROC_ROOT:-}" ]; then
+    proc_path="$FM_PROC_ROOT/$pid/cmdline"
+  else
+    platform=$(uname -s 2>/dev/null) || return 1
+    case "$platform" in
+      Linux) proc_path="/proc/$pid/cmdline" ;;
+      Darwin)
+        [ -x /usr/bin/ruby ] || return 1
+        /usr/bin/ruby - "$pid" <<'RB'
+require "fiddle/import"
+require "json"
 
+module LibC
+  extend Fiddle::Importer
+  dlload Fiddle.dlopen(nil)
+  extern "int sysctl(int*, unsigned int, void*, size_t*, void*, size_t)"
+end
 
-class ObjectPairs(list):
-    pass
-
-
-def proc_argv(pid):
-    proc_root = os.environ.get("FM_PROC_ROOT")
-    if proc_root:
-        path = os.path.join(proc_root, str(pid), "cmdline")
-    elif sys.platform.startswith("linux"):
-        path = f"/proc/{pid}/cmdline"
-    else:
-        path = None
-    if path is not None:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-        if not raw or not raw.endswith(b"\0"):
-            raise ValueError("cmdline")
-        return [part.decode("utf-8") for part in raw[:-1].split(b"\0")]
-    if sys.platform != "darwin":
-        raise ValueError("platform")
-    libc = ctypes.CDLL(None, use_errno=True)
-    sysctl = libc.sysctl
-    sysctl.argtypes = [
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.c_uint,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-    ]
-    sysctl.restype = ctypes.c_int
-    mib = (ctypes.c_int * 3)(1, 49, pid)
-    size = ctypes.c_size_t()
-    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
-        raise OSError(ctypes.get_errno(), "sysctl")
-    if size.value <= 4 or size.value > 8 * 1024 * 1024:
-        raise ValueError("procargs size")
-    buffer = ctypes.create_string_buffer(size.value)
-    if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
-        raise OSError(ctypes.get_errno(), "sysctl")
-    raw = buffer.raw[:size.value]
-    argc = struct.unpack_from("=i", raw)[0]
-    if argc <= 0 or argc > 65536:
-        raise ValueError("argc")
-    offset = raw.index(b"\0", 4) + 1
-    while offset < len(raw) and raw[offset] == 0:
-        offset += 1
-    argv = []
-    for _ in range(argc):
-        finish = raw.index(b"\0", offset)
-        argv.append(raw[offset:finish].decode("utf-8"))
-        offset = finish + 1
-    return argv
-
-
-try:
-    argv = proc_argv(int(sys.argv[1]))
-    if len(argv) < 4 or argv[1:3] != ["daemon", "run"]:
-        raise ValueError("daemon argv")
-    positions = [index for index, value in enumerate(argv) if value == "--spawned-by"]
-    if len(positions) != 1 or positions[0] + 1 >= len(argv):
-        raise ValueError("spawned-by argv")
-    pairs = json.loads(argv[positions[0] + 1], object_pairs_hook=ObjectPairs)
-    if not isinstance(pairs, ObjectPairs):
-        raise ValueError("spawned-by object")
-    keys = [key for key, _ in pairs]
-    if len(keys) != 3 or set(keys) != {"label", "cwd", "pid"}:
-        raise ValueError("spawned-by keys")
-    value = dict(pairs)
-    if value["label"] != "claude":
-        raise ValueError("spawned-by label")
-    if not isinstance(value["cwd"], str) or not value["cwd"]:
-        raise ValueError("spawned-by cwd")
-    if any(character in value["cwd"] for character in "\n\r\t"):
-        raise ValueError("spawned-by cwd")
-    if isinstance(value["pid"], bool) or not isinstance(value["pid"], int) or value["pid"] <= 0:
-        raise ValueError("spawned-by pid")
-    sys.stdout.write(json.dumps(value, separators=(",", ":")))
-except (Exception, KeyboardInterrupt):
-    raise SystemExit(1)
-PY
+pid = Integer(ARGV.fetch(0), 10)
+raise unless pid.positive?
+mib = [1, 49, pid].pack("i*")
+size = [0].pack("J")
+raise unless LibC.sysctl(mib, 3, nil, size, nil, 0).zero?
+length = size.unpack1("J")
+raise unless length > 4 && length <= 8 * 1024 * 1024
+buffer = "\0" * length
+raise unless LibC.sysctl(mib, 3, buffer, size, nil, 0).zero?
+raw = buffer.byteslice(0, size.unpack1("J"))
+argc = raw.unpack1("i")
+raise unless argc.positive? && argc <= 65_536
+offset = raw.index("\0", 4) + 1
+offset += 1 while offset < raw.bytesize && raw.getbyte(offset).zero?
+argv = []
+argc.times do
+  finish = raw.index("\0", offset)
+  raise unless finish
+  value = raw.byteslice(offset, finish - offset).force_encoding(Encoding::UTF_8)
+  raise unless value.valid_encoding?
+  argv << value
+  offset = finish + 1
+end
+STDOUT.write(JSON.generate(argv))
+RB
+        return $?
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  node -e '
+const fs = require("fs");
+try {
+  const raw = fs.readFileSync(process.argv[1]);
+  if (raw.length === 0 || raw[raw.length - 1] !== 0) throw new Error();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const argv = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== 0) continue;
+    argv.push(decoder.decode(raw.subarray(start, index)));
+    start = index + 1;
+  }
+  process.stdout.write(JSON.stringify(argv));
+} catch (_) {
+  process.exit(1);
+}
+' "$proc_path"
 }
 
 fm_claude_daemon_spawned_by_matches() {  # <process-pid> <lock-pid> <root-real>
-  local process_pid=$1 lock_pid=$2 root_real=$3 json spawned_pid spawned_cwd spawned_real
-  command -v jq >/dev/null 2>&1 || return 1
-  json=$(fm_claude_spawned_by_json "$process_pid") || return 1
-  printf '%s\n' "$json" | jq -e '
-    type == "object"
-    and (keys | sort) == ["cwd", "label", "pid"]
-    and .label == "claude"
-    and (.cwd | type) == "string"
-    and (.cwd | contains("\n") | not)
-    and (.cwd | contains("\r") | not)
-    and (.cwd | contains("\t") | not)
-    and (.pid | type) == "number"
-    and ((.pid | floor) == .pid)
-    and .pid > 0
-  ' >/dev/null 2>&1 || return 1
-  spawned_pid=$(printf '%s\n' "$json" | jq -r '.pid')
+  local process_pid=$1 lock_pid=$2 root_real=$3 argv_json fields spawned_pid spawned_cwd spawned_real
+  argv_json=$(fm_claude_process_argv_json "$process_pid") || return 1
+  fields=$(printf '%s' "$argv_json" | node -e '
+const fs = require("fs");
+try {
+  const argv = JSON.parse(fs.readFileSync(0, "utf8"));
+  if (!Array.isArray(argv) || argv.some(value => typeof value !== "string")) throw new Error();
+  if (argv.length < 4 || argv[1] !== "daemon" || argv[2] !== "run") throw new Error();
+  const positions = [];
+  argv.forEach((value, index) => { if (value === "--spawned-by") positions.push(index); });
+  if (positions.length !== 1 || positions[0] + 1 >= argv.length) throw new Error();
+  const raw = argv[positions[0] + 1];
+  let index = 0;
+  const skip = () => { while (/[ \t\n\r]/.test(raw[index] || "")) index += 1; };
+  const string = () => {
+    skip();
+    if (raw[index] !== "\"") throw new Error();
+    const start = index++;
+    while (index < raw.length) {
+      const code = raw.charCodeAt(index);
+      if (code < 0x20) throw new Error();
+      if (raw[index] === "\"") {
+        index += 1;
+        return JSON.parse(raw.slice(start, index));
+      }
+      if (raw[index] === "\\") {
+        index += 1;
+        if (index >= raw.length || !/["\\/bfnrtu]/.test(raw[index])) throw new Error();
+        if (raw[index] === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(raw.slice(index + 1, index + 5))) throw new Error();
+          index += 4;
+        }
+      }
+      index += 1;
+    }
+    throw new Error();
+  };
+  skip();
+  if (raw[index++] !== "{") throw new Error();
+  const values = Object.create(null);
+  const keys = new Set();
+  while (true) {
+    skip();
+    if (raw[index] === "}") { index += 1; break; }
+    const key = string();
+    if (keys.has(key) || !["label", "cwd", "pid"].includes(key)) throw new Error();
+    keys.add(key);
+    skip();
+    if (raw[index++] !== ":") throw new Error();
+    skip();
+    if (key === "pid") {
+      const match = raw.slice(index).match(/^(0|[1-9][0-9]*)/);
+      if (!match) throw new Error();
+      values.pid = Number(match[0]);
+      index += match[0].length;
+    } else {
+      values[key] = string();
+    }
+    skip();
+    if (raw[index] === ",") {
+      index += 1;
+      skip();
+      if (raw[index] === "}") throw new Error();
+      continue;
+    }
+    if (raw[index] === "}") { index += 1; break; }
+    throw new Error();
+  }
+  skip();
+  if (index !== raw.length || keys.size !== 3 || values.label !== "claude") throw new Error();
+  if (!values.cwd || /[\0\n\r\t]/.test(values.cwd)) throw new Error();
+  if (!Number.isSafeInteger(values.pid) || values.pid <= 0) throw new Error();
+  process.stdout.write(String(values.pid) + "\n" + values.cwd);
+} catch (_) {
+  process.exit(1);
+}
+') || return 1
+  spawned_pid=${fields%%$'\n'*}
   [ "$spawned_pid" = "$lock_pid" ] || return 1
-  spawned_cwd=$(printf '%s\n' "$json" | jq -r '.cwd')
+  [ "$fields" != "$spawned_pid" ] || return 1
+  spawned_cwd=${fields#*$'\n'}
   [ -n "$spawned_cwd" ] || return 1
   spawned_real=$(fm_session_resolve_dir "$spawned_cwd") || return 1
   [ "$spawned_real" = "$root_real" ]

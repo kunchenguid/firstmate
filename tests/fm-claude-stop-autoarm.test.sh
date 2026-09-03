@@ -405,20 +405,28 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
 }
 
 test_claude_daemon_spawned_by_foreground_lock_owner_arms() {
-  local dir out status owner lock_after
+  local dir out status owner lock_after tool
   dir=$(make_primary_dir "$TMP_ROOT/daemon-spawned-by")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   owner=$!
   printf '%s\n' "$owner" > "$dir/state/.lock"
+  mkdir -p "$dir/no-interpreters"
+  for tool in python3 jq; do
+    cat > "$dir/no-interpreters/$tool" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+    chmod +x "$dir/no-interpreters/$tool"
+  done
 
-  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
+  out=$(PATH="$dir/no-interpreters:$PATH" run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
   lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
   kill "$owner" 2>/dev/null || true
   wait "$owner" 2>/dev/null || true
 
-  expect_code 2 "$status" "a Claude daemon spawned by the foreground session must arm and rewake"
+  expect_code 2 "$status" "a Claude daemon spawned by the foreground session must arm without python3 or jq"
   [ "$lock_after" = "$owner" ] || fail "daemon bridge rewrote the foreground session lock: expected $owner, got $lock_after"
   [ -e "$dir/state/arm-ran" ] || fail "daemon-delivered Stop hook did not arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "daemon-delivered Stop hook did not record outcome=rewake"
@@ -615,8 +623,8 @@ test_concurrent_claim_failures_publish_one_notice_atomically() {
   pass "auto-arm: concurrent claim failures atomically elect one notice and retain independent failure state"
 }
 
-test_stale_failure_publisher_cannot_overwrite_current_failure() {
-  local dir state ready release stale_pid i rc current_path stale_path
+test_stale_failure_publisher_cannot_emit_after_success() {
+  local dir state ready release stale_pid i rc stale_path err
   dir=$(make_primary_dir "$TMP_ROOT/stale-failure-publisher")
   state="$dir/state"
   ready="$state/stale-publisher-ready"
@@ -631,30 +639,21 @@ test_stale_failure_publisher_cannot_overwrite_current_failure() {
     ready=$2
     release=$3
     stalled=0
-    stall_failure_publish() {
-      [ "$stalled" -eq 0 ] || return 0
-      stalled=1
-      : > "$ready"
-      while [ ! -e "$release" ]; do sleep 0.01; done
-    }
-    mv() {
+    ln() {
       local target= arg
       for arg in "$@"; do target=$arg; done
-      case "$target" in
-        "$state/.claude-autoarm-failure-epoch") stall_failure_publish ;;
-      esac
-      command mv "$@"
-    }
-    ln() {
-      case "${2:-}" in
-        "$state/.claude-autoarm-failure-epochs/"*) stall_failure_publish ;;
-      esac
+      if [ "$target" = "$state/.claude-autoarm-transition.lock" ] \
+        && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
       command ln "$@"
     }
     fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
       "$state/.claude-autoarm-failure-notified"
     printf "%s\n" "$?" > "$state/stale-publisher-rc"
-  ' _ "$dir" "$ready" "$release" &
+  ' _ "$dir" "$ready" "$release" 2> "$state/stale-publisher-err" &
   stale_pid=$!
   i=0
   while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do
@@ -667,28 +666,23 @@ test_stale_failure_publisher_cannot_overwrite_current_failure() {
     fail "stale failure publisher did not reach its publication boundary"
   fi
 
-  printf 'epoch=18 owner_pid=800 outcome=rewake updated_at=%s\n' \
-    "$(date +%s)" > "$state/.claude-autoarm-epoch"
   bash -c '
     . "$1/bin/fm-wake-lib.sh"
-    fm_autoarm_claim_failure_commit "$1/state" 18:800:rewake failed \
-      "$1/state/.claude-autoarm-failure-notified"
-  ' _ "$dir" || fail "current failure publisher could not commit"
+    fm_autoarm_claim_next "$1/state" || exit
+    fm_autoarm_write_owned "$1/state" "$FM_AUTOARM_MY_GEN" rewake
+  ' _ "$dir" || fail "later successful ledger transition could not commit"
   : > "$release"
   wait "$stale_pid" || fail "stale failure publisher fixture exited unexpectedly"
 
   rc=$(cat "$state/stale-publisher-rc")
-  expect_code 3 "$rc" "stale publisher must preserve the current publisher's elected notice"
-  current_path=$(failure_epoch_path "$dir" 18:800:rewake)
+  expect_code 2 "$rc" "stale publisher must stand down after the later successful transition"
   stale_path=$(failure_epoch_path "$dir" 17:700:rewake)
-  assert_present "$current_path" "stale publisher erased the current failure record"
-  assert_present "$stale_path" "stale publisher did not retain its immutable baseline record"
-  bash -c '
-    . "$1/bin/fm-wake-lib.sh"
-    fm_autoarm_failure_ledger_current "$1/state" \
-      && [ "$FM_AUTOARM_FAILURE_BASELINE" = 18:800:rewake ]
-  ' _ "$dir" || fail "current failure became invisible after the stale publisher resumed"
-  pass "auto-arm: stale failure publishers cannot overwrite the current baseline record"
+  assert_absent "$stale_path" "stale publisher committed a failure after the successful transition"
+  assert_absent "$state/.claude-autoarm-failure-notified" "stale publisher elected a failure notice after success"
+  err=$(cat "$state/stale-publisher-err")
+  [ -z "$err" ] || fail "stale publisher emitted failure output after success: $err"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale publisher disturbed the successful terminal ledger"
+  pass "auto-arm: a later successful ledger transition silences a stalled failure publisher"
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
@@ -1462,7 +1456,7 @@ test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
-test_stale_failure_publisher_cannot_overwrite_current_failure
+test_stale_failure_publisher_cannot_emit_after_success
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
