@@ -26,6 +26,10 @@ As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
+## Account selection (cswap)
+
+When the captain opts in with `FM_CSWAP_AUTOSELECT=1`, `../../../bin/fm-cswap-lib.sh` runs at every claude-harness spawn/relaunch boundary and may fire `cswap switch <exact-account>` before the launch command is sent, ranking accounts by remaining headroom plus cswap's own weekly burn-rate-vs-reset projection. The gate is the captain's explicit grant to mutate the shared active credential: unset (the default) leaves the active account untouched and runs no cswap command. It is best-effort and inert when cswap or jq is absent. See that script's header for the full safety contract (busy-task guard, no-op-on-already-active, post-switch verification) and `state/<id>.cswap-select` for per-dispatch evidence.
+
 ## Primary integration
 
 Primary behavior was verified 2026-07-04 on 2.1.201, preserved 2026-07-08 on 2.1.204, and Stop auto-arm revalidated 2026-07-24 on 2.1.219.

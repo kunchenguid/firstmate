@@ -295,6 +295,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-cswap-lib.sh
+. "$SCRIPT_DIR/fm-cswap-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2984,6 +2986,22 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Automated cswap account selection (AGENTS.md section 4 dispatch boundary):
+# a genuinely safe task boundary, right before this new claude-harness agent's
+# launch command is sent, never mid-task. Best effort only - see
+# bin/fm-cswap-lib.sh for the full safety contract; a flaky or absent cswap
+# never blocks this spawn.
+#
+# Gated behind an explicit captain enablement (FM_CSWAP_AUTOSELECT=1). Mutating
+# the shared active Claude credential is autonomy the captain grants
+# deliberately, not something firstmate assumes just because a `cswap` CLI
+# happens to be installed on the host: with the gate unset (the default) the
+# active account is left exactly as the captain last set it, and no cswap
+# command is ever run. Setting FM_CSWAP_AUTOSELECT=1 is the recorded grant that
+# opts this fleet's dispatch boundary into automated per-account selection.
+if [ "$HARNESS" = claude ] && [ "${FM_CSWAP_AUTOSELECT:-0}" = 1 ]; then
+  fm_cswap_dispatch_switch "$ID" "$STATE" || true
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

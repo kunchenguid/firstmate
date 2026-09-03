@@ -244,14 +244,22 @@ fm_test_spawn_brief() {
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
-# extra exit-0 tools. Echoes the fakebin path.
+# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, a no-op
+# cswap, and any extra exit-0 tools. Echoes the fakebin path.
+#
+# cswap is stubbed exit-0-with-no-output here (never a real invocation)
+# because fm_test_run_spawn's PATH keeps the real PATH after the fakebin
+# (PATH="$fakebin:$PATH"), so a developer machine with the real cswap CLI
+# installed would otherwise let a claude-harness spawn test reach it for
+# real - bin/fm-cswap-lib.sh's own no-op-on-empty-output handling then makes
+# every spawn test exercise the same absent/unavailable-cswap path
+# deterministically, never a live account's real state.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_fake_exit0 "$fakebin" treehouse cswap "$@"
   printf '%s\n' "$fakebin"
 }
 
