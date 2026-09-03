@@ -189,17 +189,37 @@ epoch_outcome() {
 }
 
 failure_epoch_path() {  # <dir> [baseline]
-  local dir=$1 baseline=${2:-} path
+  local dir=$1 baseline=${2:-} path base epoch best='' best_epoch=0
   if [ -n "$baseline" ]; then
-    printf '%s/state/.claude-autoarm-failure-epochs/%s\n' "$dir" "${baseline//:/.}"
+    base="$dir/state/.claude-autoarm-failure-epochs/${baseline//:/.}"
+    for path in "$base" "$base".*; do
+      [ -f "$path" ] && [ ! -L "$path" ] || continue
+      epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$path" 2>/dev/null || true)
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      if [ "$epoch" -gt "$best_epoch" ]; then
+        best=$path
+        best_epoch=$epoch
+      fi
+    done
+    if [ -z "$best" ]; then
+      printf '%s\n' "$base"
+      return 0
+    fi
+    printf '%s\n' "$best"
     return 0
   fi
   for path in "$dir/state/.claude-autoarm-failure-epochs"/* "$dir/state/.claude-autoarm-failure-epoch"; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
-    printf '%s\n' "$path"
-    return 0
+    case "${path##*/}" in .failure.tmp.*) continue ;; esac
+    epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$path" 2>/dev/null || true)
+    case "$epoch" in ''|*[!0-9]*) continue ;; esac
+    if [ "$epoch" -gt "$best_epoch" ]; then
+      best=$path
+      best_epoch=$epoch
+    fi
   done
-  return 1
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
 }
 
 failure_epoch_outcome() {
@@ -954,6 +974,138 @@ test_recovery_reset_cannot_be_followed_by_stalled_failure_publication() {
   pass "auto-arm: recovery reset serializes after in-flight failure publication"
 }
 
+test_lockless_failure_publication_cannot_cross_recovery_reset() {
+  local dir state ready release publisher rc reset current_rc notice_rc retry_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/lockless-reset-failure-publication")
+  state="$dir/state"
+  ready="$state/lockless-publisher-ready"
+  release="$state/lockless-publisher-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    marker="$state/.claude-autoarm-failure-notified"
+    stalled=0
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    mkdir() {
+      if [ "${1:-}" = "$marker" ] && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      command mkdir "$@"
+    }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed "$marker"
+    printf "%s\n" "$?" > "$state/lockless-publisher-rc"
+  ' _ "$dir" "$ready" "$release" &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    wait "$publisher" 2>/dev/null || true
+    fail "lockless publisher did not reach its notice boundary"
+  fi
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_failure_episode_reset "$1/state"
+  ' _ "$dir" || fail "recovery reset could not advance its failure fence"
+  reset=$(cat "$state/.claude-autoarm-failure-reset")
+  : > "$release"
+  wait "$publisher" || fail "lockless failure publisher fixture exited unexpectedly"
+  rc=$(cat "$state/lockless-publisher-rc")
+  expect_code 4 "$rc" "a lockless publisher crossing recovery reset must stand down"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_ledger_current "$1/state"
+  ' _ "$dir"
+  current_rc=$?
+  expect_code 1 "$current_rc" "a pre-reset failure record must not become current after reset"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_notice_current "$1/state" \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  notice_rc=$?
+  expect_code 1 "$notice_rc" "a pre-reset publisher must not recreate the current notice"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  retry_rc=$?
+  expect_code 0 "$retry_rc" "a post-reset failure must elect a fresh notice"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_ledger_current "$1/state" \
+      && [ "$FM_AUTOARM_FAILURE_RESET" = "$2" ] \
+      && fm_autoarm_failure_notice_current "$1/state" \
+        "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" "$reset" || fail "post-reset failure state did not bind to the new fence"
+  pass "auto-arm: lockless failure publication cannot cross a recovery reset"
+}
+
+test_lockless_failure_notice_is_released_after_ledger_advance() {
+  local dir state ready release publisher rc notice_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/lockless-ledger-advance")
+  state="$dir/state"
+  ready="$state/lockless-final-check-ready"
+  release="$state/lockless-final-check-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    fm_autoarm_claim_signature() {
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.01; done
+      if fm_autoarm_ledger_read "$state"; then
+        printf "%s:%s:%s\n" "$FM_AUTOARM_GEN" "$FM_AUTOARM_OWNER" "$FM_AUTOARM_OUTCOME"
+      else
+        printf "absent\n"
+      fi
+    }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
+      "$state/.claude-autoarm-failure-notified"
+    printf "%s\n" "$?" > "$state/lockless-ledger-publisher-rc"
+  ' _ "$dir" "$ready" "$release" &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    wait "$publisher" 2>/dev/null || true
+    fail "lockless publisher did not reach its final ledger check"
+  fi
+  printf 'epoch=18 owner_pid=800 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  : > "$release"
+  wait "$publisher" || fail "lockless ledger publisher fixture exited unexpectedly"
+  rc=$(cat "$state/lockless-ledger-publisher-rc")
+  expect_code 4 "$rc" "a lockless publisher superseded by ledger advance must stand down"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_notice_current "$1/state" \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  notice_rc=$?
+  expect_code 1 "$notice_rc" "a superseded lockless publisher must release its notice election"
+  assert_absent "$state/.claude-autoarm-failure-notified" "ledger supersession left a stale failure marker"
+  pass "auto-arm: ledger supersession releases lockless failure notices"
+}
+
 test_failure_reader_rejects_record_superseded_during_selection() {
   local dir state ready release reader rc i
   dir=$(make_primary_dir "$TMP_ROOT/failure-reader-superseded")
@@ -978,6 +1130,7 @@ test_failure_reader_rejects_record_superseded_during_selection() {
         FM_AUTOARM_FAILURE_OWNER=701
         FM_AUTOARM_FAILURE_OUTCOME=failed
         FM_AUTOARM_FAILURE_BASELINE=17:700:rewake
+        FM_AUTOARM_FAILURE_RESET=legacy
         FM_AUTOARM_FAILURE_PATH=$2
       else
         return 1
@@ -1786,6 +1939,8 @@ test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
 test_stale_failure_publisher_cannot_emit_after_success
 test_recovery_reset_cannot_be_followed_by_stalled_failure_publication
+test_lockless_failure_publication_cannot_cross_recovery_reset
+test_lockless_failure_notice_is_released_after_ledger_advance
 test_failure_reader_rejects_record_superseded_during_selection
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries

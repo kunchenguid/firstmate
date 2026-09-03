@@ -57,8 +57,8 @@
 # claim failures independently of a contended claim mutex, so the synchronous Stop guard
 # (bin/fm-turnend-guard.sh --claude) can allow a stop whose recovery this hook
 # already owns, instead of forcing a duplicate continuation for the same event
-# epoch. The failure marker state/.claude-autoarm-failure-notified atomically
-# deduplicates the last-resort notice,
+# epoch. The episode-fenced marker directory
+# state/.claude-autoarm-failure-notified atomically deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
 #

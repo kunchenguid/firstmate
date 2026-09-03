@@ -1609,6 +1609,57 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
+test_hook_claude_mode_repeated_claim_failures_reach_fail_open() {
+  local dir holder ready out status guard_out guard_status epoch previous='' count i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-repeated-claim-failures")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  ready="$dir/state/transition-steal-ready"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    FM_LOCK_REQUIRE_IDENTITY=1 \
+      fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    : > "$2"
+    while :; do sleep 1; done
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
+
+  for i in 0 1 2 3 4; do
+    out=$(FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS=1 run_integrated_autoarm "$dir"); status=$?
+    expect_code 2 "$status" "claim failure $i must request a Stop-owned retry"
+    if [ "$i" -eq 0 ]; then
+      assert_contains "$out" "could not claim recovery" "the first claim failure did not emit its notice"
+    else
+      [ -z "$out" ] || fail "claim failure $i repeated the episode notice: $out"
+    fi
+    epoch=$(bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_autoarm_failure_ledger_current "$1/state" || exit
+      printf "%s\n" "$FM_AUTOARM_FAILURE_EPOCH"
+    ' _ "$dir") || fail "claim failure $i did not publish current failure state"
+    [ "$epoch" != "$previous" ] || fail "claim failure $i reused progression epoch $epoch"
+    previous=$epoch
+
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+    if [ "$i" -eq 0 ]; then
+      expect_code 0 "$guard_status" "the first claim failure must own its initial handoff"
+    elif [ "$i" -lt 4 ]; then
+      expect_code 2 "$guard_status" "claim failure $i must advance the bounded block progression"
+      assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "claim failures reached fail-open too early"
+    else
+      expect_code 0 "$guard_status" "successive claim failures must reach the attended fail-open (count=${count:-missing})"
+      assert_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "repeated claim failures never reached fail-open"
+    fi
+  done
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-turnend-guard --claude: repeated claim failures advance to fail-open"
+}
+
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   local dir pid identity holder out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
@@ -1833,7 +1884,7 @@ test_hook_claude_mode_allow_resets_budget() {
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
   [ ! -e "$dir/state/.claude-autoarm-failure-epochs" ] || fail "positive watcher recovery must reset independent failure epochs"
-  [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive watcher recovery must reset the failure notice"
   [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "a later unhealthy chain must re-block from a fresh budget"
@@ -2092,6 +2143,7 @@ test_hook_claude_mode_consumes_independent_claim_failure_epoch
 test_hook_claude_mode_ignores_failure_superseded_by_later_success
 test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
+test_hook_claude_mode_repeated_claim_failures_reach_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_stalled_transition_recovery_is_bounded
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
