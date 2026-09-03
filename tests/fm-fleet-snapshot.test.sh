@@ -256,6 +256,8 @@ test_reconciliation_staging_failure_fails_snapshot() {
     > "$home/data/secondmates.md"
   fm_write_secondmate_meta "$home/state/mate.meta" "$secondmate"
   printf 'working: delegated work\n' > "$home/state/mate.status"
+  FM_HOME="$secondmate" "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+    || fail "reconciliation failure fixture should publish its structured home summary"
   FM_HOME="$home" "$SNAPSHOT" --json > "$home/baseline.json" \
     || fail "reconciliation failure fixture should produce a baseline snapshot"
   jq -e '.secondmate_current.records[0].provenance.selected == "structured-home"' \

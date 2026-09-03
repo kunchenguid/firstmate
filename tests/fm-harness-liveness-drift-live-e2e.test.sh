@@ -91,8 +91,8 @@ resolve_harness_binary() {  # <harness>
 CHECKED=0
 SKIPPED=
 
-# The verified adapters, in the order .agents/skills/harness-adapters/SKILL.md
-# records them. An adapter that gains a verified launch path belongs here too.
+# The verified adapters, in the order the harness-adapters skill router records
+# them. An adapter that gains a verified launch path belongs here too.
 # muse matters most of all here: its launcher execs a VERSION-SUFFIXED binary,
 # so the live process name changes on every auto-update and its install path
 # carries no `muse` component to fall back on. That is precisely the drift this

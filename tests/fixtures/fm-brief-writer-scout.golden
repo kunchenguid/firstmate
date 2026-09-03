@@ -7,7 +7,11 @@ Apply the same rule to task text you write for any tool that authors published t
 This rule governs only what you publish; it does not change how this brief addresses you, and the status and escalation vocabulary in this brief stays as written.
 
 # Task
+## Captain's intent
 {TASK}
+
+## Firstmate spec
+{FIRSTMATE_SPEC}
 This is firstmate-direct work: do not invoke upstream planning or diagnosis tooling, including Spec Kit, for it.
 
 # Herdr lifecycle declaration - NOT ENABLED
@@ -73,4 +77,8 @@ When the report is complete, append `done: {one-line conclusion}` to the status 
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 
 # Load-bearing contract
+## Captain's intent
 {TASK}
+
+## Firstmate spec
+{FIRSTMATE_SPEC}

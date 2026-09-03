@@ -9,15 +9,12 @@
 # with no live harness session.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=tests/treehouse-helpers.sh
-. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
 make_spawn_fakebin() {
@@ -77,13 +74,10 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
-  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  touch "$home/state/.last-watcher-beat"
-  mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_spawn_brief "$home" "$id"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -93,14 +87,8 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  set -- "$@" --mode no-mistakes --yolo off
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TREEHOUSE_PATH="$wt" \
-    TMUX="fake,1,0" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+  GROK_HOME="$home/grok-home" FM_FAKE_TREEHOUSE_PATH="$wt" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
 read_case_record() {
@@ -339,15 +327,16 @@ test_cursor_hooks_semantic_lifecycle() {
   assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
   jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop and .hooks.sessionEnd' "$hooks" >/dev/null \
     || fail "cursor-agent hooks do not expose the verified lifecycle"
-  unsupported=$(jq -r '.hooks | keys[]' "$hooks" | while IFS= read -r key; do
+  unsupported=
+  while IFS= read -r key; do
     case "$key" in
       beforeShellExecution|beforeMCPExecution|afterShellExecution|afterMCPExecution|beforeReadFile|afterFileEdit|beforeTabFileRead|afterTabFileEdit|stop|beforeSubmitPrompt|afterAgentResponse|afterAgentThought|sessionStart|sessionEnd|preCompact|subagentStart|subagentStop|preToolUse|postToolUse|postToolUseFailure|workspaceOpen)
         ;;
       *)
-        printf '%s\n' "$key"
+        unsupported="${unsupported}${unsupported:+$'\n'}${key}"
         ;;
     esac
-  done)
+  done < <(jq -r '.hooks | keys[]' "$hooks")
   [ -z "$unsupported" ] || fail "cursor-agent hooks contain unsupported Cursor hook key(s): $unsupported"
 
   status=$(git -C "$WT_DIR" status --short --untracked-files=all)

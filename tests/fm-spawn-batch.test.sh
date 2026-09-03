@@ -96,7 +96,7 @@ test_projects_path_scoping() {
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
-    expected="error: no brief at $home/data/$id/brief.md"
+    expected="error: task $id has no brief at inaccessible data path $home/data/$id/brief.md"
     printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
       || fail "$label: projects/alpha was not resolved through the home before the brief check"
     printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
@@ -151,7 +151,7 @@ test_reader_batch_forwards_shared_access() {
   project="$home/projects/alpha"
   mkdir -p "$home/data/$id"
   fm_git_init_commit "$project"
-  printf 'legacy writer scout brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\nlegacy writer scout brief\n' > "$home/data/$id/brief.md"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \

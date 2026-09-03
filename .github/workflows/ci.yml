@@ -23,7 +23,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       FM_LINT_JOBS: "1"
     steps:
@@ -231,14 +231,15 @@ jobs:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
-    # Hosted shards can approach 20 min under runner variance. This cap keeps a
-    # hang tripwire with measured margin instead of cancelling healthy coverage.
-    timeout-minutes: 30
+    # Measured whole remainder is ~63 min of serial work; the balanced shards
+    # are ~12.7 min each. Cap leaves recovery margin for slower hosted runners;
+    # it remains a hang tripwire, not the expected healthy end of the lane.
+    timeout-minutes: 35
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -246,7 +247,12 @@ jobs:
       - name: Install required test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ripgrep
+          sudo apt-get install -y bubblewrap ripgrep
+          # Ubuntu 24.04's AppArmor default blocks bubblewrap's uid namespace
+          # even after the package is installed. This ephemeral runner needs a
+          # usable sandbox, not merely a binary on PATH, for the runtime-closure
+          # acceptance test below.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -456,6 +462,67 @@ jobs:
           name: fm-test-timing-aggregate
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
           if-no-files-found: warn
+
+  macos-stock-bash:
+    name: Stock macOS Bash snapshot compatibility
+    runs-on: macos-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run snapshot consumers with stock Bash
+        shell: /bin/bash {0}
+        env:
+          PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
+        run: |
+          set -eu
+          case "$BASH_VERSION" in
+            3.2.57*) ;;
+            *) echo "::error::expected stock macOS Bash 3.2.57, got $BASH_VERSION"; exit 1 ;;
+          esac
+          /bin/bash --version | head -1
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+
+          shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
+          bin/fm-lint.sh --list-files > "$shell_inventory"
+          parse_fail=0
+          while IFS= read -r f; do
+            /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
+          done < "$shell_inventory"
+          [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+
+          snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
+          printf '%s\n' "$snapshot_output"
+          snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
+          [ "$snapshot_count" -eq 18 ] || {
+            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
+            exit 1
+          }
+
+          bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
+          printf '%s\n' "$bearings_output"
+          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
+          [ "$bearings_count" -eq 45 ] || {
+            echo "::error::expected 45 Bearings tests, got $bearings_count"
+            exit 1
+          }
+
+          command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
+          npm install -g tasks-axi@0.2.5 >/dev/null
+          PATH="$(npm prefix -g)/bin:$PATH"
+          export PATH
+          command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the public-followup bash 3.2 register regression"; exit 1; }
+
+          # The full public-followup suite is not a stock-bash snapshot; run only
+          # the empty-lock register regression under real /bin/bash 3.2.
+          pf_output=$(FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32 \
+            /bin/bash tests/fm-public-followup.test.sh)
+          printf '%s\n' "$pf_output"
+          pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
+          [ "$pf_count" -eq 1 ] || {
+            echo "::error::expected 1 public-followup bash 3.2 register regression, got $pf_count"
+            exit 1
+          }
 
   invariants:
     name: Repo invariants

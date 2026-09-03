@@ -2,12 +2,11 @@
 # Behavior tests for Grok-harness hook authentication, teardown cleanup, and session-lock holder detection.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=tests/treehouse-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
 
@@ -39,25 +38,21 @@ make_spawn_case() {
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" gh-axi gh)
   grok_home="$case_dir/grok"
   id="grok-$name-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$grok_home"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  mkdir -p "$grok_home"
+  fm_test_spawn_home "$home"
+  fm_test_spawn_brief "$home" "$id" brief
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$grok_home|$id"
 }
 
 run_grok_spawn() {
   local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TREEHOUSE_PATH="$wt" \
-    TMUX="fake,1,0" \
-    GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" grok --mode no-mistakes --yolo off 2>&1
+  GROK_HOME="$grok_home" FM_FAKE_TREEHOUSE_PATH="$wt" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" \
+    "$id" "$proj" grok --mode no-mistakes --yolo off
 }
 
 test_grok_hook_requires_registered_token() {

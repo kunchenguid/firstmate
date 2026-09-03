@@ -95,7 +95,7 @@ test_ordinary_briefs_state_slice_contracts() {
 }
 
 test_ordinary_briefs_bookend_load_bearing_task() {
-  local variant id brief filled task_slots bookend_line dod_line setup_line task_line oracle_count text_file inline_count remaining mode
+  local variant id brief filled task_slots spec_slots bookend_line dod_line setup_line task_line oracle_count text_file inline_count remaining spec_default_count mode
   for variant in ship-no-mistakes ship-direct-PR ship-local-only scout reader-scout; do
     id="brief-bookend-$variant"
     case "$variant" in
@@ -115,7 +115,9 @@ test_ordinary_briefs_bookend_load_bearing_task() {
     esac
     brief="$BRIEF_HOME/data/$id/brief.md"
     task_slots=$(grep -c '^{TASK}$' "$brief" || true)
+    spec_slots=$(grep -c '^{FIRSTMATE_SPEC}$' "$brief" || true)
     [ "$task_slots" -eq 2 ] || fail "$variant brief emitted $task_slots standalone {TASK} bookends instead of two"
+    [ "$spec_slots" -eq 2 ] || fail "$variant brief emitted $spec_slots standalone {FIRSTMATE_SPEC} bookends instead of two"
     assert_grep '# Load-bearing contract' "$brief" \
       "$variant brief missing its closing load-bearing contract section"
     bookend_line=$(grep -n '^# Load-bearing contract$' "$brief" | head -1 | cut -d: -f1)
@@ -126,10 +128,10 @@ test_ordinary_briefs_bookend_load_bearing_task() {
       || fail "$variant brief lost a structural boundary needed for bookend placement"
     [ "$bookend_line" -gt "$dod_line" ] \
       || fail "$variant brief closing load-bearing contract must follow Definition of done"
-    # Fill both standalone slots from one input through the public command, not
-    # a test-only Perl substitution. The text includes an inline {TASK}: prose
-    # line so the fill must target only the two standalone {TASK} lines and leave
-    # the inline token intact as content (colon-split false-negative guard).
+    # Fill both intent slots from one input through the public command, not a
+    # test-only Perl substitution. Omitting the optional spec input must fill
+    # both spec slots with the documented default. The text includes an inline
+    # {TASK}: prose line, which must remain content.
     text_file="$TMP_ROOT/bookend-text-$variant.txt"
     printf 'Oracle: FM-BOOKEND-ORACLE-7f3a\n{TASK}: FM-BOOKEND-INLINE-7f3a\nAcceptance: FM-BOOKEND-ACCEPT-7f3a\nConstraints: FM-BOOKEND-CONSTRAINT-7f3a\n' > "$text_file"
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
@@ -147,6 +149,10 @@ test_ordinary_briefs_bookend_load_bearing_task() {
     [ "$inline_count" -eq 2 ] || fail "$variant brief fill replaced or dropped the inline {TASK}: prose token instead of leaving it as content"
     remaining=$(grep -c '^{TASK}$' "$filled" || true)
     [ "$remaining" -eq 0 ] || fail "$variant brief fill left $remaining standalone {TASK} slot(s) unfilled"
+    remaining=$(grep -c '^{FIRSTMATE_SPEC}$' "$filled" || true)
+    [ "$remaining" -eq 0 ] || fail "$variant brief fill left $remaining standalone {FIRSTMATE_SPEC} slot(s) unfilled"
+    spec_default_count=$(grep -c '^No additional build instructions beyond the scaffold\.$' "$filled" || true)
+    [ "$spec_default_count" -eq 2 ] || fail "$variant brief did not repeat the default implementation spec in both bookends"
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" --validate-bookends "$filled" >/dev/null 2>&1 \
       || fail "$variant brief failed the bookend validation after a one-input fill"
     if [ "$variant" = reader-scout ]; then
@@ -174,15 +180,17 @@ test_fill_refuses_non_ordinary_or_already_filled_brief() {
     "$ROOT/bin/fm-brief.sh" fill-charter --secondmate --no-projects >/dev/null 2>&1
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-charter --fill "$text_file" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "--fill accepted a secondmate charter (not an ordinary two-slot brief)"
-  assert_contains "$out" "standalone {TASK} slot" "--fill refusal did not name the slot contract"
+  assert_contains "$out" "standalone {TASK}" "--fill refusal did not name the intent slot contract"
+  assert_contains "$out" "standalone {FIRSTMATE_SPEC}" "--fill refusal did not name the spec slot contract"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship firstmate --mode direct-PR >/dev/null 2>&1
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$text_file" >/dev/null 2>&1
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$text_file" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "--fill accepted an already-filled brief"
-  assert_contains "$out" "standalone {TASK} slot" "second --fill refusal did not name the slot contract"
+  assert_contains "$out" "standalone {TASK}" "second --fill refusal did not name the intent slot contract"
+  assert_contains "$out" "standalone {FIRSTMATE_SPEC}" "second --fill refusal did not name the spec slot contract"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fill-ship --fill "$home/no-such-file" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "--fill accepted a missing text file"
-  assert_contains "$out" "no task text file" "--fill did not name the missing text file"
+  assert_contains "$out" "no intent text file" "--fill did not name the missing intent file"
   pass "fm-brief.sh: --fill refuses charters, already-filled briefs, and missing text"
 }
 
@@ -195,7 +203,8 @@ test_validate_bookends_refuses_half_filled_and_divergent() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-unfilled firstmate --mode direct-PR >/dev/null 2>&1
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-unfilled/brief.md" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "validate-bookends accepted an unfilled brief"
-  assert_contains "$out" "unfilled standalone {TASK} slot" "validate-bookends did not name the unfilled slot"
+  assert_contains "$out" "unfilled {TASK}" "validate-bookends did not name the unfilled intent slot"
+  assert_contains "$out" "unfilled {FIRSTMATE_SPEC}" "validate-bookends did not name the unfilled spec slot"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-half firstmate --mode direct-PR >/dev/null 2>&1
   python3 - "$home/data/vb-half/brief.md" <<'PY'
 import sys
@@ -205,7 +214,8 @@ open(p,"w").write(s)
 PY
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$home/data/vb-half/brief.md" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "validate-bookends accepted a half-filled brief"
-  assert_contains "$out" "unfilled standalone {TASK} slot" "validate-bookends did not name the half-filled slot"
+  assert_contains "$out" "unfilled {TASK}" "validate-bookends did not name the half-filled intent slot"
+  assert_contains "$out" "unfilled {FIRSTMATE_SPEC}" "validate-bookends did not name the half-filled spec slot"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-div firstmate --mode direct-PR >/dev/null 2>&1
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" vb-div --fill "$text_file" >/dev/null 2>&1
   python3 - "$home/data/vb-div/brief.md" <<'PY'
@@ -258,7 +268,7 @@ test_herdr_omission_keeps_inserted_after_scaffolding_wording() {
   pass "fm-brief.sh: omitted-Herdr briefs keep the precise inserted-after-scaffolding safety wording"
 }
 
-test_ordinary_brief_echoes_describe_two_slots() {
+test_ordinary_brief_echoes_describe_structured_slots() {
   local kind id output
   for kind in ship scout reader-scout; do
     id="brief-echo-slots-$kind"
@@ -272,10 +282,10 @@ test_ordinary_brief_echoes_describe_two_slots() {
       output=$(FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes 2>&1) \
         || fail "fm-brief.sh failed to generate the $kind echo fixture"
     fi
-    assert_contains "$output" 'replace the two standalone {TASK} slots' \
-      "$kind scaffold echo must describe both standalone task slots"
+    assert_contains "$output" 'replace both {TASK} and {FIRSTMATE_SPEC} copies' \
+      "$kind scaffold echo must describe both structured task sections"
   done
-  pass "fm-brief: ship, scout, and reader-scout scaffold echoes describe both standalone task slots"
+  pass "fm-brief: ship, scout, and reader-scout scaffold echoes describe both structured task sections"
 }
 
 # The script itself must always parse under the ambient bash. That is Bash 5 in
@@ -467,6 +477,9 @@ test_ship_modes_generate_clean_briefs() {
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
+    assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
+    assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     if [ "$mode" = no-mistakes ]; then
@@ -580,11 +593,11 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
-  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+  assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
-  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+  assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
@@ -607,21 +620,28 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "make \`--intent\` preserve all relevant content from this brief" "$brief" \
-    "no-mistakes DOD must require --intent to retain the accepted task contract"
-  assert_grep "carrying only each requirement's current accepted form" "$brief" \
-    "no-mistakes DOD must replace superseded requirements with their current accepted form"
-  assert_grep "retain direct requirements instead of substituting a diff summary" "$brief" \
-    "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
-  assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
-    "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
-  # The apostrophe in "firstmate's authority check" is now structurally safe
-  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
-  # being reworded or escaped away. test_no_heredoc_in_command_substitution
-  # guards the structure that makes it safe.
-  assert_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
+    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
+  assert_grep "plus any later words the captain actually said" "$brief" \
+    "no-mistakes DOD must allow later captain words in --intent"
+  assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
+    "no-mistakes DOD must keep Firstmate spec out of --intent"
+  assert_grep "or your own decisions and tradeoffs" "$brief" \
+    "no-mistakes DOD must keep worker tradeoffs out of --intent"
+  assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
+    "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
+
+  # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
+  # claim an enforcement the tool does not provide: this is instruction only.
+  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
+    "no-mistakes DOD must state the --yes ban as a prohibition"
+  assert_grep "answering your own ask-user finding is a hard rule violation" "$brief" \
+    "no-mistakes DOD must say why --yes is banned"
+  assert_no_grep "Avoid \`--yes\`" "$brief" \
+    "no-mistakes DOD still states the --yes ban as a preference"
+  assert_no_grep "no-mistakes refuses" "$brief" \
+    "no-mistakes DOD must not claim the tool itself refuses --yes"
+  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
 test_direct_pr_dod_requires_review_ready_pr() {
@@ -779,12 +799,12 @@ test_publish_rule_covers_crewmate_briefs() {
   [ -n "$heading_line" ] && [ -n "$task_line" ] && [ "$heading_line" -lt "$task_line" ] \
     || fail "reader scout brief: publication rule must precede # Task"
 
-  # no-mistakes --intent is worker-composed text that feeds the pipeline
-  # authoring this task's commits and PR, so the DOD must subject it to the
-  # same publication rule.
+  # no-mistakes --intent feeds the pipeline authoring this task's commits and
+  # PR, so the publication section must subject it to the same rule while the
+  # DOD preserves the owner's intent verbatim.
   brief="$home/data/brief-pub-ship-nm/brief.md"
-  assert_grep "apply \`# What you publish\` to the intent you compose" "$brief" \
-    "no-mistakes DOD must subject the composed --intent to the publication rule"
+  assert_grep "including a no-mistakes \`--intent\`" "$brief" \
+    "no-mistakes brief must subject --intent to the publication rule"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pub-sm --secondmate alpha >/dev/null 2>&1 \
@@ -870,14 +890,20 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
-# Regression (issue #2575): the Herdr gate must not contain a fill token. The
-# public fill command replaces only the two deliberate task bookends from one
-# source, leaving the safety gate intact while preserving both copies.
+# Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
+# firstmate to fill `{TASK}` and `{FIRSTMATE_SPEC}`. This fork repeats those
+# structured subsections at its load-bearing boundary. The unguarded Herdr gate used
+# to quote `{TASK}` in its own prose, so that documented global replace spliced
+# the whole task body into the middle of the gate's sentence - silently
+# destroying the one contract that exists precisely because the scaffold cannot
+# see the task text. Each placeholder may exist only at the two genuine bookend
+# fill sites, and the helper must fill each pair from one authoritative file.
 test_documented_global_replace_leaves_the_herdr_gate_intact() {
-  local home id brief kind count body text_file
+  local home id brief kind count body spec intent_file spec_file
   home="$TMP_ROOT/task-fill-site-home"
   mkdir -p "$home/data"
   body='Restart the herdr session, then profile it'
+  spec='Use the isolated lab helper for every lifecycle call'
   for kind in ship scout; do
     id="brief-fill-site-$kind"
     if [ "$kind" = scout ]; then
@@ -890,17 +916,25 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     count=$(grep -c -F '{TASK}' "$brief")
     [ "$count" = 2 ] \
       || fail "$kind brief must carry exactly two {TASK} bookend fill sites, found $count"
-    text_file="$home/$id-task.txt"
-    printf '%s\n' "$body" > "$text_file"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+    count=$(grep -c -F '{FIRSTMATE_SPEC}' "$brief")
+    [ "$count" = 2 ] \
+      || fail "$kind brief must carry exactly two {FIRSTMATE_SPEC} bookend fill sites, found $count"
+    intent_file="$home/$id-intent.txt"
+    spec_file="$home/$id-spec.txt"
+    printf '%s\n' "$body" > "$intent_file"
+    printf '%s\n' "$spec" > "$spec_file"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent_file" "$spec_file" >/dev/null 2>&1 \
       || fail "$kind brief: public fill command failed"
     count=$(grep -c -F "$body" "$brief")
     [ "$count" = 2 ] \
       || fail "$kind brief: task body did not fill both bookends exactly once (found $count)"
+    count=$(grep -c -F "$spec" "$brief")
+    [ "$count" = 2 ] \
+      || fail "$kind brief: implementation spec did not fill both bookends exactly once (found $count)"
     grep -qF 'this scaffold cannot inspect the task text' "$brief" \
       || fail "$kind brief: the Herdr safety gate did not survive the documented global replace"
   done
-  pass "fm-brief.sh: the documented {TASK} fill cannot corrupt the Herdr safety gate"
+  pass "fm-brief.sh: the documented {TASK} and {FIRSTMATE_SPEC} fills cannot corrupt the Herdr safety gate"
 }
 
 test_secondmate_no_projects_charter() {
@@ -925,6 +959,12 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the reader scratch note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
+  assert_grep '# The captain and the parent channel' "$brief" \
+    "secondmate charter lost the parent-channel section"
+  assert_grep 'Nobody reads this chat' "$brief" \
+    "secondmate charter no longer says the chat is unread"
+  assert_grep 'in this home it IS the captain' "$brief" \
+    "secondmate charter no longer names the parent channel as the captain"
   assert_grep 'working [key=<work-slug>]' "$brief" \
     "secondmate charter did not key material routed-work phases"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
@@ -1721,6 +1761,9 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "you may host the Lavish review loop yourself" "$brief" \
     "scout brief must mention the option to host a Lavish review loop"
+  assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
+  assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
+  assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -1729,6 +1772,10 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
+  assert_no_grep "## Captain's intent" "$brief" \
+    "secondmate charter must not grow ship/scout Task subsections"
+  assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
+    "secondmate charter must not carry the Firstmate spec placeholder"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
@@ -1740,7 +1787,7 @@ test_fill_refuses_non_ordinary_or_already_filled_brief
 test_validate_bookends_refuses_half_filled_and_divergent
 test_validate_bookends_is_no_op_for_secondmate_charter
 test_herdr_omission_keeps_inserted_after_scaffolding_wording
-test_ordinary_brief_echoes_describe_two_slots
+test_ordinary_brief_echoes_describe_structured_slots
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

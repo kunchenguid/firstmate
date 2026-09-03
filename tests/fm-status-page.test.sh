@@ -178,6 +178,24 @@ EOF
 
 ## Done
 EOF
+  jq -n --arg home "$mate" '{
+    schema:"fm-secondmate-home-summary.v1",
+    generated:"2026-08-02T00:00:00Z",
+    generated_epoch:1785628800,
+    home:$home,
+    valid:true,
+    reason:null,
+    invalidity:{kind:null,ids:[]},
+    state:"no_active_work",
+    active_children:[],
+    decisions_open:[],
+    holds:[],
+    queued:[],
+    landed:[],
+    endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},
+    omitted:[]
+  }' > "$mate/state/home-summary.json"
   printf -- '- observability - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-08-02)\n' \
     "$mate" > "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")

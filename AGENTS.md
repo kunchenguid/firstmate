@@ -60,6 +60,7 @@ Do not dispatch until the required tools are present and GitHub authentication i
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
+Bootstrap replays valid interrupted backlog closes and repairs owned worker rows through `bin/fm-backlog-transition-lib.sh`; actionable refusals remain governed by `bootstrap-diagnostics`.
 
 ## 4. Harness and runtime dispatch
 
@@ -121,13 +122,15 @@ Record the resulting mode, yolo, and the one-line reason for any deviation in th
 
 Dispatch independently validatable isolated work concurrently; same-file overlap alone is not a blocker.
 Serialize only when a semantic dependency, shared mutable external state, or incompatible migration makes reconciliation unsafe.
-Write the task brief before spawning.
+Write the task-specific brief under section 11 before spawning.
+Fill the task subsections according to section 11.
 
 ### Dispatch and supervision handoff
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 Ship and writer scout spawns must resolve a genuine isolated task worktree distinct from the primary checkout; a reader scout spawn instead must pass `bin/fm-spawn.sh`'s checkout-free scratch-path and process-confinement guards.
-After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
+When the configured tasks-axi backlog gate applies, spawn atomically moves the work item to In flight with the worker record and refuses rather than dispatching work this home has no item for; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
+After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
@@ -165,6 +168,12 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 Load `validation-lifecycle` before starting, supervising, superseding, or answering a finding in no-mistakes validation.
+For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
+Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+When the captain adds or changes an ask mid-task, append the captain's words to that brief's `## Captain's intent` and steer the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
+`bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
+Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 ### Completion
 
@@ -197,6 +206,8 @@ Every escalation stands alone and leads with concrete evidence, then consequence
 
 Reach the captain immediately for review-ready work with its full PR URL, finished investigation findings, required decisions, exhausted blockers or failures, credentials, and destructive, irreversible, or security-sensitive action.
 
+In a secondmate home, reaching the captain means appending the outcome to the parent channel named by the charter; [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's scripts deliver there.
+
 Do not surface automatic fixes, retries, routine progress, or supervision mechanics; if a no-action operational response is mandatory, reply exactly `Shipshape.`
 Batch non-urgent updates, use plain chat for yes/no decisions, use `lavish-axi` only for genuinely structured review, and include the full `https://...` URL whenever mentioning a PR.
 When the startup reminder says the weekly `/what-to-learn` ritual is overdue, mention it at the next natural direct-chat moment.
@@ -204,7 +215,8 @@ When the startup reminder says the weekly `/what-to-learn` ritual is overdue, me
 ## 10. Backlog contract
 
 `data/backlog.md` is the durable work-item queue; agents and persistent secondmates are not items, and secondmate work belongs in that home's backlog.
-Update it on dispatch, completion, and decisions, then reconsider dependency- or time-blocked work after cleanup and fleet review.
+When the automatic transition gate applies, `bin/fm-spawn.sh` and `bin/fm-teardown.sh` atomically move the item with its worker-record lifecycle and refuse rather than report success without the transition; manual-backend homes retain the documented hand-editing path.
+Keep decisions and notes current, then reconsider dependency- or time-blocked work after cleanup and fleet review.
 `captain-hold-lifecycle` owns unresolved investigation or visual-review captain calls and their completion gate; `decision-hold-lifecycle` remains only a compatibility shim for legacy decision-hold references; load the captain-hold skill before treating an investigation or visual review as complete and before ending a visual review that exposed a captain call; `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff.
 `.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema and mechanics.
 Notes retain durable identifiers, dependencies, and artifact links, omit volatile copied state, and route reusable knowledge to section 6.
@@ -212,6 +224,19 @@ Notes retain durable identifiers, dependencies, and artifact links, omit volatil
 ## 11. Crewmate briefs
 
 Load `crewmate-briefing` before creating or materially changing a ship, scout, or secondmate charter brief.
+`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus only the context needed to read it, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
+`bin/fm-dod-lib.sh` owns what a no-mistakes worker may pass as `--intent`.
+Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+
+Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
+If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
+The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
+
+Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
+Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
+The scaffold is a safety contract, not a suggestion.
 
 ## 12. Self-update
 

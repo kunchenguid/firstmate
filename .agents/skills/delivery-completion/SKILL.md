@@ -15,7 +15,7 @@ Run `bin/fm-pr-check.sh <id> <PR url>`; it records `pr=` and the forge's `pr_hea
 Tell the captain the full `https://...` PR URL, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For a custom `state/<id>.check.sh`, use an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, and register its current bytes with `bin/fm-check-register.sh <id>` before execution.
-A finite check prints a final wake line at terminal state and is retired on that wake with `bin/fm-check-register.sh retire <id>`.
+A finite custom check prints a final wake line at terminal state and is retired on that wake with `bin/fm-check-unregister.sh <id>`.
 
 Clean up a ship task only after landing is confirmed.
 A refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.

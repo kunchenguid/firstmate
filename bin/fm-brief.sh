@@ -2,26 +2,28 @@
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. For ordinary ship and scout briefs, Firstmate then replaces the two
-# standalone {TASK} slots with the task description, acceptance criteria, and
-# context, and may adjust other sections when the task genuinely deviates (e.g.
-# working an existing external PR instead of shipping a new one). Those briefs
-# repeat the load-bearing task block at the end so oracle, acceptance criteria,
-# and hard constraints stay visible at both structural boundaries
-# (lost-in-the-middle).
+# filled in. Ship and scout `# Task` sections separate `{TASK}` under
+# `## Captain's intent` from `{FIRSTMATE_SPEC}` under `## Firstmate spec`, and
+# repeat both subsections at the closing load-bearing boundary so the accepted
+# intent and build constraints stay visible at both structural boundaries
+# (lost-in-the-middle). bin/fm-dod-lib.sh owns the no-mistakes `--intent`
+# contract and bin/fm-spawn.sh refuses leftover placeholders. Firstmate may
+# adjust other sections when the task genuinely deviates (e.g. working an
+# existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--visual] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--access <reader|writer>] [--evidence-archive] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
-#        fm-brief.sh <task-id> --fill <text-file>
+#        fm-brief.sh <task-id> --fill <intent-file> [spec-file]
 #        fm-brief.sh --validate-bookends <brief-file>
-#   --fill atomically replaces both standalone {TASK} slots in an already
-#   scaffolded ordinary ship/scout brief with the contents of <text-file>, so
-#   the opening # Task block and the closing # Load-bearing contract block come
-#   from one authoritative input and cannot diverge. It refuses a brief that
-#   does not have exactly two unfilled standalone {TASK} slots.
+#   --fill atomically replaces both standalone {TASK} slots with <intent-file>
+#   and both standalone {FIRSTMATE_SPEC} slots with [spec-file]. When the
+#   optional spec file is absent it writes an explicit no-additional-spec line.
+#   The opening and closing copies therefore come from one authoritative input
+#   per subsection and cannot diverge.
 #   --validate-bookends checks an ordinary ship/scout brief has no unfilled
-#   standalone {TASK} slot and that its opening and closing load-bearing task
-#   text agree; a charter (no # Task section) is a no-op. bin/fm-spawn.sh calls
+#   standalone {TASK} or {FIRSTMATE_SPEC} slot and that its opening and closing
+#   structured task copies agree; a charter (no # Task section) is a no-op.
+#   bin/fm-spawn.sh calls
 #   this before creating any endpoint or task state, so a half-filled or
 #   divergent brief is refused before mutation.
 #   --evidence-archive is valid only with --scout. It opts an evidence-heavy scout
@@ -58,9 +60,10 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
-#   The flag must be explicit because {TASK} is filled after scaffolding and the
-#   caller-supplied repo string cannot reliably identify this repo. Briefs made
-#   without it carry a loud declaration so an omitted contract cannot be silent.
+#   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
+#   after scaffolding and the caller-supplied repo string cannot reliably
+#   identify this repo. Briefs made without it carry a loud declaration so an
+#   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -158,6 +161,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -222,14 +227,12 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    # --fill <task-id> <text-file>: atomically replace both standalone {TASK}
-    # slots in an already-scaffolded ordinary ship/scout brief with the contents
-    # of <text-file>, so the opening # Task block and the closing # Load-bearing
-    # contract block come from one authoritative input and cannot diverge.
+    # --fill <task-id> <intent-file> [spec-file]: atomically replace both
+    # structured Task copies from one authoritative input per subsection.
     --fill) FILL=1 ;;
     # --validate-bookends <brief>: check an ordinary ship/scout brief has no
-    # unfilled standalone {TASK} slot and that its opening and closing
-    # load-bearing task text agree. A charter (no # Task section) is not an
+    # unfilled standalone {TASK} or {FIRSTMATE_SPEC} slot and that its opening
+    # and closing structured task copies agree. A charter (no # Task section) is not an
     # ordinary brief and validates as a no-op. bin/fm-spawn.sh calls this before
     # creating any endpoint or task state.
     --validate-bookends) VALIDATE_BOOKENDS=1 ;;
@@ -247,36 +250,46 @@ done
 # --fill and --validate-bookends are operations on an already-scaffolded brief,
 # not scaffold flags, so they bypass the mode/scope validation below and exit.
 if [ "$FILL" -eq 1 ]; then
-  if [ "${#POS[@]}" -ne 2 ]; then
-    echo "error: --fill requires exactly <task-id> <text-file>" >&2
+  if [ "${#POS[@]}" -lt 2 ] || [ "${#POS[@]}" -gt 3 ]; then
+    echo "error: --fill requires <task-id> <intent-file> [spec-file]" >&2
     exit 1
   fi
   FILL_ID=${POS[0]}
-  FILL_TEXT=${POS[1]}
+  FILL_INTENT=${POS[1]}
+  FILL_SPEC=${POS[2]:-}
   FILL_BRIEF="$DATA/$FILL_ID/brief.md"
   [ -f "$FILL_BRIEF" ] || { echo "error: no brief at $FILL_BRIEF to fill" >&2; exit 1; }
-  [ -f "$FILL_TEXT" ] || { echo "error: no task text file at $FILL_TEXT" >&2; exit 1; }
-  FILL_SLOTS=$(grep -c '^{TASK}$' "$FILL_BRIEF" 2>/dev/null || true)
-  if [ "$FILL_SLOTS" -ne 2 ]; then
-    echo "error: $FILL_BRIEF has $FILL_SLOTS standalone {TASK} slot(s); an ordinary ship/scout brief has exactly two unfilled - fill only a freshly scaffolded ordinary brief" >&2
+  [ -f "$FILL_INTENT" ] || { echo "error: no intent text file at $FILL_INTENT" >&2; exit 1; }
+  [ -z "$FILL_SPEC" ] || [ -f "$FILL_SPEC" ] \
+    || { echo "error: no spec text file at $FILL_SPEC" >&2; exit 1; }
+  FILL_INTENT_SLOTS=$(grep -c '^{TASK}$' "$FILL_BRIEF" 2>/dev/null || true)
+  FILL_SPEC_SLOTS=$(grep -c '^{FIRSTMATE_SPEC}$' "$FILL_BRIEF" 2>/dev/null || true)
+  if [ "$FILL_INTENT_SLOTS" -ne 2 ] || [ "$FILL_SPEC_SLOTS" -ne 2 ]; then
+    echo "error: $FILL_BRIEF has $FILL_INTENT_SLOTS standalone {TASK} and $FILL_SPEC_SLOTS standalone {FIRSTMATE_SPEC} slot(s); an ordinary ship/scout brief has exactly two of each - fill only a freshly scaffolded ordinary brief" >&2
     exit 1
   fi
-  # Single awk pass over the brief: every standalone {TASK} line is replaced
-  # with the same text-file content, so the opening # Task block and the
-  # closing # Load-bearing contract block come from one authoritative input
-  # and cannot diverge. Inline {TASK} prose tokens are never standalone
-  # lines, so they are left untouched.
+  # One pass replaces both copies of each standalone placeholder, so opening
+  # and closing task subsections cannot diverge. Inline examples stay intact.
   FILL_TMP="$FILL_BRIEF.fm-fill.$$"
-  awk -v text_file="$FILL_TEXT" '
+  awk -v intent_file="$FILL_INTENT" -v spec_file="$FILL_SPEC" '
     $0 == "{TASK}" {
-      while ((getline line < text_file) > 0) print line
-      close(text_file)
+      while ((getline line < intent_file) > 0) print line
+      close(intent_file)
+      next
+    }
+    $0 == "{FIRSTMATE_SPEC}" {
+      if (spec_file == "") {
+        print "No additional build instructions beyond the scaffold."
+      } else {
+        while ((getline line < spec_file) > 0) print line
+        close(spec_file)
+      }
       next
     }
     { print }
   ' "$FILL_BRIEF" > "$FILL_TMP" || { rm -f "$FILL_TMP"; echo "error: fill failed" >&2; exit 1; }
   mv -f "$FILL_TMP" "$FILL_BRIEF"
-  echo "filled: $FILL_BRIEF (replaced both standalone {TASK} slots from $FILL_TEXT)"
+  echo "filled: $FILL_BRIEF (replaced both structured task copies)"
   exit 0
 fi
 
@@ -291,11 +304,22 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
   # apply; validate as a no-op so the caller (bin/fm-spawn.sh) can run this on
   # any brief and only ordinary ship/scout briefs are actually checked.
   grep -qx '^# Task$' "$VB_BRIEF" || { exit 0; }
-  grep -qx '^# Load-bearing contract$' "$VB_BRIEF" \
-    || { echo "error: $VB_BRIEF has a # Task section but no # Load-bearing contract bookend" >&2; exit 1; }
-  VB_SLOTS=$(grep -c '^{TASK}$' "$VB_BRIEF" 2>/dev/null || true)
-  if [ "$VB_SLOTS" -ne 0 ]; then
-    echo "error: $VB_BRIEF still has $VB_SLOTS unfilled standalone {TASK} slot(s); fill both before launch" >&2
+  if ! grep -qx '^# Load-bearing contract$' "$VB_BRIEF"; then
+    # Briefs predating the structured Task contract have no generated bookend.
+    # Keep that compatibility only for a genuinely legacy mixed Task: once
+    # either structured subsection exists, the complete repeated pair is
+    # mandatory and a missing close remains a hard refusal.
+    if ! fm_brief_task_heading_present "$VB_BRIEF" "## Captain's intent" \
+      && ! fm_brief_task_heading_present "$VB_BRIEF" "## Firstmate spec"; then
+      exit 0
+    fi
+    echo "error: $VB_BRIEF has a structured # Task section but no # Load-bearing contract bookend" >&2
+    exit 1
+  fi
+  VB_INTENT_SLOTS=$(grep -c '^{TASK}$' "$VB_BRIEF" 2>/dev/null || true)
+  VB_SPEC_SLOTS=$(grep -c '^{FIRSTMATE_SPEC}$' "$VB_BRIEF" 2>/dev/null || true)
+  if [ "$VB_INTENT_SLOTS" -ne 0 ] || [ "$VB_SPEC_SLOTS" -ne 0 ]; then
+    echo "error: $VB_BRIEF still has $VB_INTENT_SLOTS unfilled {TASK} and $VB_SPEC_SLOTS unfilled {FIRSTMATE_SPEC} slot(s); fill both copies before launch" >&2
     exit 1
   fi
   # Extract the load-bearing task text from each bookend and require them to
@@ -311,6 +335,7 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
   VB_OPEN=$(awk -v stop="$VB_DIRECT" '
     /^# Task$/ { seen=1; next }
     seen && $0 == stop { exit }
+    seen && /^# / { exit }
     seen { print }
   ' "$VB_BRIEF" | strip_trailing_blanks)
   VB_CLOSE=$(awk '
@@ -318,7 +343,7 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
     seen { print }
   ' "$VB_BRIEF" | strip_trailing_blanks)
   if [ "$VB_OPEN" != "$VB_CLOSE" ]; then
-    echo "error: $VB_BRIEF opening # Task and closing # Load-bearing contract bookends diverge; fill both from one input with --fill" >&2
+    echo "error: $VB_BRIEF opening # Task and closing # Load-bearing contract bookends diverge; fill both copies from one input per subsection with --fill" >&2
     exit 1
   fi
   [ -n "$VB_OPEN" ] || { echo "error: $VB_BRIEF bookends are empty; fill the task text before launch" >&2; exit 1; }
@@ -475,7 +500,11 @@ ORDINARY_RULES=${ORDINARY_RULES%$'\n'}
 IFS= read -r -d '' LOAD_BEARING_BOOKEND <<'EOF' || true
 
 # Load-bearing contract
+## Captain's intent
 {TASK}
+
+## Firstmate spec
+{FIRSTMATE_SPEC}
 EOF
 LOAD_BEARING_BOOKEND=${LOAD_BEARING_BOOKEND%$'\n'}
 FIRSTMATE_SESSION_SCOPE_RULE='The fleet lock and bin/fm-session-start.sh are firstmate-only.'
@@ -536,6 +565,12 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+
+# The captain and the parent channel
+Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
+That file is your parent channel, and in this home it IS the captain: every sentence you would say to the captain, and every outcome the local AGENTS.md tells a firstmate to bring to the captain, is one appended line there, never chat.
+Your own machinery publishes the durable facts about your crew's work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the captain and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
+What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the captain.
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -657,6 +692,16 @@ Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
+
+IFS= read -r -d '' TASK_SECTION <<'EOF' || true
+# Task
+## Captain's intent
+{TASK}
+
+## Firstmate spec
+{FIRSTMATE_SPEC}
+EOF
+TASK_SECTION=${TASK_SECTION%$'\n'}
 
 IFS= read -r -d '' HEAVY_SUITE_RULE <<EOF || true
 8. Start every full frontend or browser test suite with \`$FM_ROOT/bin/fm-heavy-suite.sh -- <suite command and arguments>\`.
@@ -843,8 +888,7 @@ Access contract: access=reader
 
 $PUBLISH_SECTION
 
-# Task
-{TASK}
+$TASK_SECTION
 $FIRSTMATE_DIRECT_RULE
 
 # Project rules for this reader task
@@ -886,7 +930,7 @@ if [ "$EVIDENCE_ARCHIVE" -eq 1 ]; then
 fi
 printf '%s\n' "$LOAD_BEARING_BOOKEND" >> "$BRIEF"
 finalize_evidence_archive || exit 1
-echo "scaffolded: $BRIEF (scout, access=reader; replace the two standalone {TASK} slots and {PROJECT_RULES})"
+echo "scaffolded: $BRIEF (scout, access=reader; replace both {TASK} and {FIRSTMATE_SPEC} copies plus {PROJECT_RULES})"
 exit 0
 fi
 
@@ -896,8 +940,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $PUBLISH_SECTION
 
-# Task
-{TASK}
+$TASK_SECTION
 $FIRSTMATE_DIRECT_RULE
 
 $HERDR_SECTION
@@ -926,58 +969,30 @@ if [ "$EVIDENCE_ARCHIVE" -eq 1 ]; then
 fi
 printf '%s\n' "$LOAD_BEARING_BOOKEND" >> "$BRIEF"
 finalize_evidence_archive || exit 1
-echo "scaffolded: $BRIEF (scout; replace the two standalone {TASK} slots)"
+echo "scaffolded: $BRIEF (scout; replace both {TASK} and {FIRSTMATE_SPEC} copies)"
 exit 0
 fi
 
-# Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
-# delivery mode, validated above. The generated DOD opens with the fixed
-# "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
-# explicit --mode before launching.
-
-# Last rule by construction: the mode that omits it must leave no numbering gap for
-# the ask-user escalation to point into.
+# Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
+# above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
+# which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
+# The block opens with the fixed "Delivery contract: mode=<mode>" line that
+# bin/fm-spawn.sh checks against its own explicit --mode before launching.
 IFS= read -r -d '' CHECKS_RULE <<'EOF' || true
 9. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
    Run those exact commands rather than substitutes.
    If this repository has no CI configuration, run the check commands its own documentation defines instead (`AGENTS.md`, `CLAUDE.md`, `README`, or its package manifest's scripts); if it documents none either, there is no check set to run.
 EOF
 CHECKS_RULE=$'\n'${CHECKS_RULE%$'\n'}
-SHIP_EVIDENCE_RULE='Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence.'
-# Fast-path only: worker-run layer evidence reuses the red-before-fix sink.
-# no-mistakes clears this so the pipeline remains the sole check owner.
 ENGINEERING_BAR_RUN=$'\n'"Run every layer you can; for each, record the exact command and the pass/fail counts in the report or PR evidence."
-
 case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-$SHIP_EVIDENCE_RULE
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
-Before requesting another review round on an existing pull request, run \`$FM_ROOT/bin/fm-pr-comment-watch.sh rereview-ready --url <pr-url>\`; it refuses until every open review thread has your inline reply and either a GitHub resolution or a recorded defer via \`$FM_ROOT/bin/fm-pr-comment-watch.sh defer --url <pr-url> --thread-id <id>\`.
-Route that re-review request through \`$FM_ROOT/bin/fm-pr-body.sh publish --file <path> -- gh-axi pr edit <pr-url> --add-reviewer <reviewer-login>\` so the refusal is structural rather than advisory.
-When it is implemented and committed, publish to the fork only with an explicit source-to-destination refspec: \`git push <fork-remote> HEAD:refs/heads/fm/$ID\`.
-Then open a PR with \`gh-axi\`; after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-$SHIP_EVIDENCE_RULE
-Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
     ;;
   *)  # no-mistakes
     # The pipeline alone owns this mode's checks (AGENTS.md, "Selected delivery path
@@ -987,35 +1002,9 @@ EOF
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-$SHIP_EVIDENCE_RULE
-Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-\`--intent\` feeds the pipeline that authors this task's commits and pull request, so apply \`# What you publish\` to the intent you compose: keep every requirement's substance in plain task language, without the fleet's internal role labels.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  The repository owner applies \`ask-user-authority\` and obtains any required decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
-EOF
     ;;
 esac
-
-# read -r -d '' preserves the heredoc's trailing newline that the removed
-# $(...) command substitution used to strip. Drop that one newline so generated
-# briefs stay byte-identical to the historical Bash 5 output.
-DOD=${DOD%$'\n'}
+DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 VISUAL_EVIDENCE_SECTION=''
 if [ "$VISUAL" -eq 1 ]; then
@@ -1090,8 +1079,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $PUBLISH_SECTION
 
-# Task
-{TASK}
+$TASK_SECTION
 $FIRSTMATE_DIRECT_RULE
 
 $HERDR_SECTION
@@ -1157,4 +1145,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 $VISUAL_EVIDENCE_SECTION$PR_BODY_SECTION$DOD
 $LOAD_BEARING_BOOKEND
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace the two standalone {TASK} slots)"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace both {TASK} and {FIRSTMATE_SPEC} copies)"

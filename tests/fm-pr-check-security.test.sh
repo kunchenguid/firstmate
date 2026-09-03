@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
-# private atomic artifacts, non-executing migration, and teardown cleanup.
+# private atomic artifacts, authenticated custom checks, and teardown cleanup.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -8,15 +8,10 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=/dev/null
-. "$ROOT/bin/fm-x-lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-slack-lib.sh"
-# shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
-MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -27,7 +22,6 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
-REAL_BASENAME=$(command -v basename)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
@@ -51,6 +45,65 @@ file_mode() {
   else
     stat -c %a "$1"
   fi
+}
+
+process_is_live_non_zombie() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
+LINK_KIND=
+LINK_TARGET=
+LINK_CONTENT=
+LINK_MODE=
+make_private_symlink() {
+  local base=$1 destination=$2 kind=$3
+  LINK_KIND=$kind
+  LINK_TARGET="$base/target-$kind"
+  LINK_CONTENT=
+  LINK_MODE=
+  case "$kind" in
+    regular)
+      LINK_CONTENT='external sentinel'
+      printf '%s\n' "$LINK_CONTENT" > "$LINK_TARGET"
+      chmod 0644 "$LINK_TARGET"
+      LINK_MODE=644
+      ;;
+    dangling)
+      rm -f "$LINK_TARGET"
+      ;;
+    directory)
+      mkdir "$LINK_TARGET"
+      printf 'outside\n' > "$LINK_TARGET/keep"
+      chmod 0755 "$LINK_TARGET"
+      LINK_MODE=755
+      ;;
+    *) fail "unknown symlink fixture kind" ;;
+  esac
+  ln -s "$LINK_TARGET" "$destination"
+}
+
+assert_private_symlink_unchanged() {
+  local link=$1
+  [ -L "$link" ] || fail "private destination symlink was replaced"
+  case "$LINK_KIND" in
+    regular)
+      [ "$(cat "$LINK_TARGET")" = "$LINK_CONTENT" ] || fail "external regular target content changed"
+      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external regular target mode changed"
+      ;;
+    dangling)
+      [ ! -e "$LINK_TARGET" ] || fail "dangling target was created"
+      ;;
+    directory)
+      [ -f "$LINK_TARGET/keep" ] || fail "external directory target contents changed"
+      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external directory target mode changed"
+      ;;
+  esac
 }
 
 state_snapshot() {
@@ -199,135 +252,6 @@ write_poll_meta() {
     "pr=$url"
 }
 
-write_ambiguous_poll() {
-  local dir=$1 id=${2:-task-a}
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" \
-    'pr=https://github.com/o/r/pull/10' \
-    'window=unexpected-after-pr'
-  printf 'legacy ambiguous bytes\n' > "$dir/home/state/$id.check.sh"
-}
-
-write_v1_x_shim() {
-  local file=$1 home=$2 root=$3
-  fmx_poll_shim_v1_content "$home" "$root" > "$file"
-}
-
-write_slack_shim() {
-  local file=$1 home=$2 root=$3
-  fms_poll_shim_content "$home" "$root" > "$file"
-}
-
-write_stale_slack_shim() {
-  local file=$1 home=$2 root=$3
-  write_slack_shim "$file" "$home" "$root"
-  printf '# stale slack identity\n' >> "$file"
-}
-
-write_manual_poll_pair() {
-  local state=$1 url=${2:-https://github.com/o/r/pull/10} provider host path number
-  fm_pr_url_parse "$url" || fail "manual poll fixture URL was invalid"
-  provider=$FM_PR_PROVIDER
-  host=$FM_PR_HOST
-  path=$FM_PR_PATH
-  number=$FM_PR_NUMBER
-  cp "$POLL" "$state/task-a.check.sh"
-  printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$state/task-a.pr-poll"
-  chmod 0600 "$state/task-a.check.sh" "$state/task-a.pr-poll"
-}
-
-start_ambiguous_pending_repair() {
-  local dir=$1 state rc
-  state="$dir/home/state"
-  write_ambiguous_poll "$dir"
-  mkdir "$state/task-a.pr-poll"
-  set +e
-  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "ambiguous pending-repair fixture unexpectedly completed"
-  rmdir "$state/task-a.pr-poll"
-  write_poll_meta "$state" task-a https://github.com/o/r/pull/10
-  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.pending-ambiguous" ] \
-    || fail "ambiguous pending-repair fixture lost its pending obligation"
-}
-
-write_watcher_lock() {
-  local state=$1 home=$2 pid=$3 identity
-  rm -rf "$state/.watch.lock"
-  mkdir "$state/.watch.lock"
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid")
-  [ -n "$identity" ] || fail "could not capture fake older-watcher identity"
-  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
-  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-}
-
-assert_valid_migration_marker() {
-  local marker=$1
-  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary marker"
-  [ "$(file_mode "$marker")" = 600 ] || fail "migration marker mode was not 0600"
-  grep -qxF fm-pr-check-migration-v1 "$marker" || fail "migration marker bytes were not exact"
-  [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration marker had extra records"
-}
-
-assert_valid_scan_marker() {
-  local marker=$1
-  [ -f "$marker" ] && [ ! -L "$marker" ] || fail "migration success did not publish an ordinary scan marker"
-  [ "$(file_mode "$marker")" = 600 ] || fail "migration scan marker mode was not 0600"
-  grep -qxF fm-pr-check-migration-scan-v1 "$marker" || fail "migration scan marker bytes were not exact"
-  [ "$(awk 'END { print NR + 0 }' "$marker")" -eq 1 ] || fail "migration scan marker had extra records"
-}
-
-LINK_KIND=
-LINK_TARGET=
-LINK_CONTENT=
-LINK_MODE=
-make_private_symlink() {
-  local base=$1 destination=$2 kind=$3
-  LINK_KIND=$kind
-  LINK_TARGET="$base/target-$kind"
-  LINK_CONTENT=
-  LINK_MODE=
-  case "$kind" in
-    regular)
-      LINK_CONTENT='external sentinel'
-      printf '%s\n' "$LINK_CONTENT" > "$LINK_TARGET"
-      chmod 0644 "$LINK_TARGET"
-      LINK_MODE=644
-      ;;
-    dangling)
-      rm -f "$LINK_TARGET"
-      ;;
-    directory)
-      mkdir "$LINK_TARGET"
-      printf 'outside\n' > "$LINK_TARGET/keep"
-      chmod 0755 "$LINK_TARGET"
-      LINK_MODE=755
-      ;;
-    *) fail "unknown symlink fixture kind" ;;
-  esac
-  ln -s "$LINK_TARGET" "$destination"
-}
-
-assert_private_symlink_unchanged() {
-  local link=$1
-  [ -L "$link" ] || fail "private destination symlink was replaced"
-  case "$LINK_KIND" in
-    regular)
-      [ "$(cat "$LINK_TARGET")" = "$LINK_CONTENT" ] || fail "external regular target content changed"
-      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external regular target mode changed"
-      ;;
-    dangling)
-      [ ! -e "$LINK_TARGET" ] || fail "dangling target was created"
-      ;;
-    directory)
-      [ -f "$LINK_TARGET/keep" ] || fail "external directory target contents changed"
-      [ "$(file_mode "$LINK_TARGET")" = "$LINK_MODE" ] || fail "external directory target mode changed"
-      ;;
-  esac
-}
 
 run_check_entry() {
   local dir=$1
@@ -711,11 +635,6 @@ SH
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
-    mkdir -p "$dir/home/state/.pr-check-quarantine"
-    chmod 0700 "$dir/home/state/.pr-check-quarantine"
-    printf 'reserved migration evidence\n' \
-      > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
-    chmod 0600 "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -749,8 +668,6 @@ SH
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
-    [ "$(cat "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence")" = 'reserved migration evidence' ] \
-      || fail "legacy task teardown changed the reserved migration namespace"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
@@ -965,112 +882,6 @@ SH
   pass "concurrent watchers observe only complete private poll publications"
 }
 
-test_migration_excludes_older_watcher_before_scan() {
-  local dir state gate sentinel older_pid rc
-  dir=$(make_case migration-pause-before-scan)
-  state="$dir/home/state"
-  gate="$dir/scan-started"
-  sentinel="$dir/legacy-ran"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/9'
-  cat > "$state/task-a.check.sh" <<SH
-#!/usr/bin/env bash
-printf 'seen\n' > '$sentinel'
-SH
-  (
-    while [ ! -e "$gate" ]; do sleep 0.01; done
-    bash "$state/task-a.check.sh"
-    while :; do sleep 1; done
-  ) &
-  older_pid=$!
-  write_watcher_lock "$state" "$dir/home" "$older_pid"
-  cat > "$dir/fakebin/basename" <<SH
-#!/usr/bin/env bash
-: > '$gate'
-sleep 0.3
-exec '$REAL_BASENAME' "\$@"
-SH
-  chmod +x "$dir/fakebin/basename"
-
-  set +e
-  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  wait "$older_pid" 2>/dev/null || true
-  [ "$rc" -eq 0 ] || fail "pause-before-scan migration failed"
-  [ ! -e "$sentinel" ] || fail "older watcher ran a legacy check during migration startup"
-  [ -e "$gate" ] || fail "migration never reached its under-lock check scan"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  cmp -s "$POLL" "$state/task-a.check.sh" || fail "pause-before-scan migration did not rebuild the poll"
-
-  dir=$(make_case migration-pause-no-check)
-  state="$dir/home/state"
-  ( while :; do sleep 1; done ) &
-  older_pid=$!
-  write_watcher_lock "$state" "$dir/home" "$older_pid"
-  set +e
-  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  wait "$older_pid" 2>/dev/null || true
-  [ "$rc" -eq 0 ] || fail "no-check older-watcher migration failed"
-  ! kill -0 "$older_pid" 2>/dev/null || fail "no-check migration left the older watcher running"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  pass "migration pauses older watchers and acquires exclusion before its first scan or marker"
-}
-
-test_migration_initializes_fresh_state() {
-  local dir state rc
-  dir="$TMP_ROOT/migration-fresh-state"
-  state="$dir/home/state"
-  mkdir -p "$dir"
-
-  set +e
-  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-
-  [ "$rc" -eq 0 ] || fail "fresh-state migration failed: $(cat "$dir/migrate.err")"
-  [ -d "$state" ] && [ ! -L "$state" ] || fail "fresh-state migration did not create an ordinary state directory"
-  [ "$(file_mode "$state")" = 700 ] || fail "fresh-state migration did not create state with mode 0700"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  pass "migration creates and validates private state before watcher exclusion"
-}
-
-test_migration_completes_when_directory_and_file_devices_differ() {
-  local dir state rc
-  dir=$(make_case "migration-split-devices")
-  state="$dir/home/state"
-  cat > "$dir/fakebin/stat" <<'SH'
-#!/usr/bin/env bash
-path=${!#}
-case " $* " in
-  *" %d "*)
-    if [ -d "$path" ]; then
-      printf '39\n'
-      exit 0
-    fi
-    if [ -f "$path" ]; then
-      printf '40\n'
-      exit 0
-    fi
-    ;;
-esac
-exec "${FM_TEST_REAL_STAT:?}" "$@"
-SH
-  chmod +x "$dir/fakebin/stat"
-  set +e
-  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
-    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "split-device migration failed: $(cat "$dir/migrate.err")"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
-  pass "migration completes when directory and file device numbers differ"
-}
-
 test_private_file_refuses_wrong_expected_store_device() {
   local dir state file actual parent_dev wrong
   dir=$(make_case "wrong-expected-store-device")
@@ -1092,26 +903,6 @@ test_private_file_refuses_wrong_expected_store_device() {
   fm_pr_private_file_valid "$file" 600 "$parent_dev" \
     || fail "private file rejected the parent store device"
   pass "private file refuses a wrong expected store device and still accepts the parent store"
-}
-
-test_migration_quarantines_legacy_poll_when_directory_and_file_devices_differ() {
-  local dir state rc
-  dir=$(make_case "migration-legacy-split-devices")
-  state="$dir/home/state"
-  install_overlay_device_stat "$dir"
-  write_ambiguous_poll "$dir"
-  set +e
-  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
-    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "legacy-poll overlay migration failed: $(cat "$dir/migrate.err")"
-  [ ! -e "$state/task-a.check.sh" ] || fail "legacy-poll overlay migration left a runnable check"
-  find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
-    || fail "legacy-poll overlay migration did not quarantine the check"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
-  pass "migration quarantines a legacy poll when directory and file device numbers differ"
 }
 
 test_meta_rewrite_accepts_overlay_file_devices() {
@@ -1152,10 +943,6 @@ test_teardown_removes_poll_artifacts_when_directory_and_file_devices_differ() {
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
-  mkdir -p "$dir/home/state/.pr-check-quarantine"
-  chmod 0700 "$dir/home/state/.pr-check-quarantine"
-  printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
-  chmod 0600 "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1172,75 +959,11 @@ SH
   [ "$rc" -eq 0 ] || fail "overlay teardown failed: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "overlay teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "overlay teardown left the sidecar"
-  pass "teardown removes poll artifacts when directory and file device numbers differ"
+  pass "teardown removes poll artifacts when directory and file devices differ"
 }
 
-test_historical_x_shim_survives_overlay_devices() {
-  local dir state shim executed rc
-  dir=$(make_case "historical-x-overlay-devices")
-  state="$dir/home/state"
-  shim="$state/x-watch.check.sh"
-  executed="$dir/x-poll-executed"
-  install_overlay_device_stat "$dir"
-  cat > "$dir/root/bin/fm-x-poll.sh" <<SH
-#!/usr/bin/env bash
-touch '$executed'
-SH
-  chmod 0700 "$dir/root/bin/fm-x-poll.sh"
-  write_v1_x_shim "$shim" "$dir/home" "$dir/root"
-  chmod 0755 "$shim"
-  set +e
-  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
-    PATH="$dir/fakebin:$BASE_PATH" \
-    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "overlay historical X shim migration failed: $(cat "$dir/migrate.err")"
-  fmx_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
-    || fail "overlay historical X shim was not replaced with the current identity"
-  [ "$(file_mode "$shim")" = 700 ] || fail "overlay current X shim mode was not 0700"
-  [ ! -e "$executed" ] || fail "overlay historical X shim was executed during migration"
-  ! find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f 2>/dev/null | grep . >/dev/null \
-    || fail "overlay historical X shim was quarantined"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
-  pass "historical X shim refreshes when directory and file device numbers differ"
-}
-
-test_historical_slack_shim_survives_overlay_devices() {
-  local dir state shim executed rc
-  dir=$(make_case "historical-slack-overlay-devices")
-  state="$dir/home/state"
-  shim="$state/slack-watch.check.sh"
-  executed="$dir/slack-poll-executed"
-  install_overlay_device_stat "$dir"
-  cat > "$dir/root/bin/fm-slack-poll.sh" <<SH
-#!/usr/bin/env bash
-touch '$executed'
-SH
-  chmod 0700 "$dir/root/bin/fm-slack-poll.sh"
-  write_stale_slack_shim "$shim" "$dir/home" "$dir/root"
-  chmod 0700 "$shim"
-  set +e
-  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
-    PATH="$dir/fakebin:$BASE_PATH" \
-    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "overlay historical Slack shim migration failed: $(cat "$dir/migrate.err")"
-  fms_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
-    || fail "overlay historical Slack shim was not replaced with the current identity"
-  [ "$(file_mode "$shim")" = 700 ] || fail "overlay current Slack shim mode was not 0700"
-  [ ! -e "$executed" ] || fail "overlay historical Slack shim was executed during migration"
-  ! find "$state/.pr-check-quarantine" -name 'slack-watch.check.*' -type f 2>/dev/null | grep . >/dev/null \
-    || fail "overlay historical Slack shim was quarantined"
-  assert_valid_migration_marker "$state/.pr-check-migration-v1"
-  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
-  pass "historical Slack shim refreshes when directory and file device numbers differ"
-}
-
-test_private_artifact_paths_refuse_symlinks_and_directories() {
-  local artifact kind dir state destination rc
+test_poll_publication_refuses_unsafe_destinations() {
+  local artifact kind dir state destination
   for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
     for kind in regular dangling directory; do
       dir=$(make_case "poll-path-${artifact//./-}-$kind")
@@ -1269,58 +992,83 @@ test_private_artifact_paths_refuse_symlinks_and_directories() {
     fi
     fm_pr_poll_cleanup
     [ -d "$destination" ] || fail "poll publication replaced a directory destination"
-    [ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print)" ] || fail "poll publication wrote inside a directory destination"
+    [ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print)" ] \
+      || fail "poll publication wrote inside a directory destination"
   done
+  pass "poll publication paths refuse symlinks and directories"
+}
 
-  for artifact in marker log quarantine; do
-    for kind in regular dangling directory; do
-      dir=$(make_case "migration-path-$artifact-$kind")
-      state="$dir/home/state"
-      case "$artifact" in
-        marker)
-          destination="$state/.pr-check-migration-v1"
-          ;;
-        log)
-          write_ambiguous_poll "$dir"
-          destination="$state/.pr-check-migration.log"
-          ;;
-        quarantine)
-          write_ambiguous_poll "$dir"
-          destination="$state/.pr-check-quarantine"
-          ;;
-      esac
-      make_private_symlink "$dir" "$destination" "$kind"
-      set +e
-      FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-      rc=$?
-      set -e
-      [ "$rc" -ne 0 ] || fail "migration accepted a symlinked private $artifact path"
-      assert_private_symlink_unchanged "$destination"
-      [ ! -e "$state/.pr-check-migration-v1" ] || [ -L "$state/.pr-check-migration-v1" ] \
-        || fail "failed private-path migration published a completion marker"
-    done
-  done
-
-  for artifact in marker log; do
-    dir=$(make_case "migration-path-$artifact-direct-directory")
+test_live_artifact_single_link_and_privacy_validation() {
+  local artifact dir state alias rc
+  for artifact in check.sh pr-poll pr-poll-registration; do
+    dir=$(make_case "single-link-live-${artifact//./-}")
     state="$dir/home/state"
-    if [ "$artifact" = marker ]; then
-      destination="$state/.pr-check-migration-v1"
-    else
-      write_ambiguous_poll "$dir"
-      destination="$state/.pr-check-migration.log"
+    write_task_meta "$dir"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null 2>/dev/null \
+      || fail "could not publish $artifact hard-link fixture"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$artifact fixture was not initially authenticated"
+    alias="$dir/$artifact.alias"
+    ln "$state/task-a.$artifact" "$alias"
+    if [ "$artifact" = pr-poll ]; then
+      printf '%s\n%s\n%s\n%s\n' https://github.com/o/r/pull/11 o r 11 > "$alias"
     fi
-    mkdir "$destination"
-    set +e
-    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
-    rc=$?
-    set -e
-    [ "$rc" -ne 0 ] || fail "migration accepted a directory $artifact destination"
-    [ -d "$destination" ] || fail "migration replaced a directory $artifact destination"
-    [ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print)" ] || fail "migration wrote inside a directory $artifact destination"
-    [ ! -f "$state/.pr-check-migration-v1" ] || fail "failed directory-path migration published a marker"
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$artifact hard link remained authenticated"
+    [ -e "$alias" ] || fail "$artifact hard-link refusal removed the external alias"
   done
-  pass "poll, marker, diagnostic, and quarantine paths refuse symlinks and directories"
+
+  dir=$(make_case single-link-custom-check-registration)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  alias="$dir/custom-check.alias"
+  ln "$state/custom.check.sh" "$alias"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a hard-linked source"
+  [ ! -e "$state/custom.check-trust" ] || fail "rejected hard-linked custom check received a trust record"
+  rm -f "$alias"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register the custom check single-link fixture"
+  ln "$state/custom.check.sh" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after source hard-linking"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check source"
+  fm_custom_check_snapshot_cleanup
+  rm -f "$alias"
+  alias="$dir/custom-trust.alias"
+  ln "$state/custom.check-trust" "$alias"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "hard-linked custom check trust remained authenticated"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a hard-linked custom check trust record"
+  fm_custom_check_snapshot_cleanup
+  [ -e "$alias" ] || fail "custom-check hard-link refusal removed the external alias"
+
+  dir=$(make_case private-custom-check-source)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0755 "$state/custom.check.sh"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
+  [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
+  chmod 0700 "$state/custom.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register private custom check fixture"
+  chmod 0755 "$state/custom.check.sh"
+  ! fm_custom_check_registered "$state" custom \
+    || fail "registered custom check remained authenticated after becoming non-private"
+  ! fm_custom_check_snapshot_prepare "$state" custom \
+    || fail "watcher snapshot accepted a non-private custom check source"
+  fm_custom_check_snapshot_cleanup
+  pass "live poll and custom-check artifacts require private single-link files"
 }
 
 install_final_publication_fault() {
@@ -2626,167 +2374,29 @@ test_direct_registration_refreshes_v1_x_shim() {
   pass "direct registration refreshes authenticated v1 X shims across marker states"
 }
 
-test_bootstrap_migrates_before_other_mutations() {
+test_bootstrap_leaves_unauthenticated_checks() {
   local dir state
-  dir=$(make_case bootstrap-boundary)
+  dir=$(make_case bootstrap-no-legacy-rewrite)
   state="$dir/home/state"
   fm_write_meta "$state/task-a.meta" \
     'window=fm-task-a' \
     'pr=https://github.com/o/r/pull/11'
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
 
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+  mkdir -p "$dir/home/config"
+  printf '%s\n' manual > "$dir/home/config/backlog-backend"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_NETWORK=skip \
+    PATH="$dir/fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-bootstrap.sh" > "$dir/bootstrap.out" 2> "$dir/bootstrap.err" \
-    || fail "bootstrap boundary failed"
-  cmp -s "$POLL" "$state/task-a.check.sh" || fail "bootstrap did not migrate the legacy poll"
-  [ "$(file_mode "$state/task-a.check.sh")" = 600 ] || fail "bootstrap migration did not publish privately"
-  pass "bootstrap runs the non-executing migration at the locked session boundary"
-}
-
-test_bootstrap_isolates_incomplete_poll_migration() {
-  local dir state fakebin fleet_marker x_poll_marker rc
-  dir=$(make_case bootstrap-migration-isolation)
-  state="$dir/home/state"
-  fakebin="$dir/fakebin"
-  fleet_marker="$dir/fleet-ran"
-  x_poll_marker="$dir/x-poll-ran"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/12'
-  printf 'legacy bytes\n' > "$state/task-a.check.sh"
-  mkdir "$state/task-a.pr-poll"
-  write_poll_meta "$state" z-healthy https://github.com/o/r/pull/13
-  fm_pr_poll_prepare "$state" z-healthy github https://github.com/o/r/pull/13 github.com o/r 13 "$POLL" \
-    || fail "could not prepare healthy poll for migration isolation"
-  fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
-  fm_write_meta "$state/secondmate-a.meta" \
-    'window=firstmate:fm-secondmate-a' \
-    'kind=secondmate' \
-    'harness=codex' \
-    'backend=tmux'
-  printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
-  mkdir -p "$dir/home/projects"
-  fm_fake_exit0 "$fakebin" curl jq
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-case " $* " in
-  *' list-windows '*) printf 'fm-secondmate-a\n' ;;
-  *' display-message '*) printf 'node\n' ;;
-esac
-SH
-  cat > "$dir/root/bin/fm-fleet-sync.sh" <<'SH'
-#!/usr/bin/env bash
-: > "${FM_TEST_FLEET_MARKER:?}"
-printf 'alpha: recovered: continued after isolated migration failure\n'
-SH
-  cat > "$dir/root/bin/fm-x-poll.sh" <<'SH'
-#!/usr/bin/env bash
-: > "${FM_TEST_X_POLL_MARKER:?}"
-SH
-  chmod +x "$fakebin/tmux" "$dir/root/bin/fm-fleet-sync.sh" "$dir/root/bin/fm-x-poll.sh"
-
-  set +e
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_FLEET_MARKER="$fleet_marker" \
-    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" > "$dir/bootstrap.out" 2> "$dir/bootstrap.err"
-  rc=$?
-  set -e
-
-  [ "$rc" -eq 0 ] || fail "isolated bootstrap migration failure returned $rc"
-  [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
-    || fail "isolated bootstrap migration left the legacy check runnable"
-  [ -d "$state/task-a.pr-poll" ] || fail "isolated bootstrap migration changed the unrepaired sidecar"
-  find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
-    || fail "isolated bootstrap migration did not quarantine the legacy check"
-  assert_grep 'task task-a: canonical poll migration is incomplete; poll remains unarmed; repair its private artifacts, then rerun bootstrap' \
-    "$state/.pr-check-migration.log" "isolated bootstrap migration did not publish a durable repair diagnostic"
-  assert_grep 'migration did not complete safely' "$dir/bootstrap.err" \
-    "isolated bootstrap migration did not surface its incomplete status"
-  assert_grep 'SECONDMATE_SYNC: secondmate secondmate-a: skipped:' "$dir/bootstrap.out" \
-    "incomplete poll migration suppressed secondmate sync"
-  assert_grep 'SECONDMATE_LIVENESS: secondmate secondmate-a: skipped: existing endpoint has ambiguous agent process' "$dir/bootstrap.out" \
-    "incomplete poll migration suppressed persistent supervisor recovery"
-  assert_grep 'FMX: X mode on - relay poll armed' "$dir/bootstrap.out" \
-    "incomplete poll migration suppressed X mention setup"
-  fmx_poll_shim_valid "$state/x-watch.check.sh" "$dir/home" "$dir/root" \
-    || fail "incomplete poll migration did not arm a private authenticated X relay shim"
-  [ -e "$fleet_marker" ] || fail "incomplete poll migration suppressed fleet refresh"
-  assert_grep 'FLEET_SYNC: alpha: recovered: continued after isolated migration failure' "$dir/bootstrap.out" \
-    "continued fleet refresh was not operator-visible"
-  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' replacement-ran" > "$state/a-replaced.check.sh"
-  chmod 0600 "$state/a-replaced.check.sh"
-  set +e
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
-    FM_TEST_GH_STATE=MERGED FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
-    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "watcher remained blocked after unsafe legacy check exclusion: $(cat "$dir/watch.err")"
-  [ -e "$x_poll_marker" ] || fail "watcher did not continue X mention polling after isolated migration failure"
-  assert_no_grep 'replacement-ran' "$dir/watch.out" \
-    "watcher executed an unauthenticated check created after scan completion"
-  assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
-    "watcher did not continue the healthy authenticated poll"
-  ack_watcher_cycle "$state" || fail "healthy authenticated poll wake acknowledgement failed"
-  [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
-    || fail "watcher continuation rearmed the unsafe legacy check"
-  rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
-  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-ready" > "$state/b-custom.check.sh"
-  chmod 0700 "$state/b-custom.check.sh"
-  FM_HOME="$dir/home" "$REGISTER" b-custom > "$dir/register.out" \
-    || fail "custom check registration failed"
-  assert_grep 'registered: state/b-custom.check.sh' "$dir/register.out" \
-    "custom check registration was not visible"
-  set +e
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
-    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
-    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-custom.out" 2> "$dir/watch-custom.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
-  assert_grep "check: $state/b-custom.check.sh: custom-ready" "$dir/watch-custom.out" \
-    "registered custom check output did not wake the watcher"
-  ack_watcher_cycle "$state" || fail "registered custom check wake acknowledgement failed"
-  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-replacement-ran" > "$state/b-custom.check.sh"
-  chmod 0700 "$state/b-custom.check.sh"
-  rm -f "$state/.last-check" "$x_poll_marker"
-  set +e
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
-    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
-    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-custom-replaced.out" 2> "$dir/watch-custom-replaced.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced custom check: $(cat "$dir/watch-custom-replaced.err")"
-  assert_no_grep 'custom-replacement-ran' "$dir/watch-custom-replaced.out" \
-    "watcher executed a custom check after its registered bytes changed"
-  [ -e "$x_poll_marker" ] || fail "custom replacement rejection suppressed the trusted X poll"
-  [ ! -e "$state/b-custom.check.sh" ] && [ ! -L "$state/b-custom.check.sh" ] \
-    || fail "marker-aware scan left the replaced custom check runnable"
-  find "$state/.pr-check-quarantine" -name 'b-custom.check.*' -type f | grep . >/dev/null \
-    || fail "marker-aware scan did not quarantine the replaced custom check"
-  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ran" > "$state/x-watch.check.sh"
-  chmod 0700 "$state/x-watch.check.sh"
-  rm -f "$state/.last-check" "$x_poll_marker"
-  set +e
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
-    FM_TEST_GH_STATE=OPEN FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
-    PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch-replaced.out" 2> "$dir/watch-replaced.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "watcher failed while rejecting a replaced X shim: $(cat "$dir/watch-replaced.err")"
-  assert_no_grep 'forged-x-ran' "$dir/watch-replaced.out" \
-    "watcher executed a filename-only X shim replacement"
-  [ ! -e "$x_poll_marker" ] || fail "watcher trusted the replaced X shim identity"
-  [ ! -e "$state/b-custom.check.sh" ] && [ ! -L "$state/b-custom.check.sh" ] \
-    || fail "locked X-shim scan left the replaced custom check runnable"
-  [ ! -e "$state/x-watch.check.sh" ] && [ ! -L "$state/x-watch.check.sh" ] \
-    || fail "locked X-shim scan left the forged X shim runnable"
-  find "$state/.pr-check-quarantine" -name 'b-custom.check.*' -type f | grep . >/dev/null \
-    || fail "locked X-shim scan did not quarantine the replaced custom check"
-  find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f | grep . >/dev/null \
-    || fail "locked X-shim scan did not quarantine the forged X shim"
-  [ -f "$state/.pr-check-quarantine/task-a.diagnostic.failure-canonical" ] \
-    || fail "watcher continuation lost the durable repair obligation"
-  pass "bootstrap isolates incomplete poll migration from unrelated recovery sweeps"
+    || fail "bootstrap failed after migration retirement"
+  [ "$(cat "$state/task-a.check.sh")" = 'legacy bytes' ] \
+    || fail "bootstrap rewrote an unauthenticated check after migration retirement"
+  assert_no_grep 'PR_CHECK_MIGRATION' "$dir/bootstrap.out" \
+    "bootstrap still emitted a retired migration diagnostic on stdout"
+  assert_no_grep 'PR_CHECK_MIGRATION' "$dir/bootstrap.err" \
+    "bootstrap still emitted a retired migration diagnostic on stderr"
+  pass "bootstrap does not rewrite unauthenticated checks or emit retired migration diagnostics"
 }
 
 test_custom_snapshot_cleanup_on_signal() {
@@ -2794,8 +2404,6 @@ test_custom_snapshot_cleanup_on_signal() {
   dir=$(make_case custom-snapshot-signal)
   state="$dir/home/state"
   child_pid_file="$dir/custom-child.pid"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-v1"
   # shellcheck disable=SC2016  # The generated child expands $$ when it runs.
   printf '%s\n' '#!/usr/bin/env bash' 'trap "" TERM' \
     'printf "%s\n" "$$" > "$FM_TEST_CUSTOM_CHILD_PID"' 'while :; do sleep 1; done' \
@@ -2862,8 +2470,6 @@ test_returned_custom_check_descendants_are_drained() {
     direct_done="$dir/direct-check-done"
     child_pid_file="$dir/descendant.pid"
     sentinel="$dir/descendant-sentinel"
-    printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-    chmod 0600 "$state/.pr-check-migration-v1"
     cat > "$state/custom.check.sh" <<'SH'
 #!/usr/bin/env bash
 perl -e '$SIG{TERM}="IGNORE"; open my $ready, ">", $ENV{FM_TEST_DESCENDANT_READY} or die $!; print {$ready} "ready\n"; close $ready; select undef, undef, undef, 4; open my $sentinel, ">", $ENV{FM_TEST_DESCENDANT_SENTINEL} or die $!; print {$sentinel} "late\n"; close $sentinel; select undef, undef, undef, 1' &
@@ -2908,11 +2514,11 @@ SH
     child_pid=$(cat "$child_pid_file")
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
     i=0
-    while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 150 ]; do
+    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
       sleep 0.02
       i=$((i + 1))
     done
-    if kill -0 "$watcher_pid" 2>/dev/null; then
+    if process_is_live_non_zombie "$watcher_pid"; then
       kill -KILL "$watcher_pid" 2>/dev/null || true
       wait "$watcher_pid" 2>/dev/null || true
       kill -KILL "$child_pid" 2>/dev/null || true
@@ -2922,7 +2528,7 @@ SH
     wait "$watcher_pid" || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
     alive=0
-    kill -0 "$child_pid" 2>/dev/null && alive=1
+    process_is_live_non_zombie "$child_pid" && alive=1
     [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
     [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
@@ -2937,7 +2543,7 @@ SH
 }
 
 test_teardown_removes_poll_artifacts() {
-  local dir fakebin kind artifact counterpart rc
+  local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_git_init_commit "$dir/project"
@@ -2952,10 +2558,6 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
-  mkdir -p "$dir/home/state/.pr-check-quarantine"
-  chmod 0700 "$dir/home/state/.pr-check-quarantine"
-  printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
-  chmod 0600 "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -2971,8 +2573,6 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
-  ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
-    || fail "teardown left task quarantine artifacts"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -3255,9 +2855,6 @@ seed_canonical_poll() {
   fm_pr_poll_prepare "$state" "$id" "$provider" "$url" "$host" "$path" "$number" "$template" \
     || fail "could not prepare retirement fixture"
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
 }
 
 add_stop_custom_check() {
@@ -3462,8 +3059,8 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
-    || fail "merge-outcome-committed: self and poll reports produced duplicate outcomes"
+  [ "$(grep -c -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
+    || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
   assert_poll_absent "$state" task-a
@@ -3998,31 +3595,13 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
-test_postrename_poll_validation_revokes_and_retries
-test_migration_initializes_fresh_state
-test_migration_completes_when_directory_and_file_devices_differ
 test_private_file_refuses_wrong_expected_store_device
-test_migration_quarantines_legacy_poll_when_directory_and_file_devices_differ
 test_meta_rewrite_accepts_overlay_file_devices
 test_teardown_removes_poll_artifacts_when_directory_and_file_devices_differ
-test_historical_x_shim_survives_overlay_devices
-test_historical_slack_shim_survives_overlay_devices
-test_migration_excludes_older_watcher_before_scan
-test_private_artifact_paths_refuse_symlinks_and_directories
-test_marker_and_diagnostic_rename_fail_closed
-test_postrename_marker_and_diagnostic_validation_retries
-test_quarantine_validation_and_retry_contract
-test_failed_outcomes_block_every_retry_until_repaired
-test_ambiguous_failure_accepts_validated_replacement
-test_replacement_provenance_negative_matrix
-test_complete_single_link_validation
-test_canonical_publication_failure_recovers_only_on_retry
-test_obligation_namespace_compatibility
-test_nonexecuting_migration
-test_historical_x_shim_transition_matrix
-test_direct_registration_refreshes_v1_x_shim
-test_bootstrap_migrates_before_other_mutations
-test_bootstrap_isolates_incomplete_poll_migration
+test_poll_publication_refuses_unsafe_destinations
+test_live_artifact_single_link_and_privacy_validation
+test_postrename_poll_validation_revokes_and_retries
+test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts

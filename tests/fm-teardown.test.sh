@@ -123,7 +123,7 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   occupancy_bin="$case_dir/occupancy-bin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin" "$occupancy_bin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin" "$occupancy_bin"
 
   cat > "$occupancy_bin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -582,6 +582,16 @@ ready[1]{id,state,kind,repo,title}:
 OUT
   exit 0
 fi
+if [ "\${1:-}" = show ]; then
+  cat <<'OUT'
+task:
+  state: in_flight
+  held: no
+  blocked: no
+  hold_kind: -
+OUT
+  exit 0
+fi
 if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi update <id> [flags]'
   printf '%s\n' '  --body-file <path>'
@@ -658,7 +668,8 @@ write_meta() {
     "treehouse_slot=slot-task-x1" \
     "treehouse_lease=lease-task-x1" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -724,6 +735,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *" --json state "*) printf '%s\n' 'MERGED' ; exit 0 ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
@@ -1012,8 +1024,12 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
+  # home's backlog item itself; without it $DATA would resolve to the real
+  # repo's own home and a test could mutate live records.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_FAKE_TREEHOUSE_WORKTREE="$case_dir/wt" \
   FM_FAKE_TREEHOUSE_DELEGATE="$case_dir/fakebin/treehouse" \
@@ -1027,6 +1043,25 @@ run_local_merge() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_ROOT_OVERRIDE="$ROOT" \
     "$MERGE_LOCAL" task-x1
+}
+
+# Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
+# has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
+# no tasks-axi stub, so PATH resolves the installed one).
+seed_backlog_in_flight() {
+  local case_dir=$1 kind=${2:-ship}
+  mkdir -p "$case_dir/data"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$case_dir/data/backlog.md"
+  tasks-axi add task-x1 "teardown fixture task" --kind "$kind" \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+}
+
+backlog_row_state() {
+  local case_dir=$1
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
+    sed -n 's/^  state: *//p' | head -1
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -1056,44 +1091,54 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
-  pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+  jq -e --arg id task-x1 '
+    .schema == "fm-secondmate-home-summary.v1"
+    and all(.endpoints[]; .id != $id)
+  ' "$case_dir/state/home-summary.json" >/dev/null \
+    || fail "successful task teardown did not publish the task's removal from the home summary ledger"
+  pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
-test_teardown_prompts_tasks_axi_done_when_compatible() {
+test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
-  case_dir=$(make_case tasks-axi-reminder)
+  case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  add_compatible_tasks_axi "$case_dir"
+  seed_backlog_in_flight "$case_dir"
   add_gh_pr_state_for_url "$case_dir" MERGED
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
+  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "closed backlog item did not record the task's PR"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed close left its pending-close record behind"
   printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
+    || fail "teardown dropped the dependency-cleared follow-up: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
-    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
-  pass "teardown prompts tasks-axi backlog refresh when compatible"
+  printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
+    && fail "teardown still asked a later turn to close the item it already closed: $out"
+  pass "teardown closes its own backlog item before reporting success"
 }
 
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
-  local case_dir out
+test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
+  local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
-  add_compatible_tasks_axi "$case_dir"
+  seed_backlog_in_flight "$case_dir"
   add_gh_pr_state_for_url "$case_dir" MERGED
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "manual backlog backend was mutated by teardown anyway"
+  backlog_path=$(cd "$case_dir/data" && pwd -P)/backlog.md
+  printf '%s\n' "$out" | grep -F "Update $backlog_path - move task-x1 to Done" >/dev/null \
     || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
-    && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+  pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -1234,6 +1279,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
   land_on_origin_main "$case_dir" feature.txt hello
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
   # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
 
   ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
@@ -1246,6 +1292,8 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
@@ -1531,6 +1579,7 @@ test_missing_classifier_keeps_dirty_refusal() {
   set +e
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_FAKE_TREEHOUSE_WORKTREE="$case_dir/wt" \
   FM_FAKE_TREEHOUSE_DELEGATE="$case_dir/fakebin/treehouse" \
@@ -1920,6 +1969,139 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# Mark the case's home as a secondmate home bound to a parent: teardown and
+# fm-pr-check run with FM_HOME="$case_dir/home" so the parent-channel
+# publishers resolve that binding while the task state stays in $case_dir/state.
+configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
+  local case_dir=$1 route=$2 parent=${3:-} home="$1/home"
+  mkdir -p "$home"
+  printf 'mate-x\n' > "$home/.fm-secondmate-home"
+  {
+    printf 'schema=fm-secondmate-parent.v1\nroute=%s\n' "$route"
+    [ "$route" != local ] || printf 'parent_home=%s\n' "$parent"
+  } > "$home/.fm-secondmate-parent"
+  if [ "$route" = local ]; then
+    # A local parent registers the mate; teardown resolves that registration.
+    mkdir -p "$parent/state" "$parent/data"
+    fm_write_secondmate_meta "$parent/state/mate-x.meta" "$home"
+    printf -- '- mate-x - fixture scope (home: %s; scope: fixture; projects: alpha; added 2026-07-14)\n' \
+      "$home" > "$parent/data/secondmates.md"
+  fi
+}
+
+# Registering a PR inside a secondmate home publishes the child's ready line
+# with the canonical URL on the parent channel from fm-pr-check itself, once;
+# a main home publishes nothing.
+test_secondmate_pr_registration_publishes_ready_line() {
+  local case_dir pr_head channel url
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case mate-pr-ready)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready: poll was not armed"
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" "$channel" \
+    "mate-pr-ready: the ready line did not reach the parent channel"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready: registration reported a channel problem: $(cat "$case_dir/pr-check.err")"
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2>&1 \
+    || fail "mate-pr-ready: re-registration failed"
+  [ "$(grep -c 'child-pr-task-x1' "$channel")" -eq 1 ] \
+    || fail "mate-pr-ready: re-registration duplicated the ready line"
+
+  case_dir=$(make_case main-pr-ready)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
+    || fail "main-pr-ready: fm-pr-check failed"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "main-pr-ready: a main home reported a channel problem"
+  [ ! -e "$case_dir/state/parent-replies.status" ] || fail "main-pr-ready: a main home wrote a parent reply"
+  pass "fm-pr-check publishes the PR-ready line on a secondmate's parent channel once"
+}
+
+# Tearing a child down inside a secondmate home delivers the child's final
+# ledger line to the parent before the record goes, and refuses (retaining
+# every record) while the parent channel cannot be written; a rerun after the
+# repair delivers and completes.
+test_secondmate_home_teardown_delivers_final_line_or_refuses() {
+  local case_dir rc channel wt_head err seq generation
+
+  case_dir=$(make_case mate-teardown-delivers)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green pr=https://github.com/example/repo/pull/9 mode=local-only$' "$channel" \
+    || fail "mate-teardown-delivers: the final ledger line did not reach the parent: $(cat "$channel" 2>/dev/null)"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-delivers: teardown left the task record"
+
+  case_dir=$(make_case mate-teardown-refuses)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  # The channel path is occupied by a directory, so no line can be appended.
+  mkdir -p "$case_dir/parent/state/mate-x.status"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/tasktmp"
+  printf '!\n' > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '!\n' > "$case_dir/state/task-x1.kimi-turnend-token"
+  printf 'tasktmp=%s\n' "$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
+  grep -q 'has not reached the parent channel' "$case_dir/stderr" \
+    || fail "mate-teardown-refuses: refusal did not name the parent channel: $(cat "$case_dir/stderr")"
+  [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "mate-teardown-refuses: refusal did not retain the task records"
+  [ -f "$case_dir/state/task-x1.grok-turnend-token" ] \
+    && [ -f "$case_dir/state/task-x1.kimi-turnend-token" ] \
+    && [ -d "$case_dir/tasktmp" ] \
+    || fail "mate-teardown-refuses: refusal removed endpoint records before parent delivery"
+  rmdir "$channel"
+  err=$(FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null)
+  seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p')
+  generation=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p')
+  [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' "$channel" \
+    || fail "mate-teardown-refuses: the rerun did not deliver the final line"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-refuses: rerun left the task record"
+  pass "a secondmate home's teardown delivers the child's final line or refuses until it can"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -2270,8 +2452,8 @@ SH
       ;;
   esac
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
-    FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -4359,7 +4541,7 @@ test_local_only_missing_task_base_is_diagnosed
 test_local_only_empty_commit_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_closes_the_backlog_item_itself
 test_teardown_allows_when_no_linked_kit_run
 test_teardown_refuses_unsealed_linked_kit_run_before_return
 test_teardown_kit_seal_refusal_precedes_telemetry_seal
@@ -4375,12 +4557,14 @@ test_teardown_prints_retro_acceleration_before_return
 test_teardown_secondmate_seam_prompt_on_subject_change
 test_teardown_secondmate_seam_silent_when_same_subject
 test_teardown_secondmate_kind_skips_completion_reminders
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_secondmate_pr_registration_publishes_ready_line
+test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_teardown_reaps_escalation_log_and_abandoned_lock_owner
 test_herdr_teardown_clears_escalation_marker

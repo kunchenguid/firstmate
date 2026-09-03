@@ -3,6 +3,7 @@
   "finished_at": "2026-08-30T15:12:19Z",
   "fm_test_run_jobs_enabled": false,
   "kind": "isolation-proof",
+  "pool": "portable",
   "production_sharding_enabled": false,
   "run_id": "fm-isolation-1788101811103-94956",
   "scripts": [

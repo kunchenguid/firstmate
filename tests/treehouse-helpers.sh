@@ -63,7 +63,7 @@ case "${1:-}" in
     done
     printf ']\n'
     ;;
-  return) exit 0 ;;
+  return) [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ] ;;
   *) exit 1 ;;
 esac
 SH

@@ -4,6 +4,7 @@
 # Usage:
 #   fm-check-register.sh <id>
 #   fm-check-register.sh retire <id>
+# New callers may use fm-check-unregister.sh <id> to remove only a custom check.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

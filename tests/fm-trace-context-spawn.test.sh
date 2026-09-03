@@ -12,6 +12,24 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
+write_ship_brief() {  # <file> <id>
+  cat > "$1" <<EOF
+# Task
+## Captain's intent
+Exercise trace propagation for $2.
+
+## Firstmate spec
+Verify the spawned process receives the expected trace context.
+
+# Load-bearing contract
+## Captain's intent
+Exercise trace propagation for $2.
+
+## Firstmate spec
+Verify the spawned process receives the expected trace context.
+EOF
+}
+
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
 # argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
 # one per line, in send order, so ordering is observable.
@@ -125,7 +143,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   id=$name-z1
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  write_ship_brief "$home/data/$id/brief.md" "$id"
   printf '%s\n' "$home|$proj|$wt|$fakebin|$launchlog|$id"
 }
 
@@ -242,7 +260,7 @@ run_two_level() {
   wwt="$base/wwt"
   fm_git_worktree "$wproj" "$wwt" "wt-$name"
   mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
-  printf 'worker brief\n' > "$sm/data/$worker_id/brief.md"
+  write_ship_brief "$sm/data/$worker_id/brief.md" "$worker_id"
   touch "$sm/state/.last-watcher-beat"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
@@ -273,6 +291,11 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   expect_code 0 "$status" "enabled trace-context spawn should succeed"
   assert_contains "$out" "spawned $CASE_ID" "enabled spawn should report success"
   meta="$HOME_DIR/state/$CASE_ID.meta"
+  jq -e --arg id "$CASE_ID" '
+    .schema == "fm-secondmate-home-summary.v1"
+    and any(.endpoints[]; .id == $id)
+  ' "$HOME_DIR/state/home-summary.json" >/dev/null \
+    || fail "successful task spawn did not publish the task in the home summary ledger"
 
   mtp=$(meta_traceparent "$meta")
   fm_trace_context_valid "$mtp" || fail "enabled spawn must record a valid traceparent= in meta (got '$mtp')"
@@ -525,8 +548,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   fm_git_worktree "$proj_a" "$wt_a" wt-routed-a
   fm_git_worktree "$proj_b" "$wt_b" wt-routed-b
   mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"
-  printf 'brief a\n' > "$sm/data/$id_a/brief.md"
-  printf 'brief b\n' > "$sm/data/$id_b/brief.md"
+  write_ship_brief "$sm/data/$id_a/brief.md" "$id_a"
+  write_ship_brief "$sm/data/$id_b/brief.md" "$id_b"
   log_a="$base/launch-a.log"
   log_b="$base/launch-b.log"
 

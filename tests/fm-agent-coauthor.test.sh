@@ -127,6 +127,13 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+write_ship_brief() {
+  local home=$1 id=$2
+  mkdir -p "$home/data/$id"
+  printf '# Task\nCaptain: Exercise the worker Git policy for %s.\n\nDelivery contract: mode=no-mistakes\n' "$id" \
+    > "$home/data/$id/brief.md"
+}
+
 test_worker_amend_removes_only_agent_coauthors() {
   local case_dir="$TMP_ROOT/amend" home proj wt fakebin id out initial_out initial_status status \
     expected_tree expected_parent expected_committer expected_author expected actual hook hook_out hook_log project_message task_tmp
@@ -138,8 +145,8 @@ test_worker_amend_removes_only_agent_coauthors() {
   proj="$case_dir/project"
   wt="$case_dir/worktree"
   fakebin=$(make_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config"
+  write_ship_brief "$home" "$id"
   printf 'codex\n' > "$home/config/crew-harness"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -253,8 +260,8 @@ test_commit_msg_composition_without_precommit_relay() {
   wt="$case_dir/worktree"
   project_message="$case_dir/project-message"
   fakebin=$(make_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config"
+  write_ship_brief "$home" "$id"
   printf 'codex\n' > "$home/config/crew-harness"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -320,8 +327,8 @@ done
 exec /bin/mkdir "$@"
 SH
   chmod +x "$fakebin/mkdir"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config"
+  write_ship_brief "$home" "$id"
   printf 'codex\n' > "$home/config/crew-harness"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -356,8 +363,7 @@ test_every_verified_harness_reaches_task_local_sanitizer() {
     id="agent-coauthor-${harness}-z2"
     TASK_TMP_ROOTS+=("/tmp/fm-$id")
     rm -rf "/tmp/fm-$id"
-    mkdir -p "$home/data/$id"
-    printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+    write_ship_brief "$home" "$id"
     printf '%s\n' "$harness" > "$home/config/crew-harness"
     : > "$case_dir/launch"
     : > "$case_dir/events"
@@ -435,8 +441,8 @@ test_cursor_agent_refuses_brief_before_verified_empty_composer() {
   proj="$case_dir/project"
   wt="$case_dir/worktree"
   fakebin=$(make_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config"
+  write_ship_brief "$home" "$id"
   printf 'cursor-agent\n' > "$home/config/crew-harness"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" 'fm/agent-coauthor-cursor-unready'
@@ -477,8 +483,8 @@ test_worker_push_policy_refuses_protected_destinations_and_allows_task_branch() 
   bare="$proj.origin.git"
   project_hooks_log="$case_dir/project-pre-push.log"
   fakebin=$(make_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/projects" "$home/state" "$home/config"
+  write_ship_brief "$home" "$id"
   printf 'codex\n' > "$home/config/crew-harness"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "fm/$id"

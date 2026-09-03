@@ -46,6 +46,7 @@ expected_primary_jobs = [
     "tests-portable-serial",
     "tests-herdr",
     "tests-timing-aggregate",
+    "macos-stock-bash",
     "invariants",
 ]
 assert list(ci["jobs"]) == expected_primary_jobs, list(ci["jobs"])
@@ -76,10 +77,12 @@ primary_names = {
     "tests-portable-serial": "Behavior portable serial ${{ matrix.shard }}",
     "tests-herdr": "Behavior tests (Herdr)",
     "tests-timing-aggregate": "Behavior timing aggregate",
+    "macos-stock-bash": "Stock macOS Bash snapshot compatibility",
     "invariants": "Repo invariants",
 }
 for job_id, job in ci["jobs"].items():
-    assert job["runs-on"] == "ubuntu-latest", (job_id, job["runs-on"])
+    expected_runner = "macos-latest" if job_id == "macos-stock-bash" else "ubuntu-latest"
+    assert job["runs-on"] == expected_runner, (job_id, job["runs-on"])
     assert job["name"] == primary_names[job_id], (job_id, job["name"])
     assert "self-hosted" not in str(job["runs-on"])
     assert "water-7" not in str(job["runs-on"])
@@ -133,6 +136,7 @@ for job_id in (
     "tests-portable-parallel-2",
     "tests-portable-serial",
     "tests-herdr",
+    "macos-stock-bash",
     "invariants",
 ):
     assert ci["jobs"][job_id]["if"] == full_ci_gate, job_id
@@ -200,21 +204,48 @@ required_tool_step = {
 for job_id in (
     "tests-portable-parallel-1",
     "tests-portable-parallel-2",
-    "tests-portable-serial",
     "tests-herdr",
 ):
     steps = ci["jobs"][job_id]["steps"]
     assert required_tool_step in steps, (job_id, steps)
+serial_required_tool_step = {
+    "name": "Install required test tools",
+    "run": (
+        "sudo apt-get update\n"
+        "sudo apt-get install -y bubblewrap ripgrep\n"
+        "# Ubuntu 24.04's AppArmor default blocks bubblewrap's uid namespace\n"
+        "# even after the package is installed. This ephemeral runner needs a\n"
+        "# usable sandbox, not merely a binary on PATH, for the runtime-closure\n"
+        "# acceptance test below.\n"
+        "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
+    ),
+}
+assert serial_required_tool_step in ci["jobs"]["tests-portable-serial"]["steps"]
 
 serial = ci["jobs"]["tests-portable-serial"]
 assert serial["strategy"]["fail-fast"] is False
-assert serial["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
+assert serial["strategy"]["matrix"]["shard"] == [1, 2, 3, 4, 5]
 assert ci["jobs"]["tests-timing-aggregate"]["needs"] == [
     "tests-portable-parallel-1",
     "tests-portable-parallel-2",
     "tests-portable-serial",
     "tests-herdr",
 ]
+
+macos = ci["jobs"]["macos-stock-bash"]
+assert macos["timeout-minutes"] == 10
+assert len(macos["steps"]) == 2
+assert macos["steps"][0]["uses"] == "actions/checkout@v6"
+macos_command = macos["steps"][1]
+assert macos_command["shell"] == "/bin/bash {0}"
+assert macos_command["env"]["PATH"] == "/bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+for required in (
+    "bin/fm-lint.sh --list-files",
+    "/bin/bash tests/fm-fleet-snapshot-view.test.sh",
+    "/bin/bash tests/fm-bearings-snapshot.test.sh",
+    "/bin/bash tests/fm-public-followup.test.sh",
+):
+    assert required in macos_command["run"], required
 
 assert fallback_job["runs-on"] == labels
 assert fallback_job["name"] == "Suite"

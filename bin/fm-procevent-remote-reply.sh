@@ -50,6 +50,9 @@ REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
 MAX_LINE_BYTES=${FM_REMOTE_REPLY_MAX_LINE_BYTES:-2048}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
+WINDOW_CLOSED_EMPTY=75
+SSH_UNAVAILABLE=255
+DOCUMENT_LOCAL_FAILURE=2
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -173,10 +176,14 @@ write_ingest_receipt() { # <id> <sequence> <result>
 }
 
 result_field() { # <result> <field>
-  local count
-  count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
-  [ "$count" -eq 1 ] || return 1
-  grep "^$2=" "$1" | cut -d= -f2-
+  LC_ALL=C awk -v prefix="$2=" '
+    $0 == "" { exit }
+    index($0, prefix) == 1 { count++; value = substr($0, length(prefix) + 1) }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$1"
 }
 
 classify_result() {
@@ -221,11 +228,16 @@ cmd_arm() {
 }
 
 cmd_source() {
-  local id=${1:-}
+  local id=${1:-} started rc=0
   validate_id "$id"
   read_cursor "$id"
-  exec "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null
+  started=$(fm_pending_reply_now)
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+  if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+  fi
+  return "$rc"
 }
 
 safe_doc_path() {
@@ -239,23 +251,25 @@ safe_doc_path() {
 }
 
 fetch_document() { # <id> <remote-relative> <result-var>
-  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel
+  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel rc=0
   safe_doc_path "$rel" || return 1
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
   parent=$(dirname "$destination")
-  mkdir -p "$parent" || return 1
-  [ ! -L "$base" ] && [ ! -L "$parent" ] || return 1
-  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
-  [ ! -L "$destination" ] || return 1
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2>/dev/null; then
+  mkdir -p "$parent" || return "$DOCUMENT_LOCAL_FAILURE"
+  [ ! -L "$base" ] && [ ! -L "$parent" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
+  case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
+  [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -f -- "$tmp"
+    [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
@@ -415,10 +429,23 @@ payload_line_bounded_printable() { # <payload> <line-number>
     ' "$1"
 }
 
+normalize_payload() { # <source> <destination>
+  LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
+}
+
 line_status_valid() { # <line>
   local line=$1
   line_bytes_bounded_printable "$line" || return 1
   printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])*:' || return 1
+}
+
+line_has_valid_key() { # <line>
+  printf '%s' "$1" \
+    | grep -Eq '(^|[[:space:]])\[key=[A-Za-z0-9._:-]+\]([[:space:]]|:)'
+}
+
+line_is_opaque_content() { # <line>
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]+=[^[:cntrl:]]+$'
 }
 
 validate_sha256() { # <value>
@@ -469,9 +496,9 @@ line_has_corr_token() { # <line>
 }
 
 cmd_ingest() {
-  local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
+  local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 quarantined=0 cursor_already=0 lock status_file tmp legacy_prefix=1
-  local line_number=0 quarantine_reason quarantine_detail doc_failed accepted_corrs
+  local line_number=0 quarantine_reason quarantine_detail doc_failed fetch_rc accepted_corrs
   local result_hash quarantine_reasons quarantine_reason_list
   validate_id "$id"
   remote_route_exists "$id"
@@ -494,7 +521,7 @@ cmd_ingest() {
     case "$hash" in *[!A-Fa-f0-9]*|'') die "result carries an invalid SHA-256 value" ;; esac
     [ "${#hash}" -eq 64 ] || die "result carries an invalid SHA-256 length"
   done
-  blank=$(grep -n -m 1 '^$' "$result" | cut -d: -f1)
+  blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$result")
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
   trap 'rm -rf -- "$tmp"' EXIT
@@ -504,6 +531,8 @@ cmd_ingest() {
   actual_hash=$(sha256_file "$payload")
   [ "$actual_bytes" -eq "$payload_bytes" ] && [ "$actual_hash" = "$payload_hash" ] \
     || die "result payload bytes do not match its committed digest"
+  normalized_payload="$tmp/normalized-payload"
+  normalize_payload "$payload" "$normalized_payload" || die "cannot normalize remote reply payload"
   status_file="$STATE/$id.status"
   mkdir -p "$STATE" || die "cannot create parent state directory"
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
@@ -535,18 +564,19 @@ cmd_ingest() {
     line_number=$((line_number + 1))
     quarantine_reason=
     quarantine_detail=
-    if ! payload_line_bounded_printable "$payload" "$line_number" \
-      || ! line_status_valid "$line"; then
+    if ! payload_line_bounded_printable "$payload" "$line_number"; then
+      if ! line_status_valid "$line" || ! line_has_valid_key "$line" \
+        || line_has_corr_token "$line"; then
+        quarantine_reason=invalid-status
+      fi
+    elif ! line_status_valid "$line" && ! line_is_opaque_content "$line"; then
       quarantine_reason=invalid-status
     elif ! line_has_valid_corr "$line"; then
-      if [ "$from" -eq 0 ] && [ "$legacy_prefix" -eq 1 ] && ! line_has_corr_token "$line"; then
-        if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-          printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append legacy remote reply"; }
-          appended=$((appended + 1))
-        fi
-        continue
-      fi
-      if line_has_corr_token "$line"; then
+      if ! line_has_corr_token "$line" \
+        && { { [ "$from" -eq 0 ] && [ "$legacy_prefix" -eq 1 ]; } \
+          || line_has_valid_key "$line" || line_is_opaque_content "$line"; }; then
+        :
+      elif line_has_corr_token "$line"; then
         quarantine_reason=invalid-correlation
       else
         quarantine_reason=missing-correlation
@@ -566,11 +596,17 @@ cmd_ingest() {
     doc_failed=0
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
-      if ! fetch_document "$id" "$doc" local_doc; then
+      fetch_rc=0
+      fetch_document "$id" "$doc" local_doc || fetch_rc=$?
+      if [ "$fetch_rc" -eq 1 ]; then
         doc_failed=1
         quarantine_detail=$doc
         break
       fi
+      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
+        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
+      [ "$fetch_rc" -eq 0 ] \
+        || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
     if [ "$doc_failed" -eq 1 ]; then
@@ -587,7 +623,7 @@ cmd_ingest() {
     fi
     printf '%s\n' "$line" | grep -Eo '\[corr=[A-Fa-f0-9]{16}\]' \
       | sed 's/^\[corr=//;s/\]$//' | tr 'A-F' 'a-f' >> "$accepted_corrs"
-  done < "$payload"
+  done < "$normalized_payload"
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
@@ -753,6 +789,7 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
+  rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 
 cmd_retire() {
@@ -790,6 +827,7 @@ case "${1:-}" in
   cursor-rebase|rebase) shift; [ "$#" -eq 3 ] || usage; cmd_cursor_rebase "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
+  self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;

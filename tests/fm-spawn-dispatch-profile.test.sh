@@ -7,8 +7,8 @@
 # command firstmate would run without starting any real harness.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # The suite opts into an explicit NM_HOME only in the test that covers that
 # override, so an invoking runner's no-mistakes home cannot affect defaults.
@@ -20,6 +20,23 @@ COOLDOWN="$ROOT/bin/fm-quota-cooldown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$ROOT/bin/fm-backend-hometag-lib.sh"
+
+make_spawn_pi_probe() {
+  local fakebin=$1 tool=$2
+  cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
+    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
+  else
+    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/$tool"
+}
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -157,20 +174,24 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  fm_fake_exit0 "$fakebin" cursor-agent pi-signed no-mistakes gh-axi gh tasks-axi
-  # fm-spawn probes the resolved pi executable's help before threading
-  # --tui-mode regular, so the fixture owns pi with a help surface that
-  # advertises it. A host-installed pi would otherwise decide these launch
-  # assertions.
-  cat > "$fakebin/pi" <<'SH'
+  cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-set -u
-if [ "${1:-}" = --help ]; then
-  printf 'Usage: pi [options]\n  --tui-mode <mode>\n'
+seconds=$1
+shift
+exec perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+SH
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
 fi
 exit 0
 SH
-  chmod +x "$fakebin/pi"
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  make_spawn_pi_probe "$fakebin" pi
+  make_spawn_pi_probe "$fakebin" pi-signed
+  fm_fake_exit0 "$fakebin" no-mistakes gh-axi gh tasks-axi
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -219,13 +240,10 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
-  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
-    mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    fm_test_spawn_brief "$home" "$id"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -280,6 +298,9 @@ run_spawn() {
     FM_FAKE_TMUX_CAPTURE_STATE="${FM_FAKE_TMUX_CAPTURE_STATE:-$home/cursor-capture.state}" \
     FM_FAKE_TMUX_CAPTURE_AFTER_TEXT="${FM_FAKE_TMUX_CAPTURE_AFTER_TEXT:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="${FM_TEST_ENDPOINT_LOG:-}" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
+    FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -502,7 +523,7 @@ test_recorded_default_axes_respawn_as_unset() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "recorded default axes did not launch identically to unset axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
 
   ledger="$HOME_DIR/data/routing-outcomes.jsonl"
@@ -526,7 +547,7 @@ test_no_profile_keeps_claude_profile_defaults() {
     "the default writer spawn added an access field to legacy metadata"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults, writer metadata omits access, and the claude launch is canonical"
 }
@@ -555,7 +576,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$id/launch-brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
@@ -584,7 +605,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -604,7 +625,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$absolute_id/launch-brief.md'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
@@ -632,7 +653,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$id/launch-brief.md'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
@@ -812,7 +833,7 @@ test_codex_initial_and_resume_share_full_launch_posture() {
   status=$?
   expect_code 0 "$status" "ordinary Codex launch should succeed"
   initial=$(cat "$LAUNCH_LOG")
-  brief=$(shell_quote_value "$HOME_DIR/data/$id/brief.md")
+  brief=$(shell_quote_value "$HOME_DIR/data/$id/launch-brief.md")
 
   out=$(FM_FAKE_TMUX_WINDOWS="fm-$id" FM_FAKE_PANE_COMMAND=bash \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -960,7 +981,7 @@ test_cursor_agent_delivers_encoded_brief_after_interactive_ready_for_persistent_
   expect_code 0 "$status" "cursor-agent ship spawn should deliver its brief through the ready interactive composer"
   launch=$(cat "$LAUNCH_LOG")
   first_launch=$(sed -n '1p' "$LAUNCH_LOG")
-  expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $HOME_DIR/data/$id/brief.md and follow it exactly."
+  expected_pointer="FIRSTMATE_OP: v1 launch-brief: Read the launch brief at $HOME_DIR/data/$id/launch-brief.md and follow it exactly."
   assert_contains "$first_launch" "'$FAKEBIN_DIR/cursor-agent' --trust --force --model 'cursor-grok-4.6-high'" \
     "cursor-agent ship launch lost its persistent interactive command"
   assert_not_contains "$first_launch" "encode launch-brief" \
@@ -1103,7 +1124,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
   pi_signed_bin=$FAKEBIN_DIR/pi-signed
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not share Pi's preflighted executable, model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
@@ -1164,7 +1185,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
   pi_signed_bin=$FAKEBIN_DIR/pi-signed
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not share Pi's preflighted primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
@@ -2680,7 +2701,7 @@ test_oversized_cooldown_evidence_is_recorded_truncated() {
 
 # The load-bearing bookend gate (bin/fm-brief.sh --validate-bookends) is wired
 # into bin/fm-spawn.sh before any endpoint or task-state creation. A ship brief
-# whose two standalone {TASK} slots are not both filled must be refused before
+# whose structured intent/spec slots are not all filled must be refused before
 # the backend creates a window, so a half-filled or divergent brief can never
 # launch a worker. This drives the real spawn path with a fake tmux that logs
 # new-window calls, and asserts the gate refuses and no endpoint is created.
@@ -2692,16 +2713,16 @@ test_spawn_refuses_unfilled_bookends_before_endpoint_creation() {
   endpoint_log="$CASE_DIR/endpoint.log"
   : > "$endpoint_log"
   # Replace the stub brief with a real unfilled ordinary ship brief so the
-  # bookend gate sees the two standalone {TASK} slots and refuses.
+  # bookend gate sees the unfilled intent/spec slots and refuses.
   rm -f "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" "$PROJ_DIR" --mode no-mistakes >/dev/null 2>&1 \
     || fail "fm-brief.sh failed to scaffold a real ship brief for the bookend gate"
   grep -qx '^# Task$' "$HOME_DIR/data/$id/brief.md" || fail "real ship brief missing its # Task section"
   out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model gpt-5 --effort medium --routing-source fallback 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a ship brief with unfilled {TASK} bookends"
+  [ "$status" -ne 0 ] || fail "spawn accepted a ship brief with unfilled intent/spec bookends"
   assert_contains "$out" "bookend check" "spawn refusal did not name the bookend gate"
-  assert_contains "$out" "fill both standalone {TASK} slots" "spawn refusal did not point at the fill command"
+  assert_contains "$out" "--fill <intent-file> [spec-file]" "spawn refusal did not point at the structured fill command"
   # No endpoint mutation: the fake tmux new-window hook never ran.
   [ ! -s "$endpoint_log" ] || fail "spawn created an endpoint before the bookend gate refused"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn wrote task metadata before the bookend gate refused"
@@ -2721,9 +2742,9 @@ test_spawn_refuses_reader_bookends_before_endpoint_creation() {
   grep -qx '^# Task$' "$HOME_DIR/data/$id/brief.md" || fail "real reader brief missing its # Task section"
   out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --scout --access reader --model gpt-5 --effort medium --routing-source fallback 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a reader scout brief with unfilled {TASK} bookends"
+  [ "$status" -ne 0 ] || fail "spawn accepted a reader scout brief with unfilled intent/spec bookends"
   assert_contains "$out" "bookend check" "reader spawn refusal did not name the bookend gate"
-  assert_contains "$out" "fill both standalone {TASK} slots" "reader spawn refusal did not point at the fill command"
+  assert_contains "$out" "--fill <intent-file> [spec-file]" "reader spawn refusal did not point at the structured fill command"
   [ ! -s "$endpoint_log" ] || fail "reader spawn created an endpoint before the bookend gate refused"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "reader spawn wrote task metadata before the bookend gate refused"
 
@@ -3100,7 +3121,7 @@ test_reader_access_flag_is_scout_only_and_closed_set() {
 }
 
 test_reader_brief_access_contract_cross_check() {
-  local rec id out status cmdlog brief staged
+  local rec id out status cmdlog brief
   id=access-reader-brief-spoof-z5
   rec=$(make_spawn_case access-reader-brief-spoof claude "$id")
   read_case_record "$rec"
@@ -3110,9 +3131,9 @@ test_reader_brief_access_contract_cross_check() {
   rm -f "$brief"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --scout >/dev/null 2>&1 \
     || fail "writer scout brief scaffold should succeed"
-  staged="$CASE_DIR/spoofed-writer-brief.md"
-  sed 's/^{TASK}$/Access contract: access=reader/' "$brief" > "$staged"
-  mv "$staged" "$brief"
+  printf 'Access contract: access=reader\n' > "$CASE_DIR/spoofed-writer-intent.txt"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" --fill "$CASE_DIR/spoofed-writer-intent.txt" >/dev/null 2>&1 \
+    || fail "writer scout brief fill should succeed"
 
   out=$(FM_FAKE_TMUX_CMDLOG="$cmdlog" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --access reader)
@@ -3470,7 +3491,7 @@ test_access_flip_on_existing_task_refuses() {
 
   printf 'window=firstmate:fm-%s\nendpoint_task_id=%s\nworktree=%s/scratch\nproject=%s\nharness=claude\nkind=scout\naccess=reader\ntasktmp=%s\n' \
     "$id" "$id" "$task_tmp" "$PROJ_DIR" "$task_tmp" > "$HOME_DIR/state/$id.meta"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
   [ "$status" -ne 0 ] \

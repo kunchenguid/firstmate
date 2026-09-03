@@ -145,7 +145,7 @@ SH
 }
 
 file_mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
 test_room_state_is_private_under_open_umask() {

@@ -195,45 +195,48 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
-want_value=
-for a in "$@"; do
-  if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) die "--$want_value requires a value" ;;
+control_want_value=
+for control_arg in "$@"; do
+  if [ -n "$control_want_value" ]; then
+    case "$control_arg" in
+      --*) die "--$control_want_value requires a value" ;;
     esac
-    case "$want_value" in
-      harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
-      model) NEW_MODEL=$a; MODEL_SET=1 ;;
-      effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
-      note) NOTE=$a; NOTE_SET=1 ;;
-      note-file)
-        [ -f "$a" ] || die "--note-file '$a' is not a readable file"
-        NOTE=$(cat "$a")
+    case "$control_want_value" in
+      harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
+      model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
+      effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      note) NOTE=$control_arg; NOTE_SET=1 ;;
+      note_file)
+        [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
+        NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
     esac
-    want_value=
+    control_want_value=
     continue
   fi
-  case "$a" in
-    --harness) want_value=harness ;;
-    --harness=*) NEW_HARNESS=${a#--harness=}; HARNESS_SET=1 ;;
-    --model) want_value=model ;;
-    --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
-    --effort) want_value=effort ;;
-    --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
-    --note) want_value=note ;;
-    --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
-    --note-file) want_value=note-file ;;
+  case "$control_arg" in
+    --harness) control_want_value=harness ;;
+    --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
+    --model) control_want_value=model ;;
+    --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
+    --effort) control_want_value=effort ;;
+    --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --note) control_want_value=note ;;
+    --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --note-file) control_want_value=note_file ;;
     --note-file=*)
-      [ -f "${a#--note-file=}" ] || die "--note-file '${a#--note-file=}' is not a readable file"
-      NOTE=$(cat "${a#--note-file=}")
+      [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
+      NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
-    *) die "unexpected argument '$a'" ;;
+    *) die "unexpected argument '$control_arg'" ;;
   esac
 done
-[ -z "$want_value" ] || die "--$want_value requires a value"
+if [ -n "$control_want_value" ]; then
+  [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  die "--$control_want_value requires a value"
+fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
@@ -752,7 +755,7 @@ safe_checkpoint() {
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
 record_note() {
-  local stamp
+  local stamp note_block noted_brief
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
@@ -760,7 +763,11 @@ record_note() {
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
-      {
+      note_block=$(mktemp "$JOURNAL.note-block.XXXXXX") \
+        || die "could not allocate progress-note staging for task $ID"
+      if ! {
+        echo
+        echo "# Relaunch context"
         echo
         echo "## Progress note ($stamp)"
         echo
@@ -772,8 +779,41 @@ record_note() {
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
-        || die "could not append the progress note to task $ID's instructions"
+      } > "$note_block"; then
+        rm -f "$note_block"
+        die "could not stage the progress note for task $ID"
+      fi
+      if grep -qx '^# Load-bearing contract$' "$RELAUNCH_BRIEF"; then
+        # Structured briefs keep the repeated load-bearing contract at EOF.
+        # Insert runtime context before that bookend so the opening and closing
+        # task text remain byte-equivalent when fm-spawn validates the relaunch.
+        noted_brief=$(mktemp "$RELAUNCH_BRIEF.relaunch-note.XXXXXX") || {
+          rm -f "$note_block"
+          die "could not allocate instruction staging for task $ID"
+        }
+        if ! cp -p "$RELAUNCH_BRIEF" "$noted_brief"; then
+          rm -f "$note_block" "$noted_brief"
+          die "could not stage task $ID's instructions for the progress note"
+        fi
+        if ! awk -v note_file="$note_block" '
+          !inserted && /^# Load-bearing contract$/ {
+            while ((getline line < note_file) > 0) print line
+            close(note_file)
+            inserted=1
+          }
+          { print }
+          END { if (!inserted) exit 1 }
+        ' "$RELAUNCH_BRIEF" > "$noted_brief"; then
+          rm -f "$note_block" "$noted_brief"
+          die "could not insert the progress note before task $ID's load-bearing contract"
+        fi
+        mv -f "$noted_brief" "$RELAUNCH_BRIEF" \
+          || die "could not publish the progress note into task $ID's instructions"
+      else
+        cat "$note_block" >> "$RELAUNCH_BRIEF" \
+          || die "could not append the progress note to task $ID's instructions"
+      fi
+      rm -f "$note_block"
       ;;
   esac
 }
