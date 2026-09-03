@@ -198,6 +198,24 @@ Re-run the two commands above and update this section and the pinned version tog
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
 `tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
+The Codex-home profile axis was verified on 2026-09-03 with Bash 5.2.21 and ShellCheck 0.11.0.
+
+```sh
+tests/fm-spawn-dispatch-profile.test.sh
+bin/fm-lint.sh
+```
+
+Bounded observed output:
+
+```text
+ok - pi and pi-signed launches receive the normalized per-spawn Codex home
+ok - dispatch profile codexHome routes through the concrete flag, which permits an explicit override
+ok - --codex-home rejects paths that do not resolve to an existing directory
+# all fm-spawn-dispatch-profile tests passed
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.

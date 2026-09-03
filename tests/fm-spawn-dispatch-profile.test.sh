@@ -591,11 +591,85 @@ test_pi_threads_model_and_max_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "pi launch without --codex-home must stay on the default account without a new prefix"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
   pass "pi receives --model and --thinking max profile flags"
+}
+
+test_pi_family_threads_normalized_codex_home() {
+  local harness rec id out status launch codex_link codex_real
+  for harness in pi pi-signed; do
+    id="profile-$harness-codex-home-z8a"
+    rec=$(make_spawn_case "profile-$harness-codex-home" "$harness" "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/codex home"
+    codex_real=$(cd "$CASE_DIR/codex home" && pwd -P)
+    codex_link="$CASE_DIR/codex-home-link"
+    ln -s "$codex_real" "$codex_link"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "$harness" --codex-home "$codex_link")
+    status=$?
+    expect_code 0 "$status" "$harness spawn with --codex-home should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "CODEX_HOME='$codex_real' FM_PI_HARNESS=$harness " \
+      "$harness launch did not prepend the normalized, quoted Codex home"
+  done
+  pass "pi and pi-signed launches receive the normalized per-spawn Codex home"
+}
+
+test_dispatch_profile_codex_home_routes_through_concrete_flag() {
+  local rec profile_id explicit_id out status launch profile_home explicit_home resolved_home
+  profile_id=profile-config-codex-home-z8aa
+  explicit_id=profile-explicit-codex-home-z8aaa
+  rec=$(make_spawn_case profile-config-codex-home pi "$profile_id" "$explicit_id")
+  read_case_record "$rec"
+  profile_home="$CASE_DIR/profile-codex-home"
+  explicit_home="$CASE_DIR/explicit-codex-home"
+  mkdir -p "$profile_home" "$explicit_home"
+  printf '%s\n' \
+    "{\"default\":{\"harness\":\"pi\",\"model\":\"openai-codex/gpt-5.6-sol\",\"codexHome\":\"$profile_home\"}}" \
+    > "$HOME_DIR/config/crew-dispatch.json"
+  resolved_home=$(jq -r '.default.codexHome' "$HOME_DIR/config/crew-dispatch.json")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$profile_id" "$PROJ_DIR" --harness pi --codex-home "$resolved_home")
+  status=$?
+  expect_code 0 "$status" "resolved dispatch profile Codex home should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$profile_home' FM_PI_HARNESS=pi " \
+    "resolved dispatch profile codexHome did not reach the launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$explicit_id" "$PROJ_DIR" --harness pi --codex-home "$explicit_home")
+  status=$?
+  expect_code 0 "$status" "resolved dispatch profile with explicit Codex-home override should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$explicit_home' FM_PI_HARNESS=pi " \
+    "explicit --codex-home did not reach the resolved profile launch"
+  assert_not_contains "$launch" "CODEX_HOME='$profile_home'" \
+    "dispatch profile codexHome overrode the explicit per-task flag"
+  pass "dispatch profile codexHome routes through the concrete flag, which permits an explicit override"
+}
+
+test_codex_home_requires_an_existing_directory() {
+  local rec id out status
+  id=profile-missing-codex-home-z8ab
+  rec=$(make_spawn_case profile-missing-codex-home pi "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --codex-home "$CASE_DIR/missing-codex-home")
+  status=$?
+  expect_code 1 "$status" "spawn with a missing --codex-home should fail"
+  assert_contains "$out" "--codex-home directory cannot be resolved" \
+    "missing Codex home did not produce a named validation error"
+  [ ! -s "$LAUNCH_LOG" ] || fail "invalid --codex-home must fail before launch"
+  pass "--codex-home rejects paths that do not resolve to an existing directory"
 }
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
@@ -814,6 +888,9 @@ test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_pi_family_threads_normalized_codex_home
+test_dispatch_profile_codex_home_routes_through_concrete_flag
+test_codex_home_requires_an_existing_directory
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
