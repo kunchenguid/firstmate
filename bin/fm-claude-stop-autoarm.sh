@@ -154,6 +154,7 @@ SESSION_OWNER_PID=$LOCK_PID
 FAILURE_SUPPRESSION_OWNER_PID=$SESSION_OWNER_PID
 if ! fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"; then
   SESSION_AUTHENTICATED=0
+  FAILURE_SUPPRESSION_OWNER_PID=
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
   if FAILURE_CLAIMANT_PID=$(fm_claude_daemon_spawned_by_session_owner "$FM_ROOT" 2>/dev/null); then
@@ -182,6 +183,7 @@ autoarm_session_still_owned() {
 }
 
 autoarm_alarm_current() {
+  [ -n "$FAILURE_SUPPRESSION_OWNER_PID" ] || return 1
   fm_autoarm_failure_alarm_current \
     "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$FAILURE_SUPPRESSION_OWNER_PID"
 }

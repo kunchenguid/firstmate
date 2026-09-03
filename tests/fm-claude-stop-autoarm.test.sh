@@ -852,6 +852,34 @@ test_unbound_claude_daemon_cannot_reclaim_stale_lock() {
   pass "auto-arm: detached daemons fail closed without authenticated foreground ownership"
 }
 
+test_unbound_claude_daemon_ignores_predecessor_alarm() {
+  local dir out status failure
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-unbound-predecessor-alarm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf '9999999\n' > "$dir/state/.lock"
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-notified" \
+    "$dir/state/.claude-autoarm-failure-alarmed"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.9999999"
+  : > "$dir/state/.claude-autoarm-failure-alarmed/0.9999999"
+
+  out=$(run_autoarm_from_unbound_claude_daemon "$dir" 2>/dev/null); status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "predecessor alarm suppressed an unbound daemon recovery failure"
+
+  expect_code 2 "$status" "an unbound daemon must not inherit predecessor failure suppression"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "unbound-daemon failure escaped the unchanged stale-owner fence"
+  assert_present "$failure" \
+    "unbound daemon did not persist its failure beside the predecessor alarm"
+  assert_contains "$out" "stale session lock recovery failed" \
+    "predecessor alarm suppressed the unbound daemon failure banner"
+  assert_absent "$dir/state/arm-ran" \
+    "unbound daemon armed without authenticated foreground ownership"
+  pass "auto-arm: unbound daemons do not inherit predecessor failure suppression"
+}
+
 test_recovery_revalidates_bridged_owner_after_session_lease_wait() {
   local dir out status owner holder hook failure reset i
   dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-dies-during-recovery-lease")
@@ -3888,6 +3916,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_reclaims_stale_lock_to_foreground_owner
 test_unbound_claude_daemon_cannot_reclaim_stale_lock
+test_unbound_claude_daemon_ignores_predecessor_alarm
 test_recovery_revalidates_bridged_owner_after_session_lease_wait
 test_recovered_owner_death_publishes_current_owner_failure
 test_recovered_owner_binding_rejects_successor_transfer
