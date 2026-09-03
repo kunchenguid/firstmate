@@ -65,7 +65,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-pr-follow.sh --help` own the exact commands and flags.
 
 An explicitly enabled external adapter registers through `bin/fm-procevent.sh register-extension`, never through a package-discovered script or package-supplied argv.
 [`docs/configuration.md`](../../../docs/configuration.md#trusted-external-process-event-adapters-configextensionsd) owns setup and [`docs/extension-bindings.md`](../../../docs/extension-bindings.md) owns the narrow trusted-code and untrusted-evidence boundary.
@@ -87,6 +87,14 @@ Two rules the commands cannot enforce for you:
   Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
   The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
+  `pr-follow` is the same kind of adapter: a captured PR lifecycle document is applied - cursor merge, backfill latch, and handled acknowledgement - only by
+  ```sh
+  bin/fm-procevent-pr-follow.sh handle <scheduler-id> <sequence> <result-file>
+  ```
+  Read the document's validated `target:` field for the PR tracking id and its `event:` lines as findings to act on under the ordinary review and merge owners, then run `handle`; never acknowledge a `pr-follow` wake through the generic command, because only the adapter advances the target's durable cursor.
+  The home-level scheduler id comes from `bin/fm-procevent-pr-follow.sh scheduler-id` and never retires itself after merge or close. Each PR remains in its cursor roster until someone deliberately runs `bin/fm-procevent-pr-follow.sh retire <tracking-id>`, which refuses while an unhandled scheduler capture targets that PR unless `--force`.
+  A `handle` refusal names its class: "tampered or foreign" means the captured document was modified or does not claim this source and stays refused until an operator inspects and resolves it, while "adapter-produced document failed its own validation contract" means the adapter emitted bytes its own validator rejects; that class is bounded, and past its bound the source is quarantined with one monitoring-loss document naming the pause.
+  When a monitoring-loss document arrives, read the private quarantine record it names, update or repair firstmate so the adapter no longer emits unapplicable documents, then resume tracking by re-running `bin/fm-procevent-pr-follow.sh arm <task-id> <pr-url>`, which clears the quarantine; never delete the record to hide the loss.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:

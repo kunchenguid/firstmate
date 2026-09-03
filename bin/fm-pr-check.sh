@@ -152,4 +152,21 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
+# Arm durable lifecycle follow-through for this PR before the armed line and
+# with its registration output suppressed, so this script keeps its exact
+# single-line success contract: a durable per-PR cursor under one home-level
+# process-event scheduler, which survives task cleanup, merge, and restart, and
+# follows the PR for new comments, reviews, head moves, and check changes for
+# its whole retained lifetime. Refusing here leaves the standing follow-through
+# instruction unenforced, so the failure is fatal and rerunning this script is
+# idempotent.
+if [ -n "$PR_HEAD" ]; then
+  PR_FOLLOW_ARM=(arm "$ID" "$URL" --seed-head "$PR_HEAD")
+else
+  PR_FOLLOW_ARM=(arm "$ID" "$URL")
+fi
+if ! "$SCRIPT_DIR/fm-procevent-pr-follow.sh" "${PR_FOLLOW_ARM[@]}" >/dev/null; then
+  echo "error: PR lifecycle follow-through could not be armed; rerun fm-pr-check.sh" >&2
+  exit 1
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

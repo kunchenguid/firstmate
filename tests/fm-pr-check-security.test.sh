@@ -17,6 +17,11 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
+# fm-pr-check.sh arms PR lifecycle follow-through, which takes the machine-wide
+# process-event source lock; keep that claim root inside this suite's tree so a
+# run never writes to the developer's or runner's real user state directory and
+# two concurrent homes cannot block on the same derived lock.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
@@ -483,16 +488,24 @@ test_invalid_entrypoints_have_zero_side_effects() {
 }
 
 test_valid_recording_and_merge_derivation() {
-  local dir expected sidecar count rc
+  local dir expected sidecar count rc tracking_cursor
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
+  [ "$(cat "$dir/stdout")" = 'armed: state/task-a.check.sh' ] \
+    || fail "fm-pr-check.sh must keep its exact single-line success output while arming lifecycle follow-through"
 
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
+  tracking_cursor=$(printf '%s\n' "$dir/home/state/pr-follow"/prf-gh-*.cursor)
+  [ -f "$tracking_cursor" ] || fail "PR lifecycle tracking cursor was not armed"
+  grep -qxF "head=$expected" "$tracking_cursor" \
+    || fail "PR lifecycle tracking did not seed the verified head"
+  grep -qxF 'state=open' "$tracking_cursor" \
+    || fail "PR lifecycle tracking did not seed the verified open state"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
   [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"
