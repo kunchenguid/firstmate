@@ -435,14 +435,12 @@ STUB
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "6. These ship instructions supersede the scout delivery rules" "$payload" \
-    "promotion fixture must retain its competing numbered rule 6"
-  assert_grep "the escalation rules, including ask-user" "$payload" \
-    "promoted no-mistakes worker lost the original brief's ask-user escalation rule"
-  assert_grep "follow the \`needs-decision\` escalation rule for human-owned decisions under \`# Rules\` in your original task brief and stop" "$payload" \
-    "promoted no-mistakes worker did not receive an unambiguous ask-user escalation reference"
-  assert_no_grep "(rule 6)" "$payload" \
-    "promoted no-mistakes worker received an ambiguous numbered escalation reference"
+  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
+    "promoted no-mistakes worker did not receive the ask-user escalation rule"
+  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
+    "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
+  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
+    "promoted no-mistakes worker did not receive the structured escalation event"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \
