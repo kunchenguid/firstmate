@@ -521,6 +521,48 @@ test_relaunches_do_not_block_persist_polling() {
   pass "T12 relaunch waits do not block fleet persistence polling"
 }
 
+# --- T13: a worker that cannot publish its result cannot hang the pass -------
+test_unpublished_worker_result_is_accounted_for() {
+  local dir out rc_file driver i result_dir
+  dir=$(new_case worker-result)
+  setup_remote_case "$dir" sm1 slow-relaunch
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+  out="$dir/restart.out"
+  rc_file="$dir/restart.rc"
+
+  ( run_restart "$dir" sm1 > "$out" 2>&1; printf '%s\n' "$?" > "$rc_file" ) &
+  driver=$!
+  result_dir=
+  i=0
+  while [ "$i" -lt 200 ]; do
+    result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
+    [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -n "$result_dir" ] || { kill "$driver" 2>/dev/null || true; fail "restart result directory never appeared"; }
+  rm -rf -- "$result_dir"
+  i=0
+  while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 400 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  if kill -0 "$driver" 2>/dev/null; then
+    kill "$driver" 2>/dev/null || true
+    wait "$driver" 2>/dev/null || true
+    fail "a terminated restart worker left the parent hung"
+  fi
+  wait "$driver" 2>/dev/null || true
+  unset FM_FAKE_ANSWER_STATUS
+
+  [ "$(cat "$rc_file")" = 3 ] || fail "an unpublished worker result did not fail as accounted"
+  assert_contains "$(cat "$out")" "restart worker exited before publishing an outcome" \
+    "the missing worker result was not reported"
+  assert_contains "$(cat "$out")" "summary: 0 of 1 restarted, 0 nudged, 1 unreached" \
+    "the missing worker result was not included in the summary"
+  pass "T13 a dead restart worker cannot hang the parent"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_unprovable_runtime_falls_back
@@ -533,5 +575,6 @@ test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached
 test_relaunches_do_not_block_persist_polling
+test_unpublished_worker_result_is_accounted_for
 
 echo "# all fm-secondmate-restart tests passed"

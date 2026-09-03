@@ -193,15 +193,29 @@ launch_restart() {  # <array-index>
 }
 
 harvest_restarts() {
-  local i out
+  local i out worker_state
   i=0
   while [ "$i" -lt "${#IDS[@]}" ]; do
-    if [ "${PLAN[i]}" != restarting ] || [ ! -f "${RESTART_RESULT[i]}" ]; then
+    if [ "${PLAN[i]}" != restarting ]; then
       i=$((i + 1))
       continue
     fi
-    wait "${RESTART_PID[i]}" 2>/dev/null || true
-    out=$(cat "${RESTART_RESULT[i]}")
+    if [ -f "${RESTART_RESULT[i]}" ]; then
+      wait "${RESTART_PID[i]}" 2>/dev/null || true
+      out=$(cat "${RESTART_RESULT[i]}")
+    else
+      worker_state=$(ps -p "${RESTART_PID[i]}" -o stat= 2>/dev/null || true)
+      case "$worker_state" in
+        ''|Z*)
+          wait "${RESTART_PID[i]}" 2>/dev/null || true
+          out="unreached: ${IDS[$i]}: the restart worker exited before publishing an outcome"
+          ;;
+        *)
+          i=$((i + 1))
+          continue
+          ;;
+      esac
+    fi
     printf '%s\n' "$out"
     case "$out" in
       restarted:*) restarted_count=$((restarted_count + 1)) ;;

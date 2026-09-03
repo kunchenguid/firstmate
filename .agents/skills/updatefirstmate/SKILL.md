@@ -40,7 +40,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `nudge-secondmates: fm-<id>...|none`
 
    The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
-   A mate reached neither set because it was skipped, was already current, advanced without changing anything it reads or runs, or has no live agent - none of those need any action from you.
+   A mate reached neither set because it was skipped, was already current, advanced without changing anything it reads or runs, or lacked a positively confirmed live agent - none of those need any action from you.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
