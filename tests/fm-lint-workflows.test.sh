@@ -12,6 +12,7 @@ set -u
 
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 LINT="$ROOT/bin/fm-lint.sh"
+GUARD="$ROOT/bin/fm-prepush-voice-guard.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
@@ -462,13 +463,23 @@ test_installer_rejects_unsupported_platform() {
 # Prove the no-mistakes/local owner (bin/fm-lint.sh with no paths) catches a
 # self-broken ci.yml. Copy the lint scripts into a fake repo so the default
 # workflow root is the fixture, not this worktree.
+#
+# The default path also runs bin/fm-prepush-voice-guard.sh from the same bin
+# directory, so the fixture must carry it too. Without it the step failed with
+# exit 127 on every run and the deliberately broken ci.yml masked that, leaving
+# the test measuring a missing file rather than the workflow error it names.
+# This is the only fixture in this file or tests/fm-lint.test.sh that copies
+# fm-lint.sh; the changed-file tests there invoke the real script from bin/ and
+# stub git's "rev-list HEAD --not" answer instead.
 test_fm_lint_default_path_catches_broken_ci_yml() {
   local tmp fakebin log diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-wf-default)
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"
   cp "$LINT" "$tmp/bin/fm-lint.sh"
   cp "$LINT_WF" "$tmp/bin/fm-lint-workflows.sh"
-  chmod +x "$tmp/bin/fm-lint.sh" "$tmp/bin/fm-lint-workflows.sh"
+  cp "$GUARD" "$tmp/bin/fm-prepush-voice-guard.sh"
+  chmod +x "$tmp/bin/fm-lint.sh" "$tmp/bin/fm-lint-workflows.sh" \
+    "$tmp/bin/fm-prepush-voice-guard.sh"
   write_col0_heredoc_workflow "$tmp/.github/workflows/ci.yml"
 
   fakebin=$(fm_fakebin "$tmp")
@@ -511,6 +522,10 @@ SH
     "fm-lint.sh default path did not surface the workflow YAML error"
   assert_contains "$out" "ci.yml" \
     "fm-lint.sh default path did not name the broken workflow"
+  assert_not_contains "$out" "No such file or directory" \
+    "a missing fixture script masqueraded as the workflow failure"$'\n'"$out"
+  assert_not_contains "$out" "The scan did not complete" \
+    "a voice-guard scanner error masqueraded as the workflow failure"$'\n'"$out"
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
