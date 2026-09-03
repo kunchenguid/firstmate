@@ -27,7 +27,10 @@
 #   B. RESTART. Only after that mate's own correlated answer lands on the parent
 #      channel. The gate is that answer, never a wall clock, so a mate that is
 #      mid-turn queues the request behind that turn; the bound below exists to
-#      end the wait, not to authorize a restart without the answer.
+#      end the wait, not to authorize a restart without the answer. A timeout
+#      deliberately leaves that unanswered expectation open: it is a genuine
+#      open loop owned by the ordinary pending-reply recovery ladder, not state
+#      this restart pass may close.
 #
 # A mate whose persist answer did not arrive or whose runtime cannot prove a
 # restart gets the ordinary re-read nudge and is reported as a nudge, never as a
@@ -204,17 +207,18 @@ harvest_restarts() {
       wait "${RESTART_PID[i]}" 2>/dev/null || true
       out=$(cat "${RESTART_RESULT[i]}")
     else
-      worker_state=$(ps -p "${RESTART_PID[i]}" -o stat= 2>/dev/null || true)
-      case "$worker_state" in
-        ''|Z*)
-          wait "${RESTART_PID[i]}" 2>/dev/null || true
-          out="unreached: ${IDS[$i]}: the restart worker exited before publishing an outcome"
-          ;;
-        *)
-          i=$((i + 1))
-          continue
-          ;;
-      esac
+      if kill -0 "${RESTART_PID[i]}" 2>/dev/null; then
+        worker_state=$(ps -p "${RESTART_PID[i]}" -o stat= 2>/dev/null || true)
+        case "$worker_state" in
+          Z*) ;;
+          *)
+            i=$((i + 1))
+            continue
+            ;;
+        esac
+      fi
+      wait "${RESTART_PID[i]}" 2>/dev/null || true
+      out="unreached: ${IDS[$i]}: the restart worker exited before publishing an outcome"
     fi
     printf '%s\n' "$out"
     case "$out" in

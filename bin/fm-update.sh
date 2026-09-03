@@ -30,12 +30,15 @@
 #     restart, so their agents must be replaced to actually reload)
 #   - nudge-secondmates: fm-<id>...|none   (the residual: advanced live
 #     secondmates that changed instructions but cannot be restarted provably, so
-#     the older re-read steer is all that is honest for them)
+#     the older re-read steer is all that is honest for them; a legacy remote
+#     advance that cannot report its instruction diff also lands here because
+#     the unknown surface cannot safely authorize a restart)
 #
-# The two sets are disjoint and both require a CHANGED INSTRUCTION SURFACE, which
-# is stricter than this command's older "any advance" nudge and matches what the
-# session-start sweep has always used. Restart is stricter again: a bin/-only
-# advance reloads itself on the next call and never costs a conversation
+# The two sets are disjoint. Normally both require a CHANGED INSTRUCTION SURFACE,
+# which is stricter than this command's older "any advance" nudge and matches what
+# the session-start sweep has always used; the one compatibility exception is the
+# legacy remote unknown above. Restart is stricter again: a bin/-only advance
+# reloads itself on the next call and never costs a conversation
 # (bin/fm-ff-lib.sh's ff_instr_needs_reload), and bin/fm-secondmate-restart-lib.sh
 # owns the capability half.
 #
@@ -145,8 +148,8 @@ if [ -f "$SECONDMATES_MD" ]; then
             remote_detail=${remote_result#synced: }
             # The host reports its advance as "<commit> instr=<paths>". A host
             # whose Firstmate copy predates that suffix reports the commit alone,
-            # which is UNKNOWN rather than "nothing changed", so it stays out of
-            # both action sets instead of being restarted or steered on a guess.
+            # which is UNKNOWN rather than "nothing changed" and therefore earns
+            # the safe re-read steer rather than an unprovable restart.
             case "$remote_detail" in
               *' instr='*)
                 remote_instr=${remote_detail##* instr=}
@@ -160,14 +163,17 @@ if [ -f "$SECONDMATES_MD" ]; then
             else
               echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
             fi
-            if [ "$remote_instr_known" -eq 1 ] && [ -n "$remote_instr" ] \
-              && [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta" \
+            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta" \
               && secondmate_agent_is_alive "$id"; then
-              if ff_instr_needs_reload "$remote_instr" \
-                && fm_secondmate_restart_capable "$STATE/$id.meta"; then
-                FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
-              else
+              if [ "$remote_instr_known" -eq 0 ]; then
                 FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+              elif [ -n "$remote_instr" ]; then
+                if ff_instr_needs_reload "$remote_instr" \
+                  && fm_secondmate_restart_capable "$STATE/$id.meta"; then
+                  FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
+                else
+                  FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+                fi
               fi
             fi
             ;;

@@ -73,6 +73,8 @@ SH
   printf 'r1\n' > "$w/seed/README.md"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-remote-secondmate-control.sh"
+  chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
@@ -130,6 +132,7 @@ bump_origin() {
 run_update() {
   local w=$1
   PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
@@ -233,6 +236,55 @@ test_dead_secondmate_gets_no_action() {
   assert_contains "$out" "restart-secondmates: none" "a stopped mate must not be sent to restart"
   assert_contains "$out" "nudge-secondmates: none" "a stopped mate must not receive a queued nudge"
   pass "T3d an already-stopped secondmate is left to startup recovery"
+}
+
+# --- T3e: a legacy remote advance gets the safe fallback steer --------------
+test_legacy_remote_advance_is_nudged() {
+  local w out fake_ssh
+  w=$(new_world t3e)
+  fake_ssh="$w/fakebin/fake-ssh"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+case "${rargs[1]:-}" in
+  update) printf 'synced: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+  state) printf 'alive\n' ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fake_ssh"
+  cat > "$w/home/state/sm1.meta" <<EOF
+window=remote:sm1
+endpoint_task_id=sm1
+worktree=/srv/sm1
+project=/srv/sm1
+harness=claude
+kind=secondmate
+home=/srv/sm1
+remote_host=remote-mac
+remote_backend=herdr
+EOF
+  printf -- '- sm1 - remote domain (host: remote-mac; root: /srv/fm; home: /srv/sm1; scope: things; projects: p; added 2026-09-03)\n' \
+    > "$w/home/data/secondmates.md"
+
+  out=$(FM_TEST_SSH_BIN="$fake_ssh" run_update "$w")
+
+  assert_contains "$out" "remote secondmate sm1: updated on remote-mac" \
+    "the legacy remote advance was not accepted"
+  assert_contains "$out" "restart-secondmates: none" \
+    "an unknown remote instruction diff must not authorize restart"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" \
+    "an unknown remote instruction diff must receive the safe re-read steer"
+  pass "T3e a legacy remote advance falls back to the re-read steer"
 }
 
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
@@ -392,6 +444,7 @@ test_reread_gate_is_instruction_only
 test_bin_only_advance_never_restarts
 test_unprovable_runtime_gets_no_action
 test_dead_secondmate_gets_no_action
+test_legacy_remote_advance_is_nudged
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current

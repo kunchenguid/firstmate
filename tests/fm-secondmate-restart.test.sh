@@ -193,6 +193,8 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_no_grep '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
   assert_absent "$dir/home/state/sm1.control-relaunch" \
     "a restart transaction was opened without a confirmed persist"
+  grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=awaiting_report$' \
+    || fail "the timed-out persist expectation was closed instead of left to recovery"
 
   # The request the mate actually received is the open-record half of /stow only.
   request=$(cat "$dir/home/state/sm1.inbox"/*.msg)
