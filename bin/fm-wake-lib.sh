@@ -1097,6 +1097,7 @@ fm_failure_episode_reset() {
   esac
   for path in \
     "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-epoch" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed"
   do
@@ -1107,6 +1108,7 @@ fm_failure_episode_reset() {
   done
   if ! rm -f \
     "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-epoch" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed" \
     2>/dev/null; then
@@ -1154,11 +1156,12 @@ fm_failure_episode_reset() {
 #   - The irrevocable commit point of a translation is the EXIT STATUS: the
 #     harness delivers the collected stderr banner only on exit 2 and discards
 #     it on exit 0. Markerless outcomes commit with the owned terminal ledger
-#     write. The once-per-episode failure notice commits only when its marker is
-#     created after the winning "failed" write in the same owned critical
-#     section. A superseded generation or failed required-marker creation is
-#     refused and exits 0 silently even after printing; a later generation
-#     supersedes the terminal entry and retries the notice.
+#     write. An owned generation's once-per-episode failure notice commits only
+#     when its marker is created after the winning "failed" write in the same
+#     owned critical section. A claim failure that cannot acquire that section
+#     instead publishes an independent failure epoch, and concurrent publishers
+#     elect one notice through atomic marker creation. The synchronous guard
+#     consumes either failure record.
 #
 # This structurally removes the failure classes the lock-held-across-arm
 # design produced: a hung owner deferring every later firing forever (observed
@@ -1307,21 +1310,57 @@ fm_autoarm_claim_signature() {  # <state-dir>
   fi
 }
 
-# Publish a terminal failed generation for an eligible hook invocation that
-# could not claim an arming generation. This diagnostic handoff never acquires
-# the claim micro-mutex whose contention it may be reporting. It gives a short
-# in-flight writer time to advance the exact pre-attempt ledger snapshot, then
-# commits the failure when a live or hung holder leaves that snapshot unchanged.
+fm_autoarm_failure_ledger_read() {  # <state-dir>
+  local state=$1 failure
+  failure="$state/.claude-autoarm-failure-epoch"
+  FM_AUTOARM_FAILURE_EPOCH=
+  FM_AUTOARM_FAILURE_OWNER=
+  FM_AUTOARM_FAILURE_OUTCOME=
+  FM_AUTOARM_FAILURE_EPOCH=$(_fm_autoarm_epoch_field "$failure" epoch) || return 1
+  FM_AUTOARM_FAILURE_OWNER=$(_fm_autoarm_epoch_field "$failure" owner_pid) || return 1
+  FM_AUTOARM_FAILURE_OUTCOME=$(_fm_autoarm_epoch_field "$failure" outcome) || return 1
+  case "$FM_AUTOARM_FAILURE_EPOCH" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$FM_AUTOARM_FAILURE_OWNER" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$FM_AUTOARM_FAILURE_OUTCOME" in
+    failed|failed-suppressed) return 0 ;;
+  esac
+  return 1
+}
+
+fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
+  local marker=$1 claim_id=$2 pid marker_tmp
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    return 2
+  fi
+  pid=${BASHPID:-$$}
+  marker_tmp="$marker.tmp.$pid"
+  if ! printf '%s\n' "$claim_id" > "$marker_tmp" 2>/dev/null; then
+    return 1
+  fi
+  if ln "$marker_tmp" "$marker" 2>/dev/null; then
+    rm -f "$marker_tmp" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$marker_tmp" 2>/dev/null || true
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    return 2
+  fi
+  return 1
+}
+
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock epoch pid gen identity tmp current i
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock failure pid failure_epoch tmp current i marker_rc
   lock="$state/.claude-autoarm.lock"
-  epoch="$state/.claude-autoarm-epoch"
+  failure="$state/.claude-autoarm-failure-epoch"
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
   pid=${BASHPID:-$$}
-  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
   i=0
   while [ -e "$lock" ] && [ "$i" -lt 20 ]; do
     current=$(fm_autoarm_claim_signature "$state")
@@ -1331,33 +1370,22 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   done
   current=$(fm_autoarm_claim_signature "$state")
   [ "$current" = "$baseline" ] || return 2
-  gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
-  case "$gen" in
-    ''|*[!0-9]*) gen=0 ;;
+  failure_epoch="$(date +%s)${pid}"
+  tmp="$failure.tmp.$pid"
+  if ! printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+      "$failure_epoch" "$pid" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$failure" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  [ -n "$marker" ] || return 0
+  fm_autoarm_failure_notice_claim "$marker" "$failure_epoch"
+  marker_rc=$?
+  case "$marker_rc" in
+    0) return 0 ;;
+    2) return 3 ;;
+    *) return 1 ;;
   esac
-  gen=$((gen + 1))
-  tmp="$epoch.tmp.$pid"
-  if ! {
-      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-        "$gen" "$pid" "$outcome" "$(date +%s)"
-      [ -z "$identity" ] || printf '%s\n' "$identity"
-    } > "$tmp" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
-  fi
-  current=$(fm_autoarm_claim_signature "$state")
-  if [ "$current" != "$baseline" ]; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 2
-  fi
-  if ! mv -f "$tmp" "$epoch" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
-  fi
-  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
-    return 1
-  fi
-  return 0
 }
 
 # Write a new outcome for a generation this process still owns, re-verified
@@ -1369,7 +1397,7 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
 # Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
 # unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i marker_rc
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
@@ -1395,9 +1423,13 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     fm_lock_release "$lock"
     return 1
   fi
-  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
-    fm_lock_release "$lock"
-    return 2
+  if [ -n "$marker" ]; then
+    fm_autoarm_failure_notice_claim "$marker" "$gen:$pid"
+    marker_rc=$?
+    if [ "$marker_rc" -ne 0 ]; then
+      fm_lock_release "$lock"
+      return 2
+    fi
   fi
   fm_lock_release "$lock"
   return 0
@@ -1476,6 +1508,36 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
       ;;
   esac
   return 0
+}
+
+fm_autoarm_legacy_claim_active() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
+  role=$(fm_lock_role "$lock" 2>/dev/null || true)
+  [ "$role" = autoarm ] || return 1
+  pid=$(cat "$lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ]; then
+    current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    [ -n "$current" ] && [ "$current" = "$recorded" ] || return 1
+  fi
+  owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid 2>/dev/null || true)
+  outcome=$(_fm_autoarm_epoch_field "$epoch" outcome 2>/dev/null || true)
+  if [ "$owner" = "$pid" ] && [ "$outcome" = arming ]; then
+    [ "$(fm_path_age "$epoch")" -lt "$grace" ] \
+      || [ "$(fm_path_age "$state/.last-watcher-beat")" -lt "$grace" ]
+    return $?
+  fi
+  [ "$owner" != "$pid" ] || return 1
+  [ "$(fm_path_age "$lock")" -lt "$grace" ]
 }
 
 # Remove a proven-abandoned legacy claim so the next claimant can arm. The

@@ -220,8 +220,8 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
-write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [label]
-  local fakebin=$1 spawned_cwd=$2 spawned_pid=$3 label=${4:-claude}
+write_claude_daemon_args_ps() {  # <fakebin> <daemon-args>
+  local fakebin=$1 daemon_args=$2
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -238,7 +238,7 @@ case "\$pid:\$field" in
   700:args=|701:args=) printf '%s\n' claude ;;
   700:ppid=|701:ppid=) printf '%s\n' 1 ;;
   900:comm=) printf '%s\n' claude ;;
-  900:args=) printf '%s\n' '/Users/u/.local/bin/claude daemon run --keep-alive --spawned-by {"label":"$label","cwd":"$spawned_cwd","pid":$spawned_pid}' ;;
+  900:args=) printf '%s\n' '$daemon_args' ;;
   900:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
@@ -248,8 +248,14 @@ SH
   chmod +x "$fakebin/ps"
 }
 
+write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [label]
+  local fakebin=$1 spawned_cwd=$2 spawned_pid=$3 label=${4:-claude}
+  write_claude_daemon_args_ps "$fakebin" \
+    "/Users/u/.local/bin/claude daemon run --keep-alive --spawned-by {\"label\":\"$label\",\"cwd\":\"$spawned_cwd\",\"pid\":$spawned_pid}"
+}
+
 test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
-  local dir root state other fakebin
+  local dir root state other fakebin args
   dir="$TMP_ROOT/daemon-spawned-by"
   root="$dir/home"
   state="$root/state"
@@ -281,6 +287,34 @@ test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
   write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700 codex
   if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
     fail "the daemon bridge accepted spawned-by metadata for a non-Claude session label"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/poisoned-tail")
+  args="/Users/u/.local/bin/claude daemon run --spawned-by {\"label\":\"codex\",\"cwd\":\"$other\",\"pid\":701} --metadata {\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_args_ps "$fakebin" "$args"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted matching fields outside the spawned-by value"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/duplicate-flag")
+  args="/Users/u/.local/bin/claude daemon run --spawned-by {\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700} --spawned-by {\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_args_ps "$fakebin" "$args"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted duplicate spawned-by values"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/duplicate-key")
+  args="/Users/u/.local/bin/claude daemon run --spawned-by {\"label\":\"codex\",\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_args_ps "$fakebin" "$args"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted ambiguous spawned-by JSON"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/malformed-json")
+  args="/Users/u/.local/bin/claude daemon run --spawned-by {\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700,}"
+  write_claude_daemon_args_ps "$fakebin" "$args"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted malformed spawned-by JSON"
   fi
   pass "session-lock: Claude daemon spawned-by metadata bridges only to the matching foreground lock owner"
 }

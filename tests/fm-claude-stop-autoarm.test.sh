@@ -188,6 +188,10 @@ epoch_outcome() {
   sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+failure_epoch_outcome() {
+  sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-failure-epoch" 2>/dev/null || true
+}
+
 # Run the hook in the background under the fake harness, output captured to a
 # file. Sets RUN_AUTOARM_BG_PID (a direct child of the calling shell, so the
 # caller can `wait` on it for the hook's exit status).
@@ -491,7 +495,7 @@ SH
   expect_code 2 "$status" "an eligible hook that cannot recover the session lock must report a failed claim"
   assert_contains "$out" "could not claim recovery" "claim failure did not describe the failed claim path"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "claim failure did not write the failure marker"
-  [ "$(epoch_outcome "$dir")" = failed ] || fail "claim failure did not record outcome=failed"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "claim failure did not record outcome=failed"
   [ "$(epoch_field "$dir" owner_pid)" != 9999999 ] || fail "claim failure left the dead session owner as the auto-arm owner"
   assert_absent "$dir/state/arm-ran" "claim failure armed after the recovery claim failed"
   pass "auto-arm: failed claim paths leave a durable failed epoch and marker"
@@ -514,7 +518,7 @@ test_live_claim_mutex_holder_cannot_hide_failure() {
   expect_code 2 "$status" "a live claim-mutex holder must not hide an eligible claim failure"
   assert_contains "$out" "could not claim recovery" "claim-mutex failure did not report the failed claim"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "live claim-mutex contention did not write the failure marker"
-  [ "$(epoch_outcome "$dir")" = failed ] || fail "live claim-mutex contention did not record outcome=failed"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "live claim-mutex contention did not record outcome=failed"
   [ "$lock_after" = "$holder" ] || fail "failure reporting replaced the live claim-mutex holder"
   assert_absent "$dir/state/arm-ran" "claim-mutex failure reached the arm"
   pass "auto-arm: live claim-mutex contention records a durable failure independently"
@@ -539,10 +543,47 @@ test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
   expect_code 2 "$status" "a fresh prior terminal epoch must not hide the current claim failure"
   assert_contains "$out" "could not claim recovery" "fresh-epoch claim failure did not report the failed claim"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "fresh prior terminal epoch suppressed the current failure marker"
-  [ "$(epoch_field "$dir" epoch)" -gt "$prior_gen" ] || fail "current failure did not supersede the prior terminal generation"
-  [ "$(epoch_outcome "$dir")" = failed ] || fail "fresh prior terminal epoch still masks outcome=failed"
+  [ "$(epoch_field "$dir" epoch)" -eq "$prior_gen" ] || fail "current failure rewrote the prior main generation"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "fresh prior terminal epoch still masks outcome=failed"
   assert_absent "$dir/state/arm-ran" "fresh-epoch claim failure reached the arm"
   pass "auto-arm: prior terminal freshness cannot suppress a current claim failure"
+}
+
+test_concurrent_claim_failures_publish_one_notice_atomically() {
+  local dir holder rc1 rc2 notices
+  dir=$(make_primary_dir "$TMP_ROOT/concurrent-claim-failures")
+  : > "$dir/state/task.meta"
+  printf 'epoch=17 owner_pid=9999999 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1" &
+    p1=$!
+    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err2" &
+    p2=$!
+    wait "$p1"; echo $? > "$FM_HOME/state/rc1"
+    wait "$p2"; echo $? > "$FM_HOME/state/rc2"
+  '
+  rc1=$(cat "$dir/state/rc1")
+  rc2=$(cat "$dir/state/rc2")
+  notices=$(grep -h -c 'could not claim recovery' "$dir/state/err1" "$dir/state/err2" | awk '{ total += $1 } END { print total + 0 }')
+  printf 'epoch=18 owner_pid=%s outcome=arming updated_at=%s\n' \
+    "$holder" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$rc1" "the first concurrent claim failure must request another Stop-owned retry"
+  expect_code 2 "$rc2" "the second concurrent claim failure must request another Stop-owned retry"
+  [ "$notices" -eq 1 ] || fail "concurrent claim failures emitted $notices notices instead of one"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "concurrent claim failures did not publish the failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "concurrent claim failures did not publish a valid independent failure epoch"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "fixture did not reproduce the stalled claimant's later main-ledger write"
+  pass "auto-arm: concurrent claim failures atomically elect one notice and retain independent failure state"
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
@@ -920,6 +961,29 @@ test_claim_not_named_by_the_ledger_is_never_reclaimed() {
   pass "auto-arm: a live claim the ledger does not name is never reclaimed"
 }
 
+test_stale_unmatched_legacy_claim_reports_without_signalling() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/stale-unmatched-legacy")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_epoch "$dir" 464 999 rewake
+  touch -t 202001010000 "$dir/state/.claude-autoarm.lock"
+
+  out=$(FM_GUARD_GRACE=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  kill -0 "$pid" 2>/dev/null || fail "an unmatched legacy holder must not be signalled"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 2 "$status" "a stale unmatched legacy claim must report a durable failure"
+  assert_contains "$out" "did not publish a matching ledger" "the unmatched legacy claim failure was not identified"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the unmatched legacy claim did not publish its failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "the unmatched legacy claim did not publish a failed epoch"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "failure reporting rewrote the prior main epoch"
+  pass "auto-arm: stale unmatched legacy claims report without signalling unverified owners"
+}
+
 # The same unrecoverable lapse, reached where the ledger cannot prove it: a session
 # teardown kills the claim's whole process group before it records any outcome, so
 # the entry still reads "arming" while the recorded pid is later handed to an
@@ -1292,6 +1356,7 @@ test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
+test_concurrent_claim_failures_publish_one_notice_atomically
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
@@ -1306,6 +1371,7 @@ test_stale_terminal_epoch_dead_owner_does_not_prevent_next_claim
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed
+test_stale_unmatched_legacy_claim_reports_without_signalling
 test_pid_reused_arming_claim_is_reclaimed_and_rearms
 test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms
 test_identity_matched_arming_claim_is_never_reclaimed

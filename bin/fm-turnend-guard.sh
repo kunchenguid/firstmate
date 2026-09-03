@@ -160,6 +160,7 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+FAILURE_EPOCH="$STATE/.claude-autoarm-failure-epoch"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
@@ -237,8 +238,13 @@ fi
 budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
-  current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_read "$STATE"; then
+    current_epoch="failure:$FM_AUTOARM_FAILURE_EPOCH:$FM_AUTOARM_FAILURE_OWNER"
+    outcome=$FM_AUTOARM_FAILURE_OUTCOME
+  else
+    current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+    outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  fi
   initialized=0
   COUNT=0
   if [ -f "$BUDGET_FILE" ]; then
@@ -284,7 +290,7 @@ budget_account_current_epoch() {
 }
 
 autoarm_owns_recovery() {
-  local pid role outcome age
+  local role outcome age epoch_path
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   # A live OPEN generation claim owns recovery: the ledger names a live,
   # identity-matched owner still arming that is not stuck (fm_autoarm_claim_open
@@ -301,31 +307,35 @@ autoarm_owns_recovery() {
   # Legacy shim: a pre-generation build's claim holds the owner lock with the
   # autoarm role for its whole cycle; defer to it under the legacy abandonment
   # proof so an upgrade mid-session cannot double-arm.
-  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-    && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+  if [ "$role" = autoarm ] && fm_autoarm_legacy_claim_active "$STATE" "$GRACE"; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  epoch_path="$STATE/.claude-autoarm-epoch"
+  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_read "$STATE"; then
+    outcome=$FM_AUTOARM_FAILURE_OUTCOME
+    epoch_path=$FAILURE_EPOCH
+  else
+    outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  fi
   case "$outcome" in
     rewake)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$epoch_path")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
         return 0
       fi
       ;;
     failed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$epoch_path")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
       fi
       ;;
     failed-suppressed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$epoch_path")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         :
@@ -353,8 +363,7 @@ terminal_fail_open() {
     # episode's one attended alarm would never fire, so clear the abandoned
     # claim and let this decision finish instead. Failing to clear it
     # re-blocks rather than allowing.
-    if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-      && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+    if [ "$role" = autoarm ] && fm_autoarm_legacy_claim_active "$STATE" "$GRACE"; then
       return 2
     fi
     fm_autoarm_release_abandoned "$STATE" "$GRACE" || return 1
@@ -414,6 +423,7 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
+  fm_autoarm_failure_ledger_read "$STATE" && return 0
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;

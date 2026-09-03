@@ -53,11 +53,12 @@
 #     until the synchronous guard has consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
-# generation and outcome so the synchronous Stop guard
+# generation and outcome, while state/.claude-autoarm-failure-epoch records a
+# claim failure independently of a contended claim mutex, so the synchronous Stop guard
 # (bin/fm-turnend-guard.sh --claude) can allow a stop whose recovery this hook
 # already owns, instead of forcing a duplicate continuation for the same event
-# epoch. The failure marker
-# state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
+# epoch. The failure marker state/.claude-autoarm-failure-notified atomically
+# deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
 #
@@ -138,23 +139,21 @@ need_supervision || exit 0
 CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
 
 autoarm_claim_failure() {  # <reason>
-  local reason=$1 outcome marker
-  outcome=failed
-  marker=$FAILURE_NOTICE
-  if [ -e "$FAILURE_NOTICE" ]; then
-    outcome='failed-suppressed'
-    marker=
-  fi
-  if fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" "$outcome" "$marker"; then
-    [ -e "$FAILURE_ALARM" ] && exit 0
-    if [ "$outcome" = failed ]; then
-      {
-        printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not claim recovery: %s.\n' "$reason"
-        printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook claim path before ending blind.\n'
-      } >&2
-    fi
-    exit 2
-  fi
+  local reason=$1 failure_rc
+  fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE"
+  failure_rc=$?
+  case "$failure_rc" in
+    0|3)
+      [ -e "$FAILURE_ALARM" ] && exit 0
+      if [ "$failure_rc" -eq 0 ]; then
+        {
+          printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not claim recovery: %s.\n' "$reason"
+          printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook claim path before ending blind.\n'
+        } >&2
+      fi
+      exit 2
+      ;;
+  esac
   exit 0
 }
 
@@ -187,13 +186,18 @@ if [ "$CLAIM_RC" -ne 0 ]; then
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   case "$ROLE" in
     autoarm)
-      fm_autoarm_claim_abandoned "$STATE" "$GRACE" || exit 0
-      fm_autoarm_release_abandoned "$STATE" "$GRACE" \
-        || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
-      fm_autoarm_claim_next "$STATE" "$GRACE"
-      CLAIM_RC=$?
-      [ "$CLAIM_RC" -eq 0 ] \
-        || { [ "$CLAIM_RC" -eq 2 ] && exit 0; autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'; }
+      if fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+        fm_autoarm_release_abandoned "$STATE" "$GRACE" \
+          || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
+        fm_autoarm_claim_next "$STATE" "$GRACE"
+        CLAIM_RC=$?
+        [ "$CLAIM_RC" -eq 0 ] \
+          || { [ "$CLAIM_RC" -eq 2 ] && exit 0; autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'; }
+      elif fm_autoarm_legacy_claim_active "$STATE" "$GRACE"; then
+        exit 0
+      else
+        autoarm_claim_failure 'legacy auto-arm claim did not publish a matching ledger'
+      fi
       ;;
     terminal-check)
       exit 0

@@ -147,29 +147,70 @@ fm_session_resolve_dir() {  # <dir>
   CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
 }
 
-fm_claude_spawned_by_label() {  # <process-args>
-  printf '%s\n' "$1" | sed -n 's/.*"label":[[:space:]]*"\([^"]*\)".*/\1/p'
-}
-
-fm_claude_spawned_by_cwd() {  # <process-args>
-  printf '%s\n' "$1" | sed -n 's/.*"cwd":[[:space:]]*"\([^"]*\)".*/\1/p'
-}
-
-fm_claude_spawned_by_pid() {  # <process-args>
-  printf '%s\n' "$1" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+fm_claude_spawned_by_json() {  # <process-args>
+  local args=$1 padded rest
+  case "$args" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  padded=" $args "
+  case "$padded" in *" --spawned-by "*) ;; *) return 1 ;; esac
+  rest=${padded#*" --spawned-by "}
+  case " $rest" in *" --spawned-by "*) return 1 ;; esac
+  printf '%s\n' "$rest" | awk '
+    {
+      s = $0
+      start = match(s, /[^[:space:]]/)
+      if (start == 0 || substr(s, start, 1) != "{") exit 1
+      depth = 0
+      quoted = 0
+      escaped = 0
+      finish = 0
+      for (i = start; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (quoted) {
+          if (escaped) escaped = 0
+          else if (c == "\\") escaped = 1
+          else if (c == "\"") quoted = 0
+        } else if (c == "\"") quoted = 1
+        else if (c == "{") depth++
+        else if (c == "}") {
+          depth--
+          if (depth == 0) { finish = i; break }
+          if (depth < 0) exit 1
+        }
+      }
+      tail = substr(s, finish + 1)
+      if (finish == 0 || quoted || (tail != "" && substr(tail, 1, 1) !~ /[[:space:]]/)) exit 1
+      print substr(s, start, finish - start + 1)
+    }
+  '
 }
 
 fm_claude_daemon_spawned_by_matches() {  # <process-args> <lock-pid> <root-real>
-  local args=$1 lock_pid=$2 root_real=$3 label spawned_pid spawned_cwd spawned_real
+  local args=$1 lock_pid=$2 root_real=$3 json spawned_pid spawned_cwd spawned_real key count
   case " $args " in
     *" daemon run "*"--spawned-by "*) ;;
     *) return 1 ;;
   esac
-  label=$(fm_claude_spawned_by_label "$args")
-  [ "$label" = claude ] || return 1
-  spawned_pid=$(fm_claude_spawned_by_pid "$args")
+  command -v jq >/dev/null 2>&1 || return 1
+  json=$(fm_claude_spawned_by_json "$args") || return 1
+  for key in label cwd pid; do
+    count=$(printf '%s\n' "$json" | grep -o "\"$key\"[[:space:]]*:" | wc -l | tr -d '[:space:]')
+    [ "$count" = 1 ] || return 1
+  done
+  printf '%s\n' "$json" | jq -e '
+    type == "object"
+    and (keys | sort) == ["cwd", "label", "pid"]
+    and .label == "claude"
+    and (.cwd | type) == "string"
+    and (.cwd | contains("\n") | not)
+    and (.cwd | contains("\r") | not)
+    and (.cwd | contains("\t") | not)
+    and (.pid | type) == "number"
+    and ((.pid | floor) == .pid)
+    and .pid > 0
+  ' >/dev/null 2>&1 || return 1
+  spawned_pid=$(printf '%s\n' "$json" | jq -r '.pid')
   [ "$spawned_pid" = "$lock_pid" ] || return 1
-  spawned_cwd=$(fm_claude_spawned_by_cwd "$args")
+  spawned_cwd=$(printf '%s\n' "$json" | jq -r '.cwd')
   [ -n "$spawned_cwd" ] || return 1
   spawned_real=$(fm_session_resolve_dir "$spawned_cwd") || return 1
   [ "$spawned_real" = "$root_real" ]

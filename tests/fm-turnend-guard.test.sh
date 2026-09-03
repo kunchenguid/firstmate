@@ -1470,6 +1470,25 @@ test_hook_claude_mode_preserves_fresh_failed_progression() {
   pass "fm-turnend-guard --claude: fresh failed epochs preserve and advance monotonic fail-open progression"
 }
 
+test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-independent-claim-failure")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=17 owner_pid=999 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-failure-epoch"
+  seed_claude_budget "$dir" 4 stale-main-epoch
+
+  out=$(run_hook_claude "$dir" true); status=$?
+
+  expect_code 0 "$status" "a bounded independent claim failure must reach the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the guard ignored the independent claim-failure epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the independent claim failure did not enter the attended progression"
+  pass "fm-turnend-guard --claude: independent claim failures override unrelated main-ledger success"
+}
+
 test_hook_claude_mode_integrated_monotonic_fail_open() {
   local dir out status guard_out guard_status i pid identity count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-integrated-fail-open")
@@ -1690,6 +1709,8 @@ test_hook_claude_mode_allow_resets_budget() {
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
+  printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=1\n' \
+    > "$dir/state/.claude-autoarm-failure-epoch"
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
@@ -1705,6 +1726,7 @@ test_hook_claude_mode_allow_resets_budget() {
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
+  [ ! -f "$dir/state/.claude-autoarm-failure-epoch" ] || fail "positive watcher recovery must reset the independent failure epoch"
   [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
   [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
@@ -1960,6 +1982,7 @@ test_hook_claude_mode_allows_on_open_generation_claim
 test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
+test_hook_claude_mode_consumes_independent_claim_failure_epoch
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
