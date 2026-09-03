@@ -938,9 +938,9 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const verdictDescription = report.parameters.properties.verdict.description;
-  if (!verdictDescription.includes("unconditionally") ||
-      !verdictDescription.includes("directly answers an explicit captain request") ||
-      !verdictDescription.includes("regardless of whether it is healthy, routine, measured, actionable, or requires a decision")) {
+  if (!verdictDescription.includes("Verdict: routine or captain") ||
+      !verdictDescription.includes("one owner of the rule") ||
+      verdictDescription.includes("unconditionally")) {
     throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
   }
   const result = await report.execute(

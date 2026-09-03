@@ -63,8 +63,8 @@ For anything it tells you to escalate, or any failure that survives the playbook
 
 # Verdict: routine or captain
 
-Report verdict captain for any outcome that directly answers an explicit captain request.
-This rule is unconditional: do not qualify it by whether the result is healthy, routine, measured, actionable, or requires a decision.
+Report verdict captain for the finished result of work the captain requested, even when that result is healthy.
+A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine.
 Also report verdict captain for:
 - work ready for review - always include the full https:// PR URL in the summary;
 - a decision only the captain can make, including every ask-user finding from a validation gate;
