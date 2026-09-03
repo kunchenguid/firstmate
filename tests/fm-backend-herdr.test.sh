@@ -3246,14 +3246,34 @@ test_busy_state_keeps_busy_for_a_shell_with_a_child() {
   pass "fm_backend_herdr_busy_state: a shell running a child of its own never proves an agent-free pane, so its busy verdict stands"
 }
 
-test_busy_state_non_busy_verdicts_never_read_the_inventory() {
+test_busy_state_stale_idle_registration_is_not_idle() {
+  local dir bgpid stale live
+  dir="$TMP_ROOT/busy-stale-idle-registration"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  stale=$(busy_state_case "$dir/husk" w1:p2 idle "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  # The IDENTICAL idle reading, with a live harness process in the pane.
+  live=$(busy_state_case "$dir/live" w1:p2 idle "$(herdr_live_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$stale" = unknown ] \
+    || fail "an idle registration whose pane holds only a bare idle shell must not read idle, got '$stale'"
+  [ "$live" = idle ] \
+    || fail "the same idle registration over a live process must still read idle, got '$live'"
+  pass "fm_backend_herdr_busy_state: an idle registration contradicted by a lone bare idle shell reads unknown, so a secondmate delivery confirmation cannot read a fabricated completed turn"
+}
+
+test_busy_state_unknown_verdict_never_reads_the_inventory() {
   local dir out
-  dir="$TMP_ROOT/busy-idle-no-inventory"
-  out=$(busy_state_case "$dir" w1:p2 idle)
-  [ "$out" = idle ] || fail "an idle registration must still read idle, got '$out'"
+  dir="$TMP_ROOT/busy-unknown-no-inventory"; mkdir -p "$dir/responses"; : > "$dir/log"
+  printf '{"result":{"agent":{"agent_status":"bogus"}}}\n' > "$dir/responses/1.out"
+  out=$(PATH="$(make_herdr_fakebin "$dir"):$PATH" FM_HERDR_LOG="$dir/log" \
+    FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = unknown ] || fail "an unrecognized agent state must still read unknown, got '$out'"
   assert_not_contains "$(cat "$dir/log")" $'pane\x1fprocess-info' \
     "a verdict the inventory could not change must not pay for the inventory read"
-  pass "fm_backend_herdr_busy_state: only a busy verdict pays for the corroborating inventory read, so no non-busy poll gets slower"
+  pass "fm_backend_herdr_busy_state: an already-unknown verdict skips the corroborating inventory read entirely"
 }
 
 test_busy_state_working_maps_to_busy() {
@@ -4860,7 +4880,8 @@ test_busy_state_working_maps_to_busy
 test_busy_state_stale_registration_is_not_busy
 test_busy_state_keeps_busy_when_the_inventory_proves_nothing
 test_busy_state_keeps_busy_for_a_shell_with_a_child
-test_busy_state_non_busy_verdicts_never_read_the_inventory
+test_busy_state_stale_idle_registration_is_not_idle
+test_busy_state_unknown_verdict_never_reads_the_inventory
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty

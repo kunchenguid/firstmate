@@ -176,6 +176,13 @@ register_agent idle || fail "could not leave a registration on the task pane"
 STATE=$(wait_agent_state dead)
 [ "$STATE" = dead ] \
   || fail "a registration whose pane holds only its shell must classify agent-free within the settle window, got '$STATE'"
+# The classifier reaches agent-free by two independent grounds, and only the
+# process-inventory contradiction is this case's subject. herdr has been seen to
+# drop a bare registration mid-test, which would settle the verdict through
+# `agent get` answering agent_not_found instead and let this case pass without
+# ever consulting the corroboration.
+[ -n "$(registered_status)" ] \
+  || fail "herdr dropped the registration during the settle window, so the agent-free verdict came from an absent registration rather than from the process inventory contradicting a present one"
 pass "real herdr: a reported registration the pane's own process inventory contradicts reads agent-free"
 
 OUT=$(run_control hsmoke exit) \

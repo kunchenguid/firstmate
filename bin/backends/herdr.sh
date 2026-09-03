@@ -3048,52 +3048,46 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
 #
-# A `busy` verdict is corroborated against the pane's own process inventory
-# through fm_backend_herdr_pane_idle_shell_sample, the SAME proof
-# fm_backend_herdr_pane_agent_state uses, so neither verdict can ever downgrade
-# a pane on a rule the other does not apply. Only a REPORTED-BUSY state needs
-# that corroboration, because `busy` is the only native verdict that can wedge a
-# pane: bin/fm-busy-lib.sh's record-free fallthrough and
-# bin/fm-supervise-daemon.sh's pane_is_busy both act on `busy` alone and treat a
-# native `idle` as no evidence at all, falling back to their own. So the two
-# verdicts do still differ for a stale registration last reported idle - that
-# pane reads `dead` from the classifier and `idle` here - which is deliberate:
-# corroborating the idle branch would pay an inventory read on every poll of
-# every healthy pane (a live Claude reports idle through a whole turn) to change
-# an answer nothing is wedged by. The registry is written by
-# whatever reports into it and a report is not withdrawn when the process that
-# made it goes away, so a harness killed mid-turn leaves `agent get` answering
-# `working` forever. Nothing else clears that: bin/fm-busy-lib.sh's record-free
-# fallthrough would print `busy herdr-native` on every poll and suppress watcher
-# stale-pane escalation, and bin/fm-supervise-daemon.sh's pane_is_busy would
-# defer away-mode injection forever - the same "no state that could ever clear
-# it" failure the liveness classifier fixes, in the watcher lane.
+# EVERY reported agent state, `busy` and `idle` alike, is corroborated against
+# the pane's own process inventory through fm_backend_herdr_pane_idle_shell_sample,
+# the SAME proof fm_backend_herdr_pane_agent_state uses, so the two verdicts
+# always agree about what the pane is. The registry is written by whatever
+# reports into it and a report is not withdrawn when the process that made it
+# goes away, so a harness that dies mid-turn leaves `agent get` answering its
+# last report forever, and nothing else ever clears that.
+#
+# Both reported states are acted on positively by a consumer, which is why
+# neither can be trusted alone. A stale `working` makes bin/fm-busy-lib.sh's
+# record-free fallthrough print `busy herdr-native` on every poll and suppress
+# watcher stale-pane escalation, and makes bin/fm-supervise-daemon.sh's
+# pane_is_busy defer away-mode injection forever. A stale `idle` is taken by
+# fm_pending_reply_backend_observation (bin/fm-pending-reply-lib.sh), which
+# short-circuits on it without consulting anything else and stamps a secondmate
+# turn completed for an endpoint whose harness is gone.
 #
 # The corroboration is positive-only and identical in shape to the classifier's:
-# only a pane that positively proves a lone bare idle shell loses `busy`, while
-# a live process, an extra foreground process, a shell with a child, an
+# only a pane that positively proves a lone bare idle shell loses its verdict,
+# while a live process, an extra foreground process, a shell with a child, an
 # unreadable inventory, and an inventory answering about a different pane all
 # leave the verdict exactly as before.
 #
-# It resolves to `unknown`, never `idle`: a pane with no agent has no native
-# agent state at all, and `unknown` is every consumer's documented cue to fall
-# back to its own evidence, so no caller gains a fabricated positive idle (a
-# secondmate delivery confirmation in bin/fm-pending-reply-lib.sh would read
-# one as a completed turn).
+# A proved-agent-free pane resolves to `unknown`, never to `idle`: a pane with
+# no agent has no native agent state at all, and `unknown` is every consumer's
+# documented cue to fall back to its own evidence, so no caller gains a
+# fabricated positive from a registration that outlived its agent.
 #
-# The inventory read is taken ONLY on the `busy` branch, where it can change
-# the answer. `idle` and `unknown` verdicts pay nothing, and the submit
-# confirmation loop does not come through here at all: it polls
+# An already-`unknown` verdict skips the inventory read, which cannot change it.
+# The submit-confirmation loop does not come through here at all: it polls
 # fm_backend_herdr_agent_status_raw directly (fm_backend_herdr_wait_for_working,
 # fm_backend_herdr_send_text_submit, fm_backend_herdr_queued_enter_busy), so no
-# tight loop pays for this. Measured cost on the busy branch:
+# tight loop pays for this. Measured cost:
 # docs/verification/runtime-backends.md "Native busy-state corroboration cost".
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
   verdict=$(fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
-  if [ "$verdict" = busy ] && fm_backend_herdr_pane_idle_shell_sample \
+  if [ "$verdict" != unknown ] && fm_backend_herdr_pane_idle_shell_sample \
     "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
     printf 'unknown'
     return 0

@@ -710,9 +710,10 @@ This is the command that refreshes this record; run it after every harness upgra
 
 ### Native busy-state corroboration cost
 
-`fm_backend_herdr_busy_state` corroborates a `busy` verdict against the pane's own `pane process-info` inventory.
+`fm_backend_herdr_busy_state` corroborates every reported agent state against the pane's own `pane process-info` inventory.
 `bin/backends/herdr.sh` owns that contract and [`herdr-backend.md`](../herdr-backend.md#current-transport-behavior) states it; this record measures what it costs.
 Busy state is read on watcher and away-mode ticks, so the added read was measured rather than assumed.
+The last row runs the same read without the corroboration, so the added cost is derivable from this output rather than asserted beside it.
 Measured 2026-09-02 on Darwin arm64, Herdr 0.8.2, in an isolated `fm-lab-` session, 50 calls per row:
 
 ```sh
@@ -732,6 +733,13 @@ PANE=${IDS##* }
 report() { herdr pane report-agent "$PANE" --source fm-busy-cost \
   --agent fm-busy-cost-agent --state "$1" --session "$SESSION" >/dev/null; }
 verdict() { printf '%-52s -> %s\n' "$1" "$(fm_backend_herdr_busy_state "$SESSION:$PANE")"; }
+# The same read WITHOUT the corroboration, so the added cost is derivable from
+# this output rather than asserted beside it.
+uncorroborated() {  # <target>
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_classify_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
+}
 bench() {  # <label> <calls> <command...>
   local label=$1 n=$2 secs
   shift 2
@@ -741,18 +749,22 @@ bench() {  # <label> <calls> <command...>
 }
 
 printf '%s | %s\n' "$(uname -sm)" "$(herdr --version)"
+bench 'agent get (the existing per-poll read)' 50 fm_backend_herdr_agent_status_raw "$SESSION" "$PANE"
+bench 'pane process-info (the added read)' 50 fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE"
 report working
 verdict 'working registration over a bare idle shell'
-bench 'agent get (existing per-poll read)' 50 fm_backend_herdr_agent_status_raw "$SESSION" "$PANE"
-bench 'pane process-info (added read)' 50 fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE"
 bench 'busy_state, working over a bare idle shell' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+report idle
+verdict 'idle registration over a bare idle shell'
+bench 'busy_state, idle over a bare idle shell' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
 herdr_pane_run_foreground "$SESSION" "$PANE" 'sleep 600'
 report working
 verdict 'working registration over a live foreground process'
 bench 'busy_state, working over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
 report idle
-verdict 'idle registration'
-bench 'busy_state, idle (no inventory read)' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+verdict 'idle registration over a live foreground process'
+bench 'busy_state, idle over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+bench 'the same read uncorroborated, live process' 50 uncorroborated "$SESSION:$PANE"
 fm_herdr_lab_teardown "$SESSION"
 ```
 
@@ -760,23 +772,30 @@ Observed output:
 
 ```text
 Darwin arm64 | herdr 0.8.2
+agent get (the existing per-poll read)                 19.2 ms/call (0.961 s / 50 calls)
+pane process-info (the added read)                     14.0 ms/call (0.702 s / 50 calls)
 working registration over a bare idle shell          -> unknown
-agent get (existing per-poll read)                     10.0 ms/call (0.499 s / 50 calls)
-pane process-info (added read)                          6.9 ms/call (0.344 s / 50 calls)
-busy_state, working over a bare idle shell             90.9 ms/call (4.546 s / 50 calls)
+busy_state, working over a bare idle shell            154.8 ms/call (7.741 s / 50 calls)
+idle registration over a bare idle shell             -> unknown
+busy_state, idle over a bare idle shell               148.5 ms/call (7.426 s / 50 calls)
 working registration over a live foreground process  -> busy
-busy_state, working over a live process                38.7 ms/call (1.933 s / 50 calls)
-idle registration                                    -> idle
-busy_state, idle (no inventory read)                   20.2 ms/call (1.010 s / 50 calls)
+busy_state, working over a live process                71.5 ms/call (3.574 s / 50 calls)
+idle registration over a live foreground process     -> idle
+busy_state, idle over a live process                   77.3 ms/call (3.867 s / 50 calls)
+the same read uncorroborated, live process             39.1 ms/call (1.954 s / 50 calls)
 ```
 
-The healthy path this branch actually runs on is a registration reported `working` over a live foreground process: 38.7 ms per call against the 20.2 ms of an `idle` verdict that reads no inventory, so the corroboration costs about 18 ms per poll where it can change the answer.
-An `idle` or `unknown` verdict pays nothing, because the inventory is read only on the `busy` branch.
-Only a pane that really is a lone bare idle shell runs the proof to the end (90.9 ms per call), since that is the one shape whose foreground process group is the shell and therefore reaches the operating-system process-table scan.
+On the healthy path, a pane running a real foreground process, the corroboration costs about 30 ms per call: 77.3 ms against the 39.1 ms the same read costs uncorroborated.
+The inventory read itself is 14.0 ms of that, and the rest is parsing it; the sample ends as soon as the foreground process group turns out not to be the shell, before the operating-system process table is scanned.
+Both reported states now pay it, `busy` and `idle` alike, because both are acted on positively by a consumer.
+An already-`unknown` verdict pays nothing, since no inventory reading can change it.
+
+Only a pane that really is a lone bare idle shell runs the proof to the end, around 150 ms per call, since that is the one shape whose foreground process group is the shell and therefore reaches the process-table scan.
 That pane is the husk this exists to catch, and it is read once per watcher tick rather than in a loop.
+The verdict rows show it resolving to `unknown` from both a stale `working` and a stale `idle`, which is the behavior this record exists to price.
 
 The tight submit-confirmation loops pay nothing at all, because they never call this function.
-`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, measured unchanged at 10.0 ms per call above, and it deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
+`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, measured unchanged at 19.2 ms per call above, and it deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
 The consumers that do read busy state are `bin/fm-busy-lib.sh`, `bin/fm-supervise-daemon.sh`, and `bin/fm-pending-reply-lib.sh`, all once per tick.
 
 Per-call figures move with machine load, so each row prints the raw elapsed seconds and call count it divided, and the verdict rows show which branch each measurement actually took.
