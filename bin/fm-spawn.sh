@@ -12,9 +12,13 @@
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. A
-#   ship or scout spawn also refuses when the brief still contains `{TASK}` or
-#   `{FIRSTMATE_SPEC}` (bin/fm-dod-lib.sh owns that placeholder check and the
-#   `--intent` contract those subsections feed). When the explicit mode carries
+#   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
+#   placeholders, an empty Task, or an incomplete pair of Task subsections.
+#   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
+#   `--intent` contract and the extracted captain intent. A legacy mixed Task is
+#   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
+#   unmarked legacy Tasks stop for migration rather than becoming intent. That
+#   library owns the parsing and intent rules. When the explicit mode carries
 #   less rigor than the project's standing posture, a loud one-line deviation
 #   notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
