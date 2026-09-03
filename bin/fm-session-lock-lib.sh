@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which live, non-zombie verified-harness process holds this
+# home's session lock, and does the current process prove that same session by
+# ancestry or the authenticated Claude daemon bridge?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
-# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
+# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook belongs to the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
@@ -353,14 +354,14 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
+# True when state dir $1 holds a session lock whose pid is a harness ancestor of
+# the current process or the live Claude owner named by an authenticated daemon
+# bridge. Ancestry membership is the ordinary proof, because the lock owner
+# sits at an unknown depth in a contiguous Claude run - it is the
 # outermost pid when the hook fires inside the session's own nested worker chain,
 # and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# lock, a malformed lock, or ownership that neither ancestry nor the optional
+# bridge can prove all fail closed.
 # Claude Code 2.1 can also fire Stop hooks from a daemon/bg-spare process tree
 # whose pid is not below the foreground session process that wrote state/.lock.
 # When the optional root argument is supplied, the daemon's own --spawned-by

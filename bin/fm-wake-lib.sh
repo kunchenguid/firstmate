@@ -1483,21 +1483,24 @@ fm_autoarm_retire_legacy_failure() {  # <state-dir>
 # state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
 # generation. This is an optimistic, generation-based single-flight design:
 #
-#   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
-#     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
-#     claiming process's pid-identity, the same identity every other
-#     supervision lock in this repo records (fm_pid_identity above). The
+#   - The CURRENT claim is the ledger's latest entry: line 1 records the epoch,
+#     claiming pid, outcome, update time, and, for an owner-bound claim, its
+#     authenticated foreground session owner. Line 2 is the claiming process's
+#     pid-identity, the same identity every other supervision lock in this repo
+#     records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
 #     (continuity falls to the synchronous guard), and the identity is read
 #     from the ledger entry alone - never substituted from any lock - so a
 #     reused pid can never authenticate someone else's stale entry.
-#   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",
-#     its owner pid is alive, its recorded identity successfully recomputes
-#     and matches that pid, and it is not STUCK - stuck meaning both the
+#   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming", its
+#     claiming pid is alive, its recorded identity successfully recomputes and
+#     matches that pid, and it is not STUCK - stuck meaning both the
 #     ledger entry and the watcher beacon (state/.last-watcher-beat) are older
 #     than the guard grace, which proves the owner hung mid-arm with nothing
 #     supervising (every legitimate arming phase with no watcher is bounded in
-#     seconds, while a healthy hours-long cycle keeps the beacon beating).
+#     seconds, while a healthy hours-long cycle keeps the beacon beating). A
+#     bound claim additionally stays open only while its foreground owner still
+#     holds state/.lock; unbound pre-upgrade entries retain the older proof.
 #   - Every firing DEFERS (exits 0) to an open claim; anything else - a
 #     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
 #     identityless entry, or no claim at all - lets the next firing take
@@ -1594,9 +1597,10 @@ fm_autoarm_ledger_read() {  # <state-dir>
 }
 
 # True while the CURRENT ledger claim is open and healthy - the defer predicate
-# both Stop participants use. Open means: outcome "arming", a live owner whose
-# mandatory recorded identity recomputes and matches its pid, and not stuck
-# (the contract comment above owns the stuck proof). fm_path_age reports an
+# both Stop participants use. Open means: outcome "arming", a live claimant
+# whose mandatory recorded identity recomputes and matches its pid, and not
+# stuck. An owner-bound claim additionally requires that foreground owner in
+# state/.lock. The contract comment above owns the stuck proof. fm_path_age reports an
 # absent beacon as ancient, which is exactly right: arming for a full grace
 # window without producing a first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
