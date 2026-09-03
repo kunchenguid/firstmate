@@ -67,9 +67,11 @@ FM_BACKLOG_ROW_ERROR=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
-# retained_incomplete | answered | stale | noop.
+# retained_incomplete | answered | stale | recovery_retired | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
+FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR=0
+FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED=0
 
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
@@ -583,6 +585,38 @@ fm_backlog_retain_transition() {
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
+fm_backlog_close_recovery_transition() { # <close|retain> <meta> <marker> <sidecar> <data> <id> <state> [flag...]
+  local mode=$1 meta=$2 marker=$3 sidecar=$4 data=$5 id=$6 state=$7 spawn_gen
+  local mode_flags=()
+  shift 7
+  fm_backlog_close_marker_validate "$marker" "$data" "$id" "$state" || return 1
+  [ "$FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR" = 1 ] \
+    && [ "$FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED" = 0 ] \
+    || { FM_BACKLOG_TRANSITION_ERROR="recovery close requires an unretired sidecar binding"; return 1; }
+  spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
+  declare -F fm_cleanup_recovery_sidecar_validate >/dev/null 2>&1 \
+    || { FM_BACKLOG_TRANSITION_ERROR="cleanup-recovery decoder unavailable"; return 1; }
+  fm_cleanup_recovery_sidecar_validate "$state" "$id" "$spawn_gen" || return 1
+  [ -n "$FM_CLEANUP_RECOVERY_CONTROL_RELAUNCH_TX" ] \
+    || { FM_BACKLOG_TRANSITION_ERROR="orphan cleanup recovery is not bound to a relaunch transaction"; return 1; }
+  [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
+  case "$mode" in
+    close) fm_backlog_done "$data" "$id" "$@" || return 1 ;;
+    retain) fm_backlog_retain "$data" "$id" "$@" || return 1 ;;
+    *) FM_BACKLOG_TRANSITION_ERROR="invalid recovery close mode"; return 2 ;;
+  esac
+  [ "$mode" = close ] || mode_flags=(--retain)
+  fm_backlog_close_marker_commit_recovery_retirement "$state" "$marker" "$id" "$data" \
+    "${mode_flags[@]+"${mode_flags[@]}"}" "$@" || return 1
+  declare -F fm_cleanup_recovery_remove_sidecar >/dev/null 2>&1 \
+    || { FM_BACKLOG_TRANSITION_ERROR="cleanup-recovery decoder unavailable"; return 1; }
+  fm_cleanup_recovery_remove_sidecar "$state" "$id" "$spawn_gen" || {
+    FM_BACKLOG_TRANSITION_ERROR=${FM_CLEANUP_RECOVERY_ERROR:-"cleanup-recovery retirement failed"}
+    return 1
+  }
+  fm_backlog_record_remove "$marker" "pending-close record" "$state"
+}
+
 fm_backlog_atomic_transition() {
   local operation=$1
   shift
@@ -593,6 +627,7 @@ fm_backlog_atomic_transition() {
     rollback) fm_backlog_dispatch_rollback "$@" ;;
     close) fm_backlog_close_transition "$@" ;;
     retain) fm_backlog_retain_transition "$@" ;;
+    close-recovery) fm_backlog_close_recovery_transition "$@" ;;
     *) FM_BACKLOG_TRANSITION_ERROR="unknown backlog atomic transition $operation"; return 2 ;;
   esac
 }
@@ -603,15 +638,17 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
 
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
-  local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
+  local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 cleanup_recovery_sidecar=0 cleanup_recovery_retired=0 mode=close line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
-  local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
+  local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 cleanup_recovery_sidecar_count=0 cleanup_recovery_retired_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
+  FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR=0
+  FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED=0
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
@@ -629,6 +666,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       data=*) data=${line#data=}; data_count=$((data_count + 1)) ;;
       spawn_gen=*) marker_spawn_gen=${line#spawn_gen=}; spawn_gen_count=$((spawn_gen_count + 1)) ;;
       cleanup_incomplete=*) cleanup_incomplete=${line#cleanup_incomplete=}; cleanup_incomplete_count=$((cleanup_incomplete_count + 1)) ;;
+      cleanup_recovery_sidecar=*) cleanup_recovery_sidecar=${line#cleanup_recovery_sidecar=}; cleanup_recovery_sidecar_count=$((cleanup_recovery_sidecar_count + 1)) ;;
+      cleanup_recovery_retired=*) cleanup_recovery_retired=${line#cleanup_recovery_retired=}; cleanup_recovery_retired_count=$((cleanup_recovery_retired_count + 1)) ;;
       mode=*) mode=${line#mode=}; mode_count=$((mode_count + 1)) ;;
       arg=*) args+=("${line#arg=}") ;;
       *) FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"; return 1 ;;
@@ -674,6 +713,26 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       return 1
       ;;
   esac
+  if [ "$cleanup_recovery_sidecar_count" -gt 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
+    return 1
+  fi
+  case "$cleanup_recovery_sidecar" in
+    0|1) ;;
+    *) FM_BACKLOG_TRANSITION_ERROR="invalid cleanup-recovery sidecar state in pending-close record $marker"; return 1 ;;
+  esac
+  if [ "$cleanup_recovery_retired_count" -gt 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
+    return 1
+  fi
+  case "$cleanup_recovery_retired" in
+    0|1) ;;
+    *) FM_BACKLOG_TRANSITION_ERROR="invalid cleanup-recovery retirement state in pending-close record $marker"; return 1 ;;
+  esac
+  if [ "$cleanup_recovery_retired" = 1 ] && [ "$cleanup_recovery_sidecar" != 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="cleanup-recovery retirement has no sidecar binding in pending-close record $marker"
+    return 1
+  fi
   case "$data" in
     /*) ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid data directory in pending-close record $marker"; return 1 ;;
@@ -769,6 +828,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_DATA=$data_resolved
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=$marker_spawn_gen
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=$cleanup_incomplete
+  FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR=$cleanup_recovery_sidecar
+  FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED=$cleanup_recovery_retired
   FM_BACKLOG_CLOSE_VALIDATED_MODE=$mode
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
 }
@@ -810,6 +871,10 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     printf 'data=%s\n' "$data"
     printf 'spawn_gen=%s\n' "$spawn_gen"
     printf 'cleanup_incomplete=%s\n' "$cleanup_incomplete"
+    [ "${FM_BACKLOG_CLOSE_STAGE_RECOVERY_SIDECAR:-0}" = 0 ] \
+      || printf 'cleanup_recovery_sidecar=1\n'
+    [ "${FM_BACKLOG_CLOSE_STAGE_RECOVERY_RETIRED:-0}" = 0 ] \
+      || printf 'cleanup_recovery_retired=1\n'
     [ "$mode" = close ] || printf 'mode=%s\n' "$mode"
     for arg in "${serialized_args[@]+"${serialized_args[@]}"}"; do
       printf 'arg=%s\n' "$arg"
@@ -835,7 +900,29 @@ fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path>
   local state=$1 marker=$2 id=$3 data=$4 spawn_gen=$5 tmp
   shift 5
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
-  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 1 "$@" || return 1
+  FM_BACKLOG_CLOSE_STAGE_RECOVERY_SIDECAR=${FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR:-0} \
+    FM_BACKLOG_CLOSE_STAGE_RECOVERY_RETIRED=${FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED:-0} \
+    fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 1 "$@" || return 1
+  fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
+    || { rm -f "$tmp"; return 1; }
+}
+
+# Commit recovery-sidecar retirement before unlinking either the sidecar or its
+# marker.  The committed marker is replayable whether the sidecar unlink or the
+# final marker unlink is interrupted, without making an uncommitted missing
+# sidecar acceptable.
+fm_backlog_close_marker_commit_recovery_retirement() { # <state> <marker> <id> <data> [flag...]
+  local state=$1 marker=$2 id=$3 data=$4 tmp cleanup_incomplete spawn_gen
+  shift 4
+  fm_backlog_close_marker_validate "$marker" "$data" "$id" "$state" || return 1
+  [ "$FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR" = 1 ] \
+    || { FM_BACKLOG_TRANSITION_ERROR="pending close has no cleanup-recovery sidecar binding"; return 1; }
+  cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
+  spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
+  tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
+  FM_BACKLOG_CLOSE_STAGE_RECOVERY_SIDECAR=1 FM_BACKLOG_CLOSE_STAGE_RECOVERY_RETIRED=1 \
+    fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" \
+      "$cleanup_incomplete" "$@" || return 1
   fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
@@ -856,7 +943,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
+  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete recovery_sidecar recovery_retired mode sidecar
   local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   fm_backlog_directory_present "$state" "state directory" || return 1
@@ -871,13 +958,45 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   data=$FM_BACKLOG_CLOSE_VALIDATED_DATA
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
+  recovery_sidecar=$FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_SIDECAR
+  recovery_retired=$FM_BACKLOG_CLOSE_VALIDATED_RECOVERY_RETIRED
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
+  # Before the retirement phase commits, a sidecar promise is actionable only
+  # after its exact transaction-bound companion is authenticated.  Once that
+  # phase is durable, absence means the unlink landed and is replayable rather
+  # than weakening the uncommitted missing-sidecar refusal.
+  if [ "$recovery_sidecar" = 1 ]; then
+    sidecar="$state/$id.cleanup-recovery"
+    declare -F fm_cleanup_recovery_sidecar_validate >/dev/null 2>&1 \
+      || { FM_BACKLOG_TRANSITION_ERROR="cleanup-recovery decoder unavailable"; return 1; }
+    if [ "$recovery_retired" = 0 ] || [ -e "$sidecar" ] || [ -L "$sidecar" ]; then
+      fm_cleanup_recovery_sidecar_validate "$state" "$id" "$marker_spawn_gen" || return 1
+      [ -n "$FM_CLEANUP_RECOVERY_CONTROL_RELAUNCH_TX" ] \
+        || { FM_BACKLOG_TRANSITION_ERROR="orphan cleanup recovery is not bound to a relaunch transaction"; return 1; }
+    fi
+  fi
   meta="$state/$id.meta"
+  if [ "$recovery_retired" = 1 ]; then
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      fm_backlog_record_present "$meta" "task record" "$state" || return 1
+      fm_backlog_meta_spawn_gen "$meta" "$state" || return 1
+      [ "$FM_BACKLOG_META_SPAWN_GEN" != "$marker_spawn_gen" ] || {
+        FM_BACKLOG_TRANSITION_ERROR="committed recovery retirement conflicts with its task generation"
+        return 1
+      }
+    fi
+    if [ -e "$sidecar" ] || [ -L "$sidecar" ]; then
+      fm_cleanup_recovery_remove_sidecar "$state" "$id" "$marker_spawn_gen" || return 1
+    fi
+    fm_backlog_close_marker_remove "$marker" "$state" || return 1
+    FM_BACKLOG_CLOSE_REPLAY_RESULT=recovery_retired
+    return 0
+  fi
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$state"; then
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
@@ -886,6 +1005,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     fm_backlog_meta_spawn_gen "$meta" "$state" || return 1
     meta_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
     if [ "$meta_spawn_gen" != "$marker_spawn_gen" ]; then
+      if [ "$recovery_sidecar" = 1 ]; then
+        fm_backlog_close_marker_commit_recovery_retirement "$state" "$marker" "$id" "$data" \
+          "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" || return 1
+        fm_cleanup_recovery_remove_sidecar "$state" "$id" "$marker_spawn_gen" || return 1
+      fi
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
@@ -914,12 +1038,21 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       if [ "$mode" = retain ]; then
         # The captain's answer closed the row before this replay; the retained
         # transition owes it nothing more than retiring the record.
+        if [ "$recovery_sidecar" = 1 ]; then
+          fm_backlog_close_marker_commit_recovery_retirement "$state" "$marker" "$id" "$data" \
+            "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" || return 1
+          fm_cleanup_recovery_remove_sidecar "$state" "$id" "$marker_spawn_gen" || return 1
+        fi
         fm_backlog_close_marker_remove "$marker" "$state" || return 1
         FM_BACKLOG_CLOSE_REPLAY_RESULT=answered
         return 0
       fi
-      if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
-          "${args[@]+"${args[@]}"}"; then
+      if { [ "$recovery_sidecar" = 1 ] \
+          && fm_backlog_atomic_transition close-recovery "$mode" '' "$marker" "$sidecar" "$data" "$id" "$state" \
+            "${args[@]+"${args[@]}"}"; } \
+         || { [ "$recovery_sidecar" = 0 ] \
+          && fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
+            "${args[@]+"${args[@]}"}"; }; then
         if [ "$cleanup_incomplete" = 1 ]; then
           FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
         else
@@ -930,13 +1063,22 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
       ;;
     '')
+      if [ "$recovery_sidecar" = 1 ]; then
+        fm_backlog_close_marker_commit_recovery_retirement "$state" "$marker" "$id" "$data" \
+          "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" || return 1
+        fm_cleanup_recovery_remove_sidecar "$state" "$id" "$marker_spawn_gen" || return 1
+      fi
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
       ;;
   esac
-  if fm_backlog_atomic_transition "$mode" '' "$marker" "$data" "$id" "$state" \
-      "${args[@]+"${args[@]}"}"; then
+  if { [ "$recovery_sidecar" = 1 ] \
+       && fm_backlog_atomic_transition close-recovery "$mode" '' "$marker" "$sidecar" "$data" "$id" "$state" \
+         "${args[@]+"${args[@]}"}"; } \
+     || { [ "$recovery_sidecar" = 0 ] \
+       && fm_backlog_atomic_transition "$mode" '' "$marker" "$data" "$id" "$state" \
+         "${args[@]+"${args[@]}"}"; }; then
     if [ "$mode" = retain ]; then
       if [ "$cleanup_incomplete" = 1 ]; then
         FM_BACKLOG_CLOSE_REPLAY_RESULT=retained_incomplete

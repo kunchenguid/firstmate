@@ -177,6 +177,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-cleanup-recovery-lib.sh
+. "$SCRIPT_DIR/fm-cleanup-recovery-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -291,11 +293,17 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
-TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
+fm_cleanup_recovery_decode "$STATE" "$META" "$ID" || {
+  echo "error: teardown refused unsafe cleanup recovery: $FM_CLEANUP_RECOVERY_ERROR" >&2
+  exit 1
+}
+TEARDOWN_CLEANUP_RECOVERY=$FM_CLEANUP_RECOVERY_KIND
+TEARDOWN_RECOVERY_RELAUNCH_TX=$FM_CLEANUP_RECOVERY_CONTROL_RELAUNCH_TX
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
-if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
+if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ] \
+   && { [ "$TEARDOWN_CLEANUP_RECOVERY" != omp-delivery ] || [ -n "$TEARDOWN_RECOVERY_RELAUNCH_TX" ]; }; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
     TEARDOWN_BACKLOG_APPLIES=1
   else
@@ -2631,7 +2639,9 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ] \
+   && ! { [ "$CLEANUP_RECOVERY" = omp-delivery ] \
+          && [ -z "$TEARDOWN_RECOVERY_RELAUNCH_TX" ]; }; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
@@ -2736,13 +2746,21 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   }
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+  FM_BACKLOG_CLOSE_STAGE_RECOVERY_SIDECAR=$(
+    [ "$CLEANUP_RECOVERY" = omp-delivery ] && printf 1 || printf 0
+  ) fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
     "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
     "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
     || { echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
+  elif [ "$CLEANUP_RECOVERY" = omp-delivery ]; then
+    if [ -n "$TEARDOWN_RECOVERY_RELAUNCH_TX" ]; then
+      BACKLOG_SKIP_REASON="failed transaction-bound OMP relaunch has no automatic backlog transition ($TEARDOWN_BACKLOG_SKIP_REASON)"
+    else
+      BACKLOG_SKIP_REASON="failed fresh OMP delivery never moved its queued backlog item"
+    fi
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
@@ -2931,8 +2949,15 @@ rm -rf "$STATE/$ID.inbox"
 # ordering, the row returns to Queued with its deliverable recorded.
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
-  if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
-      "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+  if [ "$CLEANUP_RECOVERY" = omp-delivery ]; then
+    BACKLOG_ATOMIC_ARGS=(close-recovery "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
+      "$STATE/$ID.cleanup-recovery" "$DATA" "$ID" "$STATE")
+  else
+    BACKLOG_ATOMIC_ARGS=("$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
+      "$DATA" "$ID" "$STATE")
+  fi
+  if ! fm_backlog_atomic_transition "${BACKLOG_ATOMIC_ARGS[@]}" \
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     if [ "$BACKLOG_TRANSITION" = retain ]; then
@@ -2948,10 +2973,29 @@ elif [ "$KIND" = secondmate ] && [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
   # deletion; do not turn its confirmed absence into a false cleanup failure.
   :
 else
-  if ! fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
+  if [ "$CLEANUP_RECOVERY" = omp-delivery ]; then
+    if [ -n "$TEARDOWN_RECOVERY_RELAUNCH_TX" ]; then
+      if fm_cleanup_recovery_retire_relaunch_task "$STATE" "$STATE/$ID.meta" "$ID"; then
+        TASK_RECORD_RETIRE_STATUS=0
+      else
+        TASK_RECORD_RETIRE_STATUS=$?
+      fi
+    elif fm_cleanup_recovery_retire_fresh_task "$STATE" "$STATE/$ID.meta" "$ID"; then
+      TASK_RECORD_RETIRE_STATUS=0
+    else
+      TASK_RECORD_RETIRE_STATUS=$?
+    fi
+  else
+    if fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
+      TASK_RECORD_RETIRE_STATUS=0
+    else
+      TASK_RECORD_RETIRE_STATUS=$?
+    fi
+  fi
+  if [ "$TASK_RECORD_RETIRE_STATUS" -ne 0 ]; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
-    echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    echo "error: $ID's endpoint and local copy are cleaned up, but its recovery records could not be retired (${FM_CLEANUP_RECOVERY_ERROR:-$FM_BACKLOG_TRANSITION_ERROR})" >&2
     exit 1
   fi
 fi

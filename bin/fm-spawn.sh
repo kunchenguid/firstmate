@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--profile <name>] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--profile <name>] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -16,7 +16,7 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--profile <personal|sf>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -239,6 +239,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-cleanup-recovery-lib.sh
+. "$SCRIPT_DIR/fm-cleanup-recovery-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -312,6 +314,7 @@ fm_refuse_if_gate_agent
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
+PROFILE=
 MODEL=
 EFFORT=
 BACKEND_ARG=
@@ -319,12 +322,14 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 HARNESS_SET=0
+PROFILE_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+OMP_FORBIDDEN_ARG=
 RELAUNCH=0
 POS=()
 want_value=
@@ -335,6 +340,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      profile) PROFILE=$a; PROFILE_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
@@ -352,6 +358,8 @@ for a in "$@"; do
     --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --profile) want_value=profile ;;
+    --profile=*) PROFILE=${a#--profile=}; PROFILE_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
@@ -364,11 +372,13 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --config|--config=*|--alias|--alias=*) OMP_FORBIDDEN_ARG=${OMP_FORBIDDEN_ARG:-$a}; POS+=("$a") ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
+[ "$PROFILE_SET" -eq 0 ] || [ -n "$PROFILE" ] || { echo "error: --profile requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
@@ -437,6 +447,27 @@ else
       exit 1
     }
   fi
+fi
+
+# OMP is a deliberately narrow experimental adapter.  A fresh launch cannot
+# inherit it from config, infer its backend, or smuggle provider/model flags
+# into Mist's wrapper.  The explicit profile selects only the installed wrapper;
+# Mist remains the owner of OMP auth, models, and configuration.
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_SET" -eq 1 ] && [ "$HARNESS_ARG" = omp ]; then
+  [ "$PROFILE_SET" -eq 1 ] || { echo "error: --harness omp requires --profile personal|sf" >&2; exit 1; }
+  case "$PROFILE" in personal|sf) ;; *) echo "error: OMP --profile must be personal or sf" >&2; exit 1 ;; esac
+  [ "$BACKEND_SET" -eq 1 ] && [ "$BACKEND_ARG" = herdr ] \
+    || { echo "error: --harness omp requires the explicit --backend herdr boundary" >&2; exit 1; }
+  [ "$KIND" != secondmate ] || { echo "error: OMP is experimental for ship/scout trials only; it cannot run a secondmate" >&2; exit 1; }
+  [ "$MODEL_SET" -eq 0 ] && [ "$EFFORT_SET" -eq 0 ] \
+    || { echo "error: OMP model and effort are owned by Mist's profile; Firstmate overrides are refused" >&2; exit 1; }
+  [ -z "$OMP_FORBIDDEN_ARG" ] \
+    || { echo "error: OMP $OMP_FORBIDDEN_ARG is outside Firstmate's named adapter boundary" >&2; exit 1; }
+  [ "${FM_OMP_HERDR_EXPERIMENTAL:-0}" = 1 ] \
+    || { echo "error: OMP/Herdr live evidence is pending; supervised trials require FM_OMP_HERDR_EXPERIMENTAL=1" >&2; exit 1; }
+elif [ "$RELAUNCH" -eq 0 ] && [ "$PROFILE_SET" -eq 1 ]; then
+  echo "error: --profile is accepted only with an explicit --harness omp" >&2
+  exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -725,6 +756,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+OMP_DELIVERY_PENDING=0
+OMP_DELIVERY_FAILURE=post-publication
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -736,6 +769,58 @@ spawn_fresh_commit_rollback() {
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
   return 1
+}
+
+spawn_omp_publish_recovery() { # <cleanup-evidence>
+  local cleanup=$1 meta="$STATE/$ID.meta" tmp
+  if ! fm_cleanup_recovery_publish_omp "$STATE" "$ID" "$SPAWN_GEN" \
+      "$OMP_DELIVERY_FAILURE" "$cleanup" "$PROFILE" "$KIND" "$META_WINDOW" \
+      "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+      "${FM_CONTROL_RELAUNCH_TX:-}"; then
+    echo "warning: could not publish private OMP cleanup recovery for $ID; retaining its endpoint-bound task record" >&2
+    return 1
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  tmp=$(umask 077; mktemp "$STATE/.$ID.meta.omp-recovery.XXXXXX") || {
+    echo "warning: OMP recovery is authoritative in $STATE/$ID.cleanup-recovery; the task record could not be staged for annotation" >&2
+    return 0
+  }
+  if awk -F= '$1 != "cleanup_recovery" && $1 != "delivery_failure" && $1 != "delivery_cleanup"' "$meta" > "$tmp" \
+     && {
+       printf 'cleanup_recovery=omp-delivery\n'
+       printf 'delivery_failure=%s\n' "$OMP_DELIVERY_FAILURE"
+       printf 'delivery_cleanup=%s\n' "$cleanup"
+     } >> "$tmp" \
+     && fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  echo "warning: OMP recovery is authoritative in $STATE/$ID.cleanup-recovery; the task record could not be annotated" >&2
+  return 0
+}
+
+spawn_omp_delivery_rollback() {
+  local cleanup=unconfirmed
+  [ "$OMP_DELIVERY_PENDING" = 1 ] || return 0
+  OMP_DELIVERY_PENDING=0
+  fm_backend_kill herdr "$T" 2>/dev/null || true
+  if fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    cleanup=confirmed
+  fi
+  if [ "$RELAUNCH" -eq 0 ] && [ "$cleanup" = confirmed ]; then
+    if fm_backlog_atomic_transition remove "$STATE/$ID.meta" "failed OMP task record" "$STATE"; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+      echo "error: OMP delivery failed at $OMP_DELIVERY_FAILURE; the exact Herdr endpoint was removed and the queued task record was rolled back" >&2
+      return 0
+    fi
+  fi
+  # A relaunch always keeps its transaction-bound replacement record.  A fresh
+  # launch keeps the endpoint-bound record whenever exact endpoint removal or
+  # record retirement cannot be proven.  The private sidecar is published first
+  # so even a subsequent meta rewrite failure remains machine-recoverable.
+  spawn_omp_publish_recovery "$cleanup" || true
+  SPAWN_FRESH_COMMIT_PENDING=0
+  echo "error: OMP delivery failed at $OMP_DELIVERY_FAILURE; cleanup=$cleanup and durable recovery was retained" >&2
 }
 
 parse_orca_worktree_result() {
@@ -757,6 +842,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$OMP_DELIVERY_PENDING" = 1 ]; then
+    spawn_omp_delivery_rollback || status=1
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -941,6 +1029,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ "$PROFILE_SET" -eq 0 ] || shared_args+=(--profile "$PROFILE")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -1128,6 +1217,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_PROFILE=$(fm_meta_get "$RELAUNCH_META" profile)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1222,6 +1312,13 @@ launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
+    omp)
+      case "$PROFILE" in
+        personal) printf '%s' "/bin/zsh -lic 'omp \"\$@\"' fm-omp" ;;
+        sf) printf '%s' "/bin/zsh -lic 'ompp \"\$@\"' fm-omp" ;;
+        *) return 1 ;;
+      esac
+      ;;
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
     # predicted-next-prompt ghost text, which renders as dim/faint text inside an
     # otherwise-empty composer and would otherwise read like real typed input when
@@ -1305,7 +1402,14 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        *)
+          HARNESS=$(basename "$word")
+          case "$HARNESS" in omp|ompp) HARNESS=raw-omp ;; esac
+          break
+          ;;
+      esac
     done
     ;;
   '')
@@ -1335,6 +1439,24 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$HARNESS" = omp ]; then
+  [ "$HARNESS_SET" -eq 1 ] || [ "$RELAUNCH" -eq 1 ] \
+    || { echo "error: OMP must be selected with explicit --harness omp; config and positional selection are refused" >&2; exit 1; }
+  [ "$BACKEND" = herdr ] \
+    || { echo "error: OMP requires the recorded Herdr backend" >&2; exit 1; }
+  if [ "$RELAUNCH" -eq 1 ]; then
+    [ "$PROFILE_SET" -eq 1 ] || PROFILE=$RELAUNCH_PRIOR_PROFILE
+    case "$PROFILE" in personal|sf) ;; *) echo "error: OMP relaunch requires a recorded or explicit personal|sf profile" >&2; exit 1 ;; esac
+    [ "$MODEL_SET" -eq 0 ] && [ "$EFFORT_SET" -eq 0 ] \
+      || { echo "error: OMP model and effort are owned by Mist's profile; Firstmate overrides are refused" >&2; exit 1; }
+    [ "${FM_OMP_HERDR_EXPERIMENTAL:-0}" = 1 ] \
+      || { echo "error: OMP/Herdr live evidence is pending; supervised trials require FM_OMP_HERDR_EXPERIMENTAL=1" >&2; exit 1; }
+  fi
+elif [ "$PROFILE_SET" -eq 1 ]; then
+  echo "error: --profile is accepted only for the named OMP adapter" >&2
+  exit 1
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -2846,7 +2968,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness profile kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects cleanup_recovery delivery_failure delivery_cleanup control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2858,6 +2980,7 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  [ "$HARNESS" != omp ] || echo "profile=$PROFILE"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2910,6 +3033,13 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+fi
+if [ "$HARNESS" = omp ]; then
+  OMP_DELIVERY_PENDING=1
+  OMP_DELIVERY_FAILURE=post-publication
+  trap 'OMP_DELIVERY_FAILURE=signal-hup; exit 129' HUP
+  trap 'OMP_DELIVERY_FAILURE=signal-int; exit 130' INT
+  trap 'OMP_DELIVERY_FAILURE=signal-term; exit 143' TERM
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -3037,11 +3167,13 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+OMP_DELIVERY_FAILURE=gotmp
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
+  OMP_DELIVERY_FAILURE=trace-setup
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
@@ -3056,13 +3188,32 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+OMP_DELIVERY_FAILURE=launch-text
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+OMP_DELIVERY_FAILURE=launch-enter
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = omp ]; then
+  OMP_DELIVERY_FAILURE=readiness
+  fm_backend_herdr_omp_wait_ready "$T" || {
+    echo "error: OMP did not reach Herdr's structured idle readiness state" >&2
+    exit 1
+  }
+  OMP_DELIVERY_FAILURE=prompt-encoding
+  OMP_PROMPT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF") || {
+    echo "error: OMP launch brief could not be encoded" >&2
+    exit 1
+  }
+  OMP_DELIVERY_FAILURE=prompt-delivery
+  fm_backend_herdr_omp_prompt "$T" "$OMP_PROMPT" || {
+    echo "error: OMP launch prompt could not be delivered through Herdr's native agent channel" >&2
+    exit 1
+  }
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
@@ -3112,6 +3263,7 @@ if [ "$BACKLOG_TRANSITION" = 1 ]; then
   trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
 fi
 SPAWN_BACKLOG_COMMIT_STATUS=0
+OMP_DELIVERY_FAILURE=backlog-transition
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
 else
@@ -3122,7 +3274,9 @@ else
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
-  if [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$HARNESS" = omp ]; then
+    echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+  elif [ "$RELAUNCH" -eq 0 ]; then
     if spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
@@ -3131,6 +3285,13 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
+fi
+# Once the paired backlog commit lands, OMP delivery rollback is no longer
+# authorized.  Clear its guard while the commit-window signal traps still only
+# defer signals, so no signal can observe committed backlog state with rollback
+# armed between restoring traps and clearing this bit.
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; then
+  OMP_DELIVERY_PENDING=0
 fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
@@ -3150,4 +3311,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_PROFILE=
+[ "$HARNESS" != omp ] || SPAWN_PROFILE=" profile=$PROFILE"
+echo "spawned $ID harness=$HARNESS$SPAWN_PROFILE kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

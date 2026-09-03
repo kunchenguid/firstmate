@@ -33,7 +33,11 @@
 #     body carries an explicit SUPERSEDED / NOT REQUIRED / DEFERRED marker.
 #     It never changes captain_actionable; renderers may use it to keep
 #     prose-deferred rows out of default views.
-#   tasks[]: one row per state/<id>.meta, sorted by id.
+#   tasks[]: one row per validated state/<id>.meta, sorted by id.
+#     profile is personal|sf for the named OMP adapter and null otherwise.
+#     capabilities names whether structured interrupt-cancellation evidence is
+#     available. recovery exposes only the closed Firstmate-owned recovery
+#     schema; status prose is never decoded as recovery authority.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
@@ -172,6 +176,12 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-cleanup-recovery-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-cleanup-recovery-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -458,18 +468,61 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta id kind harness profile mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json recovery_json capability_ack capability_evidence
+  local task_pipeline_status task_restore_pipefail=0
 
+  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+    fm_backlog_directory_present "$STATE" "state directory" || {
+      echo "fm-fleet-snapshot: unsafe state directory: $FM_BACKLOG_TRANSITION_ERROR" >&2
+      return 1
+    }
+  else
+    printf '[]\n'
+    return 0
+  fi
+
+  shopt -qo pipefail || { set -o pipefail; task_restore_pipefail=1; }
   for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    [ ! -L "$meta" ] || {
+      echo "fm-fleet-snapshot: unsafe task record: symbolic links are not authoritative task metadata: $meta" >&2
+      return 1
+    }
+    fm_backlog_record_present "$meta" "task record" "$STATE" || {
+      echo "fm-fleet-snapshot: unsafe task record: $FM_BACKLOG_TRANSITION_ERROR" >&2
+      return 1
+    }
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    profile=$(meta_value "$meta" profile)
+    if [ "$harness" = omp ]; then
+      case "$profile" in personal|sf) ;; *) echo "fm-fleet-snapshot: task $id has an invalid OMP profile" >&2; return 1 ;; esac
+      capability_ack=false
+      capability_evidence=unavailable
+    else
+      profile=
+      capability_ack=null
+      capability_evidence=not-declared
+    fi
+    fm_cleanup_recovery_decode "$STATE" "$meta" "$id" || {
+      echo "fm-fleet-snapshot: task $id has unsafe cleanup recovery: $FM_CLEANUP_RECOVERY_ERROR" >&2
+      return 1
+    }
+    if [ -n "$FM_CLEANUP_RECOVERY_KIND" ]; then
+      recovery_json=$(jq -n \
+        --arg kind "$FM_CLEANUP_RECOVERY_KIND" \
+        --arg failure "$FM_CLEANUP_RECOVERY_FAILURE" \
+        --arg cleanup "$FM_CLEANUP_RECOVERY_CLEANUP" \
+        '{kind:$kind,failure:($failure|if .=="" then null else . end),cleanup:($cleanup|if .=="" then null else . end)}')
+    else
+      recovery_json=null
+    fi
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -577,6 +630,7 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg profile "$profile" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -591,6 +645,7 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
+      --arg capability_evidence "$capability_evidence" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
@@ -600,6 +655,8 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson capability_ack "$capability_ack" \
+      --argjson recovery "$recovery_json" \
       --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
@@ -608,6 +665,7 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        profile:($profile | if . == "" then null else . end),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -628,6 +686,8 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
+        capabilities:{interrupt_cancellation_ack:$capability_ack,interrupt_cancellation_evidence:$capability_evidence},
+        recovery:$recovery,
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,
@@ -648,6 +708,9 @@ task_json_lines() {
           end)
       }'
   done | jq -s 'sort_by(.id)'
+  task_pipeline_status=$?
+  [ "$task_restore_pipefail" = 0 ] || set +o pipefail
+  return "$task_pipeline_status"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks

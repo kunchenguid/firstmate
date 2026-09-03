@@ -2581,6 +2581,31 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
+# OMP is launched through a zsh function, so it cannot use Herdr's built-in
+# process launcher without bypassing the installed Mist wrapper.  Once that
+# fixed command has entered the pane, native Herdr agent operations provide the
+# structured readiness and argv-safe prompt channel; no terminal text is
+# interpreted as lifecycle evidence.
+fm_backend_herdr_omp_wait_ready() { # <target>
+  local out kind status
+  fm_backend_herdr_target_ready "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent wait \
+    "$FM_BACKEND_HERDR_PANE" --until idle 2>/dev/null) || return 1
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // .result.status // empty' 2>/dev/null)
+  case "$status" in ''|idle) ;; *) return 1 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get \
+    "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  kind=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  [ "$kind" = omp ] && [ "$status" = idle ]
+}
+
+fm_backend_herdr_omp_prompt() { # <target> <prompt>
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent prompt \
+    "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.

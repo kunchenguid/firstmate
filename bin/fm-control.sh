@@ -4,7 +4,7 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
-#        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
+#        fm-control.sh <task-id> relaunch [--harness <name>] [--profile <personal|sf>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
 #
@@ -188,9 +188,11 @@ if ! fm_control_verb_allowed "$VERB"; then
 fi
 
 NEW_HARNESS=
+NEW_PROFILE=
 NEW_MODEL=
 NEW_EFFORT=
 HARNESS_SET=0
+PROFILE_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 NOTE=
@@ -203,6 +205,7 @@ for control_arg in "$@"; do
     esac
     case "$control_want_value" in
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
+      profile) NEW_PROFILE=$control_arg; PROFILE_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
@@ -218,6 +221,8 @@ for control_arg in "$@"; do
   case "$control_arg" in
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
+    --profile) control_want_value=profile ;;
+    --profile=*) NEW_PROFILE=${control_arg#--profile=}; PROFILE_SET=1 ;;
     --model) control_want_value=model ;;
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
@@ -239,10 +244,12 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$PROFILE_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --profile, --model, --effort, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
+[ "$PROFILE_SET" = 0 ] || [ -n "$NEW_PROFILE" ] || die "--profile requires a non-empty value"
+case "$NEW_PROFILE" in ''|personal|sf) ;; *) die "--profile must be personal or sf" ;; esac
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
@@ -519,6 +526,8 @@ CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
+PRIOR_PROFILE=$(fm_meta_get "$META" profile)
+TARGET_PROFILE=$PRIOR_PROFILE
 TARGET_MODEL=
 TARGET_EFFORT=
 
@@ -659,6 +668,25 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  if [ "$TARGET_HARNESS" = omp ]; then
+    [ "${FM_OMP_HERDR_EXPERIMENTAL:-0}" = 1 ] \
+      || die "OMP relaunch is an experimental supervised trial; set FM_OMP_HERDR_EXPERIMENTAL=1 explicitly before any lifecycle change"
+    [ "$BACKEND" = herdr ] || die "OMP relaunch requires the task's recorded Herdr backend"
+    [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+      || die "OMP model and effort are owned by Mist's profile; Firstmate overrides are refused"
+    if [ "$PRIOR_HARNESS" = omp ]; then
+      [ "$PRIOR_MODEL" = default ] && [ "$PRIOR_EFFORT" = default ] \
+        || die "task $ID has non-canonical OMP model/effort metadata; refusing to stop it for an unverifiable relaunch"
+    fi
+    if [ "$PROFILE_SET" = 1 ]; then
+      TARGET_PROFILE=$NEW_PROFILE
+    elif [ "$PRIOR_HARNESS" != omp ]; then
+      die "relaunching onto OMP requires --profile personal|sf"
+    fi
+    case "$TARGET_PROFILE" in personal|sf) ;; *) die "OMP relaunch needs a recorded or explicit personal|sf profile" ;; esac
+  elif [ "$PROFILE_SET" = 1 ]; then
+    die "--profile applies only when the relaunch target is OMP"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.
@@ -678,6 +706,10 @@ resolve_relaunch_profile() {
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_EFFORT=$PRIOR_EFFORT
   else
+    TARGET_EFFORT=default
+  fi
+  if [ "$TARGET_HARNESS" = omp ]; then
+    TARGET_MODEL=default
     TARGET_EFFORT=default
   fi
 }
@@ -782,7 +814,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line profile_result
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -828,6 +860,7 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$TARGET_HARNESS" != omp ] || spawn_args+=(--profile "$TARGET_PROFILE")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -846,7 +879,9 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  profile_result=
+  [ "$TARGET_HARNESS" != omp ] || profile_result=" profile=$TARGET_PROFILE"
+  echo "relaunched $ID harness=$TARGET_HARNESS$profile_result from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
 # --- verbs ------------------------------------------------------------------

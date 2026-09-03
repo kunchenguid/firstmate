@@ -156,6 +156,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-cleanup-recovery-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-cleanup-recovery-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
@@ -1192,7 +1194,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta control_lock meta_lock id row label has_record=0 gate_status
+  local marker meta sidecar control_lock meta_lock id row label has_record=0 gate_status
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1214,6 +1216,29 @@ backlog_record_reconcile() {
   # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+  # Recovery is a closed, Firstmate-owned schema.  Validate every sidecar and
+  # every meta declaration before a lifecycle sweep can treat either as an
+  # ordinary record.  An orphan is accepted only with the durable close marker
+  # that can replay its transaction.
+  for sidecar in "$STATE"/*.cleanup-recovery; do
+    [ -e "$sidecar" ] || [ -L "$sidecar" ] || continue
+    id=$(basename "$sidecar" .cleanup-recovery)
+    fm_cleanup_recovery_sidecar_validate "$STATE" "$id" || {
+      echo "BACKLOG_RECONCILE: unsafe cleanup recovery refused: $FM_CLEANUP_RECOVERY_ERROR"
+      return 2
+    }
+    meta="$STATE/$id.meta"
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      fm_cleanup_recovery_decode "$STATE" "$meta" "$id" || {
+        echo "BACKLOG_RECONCILE: conflicting cleanup recovery refused: $FM_CLEANUP_RECOVERY_ERROR"
+        return 2
+      }
+    elif [ ! -e "$STATE/$id.backlog-close" ] && [ ! -L "$STATE/$id.backlog-close" ]; then
+      echo "BACKLOG_RECONCILE: orphan cleanup recovery for $id has no replayable close marker"
+      return 2
+    fi
+  done
 
   # Finish any close an interrupted cleanup recorded but never landed.
   for marker in "$STATE"/*.backlog-close; do
@@ -1264,6 +1289,11 @@ backlog_record_reconcile() {
       echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
       return 2
     fi
+    id=$(basename "$meta" .meta)
+    fm_cleanup_recovery_decode "$STATE" "$meta" "$id" || {
+      echo "BACKLOG_RECONCILE: unsafe worker recovery refused: $FM_CLEANUP_RECOVERY_ERROR"
+      return 2
+    }
     has_record=1
     break
   done
@@ -1286,8 +1316,14 @@ backlog_record_reconcile() {
       fm_lock_release "$meta_lock"
       return 2
     fi
+    fm_cleanup_recovery_decode "$STATE" "$meta" "$id" || {
+      echo "BACKLOG_RECONCILE: $id: post-lock cleanup recovery refused: $FM_CLEANUP_RECOVERY_ERROR"
+      fm_lock_release "$meta_lock"
+      return 2
+    }
     if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
-       && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
+       && [ "$FM_CLEANUP_RECOVERY_KIND" != orca ] \
+       && [ "$FM_CLEANUP_RECOVERY_KIND" != omp-delivery ]; then
       row=
       if fm_backlog_row_probe "$DATA" "$id"; then
         row=$FM_BACKLOG_ROW_STATE
