@@ -1113,8 +1113,19 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
     fm_lock_release "$steal"
     return 1
   }
-  if [ -z "$recorded" ] || [ "$current" != "$recorded" ] \
-    || ! kill -TERM "$pid" 2>/dev/null; then
+  if [ -z "$recorded" ]; then
+    fm_lock_release "$steal"
+    return 1
+  fi
+  if [ "$current" != "$recorded" ]; then
+    fm_lock_remove_path "$lock" || {
+      fm_lock_release "$steal"
+      return 1
+    }
+    fm_lock_release "$steal"
+    return 0
+  fi
+  if ! kill -TERM "$pid" 2>/dev/null; then
     fm_lock_release "$steal"
     return 1
   fi
@@ -1213,6 +1224,16 @@ fm_failure_episode_reset() {
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   [ "$transition_acquired" -eq 0 ] || fm_lock_release "$transition"
   return "$rc"
+}
+
+fm_autoarm_retire_legacy_failure() {  # <state-dir>
+  local failure
+  failure="$1/.claude-autoarm-failure-epoch"
+  if [ ! -e "$failure" ] && [ ! -L "$failure" ]; then
+    return 0
+  fi
+  [ -f "$failure" ] && [ ! -L "$failure" ] || return 1
+  rm -f "$failure" 2>/dev/null
 }
 
 # --- Claude Stop auto-arm generation claims -----------------------------------
@@ -1390,6 +1411,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   tmp="$epoch.tmp.$pid"
   if ! printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
       "$gen" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+    || ! fm_autoarm_retire_legacy_failure "$state" \
     || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
@@ -1645,7 +1667,9 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
       printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
         "$gen" "$pid" "$outcome" "$(date +%s)"
       [ -z "$identity" ] || printf '%s\n' "$identity"
-    } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    } > "$tmp" 2>/dev/null \
+    || ! fm_autoarm_retire_legacy_failure "$state" \
+    || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
     fm_lock_release "$transition"

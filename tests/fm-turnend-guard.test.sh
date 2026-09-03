@@ -1521,15 +1521,25 @@ test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success() {
   : > "$dir/state/.claude-autoarm-failure-notified"
   now=$(date +%s)
   printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=%s\n' \
-    "$((now - 10))" > "$dir/state/.claude-autoarm-failure-epoch"
-  printf 'epoch=18 owner_pid=888 outcome=rewake updated_at=%s\n' \
-    "$now" > "$dir/state/.claude-autoarm-epoch"
+    "$now" > "$dir/state/.claude-autoarm-failure-epoch"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    fixed_now=$2
+    date() { printf "%s\n" "$fixed_now"; }
+    pid=${BASHPID:-$$}
+    identity=$(fm_pid_identity "$pid") || exit
+    printf "epoch=18 owner_pid=%s outcome=arming updated_at=%s\n%s\n" \
+      "$pid" "$fixed_now" "$identity" > "$state/.claude-autoarm-epoch"
+    fm_autoarm_write_owned "$state" 18 rewake
+  ' _ "$dir" "$now" || fail "serialized rewake transition could not commit"
   seed_claude_budget "$dir" 4 failure:123456:777
 
   out=$(run_hook_claude "$dir" true); status=$?
 
   expect_code 0 "$status" "a later terminal ledger transition must supersede an older legacy failure"
   [ -z "$out" ] || fail "superseded legacy failure produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-epoch" "serialized ledger transition left the legacy failure current"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "superseded legacy failure reached attended fail-open"
   pass "fm-turnend-guard --claude: later success supersedes an older legacy failure"
 }
