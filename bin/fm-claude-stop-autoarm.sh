@@ -118,7 +118,9 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
+SESSION_AUTHENTICATED=1
 if ! fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"; then
+  SESSION_AUTHENTICATED=0
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
@@ -138,6 +140,11 @@ need_supervision || exit 0
 
 CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
 
+autoarm_session_still_owned() {
+  [ "$SESSION_AUTHENTICATED" -eq 0 ] \
+    || fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"
+}
+
 autoarm_alarm_current() {
   [ -f "$FAILURE_ALARM" ] && [ ! -L "$FAILURE_ALARM" ] || return 1
   fm_autoarm_failure_episode_current "$STATE" "$FAILURE_NOTICE" || return 1
@@ -146,6 +153,7 @@ autoarm_alarm_current() {
 
 autoarm_claim_failure() {  # <reason>
   local reason=$1 failure_rc
+  autoarm_session_still_owned || exit 0
   autoarm_alarm_current && exit 0
   fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE"
   failure_rc=$?
@@ -172,6 +180,7 @@ autoarm_claim_failure() {  # <reason>
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || autoarm_claim_failure 'stale session lock recovery failed'
   fm_session_lock_owned_by_self "$STATE" "$FM_ROOT" || autoarm_claim_failure 'stale session lock recovery did not restore current-session ownership'
+  SESSION_AUTHENTICATED=1
 fi
 
 # --- single-flight generation claim --------------------------------------------
@@ -186,7 +195,9 @@ fi
 # pre-generation build (or the guard's own terminal-check), which the legacy
 # shim defers to while genuinely deciding and reclaims once when proven
 # abandoned.
+autoarm_session_still_owned || exit 0
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+autoarm_session_still_owned || exit 0
 fm_autoarm_claim_next "$STATE" "$GRACE"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
@@ -195,8 +206,10 @@ if [ "$CLAIM_RC" -ne 0 ]; then
   case "$ROLE" in
     autoarm)
       if fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+        autoarm_session_still_owned || exit 0
         fm_autoarm_release_abandoned "$STATE" "$GRACE" \
           || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
+        autoarm_session_still_owned || exit 0
         fm_autoarm_claim_next "$STATE" "$GRACE"
         CLAIM_RC=$?
         [ "$CLAIM_RC" -eq 0 ] \
@@ -228,6 +241,7 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
   local commit_rc failure_rc terminal_baseline pid
+  autoarm_session_still_owned || return 2
   if [ -n "${2:-}" ]; then
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2"
   else
@@ -261,6 +275,7 @@ autoarm_commit() {  # <outcome> [marker-file]
 # Best-effort ownership-checked record for exit-0 paths, where supersession
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
+  autoarm_session_still_owned || return 0
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
@@ -284,7 +299,8 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
   # watcher/wake state: re-verify generation ownership before every arm
   # invocation, first attempt and retries alike.
-  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  if ! autoarm_session_still_owned \
+    || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
@@ -330,6 +346,11 @@ if ! need_supervision; then
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
+  if ! autoarm_session_still_owned \
+    || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   fm_autoarm_reset_owned "$STATE" "$MY_GEN"
   RESET_RC=$?
   if [ "$RESET_RC" -eq 0 ]; then
@@ -361,7 +382,8 @@ fi
 if [ "$ACTIONABLE" -eq 1 ]; then
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
-  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  if ! autoarm_session_still_owned \
+    || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
@@ -384,7 +406,8 @@ fi
 # commits in the same owned critical section as the winning failed write, so a
 # losing generation can neither consume nor deliver it.
 if [ ! -e "$FAILURE_NOTICE" ]; then
-  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  if ! autoarm_session_still_owned \
+    || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi

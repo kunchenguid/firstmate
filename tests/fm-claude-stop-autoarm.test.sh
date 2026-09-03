@@ -126,6 +126,17 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    session-transfer-actionable)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+: > "$FM_HOME/state/arm-waiting"
+while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: task.status done: transferred session\n'
+exit 0
+SH
+      ;;
     slow-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -452,6 +463,81 @@ SH
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "daemon-delivered Stop hook did not record outcome=rewake"
   assert_contains "$out" "firstmate watcher wake" "daemon-delivered Stop hook did not translate the wake"
   pass "auto-arm: Claude daemon spawned-by metadata lets the foreground-owned home arm"
+}
+
+test_claude_daemon_losing_session_owner_cannot_commit() {
+  local dir out owner successor hook status i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-transfer-commit")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" session-transfer-actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/arm-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/arm-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "daemon bridge did not reach the terminal authority boundary"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  : > "$dir/state/arm-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "a detached daemon must stand down after its foreground owner exits"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "former session daemon committed after ownership transferred"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "former session daemon published a terminal failure"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon elected a terminal notice"
+  assert_not_contains "$(cat "$out")" "firstmate watcher wake" "former session daemon delivered terminal output"
+  pass "auto-arm: daemon bridge revalidates session authority before terminal commit"
+}
+
+test_claude_daemon_losing_session_owner_cannot_rearm() {
+  local dir out owner successor hook status i arms
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-transfer-rearm")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" reset-boundary
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/arm-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/arm-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "daemon bridge did not reach the retry authority boundary"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  : > "$dir/state/arm-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "a detached daemon must not retry after session ownership transfers"
+  arms=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  [ "$arms" -eq 1 ] || fail "former session daemon invoked $arms watcher arms after ownership transferred"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "former session daemon recorded a terminal retry outcome"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "former session daemon published retry failure state"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon published a retry notice"
+  pass "auto-arm: daemon bridge revalidates session authority before every arm"
 }
 
 test_inert_when_fleet_idle() {
@@ -1295,6 +1381,91 @@ test_lockless_failure_notice_is_released_after_ledger_advance() {
   expect_code 1 "$notice_rc" "a superseded lockless publisher must release its notice election"
   assert_absent "$state/.claude-autoarm-failure-notified" "ledger supersession left a stale failure marker"
   pass "auto-arm: ledger supersession releases lockless failure notices"
+}
+
+test_lockless_failure_notice_is_released_when_reset_starts() {
+  local dir state publisher resetter ready release reset_ready reset_release rc notice_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/lockless-reset-start")
+  state="$dir/state"
+  ready="$state/lockless-final-check-ready"
+  release="$state/lockless-final-check-release"
+  reset_ready="$state/reset-start-ready"
+  reset_release="$state/reset-start-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    fm_autoarm_claim_signature() {
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.01; done
+      if fm_autoarm_ledger_read "$state"; then
+        printf "%s:%s:%s\n" "$FM_AUTOARM_GEN" "$FM_AUTOARM_OWNER" "$FM_AUTOARM_OUTCOME"
+      else
+        printf "absent\n"
+      fi
+    }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
+      "$state/.claude-autoarm-failure-notified"
+    printf "%s\n" "$?" > "$state/lockless-reset-start-rc"
+  ' _ "$dir" "$ready" "$release" &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    wait "$publisher" 2>/dev/null || true
+    fail "lockless publisher did not reach its final reset check"
+  fi
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    mv() {
+      local arg target= rc
+      for arg in "$@"; do target=$arg; done
+      command mv "$@"
+      rc=$?
+      if [ "$rc" -eq 0 ] && [ "$target" = "$state/.claude-autoarm-failure-resetting" ] \
+        && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      return "$rc"
+    }
+    fm_failure_episode_reset "$state"
+  ' _ "$dir" "$reset_ready" "$reset_release" &
+  resetter=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$reset_ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$reset_ready" ]; then
+    kill "$publisher" "$resetter" 2>/dev/null || true
+    wait "$publisher" "$resetter" 2>/dev/null || true
+    fail "reset did not reach its pre-fence transaction boundary"
+  fi
+  : > "$release"
+  wait "$publisher" || fail "lockless reset-start publisher fixture exited unexpectedly"
+  rc=$(cat "$state/lockless-reset-start-rc")
+  expect_code 4 "$rc" "a lockless publisher must stand down when reset starts before fence advance"
+  assert_absent "$state/.claude-autoarm-failure-notified" "reset-start supersession left a stale notice election"
+  : > "$reset_release"
+  wait "$resetter" || fail "reset-start fixture could not complete cleanup"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_notice_current "$1/state" \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  notice_rc=$?
+  expect_code 1 "$notice_rc" "reset-start supersession left a current failure notice"
+  pass "auto-arm: reset start supersedes lockless publication before fence advance"
 }
 
 test_failure_reader_rejects_record_superseded_during_selection() {
@@ -2234,6 +2405,8 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
+test_claude_daemon_losing_session_owner_cannot_commit
+test_claude_daemon_losing_session_owner_cannot_rearm
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
@@ -2256,6 +2429,7 @@ test_failure_allocation_cannot_adopt_later_reset_fence
 test_reset_transaction_blocks_new_fence_publication
 test_stale_reset_transaction_is_completed_before_publication
 test_lockless_failure_notice_is_released_after_ledger_advance
+test_lockless_failure_notice_is_released_when_reset_starts
 test_failure_reader_rejects_record_superseded_during_selection
 test_terminal_commit_failure_publishes_independent_failure
 test_terminal_commit_supersession_stays_silent

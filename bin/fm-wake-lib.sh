@@ -1990,7 +1990,9 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
       0|3)
         final=$(fm_autoarm_claim_signature "$state")
         final_reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
-        if [ "$final" != "$baseline" ] || [ "$final_reset" != "$reset" ]; then
+        if [ "$final" != "$baseline" ] \
+          || [ "$final_reset" != "$reset" ] \
+          || fm_autoarm_failure_reset_in_progress "$state"; then
           if [ "$publish_rc" -eq 0 ] && [ -n "$marker" ]; then
             fm_autoarm_failure_notice_release "$marker" "$failure_epoch" "$reset" || return 1
           fi
