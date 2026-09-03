@@ -30,13 +30,15 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
-# Print the body under an exact `## ...` heading until the next `## ` heading.
+# Print the body under an exact heading until the next markdown heading of any
+# level. Empty if the heading is missing. A `##` subsection therefore cannot
+# swallow a following `# Setup` / `# Rules` contract.
 fm_brief_heading_body() {  # <file> <heading>
   local file=$1 heading=$2
   [ -f "$file" ] || return 0
   awk -v heading="$heading" '
     $0 == heading { grab=1; next }
-    grab && /^## / { exit }
+    grab && /^#/ { exit }
     grab { print }
   ' "$file"
 }
