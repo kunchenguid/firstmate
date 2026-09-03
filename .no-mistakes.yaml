@@ -29,6 +29,13 @@ document:
 # Invocation wiring is asserted by `tests/fm-lint.test.sh` and
 # `tests/fm-lint-workflows.test.sh`.
 #
+# This pin is also what puts `bin/fm-voice-guard.sh` in front of the first push.
+# Lint runs after the review, test, and document steps have made their own
+# commits, so it is the last step that can read every message about to leave -
+# including the ones this pipeline's own fix agents wrote, which is where the
+# leaked internal-voice messages came from. See docs/architecture.md
+# "Internal-voice refusal before the first push".
+#
 # Pin the test baseline to the repository's own runner rather than leaving each
 # gate agent to chain `bash tests/a.test.sh && bash tests/b.test.sh` by hand.
 # `bin/fm-test-run.sh --changed` selects only the families the branch's changed

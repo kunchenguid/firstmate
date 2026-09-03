@@ -19,6 +19,11 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# That same default path runs bin/fm-voice-guard.sh, which reads back every
+# commit message not yet on the default branch and refuses firstmate's internal
+# voice before the first push. It lives here because .no-mistakes.yaml pins
+# commands.lint to this script and the gate runs lint last before push, so this
+# is the final firstmate-owned code to see the gate's own fix-agent commits.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -153,6 +158,16 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# Default no-args lint also reads back every commit message that is about to be
+# pushed. This step is here rather than in a git hook because the messages that
+# leaked came from the gate's own fix agents, which commit inside the gate's
+# separate repository: lint is the last firstmate-owned code that runs in that
+# repository before the first push. bin/fm-voice-guard.sh owns the rule set.
+fm_lint_run_voice_guard() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  "$SELF_DIR/fm-voice-guard.sh"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -323,6 +338,9 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_workflows || overall_rc=$?
+  voice_rc=0
+  fm_lint_run_voice_guard || voice_rc=$?
+  [ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
   exit "$overall_rc"
 fi
 
@@ -639,5 +657,12 @@ if [ "$overall_rc" -eq 0 ]; then
 else
   fm_lint_run_workflows || true
 fi
+
+# Always run the voice refusal, even after a ShellCheck or workflow failure, so
+# one lint round reports every message that has to be reworded rather than
+# revealing them one failed run at a time.
+voice_rc=0
+fm_lint_run_voice_guard || voice_rc=$?
+[ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
 
 exit "$overall_rc"
