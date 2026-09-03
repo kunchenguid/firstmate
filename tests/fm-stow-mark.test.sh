@@ -267,7 +267,7 @@ test_check_horizon_fallback_and_bounded_tail() {
   now=$(date +%s)
   set_record_field "$home" bound $((now - 4 * 3600))
   out=$(FM_STOW_TAIL_BYTES=300 run_check "$home" "$t"); expect_code 3 "$?" "4h of wall clock is past the 3h horizon"
-  [ "$out" = "firstmate stow nudge: 4h 00m wall clock since this session was first seen, with no /stow pass recorded (threshold 3h); run the /stow pass now" ] \
+  [ "$out" = "firstmate stow nudge: 4h 00m wall clock since this session's first turn end, with no /stow pass recorded (threshold 3h); run the /stow pass now" ] \
     || fail "unexpected horizon nudge text: $out"
 
   # A partial first line in the tail is skipped, and the usage after it is read.
@@ -438,7 +438,7 @@ test_config_off_tuning_env_and_malformed() {
   FM_HOME="$home" "$MARK" mark --transcript "$t" >/dev/null
   set_record_field "$home" bound $((now - 3700))
   out=$(run_check "$home" "$t"); expect_code 3 "$?" "1h 01m is past a 1h horizon"
-  assert_contains "$out" "1h 01m wall clock since the last stow record (threshold 1h)" "tuned horizon must be reported"
+  assert_contains "$out" "1h 01m wall clock since the last stow record or this session's first turn end, whichever is later (threshold 1h)" "tuned horizon must be reported"
 
   # Environment overrides supply the default window when the file sets none.
   rm -f "$home/config/stow-nudge"
@@ -473,7 +473,7 @@ test_config_off_tuning_env_and_malformed() {
   write_transcript "$t" 70000
   run_check "$home" "$t" >/dev/null
   append_turn "$t" 900000
-  for bad in 'window=abc' 'percent=0' 'percent=100' 'hours=-1' 'cadence=3' 'just words'; do
+  for bad in 'window=abc' 'window=99999' 'percent=0' 'percent=100' 'hours=-1' 'cadence=3' 'just words'; do
     printf '%s\n' "$bad" > "$home/config/stow-nudge"
     out=$(run_check "$home" "$t"); expect_code 0 "$?" "malformed '$bad' disables the nudge"
     [ -z "$out" ] || fail "malformed '$bad' nudged: $out"
@@ -483,6 +483,9 @@ test_config_off_tuning_env_and_malformed() {
   printf 'window=abc\n' > "$home/config/stow-nudge"
   out=$(FM_HOME="$home" "$MARK" summary)
   [ "$out" = "window must be a positive token count, got 'abc'" ] || fail "unexpected malformed reason: $out"
+  printf 'window=99999\n' > "$home/config/stow-nudge"
+  out=$(FM_HOME="$home" "$MARK" summary)
+  [ "$out" = "window must be at least 100000 tokens, got '99999'" ] || fail "unexpected below-floor reason: $out"
   rm -f "$home/config/stow-nudge"
   ln -s /dev/null "$home/config/stow-nudge"
   out=$(FM_HOME="$home" "$MARK" summary); expect_code 1 "$?" "a symlinked config is malformed"
@@ -490,6 +493,93 @@ test_config_off_tuning_env_and_malformed() {
   out=$(run_check "$home" "$t"); expect_code 0 "$?" "a symlinked config disables the nudge"
   assert_absent "$home/state/.stow-nudged" "malformed config must never deliver"
   pass "fm-stow-mark config: off, tuning, documented environment windows, and malformed files"
+}
+
+# A window below the context the measure counts from would leave no room, so
+# every token of growth after a /stow pass would be due again and each mark
+# would open a fresh cycle: /stow, nudge, /stow, nudge, back to back. Such a
+# window skips the growth condition for that cycle instead; compaction and the
+# horizon still apply.
+test_window_below_context_skips_growth_not_horizon_or_compaction() {
+  local home t out now
+  home=$(make_home "$TMP_ROOT/window-below")
+  t="$home/transcript.jsonl"
+  printf 'window=200000\n' > "$home/config/stow-nudge"
+  write_transcript "$t" 250000
+  run_check "$home" "$t" >/dev/null
+  [ "$(record_field "$home" context)" = 250000 ] || fail "binding at 250k"
+
+  append_turn "$t" 260000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "growth above a window that is already exceeded is not due"
+  [ -z "$out" ] || fail "exceeded window nudged on growth: $out"
+  assert_absent "$home/state/.stow-nudged" "no delivery when the growth condition is skipped"
+
+  # The runaway shape: a pass completes above the window, then the receipt
+  # adds a few tokens. Each such turn end must allow silently.
+  FM_HOME="$home" "$MARK" mark --transcript "$t" >/dev/null
+  append_turn "$t" 260200
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "a few tokens after the pass must not re-nudge"
+  [ -z "$out" ] || fail "re-nudged right after the pass: $out"
+  append_turn "$t" 400000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "however far it grows past the window"
+  assert_absent "$home/state/.stow-nudged" "still no delivery"
+
+  # The horizon still covers that cycle.
+  now=$(date +%s)
+  set_record_field "$home" bound $((now - 4 * 3600))
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "the horizon still nudges"
+  assert_contains "$out" "4h 00m wall clock" "the horizon must be the reason"
+
+  # And so does a compaction in the next cycle.
+  FM_HOME="$home" "$MARK" mark --transcript "$t" >/dev/null
+  append_turn "$t" 120000
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "a compaction still nudges"
+  assert_contains "$out" "the context was compacted since last /stow" "compaction must be the reason"
+  [ "$(record_field "$home" context)" = 120000 ] || fail "compaction must still rebind"
+  # Back under the window, the growth measure resumes: room is 80k, so 48k is due.
+  append_turn "$t" 170000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "delivered cycle stays silent"
+  FM_HOME="$home" "$MARK" mark --transcript "$t" >/dev/null
+  append_turn "$t" 210000
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "40k of growth against 30k of room is due"
+  assert_contains "$out" "40k context tokens since last /stow (threshold 18k)" "growth resumes under the window"
+  pass "fm-stow-mark check: a window below the bound context skips growth for the cycle while horizon and compaction still apply"
+}
+
+# Claude Code accepts no auto-compact window under 100k, so neither does the
+# measure: a smaller window= is malformed, and a smaller environment override
+# is ignored in favor of the default rather than adopted.
+test_window_floor_in_config_and_environment() {
+  local home t out
+  home=$(make_home "$TMP_ROOT/window-floor")
+  t="$home/transcript.jsonl"
+  write_transcript "$t" 20000
+  run_check "$home" "$t" >/dev/null
+  append_turn "$t" 90000
+  printf 'window=50000\n' > "$home/config/stow-nudge"
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "a window under the floor disables the nudge"
+  [ -z "$out" ] || fail "below-floor window nudged: $out"
+  assert_absent "$home/state/.stow-nudged" "malformed window must not deliver"
+  out=$(FM_HOME="$home" "$MARK" summary); expect_code 1 "$?" "summary reports the below-floor window"
+  [ "$out" = "window must be at least 100000 tokens, got '50000'" ] || fail "unexpected floor reason: $out"
+  printf 'window=100000\n' > "$home/config/stow-nudge"
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "the floor itself is a valid window"
+  assert_contains "$out" "70k context tokens with no /stow pass recorded (threshold 48k)" "a 100k window measures 80k of room"
+
+  # Under a 50k environment window, 20k of growth from 20k would be due
+  # (threshold 18k); the override is ignored and the 1M default applies.
+  home=$(make_home "$TMP_ROOT/window-floor-env")
+  t="$home/transcript.jsonl"
+  write_transcript "$t" 20000
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 run_check "$home" "$t" >/dev/null
+  append_turn "$t" 40000
+  out=$(CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 run_check "$home" "$t"); expect_code 0 "$?" "a below-floor environment window is ignored"
+  [ -z "$out" ] || fail "below-floor environment window nudged: $out"
+  append_turn "$t" 640000
+  out=$(CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 run_check "$home" "$t"); expect_code 3 "$?" "the default window measures instead"
+  assert_contains "$out" "620k context tokens with no /stow pass recorded (threshold 588k)" "the 1M default must set the threshold"
+  out=$(FM_HOME="$home" CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 "$MARK" summary); expect_code 0 "$?" "an ignored override is not a malformed config"
+  pass "fm-stow-mark config: a window under 100k is malformed in the file and ignored in the environment"
 }
 
 # --- DIGEST: summary --------------------------------------------------------
@@ -633,6 +723,8 @@ test_check_skips_synthetic_and_zero_usage_lines
 test_check_no_transcript_is_silent_noop
 test_check_requires_lock_owning_primary
 test_config_off_tuning_env_and_malformed
+test_window_below_context_skips_growth_not_horizon_or_compaction
+test_window_floor_in_config_and_environment
 test_summary_reports_age_and_overdue
 test_guard_claude_mode_delivers_nudge_once_on_allow
 test_guard_supervision_block_wins_over_nudge

@@ -43,7 +43,10 @@
 # nudge text on stdout when the cycle key is not already in .stow-nudged and
 # one of these holds:
 #   - growth: context now minus context at binding is at least percent% of
-#     (window minus context at binding), and greater than zero;
+#     (window minus context at binding), and greater than zero; when the
+#     window is not above the context at binding the growth measure is skipped
+#     for that cycle, so a window set below the live context cannot re-nudge
+#     on every turn;
 #   - compaction: context now is smaller than context at binding, so the
 #     conversation was compacted since the binding; the record's context and
 #     offset are rebound to the smaller values in the same pass;
@@ -63,9 +66,11 @@
 #
 # config/stow-nudge (optional; LOCAL, gitignored, not inherited) is either the
 # single word `off` or key=value lines with any of:
-#   window=<tokens>   the auto-compact window the measure targets; default
+#   window=<tokens>   the auto-compact window the measure targets, at least
+#                     100000 (Claude Code's own floor); default
 #                     CLAUDE_CODE_AUTO_COMPACT_WINDOW when that is a plain token
-#                     count in this process's environment, else 200000 when
+#                     count of at least 100000 in this process's environment
+#                     (a smaller one is ignored), else 200000 when
 #                     CLAUDE_CODE_DISABLE_1M_CONTEXT=1, else 1000000
 #   percent=<1..99>   how far toward the window the context may grow since the
 #                     binding before the nudge fires; default 60
@@ -96,9 +101,10 @@ RECORD="$STATE/.stow-mark"
 NUDGED="$STATE/.stow-nudged"
 TAIL_BYTES=${FM_STOW_TAIL_BYTES:-262144}
 case "$TAIL_BYTES" in ''|*[!0-9]*|0) TAIL_BYTES=262144 ;; esac
+WINDOW_FLOOR=100000
 
 usage() {
-  sed -n '2,87{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,92{s/^# \{0,1\}//;p;}' "$0"
 }
 
 is_positive_int() {
@@ -117,7 +123,7 @@ CONFIG_ERROR=
 
 default_window() {
   local env_window=${CLAUDE_CODE_AUTO_COMPACT_WINDOW-}
-  if is_positive_int "$env_window"; then
+  if is_positive_int "$env_window" && [ "$env_window" -ge "$WINDOW_FLOOR" ]; then
     printf '%s\n' "$env_window"
   elif [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT-}" = 1 ]; then
     printf '200000\n'
@@ -175,6 +181,10 @@ load_config() {
       window)
         if ! is_positive_int "$value"; then
           CONFIG_ERROR="window must be a positive token count, got '$value'"
+          return 1
+        fi
+        if [ "$value" -lt "$WINDOW_FLOOR" ]; then
+          CONFIG_ERROR="window must be at least $WINDOW_FLOOR tokens, got '$value'"
           return 1
         fi
         NUDGE_WINDOW=$value
@@ -412,10 +422,11 @@ cmd_check() {
     else
       growth=$((context_now - REC_CONTEXT))
       room=$((NUDGE_WINDOW - REC_CONTEXT))
-      [ "$room" -gt 0 ] || room=0
-      threshold=$((room * NUDGE_PERCENT / 100))
-      if [ "$growth" -gt 0 ] && [ "$growth" -ge "$threshold" ]; then
-        reason="$(fmt_tokens "$growth") context tokens $since (threshold $(fmt_tokens "$threshold"))"
+      if [ "$room" -gt 0 ]; then
+        threshold=$((room * NUDGE_PERCENT / 100))
+        if [ "$growth" -gt 0 ] && [ "$growth" -ge "$threshold" ]; then
+          reason="$(fmt_tokens "$growth") context tokens $since (threshold $(fmt_tokens "$threshold"))"
+        fi
       fi
     fi
   fi
@@ -423,9 +434,9 @@ cmd_check() {
     elapsed=$((now - REC_BOUND))
     if [ "$elapsed" -ge $((NUDGE_HOURS * 3600)) ]; then
       if [ -n "$REC_STOWED" ]; then
-        reason="$(fmt_duration "$elapsed") wall clock since the last stow record (threshold ${NUDGE_HOURS}h)"
+        reason="$(fmt_duration "$elapsed") wall clock since the last stow record or this session's first turn end, whichever is later (threshold ${NUDGE_HOURS}h)"
       else
-        reason="$(fmt_duration "$elapsed") wall clock since this session was first seen, with no /stow pass recorded (threshold ${NUDGE_HOURS}h)"
+        reason="$(fmt_duration "$elapsed") wall clock since this session's first turn end, with no /stow pass recorded (threshold ${NUDGE_HOURS}h)"
       fi
     fi
   fi

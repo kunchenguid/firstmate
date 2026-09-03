@@ -251,13 +251,14 @@ The nudge rides the primary turn-end guard: at a turn end the guard would otherw
 [`turnend-guard.md`](turnend-guard.md#stow-nudge) owns the mechanism, its gates, and why it can never displace a supervision block.
 
 The measure is the session's context size, read from the Claude transcript's newest assistant usage, compared with where it stood when the last pass completed or when this session was first seen.
-The nudge fires when the context has grown 60 percent of the way from that point to the auto-compact window, when the context shrank below that point because the conversation was compacted, or when 3 hours of wall-clock time have passed since the last stow record, whichever comes first.
-The horizon is plain wall clock rather than active time, so a session that sat idle or was resumed after a long pause is nudged at its first turn end.
-The default window is 1,000,000 tokens, which is where Claude Code compacts a Fable or Sonnet 5 session that sets no `--autocompact` window; the same environment overrides Claude Code documents, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, are honored when the primary was launched with them.
+The nudge fires when the context has grown 60 percent of the way from that point to the auto-compact window, when the context shrank below that point because the conversation was compacted, or when 3 hours of wall-clock time have passed since the last stow record or this session's first turn end, whichever of those two is later; the first condition met wins.
+The horizon is plain wall clock rather than active time, so a session that sat idle, or one resumed on the same transcript after a long pause, is nudged at its next turn end.
+When the window is not above the context the measure is counting from, the growth condition is skipped for that cycle and only compaction and the horizon can nudge, so a window set below the live context never re-nudges on every turn.
+The default window is 1,000,000 tokens, which is where Claude Code compacts a Fable or Sonnet 5 session that sets no `--autocompact` window; the same environment overrides Claude Code documents, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, are honored when the primary was launched with them, except that an override below 100,000 tokens, Claude Code's own floor, is ignored in favor of the default.
 [`verification/stow-memory.md`](verification/stow-memory.md#stow-nudge-calibration) records the evidence behind those defaults.
 
 The optional local, gitignored `config/stow-nudge` tunes or disables the nudge for this home.
-It is either the single word `off` or key=value lines: `window=<tokens>` replaces the auto-compact window the measure targets, `percent=<1..99>` replaces the 60 percent growth threshold, and `hours=<n>` replaces the 3 hour horizon.
+It is either the single word `off` or key=value lines: `window=<tokens>` replaces the auto-compact window the measure targets and must be at least 100,000, `percent=<1..99>` replaces the 60 percent growth threshold, and `hours=<n>` replaces the 3 hour horizon.
 Any other content disables the nudge and is reported at session start as a `STOW_NUDGE:` bootstrap diagnostic until corrected.
 The file is per home and is not inherited by secondmate homes, because stow cadence is a property of the home doing the stowing.
 The session-start digest also reports the last recorded pass as a `BOOTSTRAP_INFO:` fact, on every start when that pass is older than the horizon and otherwise only with verbose facts.
