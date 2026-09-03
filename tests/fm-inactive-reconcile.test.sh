@@ -256,6 +256,29 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
 }
 
+# If a terminal ledger line lands while the authoritative state read is in
+# flight, the ledger path remains the single owner on the next poll.
+test_terminal_line_during_state_read_yields_to_ledger_delivery() {
+  make_world state-ledger-race; bind_secondmate local
+  write_child "$MATE" child 'working: finishing now'
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'done: completed during state read\n' >> "$FM_STATE_OVERRIDE/$1.status"
+printf 'state: done · source: fake\n'
+SH
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
+  run_reconcile "$MATE" --startup
+  [ ! -e "$MAIN/state/mate.status" ] \
+    || ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "inactive reconciliation claimed an outcome whose terminal ledger arrived during state read"
+  run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the next ledger pass did not deliver the raced terminal line exactly once"
+  ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "one raced terminal event was reported by both reconciliation paths"
+  pass "terminal lines arriving during state reads remain ledger-owned"
+}
+
 # Receipt identity covers the complete terminal ledger line even when the
 # captain-facing rendering truncates two long notes to the same text.
 test_long_terminal_lines_have_distinct_receipts() {
@@ -725,6 +748,7 @@ test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
+test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery

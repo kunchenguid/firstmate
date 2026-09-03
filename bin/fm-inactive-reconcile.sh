@@ -344,10 +344,12 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 # is absent, unusable, still being appended (no trailing newline yet), or does
 # not end in a done or failed line.
 child_terminal_ledger_line() { # <status>
-  local status=$1 last
+  local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
-  [ "$(tail -c 1 "$status" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || return 1
-  last=$(last_status_line "$status")
+  snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
+  case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
+  snapshot=${snapshot%"$marker"}
+  last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
   case "$(status_line_verb "$last")" in
     done|failed) printf '%s\n' "$last" ;;
     *) return 1 ;;
@@ -441,6 +443,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
+    return 0
+  fi
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;

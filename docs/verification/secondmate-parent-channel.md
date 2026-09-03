@@ -31,7 +31,7 @@ done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green
 
 $ cat $P/state/mate.status   (the parent channel)
 working: delegated scope
-done [key=child-outcome-child-done]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 
 $ mate watcher wakes so far
 signal: $M/state/child.status
@@ -46,7 +46,7 @@ armed: state/child.check.sh
 
 $ cat $P/state/mate.status
 working: delegated scope
-done [key=child-outcome-child-done]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 
 $ parent watcher wakes so far (2 signals)
@@ -65,7 +65,7 @@ answered: child-call
 
 $ cat $P/state/mate.status   (final parent channel)
 working: delegated scope
-done [key=child-outcome-child-done]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
 needs-decision [key=captain-hold-child-call-1]: captain hold child-call: rollout window choice pending
 resolved [key=captain-hold-child-call-1]: captain hold child-call: answered

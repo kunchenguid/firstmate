@@ -1386,7 +1386,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
 # every record) while the parent channel cannot be written; a rerun after the
 # repair delivers and completes.
 test_secondmate_home_teardown_delivers_final_line_or_refuses() {
-  local case_dir rc channel wt_head
+  local case_dir rc channel wt_head err seq generation
 
   case_dir=$(make_case mate-teardown-delivers)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
@@ -1413,6 +1413,10 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   mkdir -p "$case_dir/parent/state/mate-x.status"
   channel="$case_dir/parent/state/mate-x.status"
   write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/tasktmp"
+  printf '!\n' > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '!\n' > "$case_dir/state/task-x1.kimi-turnend-token"
+  printf 'tasktmp=%s\n' "$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
@@ -1426,7 +1430,17 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
     || fail "mate-teardown-refuses: refusal did not name the parent channel: $(cat "$case_dir/stderr")"
   [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-x1.status" ] \
     || fail "mate-teardown-refuses: refusal did not retain the task records"
+  [ -f "$case_dir/state/task-x1.grok-turnend-token" ] \
+    && [ -f "$case_dir/state/task-x1.kimi-turnend-token" ] \
+    && [ -d "$case_dir/tasktmp" ] \
+    || fail "mate-teardown-refuses: refusal removed endpoint records before parent delivery"
   rmdir "$channel"
+  err=$(FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null)
+  seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p')
+  generation=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p')
+  [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
   set +e
   FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
