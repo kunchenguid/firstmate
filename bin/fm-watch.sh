@@ -789,7 +789,7 @@ clear_write_tracking() {  # <window-key>
 # roughly 10 * STALE_ESCALATE_SECS (default 240s) = ~40 minutes of unattended
 # signaling before the cap kicks in - enough for any human or smart supervisor
 # to act, short enough to bound the burn. Tracked for revert: see
-# PATCHES.md (patch-wedge-cap-2026-08-19).
+# git log patch/wedge-cap-2026-08-19 (PR #2605).
 FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-10}
 # v3 (2026-08-25): validate the override. A non-positive integer (0, negative)
 # would fire the cap on the very first wedge escalation, silencing fresh wakes
@@ -916,7 +916,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # not silently suppressed. Success path leaves both marker and queue
         # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this hash until pane recovers; local patch 2026-08-19)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this (window, hash) until FM_CAP_HORIZON_SECS (default 86400s) elapses, the pane hash changes, or operator manually removes STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
           if [ -n "$permanent_marker" ]; then
             if ! date +%s > "$permanent_marker" 2>/dev/null; then
               triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
