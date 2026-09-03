@@ -182,6 +182,84 @@ SH
   done
 }
 
+# fm_fake_pi <fakebin> <tool...>: a fake Pi-family executable whose --help is
+# STRUCTURALLY recognizable as Pi, so bin/fm-spawn.sh's capability preflight can
+# reach a genuine verdict instead of refusing an inconclusive probe. An exit-0
+# stub that prints nothing is not a usable Pi fixture: the preflight is supposed
+# to refuse that, and a fixture must not be the thing that proves it wrong.
+#
+# FM_FAKE_PI_HELP_MODE selects what the probe should conclude:
+#   flag         (default) advertises --tui-mode  -> launch with --tui-mode regular
+#   single-mode  no --tui-mode and no alternate-screen surface at all -> no flag
+#   failed       --help exits non-zero            -> refuse
+#   empty        --help prints nothing            -> refuse
+#   malformed    Pi banner without Pi's structure -> refuse
+#   non-pi       some other program's help        -> refuse
+#   ambiguous    fullscreen surface, no override  -> refuse
+# FM_FAKE_PI_VERSION is accepted for the version matrix: 0.82.0 means the
+# single-mode shape, anything else keeps the flag shape.
+# FM_FAKE_PI_PROBE_LOG records each --help invocation when set.
+fm_fake_pi() {
+  local fakebin=$1 tool
+  shift
+  for tool in "$@"; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" != --help ]; then
+  exit 0
+fi
+if [ -n "${FM_FAKE_PI_PROBE_LOG:-}" ]; then
+  printf '%s\t%s\n' "$(basename "$0")" "$*" >> "$FM_FAKE_PI_PROBE_LOG"
+fi
+mode=${FM_FAKE_PI_HELP_MODE:-}
+if [ -z "$mode" ]; then
+  case "${FM_FAKE_PI_VERSION:-0.84.0}" in
+    0.82.0) mode=single-mode ;;
+    *) mode=flag ;;
+  esac
+fi
+case "$mode" in
+  failed)
+    printf '%s\n' 'synthetic Pi help failure' >&2
+    exit 42
+    ;;
+  empty) exit 0 ;;
+  malformed)
+    printf '%s\n' 'pi - AI coding assistant with read, bash, edit, write tools' \
+      'Help is unavailable in this build'
+    exit 0
+    ;;
+  non-pi)
+    printf '%s\n' 'pico - unrelated editor' 'Usage:' '  pico [options]'
+    exit 0
+    ;;
+esac
+# Pi's real help shape (verified against installed Pi 0.84.2): a banner line, a
+# Usage: block, an Options: block, and the --thinking / --extension / --help
+# options fm-spawn.sh requires before trusting any capability conclusion.
+printf '%s\n' \
+  'pi - AI coding assistant with read, bash, edit, write tools' \
+  '' \
+  'Usage:' \
+  '  pi [options] [@files...] [messages...]' \
+  '' \
+  'Options:' \
+  '  --model <pattern>              Model pattern or ID' \
+  '  --thinking <level>             Set thinking level' \
+  '  --extension, -e <path>         Load an extension file'
+case "$mode" in
+  flag)        printf '%s\n' '  --tui-mode <mode>              TUI mode: regular (default) or fullscreen' ;;
+  ambiguous)   printf '%s\n' '  --fullscreen                   Use the experimental alternate screen' ;;
+  single-mode) ;;
+  *) exit 64 ;;
+esac
+printf '%s\n' '  --help, -h                     Show this help'
+SH
+    chmod +x "$fakebin/$tool"
+  done
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

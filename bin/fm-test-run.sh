@@ -272,6 +272,7 @@ family_for_basename() {
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
+    fm-pi-spawn-probe-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -575,6 +576,7 @@ tests/fm-pending-reply.test.sh 24679
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-primary-live-e2e.test.sh 20
+tests/fm-pi-spawn-probe-live-e2e.test.sh 21
 tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pr-check-security.test.sh 160475
 tests/fm-procevent-quota.test.sh 1949

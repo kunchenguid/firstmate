@@ -116,10 +116,12 @@
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
-#   same path. It adds --tui-mode regular only when that help advertises the flag;
-#   a failed or inconclusive probe omits it so older Pi versions remain launchable.
-#   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi.
+#   same path. Recognizable help that advertises --tui-mode gets exactly one
+#   --tui-mode regular; recognizable single-mode help gets no mode flag. A failed,
+#   empty, unrecognizable, malformed, or mode-ambiguous probe refuses before
+#   endpoint or authoritative metadata creation rather than reading an inconclusive
+#   answer as "the flag is absent". A missing selected executable refuses before
+#   endpoint creation, and pi-signed never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -1233,12 +1235,60 @@ resolve_pi_executable() {
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
-# before composing the optional regular-TUI flag. An absent or inconclusive probe
-# omits the flag so older Pi versions can still spawn.
-pi_supports_tui_mode() {
-  local executable=$1 help
-  help=$("$executable" --help 2>&1) || return 1
-  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
+# before composing the optional regular-TUI flag. Prints one of two CONCLUSIVE
+# capabilities and refuses otherwise:
+#   flag         recognizable Pi help that advertises --tui-mode -> pass
+#                --tui-mode regular, because Pi's experimental fullscreen
+#                rendering can bury a steer above the visible region and the
+#                explicit regular override is the safeguard against that.
+#   single-mode  recognizable Pi help with no --tui-mode and no fullscreen or
+#                alternate-screen surface at all -> one normal interactive TUI,
+#                so omitting the flag is correct rather than merely tolerated.
+# A failed, empty, unrecognizable, structurally malformed, or mode-ambiguous help
+# answer is NOT evidence the flag is absent - it is evidence the probe did not
+# work - so it refuses here, before any endpoint or authoritative metadata
+# exists, instead of launching a flag-capable Pi without its safeguard.
+# Read only on a refusal, so the loud failure names the release that produced
+# the unrecognized help without costing every conclusive launch a process.
+pi_probe_version() {  # <executable>
+  local version
+  version=$("$1" --version 2>/dev/null | head -1 | tr -d '\r')
+  printf '%s' "${version:-unknown}"
+}
+
+probe_pi_tui_mode() {
+  local executable=$1 adapter=$2 help compact
+  if ! help=$("$executable" --help 2>&1); then
+    echo "error: $adapter --help probe failed for '$executable' (version $(pi_probe_version "$executable")); refusing to launch without conclusive Pi TUI capability evidence" >&2
+    return 1
+  fi
+  compact=$(printf '%s' "$help" | tr -d '[:space:]')
+  if [ -z "$compact" ]; then
+    echo "error: $adapter --help returned empty help from '$executable' (version $(pi_probe_version "$executable")); refusing to launch without conclusive Pi TUI capability evidence" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$help" | grep -Eq '^pi - AI coding assistant([[:space:]]|$)'; then
+    echo "error: $adapter --help did not return recognizable Pi help from '$executable' (version $(pi_probe_version "$executable")); refusing to launch" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$help" | grep -Eq '^Usage:$' \
+    || ! printf '%s\n' "$help" | grep -Eq '^[[:space:]]+pi \[options\]' \
+    || ! printf '%s\n' "$help" | grep -Eq '^Options:$' \
+    || ! printf '%s\n' "$help" | grep -Eq '^[[:space:]]+--thinking([[:space:]=]|$)' \
+    || ! printf '%s\n' "$help" | grep -Eq '^[[:space:]]+--extension([[:space:],=]|$)' \
+    || ! printf '%s\n' "$help" | grep -Eq '^[[:space:]]+--help([[:space:],=]|$)'; then
+    echo "error: $adapter --help returned malformed Pi help from '$executable' (version $(pi_probe_version "$executable")); refusing to launch" >&2
+    return 1
+  fi
+  if printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'; then
+    printf '%s\n' flag
+    return 0
+  fi
+  if printf '%s\n' "$help" | grep -Eiq -- 'full[[:space:]-]*screen|alternate[[:space:]-]*(screen|tui|mode)|tui[[:space:]-]*mode'; then
+    echo "error: $adapter --help advertises fullscreen or alternate-mode behavior without --tui-mode in '$executable' (version $(pi_probe_version "$executable")); refusing an ambiguous TUI launch" >&2
+    return 1
+  fi
+  printf '%s\n' single-mode
 }
 
 # The verified launch command per adapter. The knowledge half of each adapter
@@ -1378,10 +1428,11 @@ case "$HARNESS" in
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
-    PI_TUI_MODE=
-    if pi_supports_tui_mode "$PI_BIN"; then
-      PI_TUI_MODE=' --tui-mode regular'
-    fi
+    PI_TUI_CAPABILITY=$(probe_pi_tui_mode "$PI_BIN" "$HARNESS") || exit 1
+    case "$PI_TUI_CAPABILITY" in
+      flag) PI_TUI_MODE=' --tui-mode regular' ;;
+      single-mode) PI_TUI_MODE= ;;
+    esac
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
     ;;

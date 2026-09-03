@@ -13,21 +13,11 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+# One shared Pi stub (tests/lib.sh) whose help is structurally recognizable, so
+# the spawn preflight reaches a real capability verdict here. FM_FAKE_PI_VERSION
+# still selects the 0.82.0 single-mode shape for the version matrix below.
 make_spawn_pi_probe() {
-  local fakebin=$1 tool=$2
-  cat > "$fakebin/$tool" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${1:-}" = --help ]; then
-  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
-    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
-  else
-    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
-  fi
-fi
-exit 0
-SH
-  chmod +x "$fakebin/$tool"
+  fm_fake_pi "$1" "$2"
 }
 
 make_spawn_fakebin() {
@@ -661,6 +651,40 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
 }
 
+# An INCONCLUSIVE capability probe is not evidence the flag is absent - it is
+# evidence the probe did not work. Launching anyway silently drops the regular-TUI
+# override on a Pi that does support it, and a fullscreen surface can then bury a
+# steer above the visible region. Every inconclusive shape must refuse BEFORE an
+# endpoint or authoritative metadata exists, while both conclusive shapes still
+# launch (the version matrix above covers those).
+test_pi_probe_refuses_every_inconclusive_help_before_publication() {
+  local mode rec id out status expected
+  for mode in failed empty malformed non-pi ambiguous; do
+    id="profile-pi-probe-${mode//-/}-z8e"
+    rec=$(make_spawn_case "profile-pi-probe-$mode" pi "$id")
+    read_case_record "$rec"
+    : > "$LAUNCH_LOG"
+
+    out=$(FM_FAKE_PI_HELP_MODE="$mode" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "an inconclusive '$mode' Pi probe should refuse the spawn"
+    case "$mode" in
+      failed)    expected='probe failed' ;;
+      empty)     expected='returned empty help' ;;
+      malformed) expected='returned malformed Pi help' ;;
+      non-pi)    expected='did not return recognizable Pi help' ;;
+      ambiguous) expected='advertises fullscreen or alternate-mode behavior' ;;
+    esac
+    assert_contains "$out" "$expected" \
+      "the '$mode' probe refusal did not name what was inconclusive"
+    assert_not_contains "$out" 'spawned' "the '$mode' probe still reported a spawn"
+    assert_absent "$HOME_DIR/state/$id.meta" "the '$mode' probe refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "the '$mode' probe refusal typed a launch command"
+  done
+  pass "every failed, empty, malformed, non-Pi, or mode-ambiguous probe refuses before endpoint or metadata publication"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -816,6 +840,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_pi_probe_refuses_every_inconclusive_help_before_publication
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags

@@ -30,6 +30,26 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Pi TUI capability probe
+
+`bin/fm-spawn.sh` reads the selected Pi executable's own `--help` to decide whether the launch carries `--tui-mode regular`, and refuses a failed, empty, unrecognizable, malformed, or mode-ambiguous answer before any endpoint or metadata exists.
+That verdict comes from vendor-rendered text, so `tests/fm-pi-spawn-probe-live-e2e.test.sh` is the opt-in guard that refreshes this record: it runs the real `bin/fm-spawn.sh` against every installed `pi` and `pi-signed` with a recording tmux stub, requires the spawn's conclusive verdict to agree with an independent read of the same help, reports an absent executable explicitly, and names the harness and version when they disagree.
+Run it after every Pi upgrade.
+
+Verified on 2026-09-02 with Pi 0.84.2 on macOS 26.6.2 arm64; `pi-signed` was not installed, so its probe remains unverified here.
+
+```sh
+FM_PI_SPAWN_PROBE_LIVE=1 bash tests/fm-pi-spawn-probe-live-e2e.test.sh
+```
+
+```text
+# pi 0.84.2 at .../bin/pi: --tui-mode regular x1
+ok - spawn probe: pi 0.84.2 reaches a conclusive verdict that agrees with its own help
+# skip: pi-signed is not installed on this machine, so its spawn probe is unverified here
+# unverified on this machine (not installed): pi-signed
+# checked 1 installed Pi-family executable(s)
+```
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

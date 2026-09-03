@@ -23,7 +23,10 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" opencode claude codex)
+  # Pi needs the recognizable-help stub, not a silent exit-0 one: the spawn
+  # preflight refuses an inconclusive capability probe by design.
+  fm_fake_pi "$fakebin" pi
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
