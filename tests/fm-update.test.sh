@@ -13,7 +13,11 @@
 #     or the shared default branch.
 #   - The caller-action summary is correct: reread-firstmate flips to yes only
 #     when the instruction surface (AGENTS.md / bin / .agents/skills) changed, and
-#     nudge-secondmates lists exactly the live secondmates that advanced.
+#     the two secondmate action sets are disjoint and correctly gated -
+#     restart-secondmates carries a live mate whose AGENTS.md or .agents/skills/
+#     changed AND whose recorded runtime can prove a restart, nudge-secondmates
+#     carries the residual, and an advance that changed no instruction surface,
+#     or only bin/, produces no restart at all.
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
@@ -35,7 +39,29 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state" "$w/home/data"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/fakebin" "$w/fake"
+  : > "$w/fake/windows"
+  cat > "$w/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) cat "$FM_FAKE_DIR/windows" ;;
+  display-message)
+    target=
+    for arg in "$@"; do
+      case "$arg" in main:fm-*) target=$arg ;; esac
+    done
+    case "${*: -1}" in
+      *pane_current_command*)
+        id=${target##*fm-}
+        if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'claude\n'; fi
+        ;;
+      *) printf '\n' ;;
+    esac
+    ;;
+esac
+SH
+  chmod +x "$w/fakebin/tmux"
   # Fresh watcher beacon keeps fm-guard quiet.
   touch "$w/home/state/.last-watcher-beat"
 
@@ -47,6 +73,8 @@ new_world() {
   printf 'r1\n' > "$w/seed/README.md"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-remote-secondmate-control.sh"
+  chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
@@ -60,19 +88,30 @@ new_world() {
 
 # Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
 # how treehouse leases a secondmate home), plus its state meta. Args: world id.
+# The recorded runtime matters to the action split, so it is part of the fixture:
+# harness defaults to a control-verified adapter on the default (tmux) backend,
+# which is what makes a restart provable. Pass a backend to model one that cannot
+# prove an agent stopped.
 add_sm() {
-  local w=$1 id=$2
+  local w=$1 id=$2 harness=${3:-claude} backend=${4:-}
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
     printf 'window=main:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/%s\n' "$w" "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=%s\n' "$harness"
+    [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
+  printf 'fm-%s\n' "$id" >> "$w/fake/windows"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
-# Advance origin by one commit. mode=instr changes the instruction surface
-# (AGENTS.md, bin, .agents/skills) plus README; mode=readme changes only README.
+# Advance origin by one commit. mode=instr changes the whole instruction surface
+# (AGENTS.md, bin, .agents/skills) plus README; mode=bin changes only bin/, which
+# a running agent re-executes rather than holding; mode=readme changes only README.
 bump_origin() {
   local w=$1 mode=$2
   git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true
@@ -82,6 +121,9 @@ bump_origin() {
     printf 'echo b\n' > "$w/seed/bin/tool.sh"
     printf 's2\n' > "$w/seed/.agents/skills/note.md"
   fi
+  if [ "$mode" = bin ]; then
+    printf 'echo b-%s\n' "$RANDOM" > "$w/seed/bin/tool.sh"
+  fi
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm "bump-$mode"
   git -C "$w/seed" push -q origin main
@@ -89,7 +131,9 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -107,7 +151,8 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "updated secondmate is nudged"
+  assert_contains "$out" "restart-secondmates: fm-sm1" "a changed AGENTS.md must move the secondmate into the restart set"
+  assert_contains "$out" "nudge-secondmates: none" "a restarted secondmate must not also be nudged"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
@@ -124,7 +169,7 @@ test_updates_main_and_secondmate() {
     || fail "firstmate tip is not a single-parent fast-forward"
   [ "$(git -C "$w/sm1" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "secondmate tip is not a single-parent fast-forward"
-  pass "T1 main + secondmate fast-forward (single-parent), reread + nudge signalled"
+  pass "T1 main + secondmate fast-forward (single-parent), reread + restart signalled"
 }
 
 # --- T3: README-only change does not trigger a reread ----------------------
@@ -138,9 +183,108 @@ test_reread_gate_is_instruction_only() {
 
   assert_contains "$out" "firstmate: updated " "firstmate still advanced"
   assert_contains "$out" "reread-firstmate: no" "non-instruction change skips reread"
-  # The secondmate still advanced, so it is still nudged (update-based nudge).
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate still nudged"
-  pass "T3 reread gates on instruction surface, nudge on advancement"
+  # Nothing the secondmate reads or runs moved, so neither action set names it.
+  assert_contains "$out" "restart-secondmates: none" "a README-only advance must not restart anything"
+  assert_contains "$out" "nudge-secondmates: none" "a README-only advance must not steer anything"
+  pass "T3 an advance that touched no instruction surface produces no secondmate action"
+}
+
+# --- T3b: a bin/-only advance is nudged but never restarted ----------------
+# Every helper under bin/ is executed fresh on each call, so that advance reaches
+# the mate without a new conversation; spending one would be pure cost.
+test_bin_only_advance_never_restarts() {
+  local w out
+  w=$(new_world t3b)
+  add_sm "$w" sm1
+  bump_origin "$w" bin
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "reread-firstmate: yes" "a bin/ change is still an instruction-surface advance"
+  assert_contains "$out" "restart-secondmates: none" "a bin/-only advance must not cost a conversation"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "a bin/-only advance still steers the secondmate"
+  pass "T3b a bin/-only advance steers the secondmate instead of restarting it"
+}
+
+# --- T3c: an unverifiable runtime receives the fallback nudge ----------------
+test_unprovable_runtime_gets_fallback_nudge() {
+  local w out
+  w=$(new_world t3c)
+  # zellij has no recovery-grade agent-state classifier, so no restart there can
+  # ever prove the old agent stopped and the replacement came up.
+  add_sm "$w" sm1 claude zellij
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "restart-secondmates: none" "an unprovable runtime must stay out of the restart set"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "an unverifiable runtime must retain the fallback re-read nudge"
+  pass "T3c an unverifiable secondmate receives the fallback nudge"
+}
+
+# --- T3d: an already-stopped mate is left to startup recovery ---------------
+test_dead_secondmate_gets_no_action() {
+  local w out
+  w=$(new_world t3d)
+  add_sm "$w" sm1
+  : > "$w/fake/dead-sm1"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " "the stopped mate's safe checkout still advances"
+  assert_contains "$out" "restart-secondmates: none" "a stopped mate must not be sent to restart"
+  assert_contains "$out" "nudge-secondmates: none" "a stopped mate must not receive a queued nudge"
+  pass "T3d an already-stopped secondmate is left to startup recovery"
+}
+
+# --- T3e: a legacy remote advance gets the safe fallback steer --------------
+test_legacy_remote_advance_is_nudged() {
+  local w out fake_ssh
+  w=$(new_world t3e)
+  fake_ssh="$w/fakebin/fake-ssh"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+case "${rargs[1]:-}" in
+  update) printf 'synced: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+  state) printf 'alive\n' ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fake_ssh"
+  cat > "$w/home/state/sm1.meta" <<EOF
+window=remote:sm1
+endpoint_task_id=sm1
+worktree=/srv/sm1
+project=/srv/sm1
+harness=claude
+kind=secondmate
+home=/srv/sm1
+remote_host=remote-mac
+remote_backend=herdr
+EOF
+  printf -- '- sm1 - remote domain (host: remote-mac; root: /srv/fm; home: /srv/sm1; scope: things; projects: p; added 2026-09-03)\n' \
+    > "$w/home/data/secondmates.md"
+
+  out=$(FM_TEST_SSH_BIN="$fake_ssh" run_update "$w")
+
+  assert_contains "$out" "remote secondmate sm1: updated on remote-mac" \
+    "the legacy remote advance was not accepted"
+  assert_contains "$out" "restart-secondmates: none" \
+    "an unknown remote instruction diff must not authorize restart"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" \
+    "an unknown remote instruction diff must receive the safe re-read steer"
+  pass "T3e a legacy remote advance falls back to the re-read steer"
 }
 
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
@@ -230,7 +374,11 @@ test_registry_backstop_dedup_and_self_exclusion() {
   # output, where 'secondmate reg1: updated' legitimately appears).
   local nudge_line
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
-  assert_contains "$nudge_line" "fm-sm1" "live-meta secondmate is nudged"
+  local restart_line
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  assert_contains "$restart_line" "fm-sm1" "live-meta secondmate is restarted"
+  assert_not_contains "$restart_line" "reg1" "registry-only secondmate without live metadata gets no action"
+  assert_not_contains "$nudge_line" "sm1" "a restarted secondmate must not also be nudged"
   assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
@@ -293,6 +441,10 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
+test_bin_only_advance_never_restarts
+test_unprovable_runtime_gets_fallback_nudge
+test_dead_secondmate_gets_no_action
+test_legacy_remote_advance_is_nudged
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current

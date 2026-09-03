@@ -223,7 +223,9 @@ An SSH transport failure or unreadable remote endpoint remains unknown and must 
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
 To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
-That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read; use the remote route's own relaunch path for those.
+That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read.
+Move a REMOTE one with `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
+An instruction-surface update restarts eligible mates of both placements on its own; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
