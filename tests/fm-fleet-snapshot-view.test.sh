@@ -866,6 +866,113 @@ EOF
   pass "the home summary buckets every live child and names any state no bucket claims"
 }
 
+# A row the buckets leave out ON PURPOSE is accounted for, not missing. The
+# exhaustive guard asks "did anyone classify this row", and a program-role
+# in-flight row is deliberately outside $active_all because a program is not
+# active child work - so it must not read as an inconsistency that does not
+# exist. A row nobody classified must still surface, which is what stops this
+# from being a way to silence the guard.
+test_a_deliberate_exclusion_is_accounted_for_not_unbucketed() {
+  local home fakebin out
+  home=$(make_home summary-program-role)
+  mkdir -p "$home/projects/program"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] prog-task - Aggregate program (repo: alpha) (kind: program) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/prog-task.meta" \
+    "window=firstmate:fm-prog-task" \
+    "worktree=$home/projects/program" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: aggregating\n' > "$home/state/prog-task.status"
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" prog-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" prog-task busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+      and .reason == null
+  ' >/dev/null || fail "a deliberately excluded program-role child was reported as an inconsistency: $out"
+  pass "a deliberately excluded row is accounted for and raises no invalidity"
+}
+
+# What each invalidity reason MEANS to its consumers has one owner, and this
+# drives both consumers through the parent snapshot. A data-completeness
+# observation about one child must not cost the parent the whole home's ledger:
+# discarding active_children, decisions_open, holds, queued and landed over one
+# unclassified row is disproportionate to the point of making the guard net
+# harmful. A reason that makes the home's structure itself untrustworthy still
+# discards it, which is what stops "tolerated" from meaning "ignored".
+test_a_parent_tolerates_a_data_level_invalidity_but_not_a_structural_one() {
+  local home mate fakebin ledger out
+  home=$(make_home summary-parent-tolerance)
+  mate=$(make_home summary-parent-tolerance-mate)
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf '# Fixture home\n' > "$mate/AGENTS.md"
+  mkdir -p "$mate/bin"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  printf -- '- mate - fixture domain (home: %s; scope: fixture work; projects: alpha; added 2026-08-28)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/mate.meta" "$mate" "fmtest:fm-mate" alpha claude
+  fakebin=$(make_fakebin "$home")
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$mate" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "could not build the mate's own ledger"
+
+  printf '%s' "$ledger" | jq '.valid = false
+    | .reason = "live child state is accounted for by nothing: odd-task=novel-state"
+    | .invalidity = {kind:"unbucketed_current",ids:["odd-task"]}
+    | .holds = [{id:"held-task",title:"Held",blocked_by:null,blocked_by_ids:[],
+                 unresolved_blocker_ids:[],reason:"waiting",source:"child-state"}]
+    | .counts.holds = 1' > "$mate/state/home-summary.json"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "the parent snapshot failed over a tolerated invalidity"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0].provenance.selected == "structured-home"
+      and (.secondmate_current.records[0].holds | length) == 1
+      and .secondmate_current.records[0].reconcile_inventory.kind == "unbucketed_current"
+  ' >/dev/null \
+    || fail "a tolerated data-level invalidity cost the parent the home's ledger: $(printf '%s' "$out" | jq -c '.secondmate_current.records[0]')"
+
+  printf '%s' "$ledger" | jq '.valid = false
+    | .reason = "missing structured backlog"
+    | .invalidity = {kind:"missing_backlog",ids:[]}
+    | .holds = [{id:"held-task",title:"Held",blocked_by:null,blocked_by_ids:[],
+                 unresolved_blocker_ids:[],reason:"waiting",source:"child-state"}]
+    | .counts.holds = 1' > "$mate/state/home-summary.json"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "the parent snapshot failed over a structural invalidity"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0].provenance.selected != "structured-home"
+      and (.secondmate_current.records[0].holds | length) == 0
+  ' >/dev/null \
+    || fail "a structural invalidity was sampled as though the home were readable: $(printf '%s' "$out" | jq -c '.secondmate_current.records[0]')"
+  pass "a parent keeps a home's ledger over a data-level invalidity and discards it over a structural one"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -967,6 +1074,8 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
 test_home_summary_buckets_every_live_child
+test_a_deliberate_exclusion_is_accounted_for_not_unbucketed
+test_a_parent_tolerates_a_data_level_invalidity_but_not_a_structural_one
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

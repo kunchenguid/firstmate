@@ -120,6 +120,39 @@ FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
 FM_SNAPSHOT_SECONDMATE_DECISIONS=${FM_SNAPSHOT_SECONDMATE_DECISIONS:-20}
+
+# THE ONE OWNER of what each home-summary invalidity reason MEANS to the two
+# consumers that act on it. Both read this table rather than listing reasons
+# themselves, because the two lists drifted apart the moment one of them gained
+# an entry: a reason added to the state-`unknown` exemption and not to the
+# parent sampler's tolerance made a parent discard a whole home's ledger over
+# one flag.
+#
+#   parent_tolerates      - a parent sampling this home still SAMPLES it and
+#                           keeps its ledger (active_children, decisions_open,
+#                           holds, queued, landed, endpoints, counts). True for
+#                           data-completeness observations about individual
+#                           children, which say something is unaccounted for,
+#                           not that the home's structure is unreadable.
+#                           False for reasons that make the structure itself
+#                           untrustworthy, where a retained ledger would be a
+#                           record nothing supports.
+#   state_unknown_exempt  - the summary's own `state` is still computed from
+#                           the buckets rather than collapsing to `unknown`.
+#
+# A reason absent from this table is treated as neither tolerated nor exempt,
+# which is the conservative direction; add it here when you add it to the
+# emitter, and both consumers follow at once.
+FM_SNAPSHOT_INVALIDITY_POLICY='{
+  "missing_backlog":           {"parent_tolerates": false, "state_unknown_exempt": false},
+  "unstructured_current":      {"parent_tolerates": false, "state_unknown_exempt": false},
+  "child_current_unavailable": {"parent_tolerates": true,  "state_unknown_exempt": false},
+  "orphan_in_flight":          {"parent_tolerates": true,  "state_unknown_exempt": true},
+  "unowned_current":           {"parent_tolerates": true,  "state_unknown_exempt": true},
+  "terminal_in_flight":        {"parent_tolerates": true,  "state_unknown_exempt": true},
+  "unbucketed_current":        {"parent_tolerates": true,  "state_unknown_exempt": true}
+}'
+
 FM_SNAPSHOT_TERMINAL_LINES=${FM_SNAPSHOT_TERMINAL_LINES:-8}
 FM_SNAPSHOT_TERMINAL_BYTES=${FM_SNAPSHOT_TERMINAL_BYTES:-4096}
 FM_SNAPSHOT_TERMINAL_TIMEOUT=${FM_SNAPSHOT_TERMINAL_TIMEOUT:-2}
@@ -700,6 +733,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --argjson backlog "$1" \
+    --argjson invalidity_policy "$FM_SNAPSHOT_INVALIDITY_POLICY" \
     --argjson tasks "$2" '
     def trunc($n):
       tostring | gsub("\\s+"; " ")
@@ -785,18 +819,35 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
+    # Rows the buckets above leave out ON PURPOSE, each by a rule stated here.
+    # A deliberate exclusion is ACCOUNTED FOR - somebody classified the row and
+    # decided it has no bucket - which is a different thing from a row nobody
+    # classified, and the guard below can only tell them apart if every such
+    # rule declares itself. Adding an exclusion to a bucket without adding it
+    # here turns it into a false fall-through, which is exactly how a
+    # program-role child came to be reported as an inconsistency that did not
+    # exist. Do not answer a fall-through by inventing a bucket instead: that
+    # hides the exclusion rather than stating it.
+    #   - a program-role in-flight row is outside $active_all because a program
+    #     is not active child work;
+    #   - an in-flight row whose hold the backlog already reports is outside the
+    #     $holds_all child-state arm so one hold is not listed twice; the
+    #     backlog arm reports it.
+    | (([ $owned_in_flight[] | select(.current_role == "program") | .id ]
+        + [ $owned_in_flight[] | select(.hold_reason != null and .hold_kind != null) | .id ])
+       | unique) as $accounted_exclusions
     | (([ $active_all[].id ] + [ $holds_all[].id ] + [ $terminal_in_flight[].id ]
          + [ $unknown_children[].id ] + [ $unowned_children[].id ]
-         + [ $owned_in_flight[] | select(.hold_reason != null and .hold_kind != null) | .id ])
-       | unique) as $bucketed_ids
+         + $accounted_exclusions)
+       | unique) as $accounted_ids
     | ([ $tasks[]
          | select(.kind != "secondmate")
-         | select(.id as $id | $bucketed_ids | index($id) | not)
+         | select(.id as $id | $accounted_ids | index($id) | not)
          | {id,state:.current_state.state} ]) as $unbucketed_current
     | ($strict_invalidities
        + (if ($unbucketed_current | length) > 0 then
             [{kind:"unbucketed_current",ids:($unbucketed_current | map(.id)),
-              reason:("live child state belongs to no summary bucket: " +
+              reason:("live child state is accounted for by nothing: " +
                       ($unbucketed_current | map(.id + "=" + .state) | join(", ")))}]
           else [] end)) as $strict_invalidities
     | ($backlog.present == true
@@ -815,8 +866,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        else {kind:null,ids:[]} end) as $invalidity
     | (if ($valid | not)
           and (($unknown_children | length) > 0
-               or (["orphan_in_flight","unowned_current","terminal_in_flight","unbucketed_current"]
-                   | index($invalidity.kind) | not))
+               or (($invalidity_policy[$invalidity.kind // ""].state_unknown_exempt // false) | not))
        then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
        elif ($active_all | length) > 0 then "active_child_work"
@@ -1532,10 +1582,10 @@ secondmate_current_json() {  # <parent-tasks-json>
       if [ "$summary_valid" != true ]; then
         summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
         summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
-        case "$summary_invalidity" in
-          child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
-          *) reason="structured home state invalid: $summary_reason" ;;
-        esac
+        if [ "$(printf '%s' "$FM_SNAPSHOT_INVALIDITY_POLICY" \
+                 | jq -r --arg k "$summary_invalidity" '.[$k].parent_tolerates // false')" != true ]; then
+          reason="structured home state invalid: $summary_reason"
+        fi
       fi
     fi
 
