@@ -21,13 +21,24 @@
 #       contradicted for having red or absent checks, because merge authority,
 #       not this script, owns that decision
 #   local-only
+#     - the claim names this task's own branch, exactly fm/<task-id>
 #     - the claimed head= resolves in the task's local copy and is the tip of
-#       the claimed branch=, or - once that branch has been retired after the
-#       work merged - is contained in the local default branch
+#       that branch, or - once the branch has been retired after the work
+#       merged - is BOTH the local copy's own HEAD and contained in the local
+#       default branch. Bare containment is never enough: every commit already
+#       on the default branch is its own ancestor, so containment alone would
+#       pass any claim naming the default branch's tip.
 #   scout
 #     - the claimed report= exists as a non-empty regular file. An absolute path
 #       is used as given (what bin/fm-brief.sh renders into a scout brief); a
-#       relative one is resolved against the home.
+#       relative one is resolved against the home's data root, which is where
+#       every scout report lives, so a relocated FM_DATA_OVERRIDE resolves the
+#       same claim as an unrelocated one. A leading `data/` is the home-relative
+#       spelling of that root and names it rather than a directory beneath it.
+#
+# A task whose meta records no mode= reads as no-mistakes, the same default
+# bin/fm-teardown.sh applies, so a task spawned before mode= was recorded cannot
+# skip the validated-commit check below.
 #
 # Verdicts, written to state/<id>.done-verdict and printed on stdout:
 #   verified      exit 0
@@ -45,6 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -62,7 +74,7 @@ ID=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --quiet) QUIET=1 ;;
-    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "fm-verify-done: unknown option $1" >&2; exit 2 ;;
     *) [ -z "$ID" ] || { echo "fm-verify-done: one task id" >&2; exit 2; }; ID=$1 ;;
   esac
@@ -121,7 +133,10 @@ FM_DONE_CLAIM_LINE=$CLAIM
 fm_done_claim_parse "$CLAIM" || { echo "fm-verify-done: $ID has no terminal claim to verify" >&2; exit 2; }
 
 KIND=$(meta_field kind); [ -n "$KIND" ] || KIND=ship
-MODE=$(meta_field mode)
+# An absent mode= is the legacy ship population, which bin/fm-teardown.sh also
+# reads as no-mistakes. Two owners of the same meta must not disagree about it,
+# and reading it as "some other mode" would skip the validated-commit check.
+MODE=$(meta_field mode); [ -n "$MODE" ] || MODE=no-mistakes
 WT=$(meta_field worktree)
 
 if ! fm_done_claim_has_identity; then
@@ -138,7 +153,8 @@ if [ "$KIND" = scout ]; then
   fi
   case "$REPORT" in
     /*) ;;
-    *) REPORT="$FM_HOME/$REPORT" ;;
+    data/*) REPORT="$DATA/${REPORT#data/}" ;;
+    *) REPORT="$DATA/$REPORT" ;;
   esac
   if [ -f "$REPORT" ] && [ ! -L "$REPORT" ] && [ -s "$REPORT" ]; then
     verdict_is verified "report present at $FM_DONE_CLAIM_REPORT"
@@ -161,6 +177,13 @@ if [ "$MODE" = local-only ]; then
     verdict_is contradicted 'local-only claim names no branch'
     finish
   fi
+  # A local-only task's branch is not a free field: bin/fm-brief.sh renders the
+  # claim template with this task's own fm/<id>. A claim naming anything else is
+  # not this task's work, however true it may be of some other branch.
+  if [ "$BRANCH" != "fm/$ID" ]; then
+    verdict_is contradicted "claim names branch $BRANCH, not this task's fm/$ID"
+    finish
+  fi
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     verdict_is unverified 'the local copy is gone, so the claimed commit cannot be established'
     finish
@@ -179,9 +202,22 @@ if [ "$MODE" = local-only ]; then
     finish
   fi
   # The branch is gone. That is the normal end state once local-only work has
-  # been merged and its branch retired, so containment in the default branch is
-  # the same "it landed" fact the branch tip was standing in for. Only when
-  # there is no default branch to compare against is this genuinely unknown.
+  # been merged and its branch retired, but containment in the default branch
+  # cannot stand in for the branch tip on its own: a commit is its own ancestor,
+  # so every commit already on the default branch satisfies containment, and a
+  # worker that committed nothing could pass by naming the default branch's tip.
+  # The task's own local copy supplies the missing evidence. A worker that
+  # produced the claimed commit left its worktree sitting on it; one that
+  # produced nothing left its worktree at the spawn base.
+  WT_HEAD=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ -z "$WT_HEAD" ]; then
+    verdict_is unverified "branch $BRANCH is gone and the local copy's own HEAD could not be read, so the claimed $HEAD_CLAIM cannot be established"
+    finish
+  fi
+  if [ "$WT_HEAD" != "$HEAD_CLAIM" ]; then
+    verdict_is unverified "branch $BRANCH is gone and the local copy's own HEAD is $WT_HEAD, not the claimed $HEAD_CLAIM, so nothing establishes that this task produced it"
+    finish
+  fi
   DEFAULT=$(fm_default_branch "$WT" 2>/dev/null || true)
   if [ -z "$DEFAULT" ] \
     || ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" >/dev/null 2>&1; then
@@ -189,7 +225,7 @@ if [ "$MODE" = local-only ]; then
     finish
   fi
   if git -C "$WT" merge-base --is-ancestor "$HEAD_CLAIM" "refs/heads/$DEFAULT" 2>/dev/null; then
-    verdict_is verified "claimed $HEAD_CLAIM is on $DEFAULT; its branch $BRANCH has been retired"
+    verdict_is verified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT; its branch $BRANCH has been retired"
     finish
   fi
   verdict_is contradicted "branch $BRANCH is gone and the claimed $HEAD_CLAIM is not on $DEFAULT"

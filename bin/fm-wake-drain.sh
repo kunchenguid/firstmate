@@ -365,6 +365,7 @@ case "$UNRECOGNISED_STATUS_MAX" in ''|*[!0-9]*) UNRECOGNISED_STATUS_MAX=10 ;; es
 # when nothing is unread, which is the common case.
 print_unread_status_section() {
   local snapshot=${1:-} unread task line shown=0 unrecognised=0 omitted=0
+  local header='UNREAD STATUS (new since last drain, not re-printed after this presentation):'
 
   if [ -n "$snapshot" ]; then
     unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
@@ -388,7 +389,7 @@ print_unread_status_section() {
       line="$task $line"
     fi
     if [ "$shown" -eq 0 ]; then
-      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
+      printf '%s\n' "$header" || return 1
     fi
     printf '%s\n' "$line" || return 1
     shown=$((shown + 1))
@@ -396,7 +397,12 @@ print_unread_status_section() {
 $unread
 EOF
 
+  # The count is part of the section, never a bare line on its own: with the cap
+  # set to 0 and only unrecognised lines unread, the loop above prints no header.
   if [ "$omitted" -gt 0 ]; then
+    if [ "$shown" -eq 0 ]; then
+      printf '%s\n' "$header" || return 1
+    fi
     printf 'UNREAD STATUS: %d more unrecognised line(s) omitted; read them in the task status log.\n' \
       "$omitted" || return 1
   fi

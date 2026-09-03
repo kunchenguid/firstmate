@@ -126,11 +126,18 @@ status_is_terminal_verb() {
   esac
 }
 
-# The complete set of status-line verbs this fleet recognises. Three of them are
-# overridable constants, so the set is assembled from those owners rather than
-# re-listed as literals. `done-unverified` is deliberately absent: it is a
-# current-STATE token bin/fm-crew-state.sh reports, never a verb anything writes
-# into a status file.
+# 0 when a status line carries a state this fleet recognises. The built-in verb
+# set comes first; three of its members are overridable constants, so it is
+# assembled from those owners rather than re-listed as literals. `done-unverified`
+# is deliberately absent: it is a current-STATE token bin/fm-crew-state.sh
+# reports, never a verb anything writes into a status file.
+#
+# Beyond that set, whatever status_is_captain_relevant recognises is recognised
+# here too, because that function is the one owner of the configurable
+# vocabulary: FM_CAPTAIN_RE overrides the whole captain-relevant set, and its
+# default also matches legacy free-text lines ("merged", "PR ready"). A home
+# that configures its own verbs, or a legacy bare line the fleet already routes
+# as a real state, must not then be labelled as matching no status verb.
 status_line_verb_is_known() {  # <status-line>
   local verb
   verb=$(status_line_verb "${1:-}")
@@ -140,6 +147,7 @@ status_line_verb_is_known() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ] && return 0
   [ "$verb" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] && return 0
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ] && return 0
+  status_is_captain_relevant "${1:-}" && return 0
   return 1
 }
 

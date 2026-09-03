@@ -40,7 +40,15 @@ drain_open() {  # <state> <out>
   local state=$1 out=$2
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed over $state"
   grep -F 'OPEN DECISIONS' "$out" >/dev/null || return 0
-  cat "$out"
+  # Only the OPEN DECISIONS section. This suite is about the decision fold, and
+  # the drain's other sections legitimately echo the same raw impostor lines -
+  # the unread-status surface flags each one as UNRECOGNISED - so matching the
+  # whole drain would read a merely-quoted line as a decision the fold opened.
+  awk '
+    /^OPEN DECISIONS/ { inside = 1; print; next }
+    inside && /^[A-Z][A-Z0-9]+([ ][A-Z0-9]+)*[ (:]/ { inside = 0 }
+    inside { print }
+  ' "$out"
 }
 
 # --- the fold, both directions ----------------------------------------------

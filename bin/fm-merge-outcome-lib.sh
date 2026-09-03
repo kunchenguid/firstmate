@@ -4,9 +4,13 @@
 # Two outcomes travel this one path, because both change whether a task's own
 # `done:` record is still true:
 #   merged           the PR landed.
-#   closed-unmerged  the PR was closed WITHOUT merging, which CONTRADICTS a done
-#                    record written when it was still open. A done record that
-#                    silently stops being true is the failure this carries.
+#   closed-unmerged  the PR was closed WITHOUT merging. When the task holds a
+#                    terminal `done:` record, that record has silently stopped
+#                    being true, and reporting the contradiction is the failure
+#                    this carries. The poll is armed at PR registration, well
+#                    before any terminal claim, so this outcome is also reached
+#                    with no claim on record; the publication then reports the
+#                    close plainly rather than inventing a claim to contradict.
 #
 # Both a merge performed by this home and either outcome detected by its existing
 # poll use this operation, so neither depends on an agent remembering it.
@@ -39,6 +43,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-done-claim-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-done-claim-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -60,8 +66,8 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # than treat it as success: the merge landed and the record did not.
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outcome>]
   local home=$1 state=$2 id=$3 url=$4 origin=$5 outcome=${6:-merged}
-  local self_rc=0 destination='' line lock status=0 wake_note
-  local provider host path number
+  local self_rc=0 destination='' line lock status=0 wake_note claimed=0
+  local provider host path number claim_state=''
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -78,16 +84,34 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # A merge is a completion; a close without merge is a blocker, because the
   # task still holds a done record the forge no longer supports. The verbs
   # differ for exactly that reason and are both known status verbs.
+  #
+  # Whether the task holds such a record is a fact to read, not to assume: the
+  # poll is armed at PR registration (bin/fm-pr-check.sh), long before any
+  # terminal claim, so a PR closed while the worker is still working has no done
+  # record to contradict. Asserting one would make this publication itself the
+  # unfounded claim the whole verdict path exists to stop. Read in a subshell so
+  # the claim globals a caller may be holding are left alone.
+  if [ "$outcome" != merged ]; then
+    claim_state=$(fm_done_claim_status "$state" "$id" >/dev/null 2>&1 \
+      && printf '%s' "$FM_DONE_CLAIM_STATE")
+    # An unreadable claim state is treated as no claim: the weaker wording is
+    # true either way, while the stronger one would not be.
+    case "$claim_state" in ''|none) ;; *) claimed=1 ;; esac
+  fi
   if [ "$outcome" = merged ]; then
     wake_note="check: merge landed: $id $FM_PR_URL"
-  else
+  elif [ "$claimed" -eq 1 ]; then
     wake_note="check: PR closed without merging, contradicting the done record: $id $FM_PR_URL"
+  else
+    wake_note="check: PR closed without merging: $id $FM_PR_URL"
   fi
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     if [ "$outcome" = merged ]; then
       line="done [key=merged-$id]: merged $id $FM_PR_URL"
-    else
+    elif [ "$claimed" -eq 1 ]; then
       line="blocked [key=closed-unmerged-$id]: $id claims done but $FM_PR_URL was closed without merging"
+    else
+      line="blocked [key=closed-unmerged-$id]: $id had its PR $FM_PR_URL closed without merging"
     fi
   else
     self_rc=$?

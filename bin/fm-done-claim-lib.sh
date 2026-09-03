@@ -170,12 +170,36 @@ fm_done_reason_clean() {  # <reason>
   printf '%s' "${1:-}" | LC_ALL=C tr '\n\t\r' '   ' | cut -c1-400
 }
 
+# 0 when a durable record already establishes THIS exact claim as verified. Run
+# in a subshell so reading it does not clobber a caller's FM_DONE_VERDICT* view.
+_fm_done_verdict_already_verified() {  # <state> <task-id> <claim-hash>
+  (
+    fm_done_verdict_read "$1" "$2" || exit 1
+    [ "$FM_DONE_VERDICT" = verified ] || exit 1
+    [ "$FM_DONE_VERDICT_CLAIM_HASH" = "$3" ] || exit 1
+  )
+}
+
+# Write the durable verdict record, with one refusal: an `unverified` verdict
+# never overwrites a record that already establishes the SAME claim as
+# `verified`. Unverified is only the absence of evidence - a forge that could
+# not be reached, a tool missing from PATH - so letting it overwrite would let a
+# transient outage un-establish work that was genuinely established. A
+# `contradicted` verdict still overwrites, because that is positive evidence of
+# falsity. The refusal protects only the DURABLE record: the run that observed
+# the transient unverified result still prints and exits with it (see finish()
+# in bin/fm-verify-done.sh), so nothing hides the outage from its caller.
+# Returns 0 for that refusal, because the record already holds a stronger
+# verdict for this claim and there is nothing left to record.
 fm_done_verdict_write() {  # <state> <task-id> <verdict> <claim-hash> <reason>
   local state=$1 id=$2 verdict=$3 hash=$4 reason=$5 path tmp
   case "$verdict" in verified|unverified|contradicted) ;; *) return 2 ;; esac
   case "$hash" in *[!0-9a-f]*|'') return 2 ;; esac
   [ "${#hash}" -eq 64 ] || return 2
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  if [ "$verdict" = unverified ] && _fm_done_verdict_already_verified "$state" "$id" "$hash"; then
+    return 0
+  fi
   path=$(fm_done_verdict_path "$state" "$id")
   [ ! -L "$path" ] || return 1
   umask 077

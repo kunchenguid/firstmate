@@ -26,6 +26,19 @@
 #       does not suppress a later merge of the same PR
 #   (l) the drain flags a status line carrying no recognised verb instead of
 #       absorbing it silently
+#   (m) a fabricated local-only claim naming the default branch's tip, on a task
+#       whose own branch never existed, is not verified: a commit is its own
+#       ancestor, so containment alone proves nothing
+#   (n) a local-only claim naming some other branch          -> contradicted
+#   (o) a transient unverified never downgrades an established record, while the
+#       run that observed it still reports it
+#   (p) a contradicted verdict still overwrites a verified record, so (o) is a
+#       downgrade guard and not a freeze
+#   (q) a task whose meta records no mode= still gets the validated-commit check
+#   (r) a relative scout report= resolves against a relocated data root
+#   (s) a close with no done claim on record does not invent one
+#   (t) a home's configured verb vocabulary is not labelled UNRECOGNISED
+#   (u) the omitted-unrecognised count is never printed without its header
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -36,6 +49,8 @@ set -u
 . "$ROOT/bin/fm-done-claim-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-merge-outcome-lib.sh"
 
 VERIFY="$ROOT/bin/fm-verify-done.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
@@ -89,12 +104,33 @@ SH
   printf '%s\n' "$dir"
 }
 
-# Run the verifier in <dir> and echo "<exit>\t<line>".
-verify() {  # <dir>
-  local dir=$1 out rc=0
+# Run the verifier in <dir> and echo "<exit>\t<line>". <data-root> defaults to
+# the home's own data dir; a case that relocates it passes its own.
+verify() {  # <dir> [data-root]
+  local dir=$1 data=${2:-$dir/data} out rc=0
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
-    FM_DATA_OVERRIDE="$dir/data" "$VERIFY" task-v 2>&1) || rc=$?
+    FM_DATA_OVERRIDE="$data" "$VERIFY" task-v 2>&1) || rc=$?
   printf '%s\t%s\n' "$rc" "$out"
+}
+
+# A local-only world shaped like a real spawn: a repo whose default branch keeps
+# advancing, plus a LINKED worktree left where the task was spawned. The task's
+# own fm/task-v branch is never created, which is the state a worker that
+# committed nothing leaves behind. Prints the case dir.
+make_local_world() {  # <name>
+  local name=$1 dir default
+  dir="$TMP_ROOT/$name"
+  mkdir -p "$dir/state" "$dir/data" "$dir/fakebin"
+  git -C "$dir" init -q repo
+  git -C "$dir/repo" commit -q --allow-empty -m base
+  default=$(git -C "$dir/repo" symbolic-ref --quiet --short HEAD)
+  git -C "$dir/repo" worktree add -q --detach "$dir/wt" HEAD
+  # The default branch moves on after the spawn, so its tip is a commit the task
+  # never produced - exactly the commit a fabricated claim would reach for.
+  git -C "$dir/repo" commit -q --allow-empty -m later
+  fm_write_meta "$dir/state/task-v.meta" \
+    "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship" "mode=local-only"
+  printf '%s\t%s\n' "$dir" "$default"
 }
 
 nm_status() {  # <branch> <head>
@@ -416,6 +452,266 @@ test_known_verbs_are_not_flagged_as_unrecognised() {
   pass "every known status verb stays recognised while prose does not"
 }
 
+# --- (m)-(n) local-only: containment alone is not evidence --------------------
+
+test_a_fabricated_local_only_claim_is_not_verified() {
+  local out dir default tip result
+  out=$(make_local_world local-fabricated) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  default=${out#*$'\t'}
+  tip=$(git -C "$dir/repo" rev-parse "refs/heads/$default")
+  # The worker committed nothing and fm/task-v never existed. It claims the
+  # default branch's tip, which IS contained in the default branch, so bare
+  # ancestry would pass a claim holding none of this task's work.
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  case "${result#*$'\t'}" in
+    verified:*) fail "a fabricated local-only claim naming the default branch tip was verified: $result" ;;
+  esac
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a fabricated local-only claim did not exit unverified: $result"
+  case "$result" in *"local copy's own HEAD"*) ;; *) fail "the unverified reason did not name what could not be established: $result" ;; esac
+  pass "a fabricated local-only claim naming the default branch's tip is not verified"
+}
+
+test_a_local_only_claim_naming_another_branch_is_contradicted() {
+  local out dir tip result
+  out=$(make_local_world local-other-branch) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  tip=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/repo" branch -q fm/some-other-task "$tip"
+  printf 'done: branch=fm/some-other-task head=%s - shipped\n' "$tip" \
+    > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 4 ] \
+    || fail "a claim naming another task's branch did not exit contradicted: $result"
+  case "$result" in *"not this task's fm/task-v"*) ;; *) fail "the contradiction did not name the expected branch: $result" ;; esac
+  pass "a local-only claim naming a branch other than this task's is contradicted"
+}
+
+test_a_local_only_claim_on_a_retired_branch_still_verifies() {
+  local out dir default landed result
+  out=$(make_local_world local-retired) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  default=${out#*$'\t'}
+  # The work landed on the default branch, and the task's own copy sits on the
+  # commit it produced. The fm/task-v branch itself has been retired.
+  git -C "$dir/repo" commit -q --allow-empty -m landed
+  landed=$(git -C "$dir/repo" rev-parse "refs/heads/$default")
+  git -C "$dir/wt" checkout -q --detach "$landed"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$landed" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "genuinely landed local-only work with a retired branch was not verified: $result"
+  pass "local-only work whose branch was retired after landing still verifies"
+}
+
+# --- (o)-(p) the durable record resists a downgrade but not a contradiction ---
+
+# Establish the claim, then re-run the verifier against the same claim under the
+# given fake-forge state. Echoes the re-run's own "<exit>\t<line>" and leaves the
+# durable record for the caller to read through fm_done_claim_status.
+establish_then_rerun() {  # <name> <rerun-gh-out>
+  local name=$1 rerun=$2 dir shipped result
+  dir=$(make_world "$name")
+  shipped=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
+    > "$dir/state/task-v.status"
+  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+    FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] || fail "setup error: the claim did not verify: $result"
+  result=$(FAKE_GH_OUT="$rerun" FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
+  printf '%s\t%s\n' "$dir" "$result"
+}
+
+test_a_transient_unverified_does_not_downgrade_an_established_record() {
+  local out dir result
+  # The forge is unreachable on the re-run, which is absence of evidence, not
+  # evidence of falsity.
+  out=$(establish_then_rerun downgrade-guard '') || fail "the downgrade-guard fixture failed"
+  dir=${out%%$'\t'*}
+  result=${out#*$'\t'}
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "the re-run hid the transient failure it actually observed: $result"
+  case "$result" in *unverified:*) ;; *) fail "the re-run did not report the unverified it observed: $result" ;; esac
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = verified ] \
+    || fail "a transient forge outage downgraded an established record to $FM_DONE_CLAIM_STATE"
+  pass "a transient unverified is reported but never downgrades an established record"
+}
+
+test_a_contradiction_still_overwrites_an_established_record() {
+  local out dir result other
+  other=00112233445566778899aabbccddeeff00112233
+  # The forge answers, and it answers with a different head: the claim is now
+  # established false, so the protection above must not freeze the record.
+  out=$(establish_then_rerun contradiction-overwrites "OPEN	$other	SUCCESS") \
+    || fail "the contradiction-overwrite fixture failed"
+  dir=${out%%$'\t'*}
+  result=${out#*$'\t'}
+  [ "${result%%$'\t'*}" = 4 ] || fail "the re-run did not contradict the claim: $result"
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = contradicted ] \
+    || fail "a contradiction did not overwrite the verified record ($FM_DONE_CLAIM_STATE)"
+  pass "a contradiction still overwrites an established record, so the guard is not a freeze"
+}
+
+# --- (q) an absent mode= does not skip the validated-commit check -------------
+
+test_an_absent_mode_still_checks_the_validated_commit() {
+  local dir result shipped validated
+  dir=$(make_world absent-mode)
+  shipped=$(git -C "$dir/wt" rev-parse HEAD)
+  validated=$(git -C "$dir/wt" rev-parse 'HEAD~1')
+  # A legacy ship task: spawned before mode= was recorded at all.
+  fm_write_meta "$dir/state/task-v.meta" \
+    "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship"
+  printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
+    > "$dir/state/task-v.status"
+  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+    FAKE_NM_STATUS="$(nm_status fm/task-v "$validated")" verify "$dir")
+  [ "${result%%$'\t'*}" = 4 ] \
+    || fail "a task with no recorded mode skipped the validated-commit check: $result"
+  case "$result" in *"validation ran against"*) ;; *) fail "the contradiction did not name the validated commit: $result" ;; esac
+  pass "a task whose meta records no mode still gets the validated-commit check"
+}
+
+# --- (r) a relative scout report= follows the configured data root ------------
+
+test_a_relative_scout_report_follows_a_relocated_data_root() {
+  local dir result
+  dir=$(make_world scout-relocated scout scout)
+  mkdir -p "$dir/elsewhere/task-v"
+  printf 'findings\n' > "$dir/elsewhere/task-v/report.md"
+  # Nothing at the home-relative location, so a read that ignored the configured
+  # data root would find no report at all.
+  assert_absent "$dir/data/task-v/report.md" "setup error: the report exists at the unrelocated path"
+  printf 'done: report=data/task-v/report.md - found it\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir" "$dir/elsewhere")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "a relative scout report was not resolved against the relocated data root: $result"
+  pass "a relative scout report= resolves against the configured data root, relocated or not"
+}
+
+# --- (s) a close does not invent a done claim --------------------------------
+
+# Publish a closed-unmerged outcome in a main home (no parent binding, so the
+# outcome routes to this home's durable wake queue) and echo the queue's text.
+close_publication() {  # <name> <status-line>
+  local name=$1 status_line=$2 dir state
+  dir="$TMP_ROOT/$name"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf '%s\n' "$status_line" > "$state/task-v.status"
+  fm_merge_outcome_report "$dir" "$state" task-v https://github.com/o/r/pull/7 \
+    poll closed-unmerged || fail "the close outcome could not be published for $name"
+  cat "$state/.wake-queue"
+}
+
+# The same publication from a secondmate home, which reports upward on its
+# parent channel instead. Echoes the line the parent actually received.
+close_publication_upward() {  # <name> <status-line>
+  local name=$1 status_line=$2 dir state parent
+  dir="$TMP_ROOT/$name"
+  state="$dir/state"
+  parent="$TMP_ROOT/$name-parent"
+  mkdir -p "$state" "$parent/state"
+  printf 'mate-%s\n' "$name" > "$dir/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$dir/.fm-secondmate-parent"
+  printf '%s\n' "$status_line" > "$state/task-v.status"
+  fm_merge_outcome_report "$dir" "$state" task-v https://github.com/o/r/pull/7 \
+    poll closed-unmerged || fail "the upward close outcome could not be published for $name"
+  cat "$parent/state/mate-$name.status"
+}
+
+test_a_close_does_not_invent_a_done_claim() {
+  local out claim
+  claim='done: pr=https://github.com/o/r/pull/7 head=00112233445566778899aabbccddeeff00112233 - shipped'
+
+  # The poll is armed at PR registration, so a close can arrive while the worker
+  # is still working and has claimed nothing.
+  out=$(close_publication close-no-claim 'working: still going') \
+    || fail "the no-claim close fixture failed"
+  case "$out" in
+    *"the done record"*) fail "a close invented a done record the task never wrote: $out" ;;
+  esac
+  case "$out" in
+    *"PR closed without merging"*) ;;
+    *) fail "a close with no claim on record was not published at all: $out" ;;
+  esac
+
+  out=$(close_publication close-with-claim "$claim") || fail "the claimed close fixture failed"
+  case "$out" in
+    *"contradicting the done record"*) ;;
+    *) fail "a close over a real done claim did not report the contradiction: $out" ;;
+  esac
+
+  # The durable parent line is the record the finding named, so it is checked on
+  # its own surface rather than inferred from the wake note.
+  out=$(close_publication_upward up-no-claim 'working: still going') \
+    || fail "the upward no-claim close fixture failed"
+  case "$out" in
+    *"claims done"*) fail "the parent channel was told a task claims done when it never did: $out" ;;
+  esac
+  case "$out" in
+    *"closed-unmerged-task-v"*"closed without merging"*) ;;
+    *) fail "the upward close with no claim was not published at all: $out" ;;
+  esac
+
+  out=$(close_publication_upward up-with-claim "$claim") \
+    || fail "the upward claimed close fixture failed"
+  case "$out" in
+    *"claims done but"*) ;;
+    *) fail "the parent channel lost the contradiction for a real done claim: $out" ;;
+  esac
+  pass "a close reports a contradicted done record only when a claim is actually on record"
+}
+
+# --- (t)-(u) the unread surface ----------------------------------------------
+
+test_a_configured_verb_vocabulary_is_not_unrecognised() {
+  # A home may replace the whole captain-relevant verb set. Its own states must
+  # not then be labelled as matching no status verb.
+  FM_CAPTAIN_RE='escalate:|shipped:'
+  status_line_is_unrecognized "escalate: the migration needs a decision" \
+    && fail "a verb this home configured as a real state was called unrecognised"
+  status_line_is_unrecognized "shipped: the fix is out" \
+    && fail "a second configured verb was called unrecognised"
+  status_line_is_unrecognized "Migration syntax: OK" \
+    || fail "worker prose stopped being unrecognised under a configured vocabulary"
+  unset FM_CAPTAIN_RE
+
+  # The default set also routes legacy bare lines as real states, so they are
+  # not unrecognised either.
+  status_line_is_unrecognized "merged" && fail "a legacy bare captain line was called unrecognised"
+  status_line_is_unrecognized "PR ready" && fail "a legacy bare PR line was called unrecognised"
+  pass "a home's configured verb vocabulary and the legacy bare lines stay recognised"
+}
+
+test_the_omitted_unrecognised_count_carries_its_header() {
+  local dir state status out
+  dir=$(make_case unrecognised-cap-zero)
+  state="$dir/state"
+  status="$state/task9.status"
+  out="$dir/drain.out"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursor"
+
+  printf 'Migration syntax: OK\n' >> "$status"
+  printf -- '- ruff check on all changed files: all passed\n' >> "$status"
+  # Opting out of the surface must not leave a bare counter with nothing to
+  # say what it is counting.
+  FM_DRAIN_UNRECOGNISED_MAX=0 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with the unrecognised surface capped at zero"
+  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) omitted' "$out" \
+    "the omitted unrecognised lines were not counted: $(cat "$out")"
+  assert_grep 'UNREAD STATUS (new since last drain' "$out" \
+    "the omitted count was printed without its section header: $(cat "$out")"
+  pass "the omitted-unrecognised count is never printed as a bare orphan line"
+}
+
 test_claim_grammar_round_trips
 test_unreachable_forge_is_unverified_never_a_pass
 test_head_not_the_pr_head_is_contradicted
@@ -432,4 +728,14 @@ test_poll_reports_a_close_as_well_as_a_merge
 test_marker_distinguishes_the_two_terminal_outcomes
 test_drain_flags_a_line_matching_no_status_verb
 test_known_verbs_are_not_flagged_as_unrecognised
+test_a_fabricated_local_only_claim_is_not_verified
+test_a_local_only_claim_naming_another_branch_is_contradicted
+test_a_local_only_claim_on_a_retired_branch_still_verifies
+test_a_transient_unverified_does_not_downgrade_an_established_record
+test_a_contradiction_still_overwrites_an_established_record
+test_an_absent_mode_still_checks_the_validated_commit
+test_a_relative_scout_report_follows_a_relocated_data_root
+test_a_close_does_not_invent_a_done_claim
+test_a_configured_verb_vocabulary_is_not_unrecognised
+test_the_omitted_unrecognised_count_carries_its_header
 echo "all fm-done-verified tests passed"

@@ -1447,9 +1447,10 @@ EOF
     --repo sample --start --file "$data/backlog.md" >/dev/null) \
     || fail "could not create the relocated captain-hold fixture"
   write_origin_meta "$home" "$id"
-  # This home's data root is relocated, so the claim names the report by its
-  # real path rather than the usual home-relative one.
-  printf 'done: report=%s/%s/report.md - report complete\n' "$data" "$id" > "$home/state/$id.status"
+  # This home's data root is relocated, and the claim still uses the ordinary
+  # home-relative form: a relative report= resolves against the configured data
+  # root, so the same claim reads the same file wherever that root sits.
+  printf 'done: report=data/%s/report.md - report complete\n' "$id" > "$home/state/$id.status"
   printf '# Relocated hold\n\nThe captain call remains open.\n' > "$data/$id/report.md"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
