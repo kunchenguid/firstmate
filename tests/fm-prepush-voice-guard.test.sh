@@ -27,8 +27,8 @@ LINT="$ROOT/bin/fm-lint.sh"
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 
 # fm_voice_repo <dir>: a real repo with a "main" branch carrying one commit and
-# a feature branch checked out. Commits added afterwards are the unpublished set
-# the guard scans by default.
+# a feature branch checked out. Commits added afterwards are the set the guard
+# scans by default: reachable from HEAD, not carried by the default branch.
 fm_voice_repo() {
   local dir=$1
   mkdir -p "$dir"
@@ -332,7 +332,7 @@ test_refusal_names_what_matched_and_how_to_fix_it() {
 
 # --- scope: published history is not rescanned forever ----------------------
 
-test_scans_only_unpublished_commits() {
+test_scans_only_commits_off_the_default_branch() {
   local tmp out rc=0
   tmp=$(fm_test_tmproot fm-voice-scope)
   fm_voice_repo "$tmp/repo"
@@ -353,7 +353,34 @@ test_scans_only_unpublished_commits() {
   assert_contains "$out" 'this has not shipped' "refusal named the wrong commit"
   assert_not_contains "$out" 'this already shipped' \
     "refusal reached back into already-published history"
-  pass "scans only the commits that have not been pushed"
+  pass "scans only the commits the default branch does not carry"
+}
+
+# The default set is "reachable from HEAD, not carried by the default branch",
+# which is deliberately broader than "never pushed anywhere". A commit already
+# on a feature remote is still in it, because the leak is still in what a
+# maintainer would merge. This pins both the behaviour and the wording the
+# refusal uses for it, so neither can drift back to claiming the narrower set.
+test_still_refuses_a_leak_already_on_a_feature_remote() {
+  local tmp out rc=0 base
+  tmp=$(fm_test_tmproot fm-voice-feature-remote)
+  fm_voice_repo "$tmp/repo"
+  base=$(git -C "$tmp/repo" rev-parse main)
+  git -C "$tmp/repo" update-ref refs/remotes/origin/main "$base"
+
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, this already reached the feature remote'
+  git -C "$tmp/repo" update-ref refs/remotes/origin/feature "$(git -C "$tmp/repo" rev-parse HEAD)"
+  fm_voice_commit "$tmp/repo" 'fix(bin): a clean follow-up'
+
+  out=$(fm_voice_scan "$tmp/repo") || rc=$?
+  expect_code 1 "$rc" "a leak already on a feature remote stopped being refused"$'\n'"$out"
+  assert_contains "$out" 'this already reached the feature remote' \
+    "refusal did not name the commit that is already on the feature remote"
+  assert_contains "$out" 'the commits not yet on the default branch' \
+    "refusal described the scanned set as something other than what it scans"
+  assert_not_contains "$out" 'about to be pushed' \
+    "refusal claimed the narrower never-pushed set it does not scan"
+  pass "still refuses a leak that already reached a feature remote"
 }
 
 test_prefers_origin_main_over_an_ahead_local_main() {
@@ -370,9 +397,9 @@ test_prefers_origin_main_over_an_ahead_local_main() {
   fm_voice_commit "$tmp/repo" 'fix(bin): keep the feature tip clean'
 
   out=$(fm_voice_scan "$tmp/repo") || rc=$?
-  expect_code 1 "$rc" "an ahead local main hid an unpushed leaking commit"
+  expect_code 1 "$rc" "an ahead local main hid a leaking commit off the default branch"
   assert_contains "$out" "this local-main commit has not shipped" \
-    "refusal did not identify the hidden unpushed commit"
+    "refusal did not identify the hidden commit"
   pass "prefers origin/main when local main is ahead"
 }
 
@@ -393,7 +420,7 @@ test_fails_closed_when_the_range_cannot_be_determined() {
     "fail-closed diagnostic did not explain why it refused"
   assert_contains "$out" "git fetch origin main" \
     "fail-closed diagnostic did not say how to resolve it"
-  pass "fails closed when the unpublished range cannot be determined"
+  pass "fails closed when the default-branch range cannot be determined"
 }
 
 test_fails_closed_when_the_commit_list_is_unusable() {
@@ -486,11 +513,11 @@ test_the_default_range_has_no_environment_off_switch() {
   local tmp out rc=0
   tmp=$(fm_test_tmproot fm-voice-no-off-switch)
   fm_voice_repo "$tmp/repo"
-  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, an unpublished leak'
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, a leak off the default branch'
 
   out=$(cd "$tmp/repo" && FM_VOICE_GUARD_BASE=HEAD "$GUARD" 2>&1) || rc=$?
   expect_code 1 "$rc" "an environment base silenced the pre-push default scan"$'\n'"$out"
-  assert_contains "$out" 'an unpublished leak' "refusal did not name the leaking commit"
+  assert_contains "$out" 'a leak off the default branch' "refusal did not name the leaking commit"
   pass "the default range cannot be narrowed from the environment"
 }
 
@@ -617,7 +644,8 @@ test_refuses_a_private_per_task_work_document
 test_refuses_a_private_review_artifact
 test_passes_nonprivate_paths_and_work_document_words
 test_refusal_names_what_matched_and_how_to_fix_it
-test_scans_only_unpublished_commits
+test_scans_only_commits_off_the_default_branch
+test_still_refuses_a_leak_already_on_a_feature_remote
 test_prefers_origin_main_over_an_ahead_local_main
 test_fails_closed_when_the_range_cannot_be_determined
 test_fails_closed_when_the_commit_list_is_unusable

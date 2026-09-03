@@ -49,8 +49,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate invoke it with no arguments.
   That same path runs `bin/fm-prepush-voice-guard.sh`, which reads back every commit message not yet on the remote default branch and refuses an address to the repository owner, an account of how the change was produced, a link to the working session, or a private work-document path before the first push.
   Its header owns the rule set and `--list-patterns` prints it.
-  `.github/workflows/internal-voice-guard.yml` is only a pull request title and description backstop because GitHub has already stored and exposed that text before the workflow receives its event, so a failed check reports but cannot undo disclosure.
-  Preventing that disclosure earlier requires scanning where no-mistakes generates the pull request text, which is outside this repository.
+  `.github/workflows/internal-voice-guard.yml` is only a pull request title and description backstop, and the [internal-voice refusal section of the architecture guide](docs/architecture.md#internal-voice-refusal-before-the-first-push) owns why and what it cannot cover.
   It is unrelated to the `bin/fm-voice-*` audio relay family despite the shared word.
   A refusal names the rule, the exact text that matched, and the reword command, and there is no bypass flag because rewording always clears it.
   Its header and `--help` output own the exact local lint modes, file-set selection, and analysis flags.
