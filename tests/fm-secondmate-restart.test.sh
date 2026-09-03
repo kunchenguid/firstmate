@@ -372,12 +372,7 @@ case "${rargs[1]:-}" in
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
-    model=${rargs[4]:--}
-    effort=${rargs[5]:--}
-    [ "$model" != - ] || model=default
-    [ "$effort" != - ] || effort=default
-    printf 'relaunched %s harness=%s from=claude model=%s effort=%s backend=herdr\n' \
-      "${rargs[2]}" "${rargs[3]}" "$model" "$effort"
+    printf 'relaunched %s\n' "${rargs[2]}"
     ;;
 esac
 exit 0
@@ -408,12 +403,6 @@ test_remote_mate_restarts_over_the_transport_hop() {
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
   [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
-  [ "$(grep '^harness=' "$dir/home/state/sm2.meta" | tail -1)" = "harness=codex" ] \
-    || fail "the parent record kept the remote mate's old harness"
-  [ "$(grep '^model=' "$dir/home/state/sm2.meta" | tail -1)" = "model=big-model" ] \
-    || fail "the parent record kept the remote mate's old model"
-  [ "$(grep '^effort=' "$dir/home/state/sm2.meta" | tail -1)" = "effort=high" ] \
-    || fail "the parent record kept the remote mate's old effort"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \

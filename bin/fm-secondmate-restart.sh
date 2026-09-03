@@ -87,8 +87,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
 PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
@@ -157,40 +155,8 @@ report_unreached() {  # <id> <reason>
   printf 'unreached: %s: %s\n' "$1" "$2"
 }
 
-refresh_remote_profile() {  # <array-index> <harness> <model> <effort>
-  local i=$1 harness=$2 model=$3 effort=$4 id meta lock tmp rc=0
-  id=${IDS[$i]}
-  meta="$STATE/$id.meta"
-  lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
-  if [ ! -f "$meta" ] || [ -L "$meta" ] \
-    || [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
-    || [ "$(fm_meta_get "$meta" remote_host)" != "${HOST[i]}" ]; then
-    rc=1
-  else
-    tmp="$meta.profile.$$.$RANDOM"
-    awk -v new_harness="$harness" -v new_model="$model" -v new_effort="$effort" '
-      BEGIN { harness_seen=0; model_seen=0; effort_seen=0 }
-      /^harness=/ { if (!harness_seen++) print "harness=" new_harness; next }
-      /^model=/ { if (!model_seen++) print "model=" new_model; next }
-      /^effort=/ { if (!effort_seen++) print "effort=" new_effort; next }
-      { print }
-      END {
-        if (!harness_seen) print "harness=" new_harness
-        if (!model_seen) print "model=" new_model
-        if (!effort_seen) print "effort=" new_effort
-      }
-    ' "$meta" > "$tmp" \
-      && chmod 600 "$tmp" 2>/dev/null \
-      && mv -f "$tmp" "$meta" || rc=1
-    [ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null || true
-  fi
-  fm_lock_release "$lock"
-  return "$rc"
-}
-
 restart_mate() {  # <array-index>
-  local i=$1 id restart_out restart_rc restart_reason ran_on ran_model ran_effort
+  local i=$1 id restart_out restart_rc restart_reason ran_on
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
@@ -206,16 +172,6 @@ restart_mate() {  # <array-index>
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
     [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
     if [ "${PLACEMENT[i]}" = remote ]; then
-      ran_model=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* model=\([^ ]*\).*/\1/p' | tail -1)
-      ran_effort=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* effort=\([^ ]*\).*/\1/p' | tail -1)
-      [ -n "$ran_model" ] || ran_model=${MODEL[i]:-$(fm_meta_get "$STATE/$id.meta" model)}
-      [ -n "$ran_model" ] || ran_model=default
-      [ -n "$ran_effort" ] || ran_effort=${EFFORT[i]:-$(fm_meta_get "$STATE/$id.meta" effort)}
-      [ -n "$ran_effort" ] || ran_effort=default
-      if ! refresh_remote_profile "$i" "$ran_on" "$ran_model" "$ran_effort"; then
-        report_unreached "$id" "the replacement started, but its confirmed profile could not be recorded in the parent home"
-        return
-      fi
       printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
     else
       printf 'restarted: %s (%s)\n' "$id" "$ran_on"
