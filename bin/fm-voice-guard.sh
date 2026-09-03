@@ -137,7 +137,7 @@ fm_voice_list_patterns() {
 # <path>, prefixed by <label>. Returns 1 when anything matched.
 fm_voice_scan_file() {
   local label=$1 path=$2
-  local rule id case_flag regex hint hits line_no matched line found=0
+  local rule id case_flag regex hint hits hit line_no matched line found=0
 
   for rule in "${FM_VOICE_RULES[@]}"; do
     id=$(fm_voice_rule_field "$rule" 1)
