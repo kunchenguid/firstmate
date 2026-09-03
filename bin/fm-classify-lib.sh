@@ -70,14 +70,31 @@ unset _fm_classify_nounset
 # its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
 #
-# Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
-# legacy lines that lack a standard terminal verb. status_is_captain_relevant is
-# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
-# merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76"). The legacy tokens `PR ready` and
-# `ready in branch` are prose, not the `ready:` verb below, and neither matches a
-# bare `ready:` line - the verb earns its captain relevance in its own right.
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|ready:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+# Two kinds of token live in this set and they are matched differently, because
+# they earn their relevance differently.
+#
+# VERB tokens are ANCHORED to the start of the line (leading whitespace allowed,
+# since a status line may be indented and fm_done_claim_last already tolerates
+# that). A verb means something only in the leading position it is documented to
+# occupy; matched anywhere, it turns worker prose into a state. That is not
+# theoretical - "- integration suite ready: green" and "rebased, done: nothing
+# left" both matched here unanchored, and because status_line_verb_is_known
+# defers to this function as the owner of the configurable vocabulary, such a
+# line counted as KNOWN, dropped out of the UNREAD STATUS surface, and woke
+# firstmate while classifying as nothing. That silent absorption is exactly what
+# the unrecognised-line surface exists to end, so no verb token is left
+# unanchored: a twin one line away is how a rule comes to be enforced in one
+# spelling and not its neighbour.
+#
+# FREE-TEXT tokens (PR ready, checks green, ready in branch, merged) stay
+# unanchored, because they exist only for legacy lines that lack a standard
+# leading verb - they describe prose and have no leading position to earn.
+#
+# status_is_captain_relevant is verb-aware on top of both: a nonterminal working:
+# or paused: line never becomes captain-relevant merely because its prose
+# contains one of those free-text tokens (for example "working: rebased onto
+# merged #76").
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='^[[:space:]]*done:|^[[:space:]]*ready:|^[[:space:]]*needs-decision:|^[[:space:]]*blocked:|^[[:space:]]*failed:|PR ready|checks green|ready in branch|merged'
 
 # The PRE-VALIDATION HANDOFF verb. A no-mistakes worker appends
 #   ready: <summary>

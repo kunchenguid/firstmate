@@ -954,6 +954,54 @@ test_the_prevalidation_handoff_is_not_a_claim() {
   pass "the pre-validation handoff is captain-relevant, recognised, and never a claim"
 }
 
+# A VERB earns captain relevance from the leading position it is documented to
+# occupy, never from appearing anywhere in a line. Unanchored, worker prose that
+# happens to contain a verb token counted as a real state: it became "known", so
+# it dropped out of the unread surface and woke firstmate while classifying as
+# nothing - the exact silent absorption the surface exists to end. The legacy
+# free-text tokens are prose and keep matching wherever they appear.
+test_a_verb_earns_relevance_only_from_the_leading_position() {
+  local line
+  for line in \
+    '- integration suite ready: green' \
+    'rebased, done: nothing left to do' \
+    '- ruff check on all changed files: failed: 0 errors'; do
+    status_is_captain_relevant "$line" \
+      && fail "worker prose became captain-relevant from a verb token mid-line: $line"
+    status_line_verb_is_known "$line" \
+      && fail "worker prose counted as a known state from a verb token mid-line: $line"
+    status_line_is_unrecognized "$line" \
+      || fail "worker prose carrying a verb token mid-line was not unrecognised: $line"
+    status_line_is_unread_surface "$line" \
+      || fail "worker prose carrying a verb token mid-line never reached the unread surface: $line"
+  done
+
+  # A real leading line still earns it, indented or not.
+  for line in \
+    'done: pr=https://github.com/o/r/pull/1 head=00112233445566778899aabbccddeeff00112233 - shipped' \
+    '   done: pr=https://github.com/o/r/pull/1 head=00112233445566778899aabbccddeeff00112233 - shipped' \
+    'ready: implementation complete and committed' \
+    '  ready: implementation complete and committed' \
+    'failed: the work did not land' \
+    'needs-decision: which database?' \
+    'blocked: waiting on credentials'; do
+    status_is_captain_relevant "$line" \
+      || fail "a real leading status line stopped being captain-relevant: $line"
+    status_line_verb_is_known "$line" \
+      || fail "a real leading status line stopped being a known state: $line"
+    status_line_is_unrecognized "$line" \
+      && fail "a real leading status line was flagged as matching no status verb: $line"
+  done
+
+  # The legacy free-text tokens describe prose and have no leading position to
+  # earn, so they still match wherever they appear.
+  status_is_captain_relevant 'merged' || fail "a legacy bare merged line stopped matching"
+  status_is_captain_relevant 'PR ready for review' || fail "a legacy PR ready line stopped matching"
+  status_is_captain_relevant 'the branch is ready in branch fm/x' \
+    || fail "a legacy ready-in-branch line stopped matching"
+  pass "a verb earns captain relevance from its leading position, while legacy prose tokens match anywhere"
+}
+
 # The reflog is the branch's own history, but only while its creation entry
 # survives: `git gc` prunes entries past gc.reflogExpire, and on a long-lived
 # branch that can leave the oldest SURVIVING entry sitting on the tip. Reading
@@ -1841,6 +1889,7 @@ test_help_prints_the_whole_header
 test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
 test_the_prevalidation_handoff_is_not_a_claim
+test_a_verb_earns_relevance_only_from_the_leading_position
 test_a_pruned_reflog_is_unverified_not_contradicted
 test_a_contradiction_needs_the_observation_it_contradicts_with
 test_a_local_only_claim_on_work_the_branch_never_made_is_not_verified

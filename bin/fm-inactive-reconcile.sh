@@ -532,10 +532,17 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   # `done-unverified`, and that is still a terminal outcome nobody has
   # delivered - the whole reason this backstop exists. Matching only `done`
   # would silently drop exactly the outcomes that most need a supervisor.
+  #
+  # `ready` is here for the same reason. It is not terminal, but a stopped
+  # worker that has handed off for validation is waiting on a supervisor action
+  # nobody has taken, which is the state this backstop exists to catch; the same
+  # handoff reached this path as a pre-validation `done:` before it had a verb of
+  # its own, and giving it one must not quietly remove its backstop.
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: done-unverified '*) state='done-unverified' ;;
     'state: failed '*) state='failed' ;;
+    'state: ready '*) state='ready' ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")

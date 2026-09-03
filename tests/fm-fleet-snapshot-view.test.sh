@@ -811,6 +811,61 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# Every live child must land in a bucket the summary actually reports, and the
+# guard for that is exhaustive BY CONSTRUCTION rather than by a list somebody
+# remembered to extend: a task belonging to no bucket is a named invalidity, so a
+# state added later without touching the buckets fails loudly instead of
+# vanishing while the summary still says valid. `ready` is the state that
+# exposed this - it means firstmate must act, and it belonged nowhere.
+test_home_summary_buckets_every_live_child() {
+  local home fakebin out root
+  home=$(make_home summary-exhaustive)
+  mkdir -p "$home/projects/handoff"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] handoff-ship - Implementation handed off (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/handoff-ship.meta" \
+    "window=firstmate:fm-handoff-ship" \
+    "worktree=$home/projects/handoff" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  record_claude_idle "$home/state" handoff-ship
+  printf 'ready: implementation complete and committed\n' > "$home/state/handoff-ship.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+      and (.holds | any(.id == "handoff-ship"))
+  ' >/dev/null || fail "a child waiting for firstmate to act belonged to no bucket: $out"
+
+  # A state no bucket claims must be loud. The fixture reaches one the only way
+  # a real deployment could - by running a build of the tree whose current-state
+  # reader emits it - so the guard is exercised end to end rather than mocked.
+  root="$home/test-root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  sed -i.bak 's/^    \*)              echo unknown ;;$/    *)              echo novel-state ;;/' \
+    "$root/bin/fm-crew-state.sh"
+  rm -f "$root/bin/fm-crew-state.sh.bak"
+  printf 'note: a line whose verb maps to no bucket\n' > "$home/state/handoff-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$root/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity.kind == "unbucketed_current"
+      and (.invalidity.ids == ["handoff-ship"])
+      and (.reason | contains("handoff-ship=novel-state"))
+  ' >/dev/null || fail "a state no bucket claims did not surface as an invalidity: $out"
+  pass "the home summary buckets every live child and names any state no bucket claims"
+}
+
 # Home-summary validity treats persistent secondmates as registered homes, not
 # in-flight children. They have no backlog rows, so they must not produce
 # unowned_current or terminal_in_flight. Ordinary crew/ship metas still do.
@@ -911,6 +966,7 @@ EOF
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_buckets_every_live_child
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

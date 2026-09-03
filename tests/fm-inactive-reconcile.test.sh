@@ -285,6 +285,20 @@ test_a_keyed_phase_close_is_not_the_childs_terminal_outcome() {
   pass "a closed routed phase is neither delivered as the child's outcome nor allowed to silence the backstop"
 }
 
+# The pre-validation handoff has a backstop too. A stopped child that has handed
+# off for validation is waiting on a supervisor action nobody has taken, which is
+# what this backstop exists to catch; the same handoff reached it as a
+# pre-validation `done:` before it had a verb of its own, and giving it one must
+# not quietly remove the safety net behind it.
+test_a_stopped_ready_child_reaches_the_backstop() {
+  make_world ready-backstop; bind_secondmate local
+  write_child "$MATE" child 'ready: implementation complete and committed'
+  FM_FAKE_CREW_STATE='ready' run_reconcile "$MATE" --startup
+  grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "a stopped child waiting for validation was never reported upward: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "a stopped child that handed off for validation still reaches the backstop"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -886,6 +900,7 @@ test_local_secondmate_delivers_terminal_ledger_line
 test_ledger_delivery_downgrades_an_unestablished_claim
 test_a_later_established_claim_corrects_the_parents_record
 test_a_keyed_phase_close_is_not_the_childs_terminal_outcome
+test_a_stopped_ready_child_reaches_the_backstop
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

@@ -90,7 +90,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
-| `fm-crew-state.sh`       | Print one deterministic current-state line for a crew, reporting an unestablished terminal claim as `done-unverified` |
+| `fm-crew-state.sh`       | Print one deterministic current-state line for a crew, reporting an unestablished terminal claim as `done-unverified` and a pre-validation handoff as `ready` |
 | `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-done-claim-lib.sh`   | Single owner of the terminal-claim grammar, its parser, and the durable verdict record |
 | `fm-verify-done.sh`      | Establish a task's terminal claim against the forge, git, and the validation run, and record the verdict |
