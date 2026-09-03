@@ -13,7 +13,9 @@
 # `## Captain's intent` and `## Firstmate spec` copied from the scout brief.
 # Firstmate rewrites those subsections to the ship-time ask before promoting:
 # the scout-time ask describes an investigation. Promotion refuses leftover
-# `{TASK}` / `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh).
+# `{TASK}` / `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh). Heading-body
+# copies stop at the next markdown heading of any level. A pre-subsection
+# scout brief with a filled `# Task` keeps that body instead of fill-in prose.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -139,11 +141,22 @@ if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
 fi
 INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Captain's intent")
 SPEC_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Firstmate spec")
-if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
-  INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
-fi
-if [ -z "$(printf '%s' "$SPEC_BODY" | tr -d '[:space:]')" ]; then
-  SPEC_BODY="Write Firstmate's ship-time build constraints here."
+INTENT_EMPTY=0
+SPEC_EMPTY=0
+[ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ] && INTENT_EMPTY=1
+[ -z "$(printf '%s' "$SPEC_BODY" | tr -d '[:space:]')" ] && SPEC_EMPTY=1
+if [ "$INTENT_EMPTY" -eq 1 ] && [ "$SPEC_EMPTY" -eq 1 ]; then
+  TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
+  if [ -n "$(printf '%s' "$TASK_BODY" | tr -d '[:space:]')" ]; then
+    INTENT_BODY=$TASK_BODY
+    SPEC_BODY="No separate Firstmate spec was recorded on this brief; the # Task body above is the pre-subsection contract."
+  else
+    INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
+    SPEC_BODY="Write Firstmate's ship-time build constraints here."
+  fi
+else
+  [ "$INTENT_EMPTY" -eq 1 ] && INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
+  [ "$SPEC_EMPTY" -eq 1 ] && SPEC_BODY="Write Firstmate's ship-time build constraints here."
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship

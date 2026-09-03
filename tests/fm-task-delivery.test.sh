@@ -490,6 +490,34 @@ EOF
     "promotion did not copy the filled Captain's intent into ship instructions"
   assert_grep "Do not add a classifier." "$brief" \
     "promotion did not copy the filled Firstmate spec into ship instructions"
+  assert_no_grep "SCOUT task" "$brief" \
+    "promotion copied the scout Setup/Rules contract into Firstmate spec"
+  assert_no_grep "# Setup" "$brief" \
+    "promotion copied a later brief section into a Task subsection"
+
+  id=promote-legacy-e3
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+You are a crewmate.
+
+# Task
+Investigate the fold's session-floor refusal and recommend a ship.
+
+# Setup
+This is a SCOUT task: the deliverable is a written report, not a PR.
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion of a pre-subsection scout brief should succeed"
+  brief="$home/data/$id/ship-instructions.md"
+  assert_grep "Investigate the fold's session-floor refusal and recommend a ship." "$brief" \
+    "legacy promotion discarded the existing # Task body"
+  assert_no_grep "Write the captain's ship-time ask here" "$brief" \
+    "legacy promotion replaced a real task with fill-in prose"
+  assert_no_grep "This is a SCOUT task" "$brief" \
+    "legacy promotion copied the scout Setup section into Task"
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
 }
 
