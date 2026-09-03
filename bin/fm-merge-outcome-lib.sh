@@ -173,15 +173,25 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
     return 0
   fi
 
-  if [ -n "$claim_verdict" ]; then
-    fm_done_verdict_write "$state" "$id" "$claim_verdict" "$claim_hash" "$claim_reason" \
-      || status=1
-  fi
-  if [ "$status" -eq 0 ] && [ -n "$destination" ]; then
+  if [ -n "$destination" ]; then
     fm_parent_channel_append_once "$destination" "$line" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "$outcome-$id-$FM_PR_URL" "$wake_note" || status=1
+  fi
+  # After the report, never in front of it. This write can fail for reasons that
+  # have nothing to do with the outcome - a symlink planted at the verdict path,
+  # a full or read-only state directory - and gating the publication on it would
+  # turn a closed-unmerged observation, the exact rot this whole path exists to
+  # catch, into no parent line, no captain wake, and (on the poll path, through
+  # bin/fm-watch.sh's fatal non-zero handling) a dead watcher. Publishing first
+  # is the same order the marker already uses, for the same reason: both
+  # publications are key-deduplicated, so an at-least-once retry cannot
+  # duplicate. A failure here still sets status, so the retry happens; it simply
+  # no longer has a veto over the report.
+  if [ -n "$claim_verdict" ]; then
+    fm_done_verdict_write "$state" "$id" "$claim_verdict" "$claim_hash" "$claim_reason" \
+      || status=1
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

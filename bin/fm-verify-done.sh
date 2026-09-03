@@ -17,41 +17,52 @@
 #     - (no-mistakes only) the commit the validation run recorded as validated
 #       equals the claimed head=, so a fix pushed after validation, or a
 #       force-push over a validated head, cannot pass as validated work
+#     - (direct-PR only) the branch the forge says the PR is built from is this
+#       task's own fm/<task-id>. Without it the whole check is that the claim
+#       and the forge agree about a head, which any open PR whose head a worker
+#       states correctly would satisfy: consistency, not authorship. A
+#       no-mistakes task needs no counterpart because the validated-commit check
+#       already requires the run's branch to be this worktree's own.
 #     - the checks state is RECORDED as fact, never judged: a claim is not
 #       contradicted for having red or absent checks, because merge authority,
 #       not this script, owns that decision
 #   local-only
 #     - the claim names this task's own branch, exactly fm/<task-id>
 #     - the claimed head= resolves in the task's local copy and is the tip of
-#       that branch, AND that branch has moved since git created it.
-#       bin/fm-brief.sh has every worker create fm/<task-id> before it does any
-#       work, so the branch exists at the spawn base from the outset: a branch
-#       still sitting exactly where it was created is positive evidence that it
-#       introduced nothing, whatever the claim says. The branch's own history is
-#       the authority for that, not its merge base with the default branch:
-#       local-only work is on the default branch by the time it may be torn
-#       down, so a merge base equal to the branch tip is the ordinary shape of
-#       LANDED work and would contradict every honest claim. A branch history
-#       that cannot be read is absence of evidence and reads unverified, and so
-#       is one whose oldest surviving reflog entry is no longer the creation
-#       (`git gc` prunes entries past gc.reflogExpire): the entry must say it is
-#       the creation before anything is concluded from it.
+#       that branch, AND git's own log says the branch RECORDED a commit.
+#       That last one is the question this arm asks, and it took three tries to
+#       ask it. A merge base, then "the tip moved since creation", both tested
+#       whether something CHANGED rather than whether this branch AUTHORED
+#       anything - and bin/fm-brief.sh's local-only contract tells a worker to
+#       rebase onto the default branch when it advances, so a worker that
+#       commits nothing and obeys that instruction moves fm/<task-id> onto
+#       someone else's work and satisfied both. Only an entry git writes when a
+#       commit is recorded (`commit:`, `commit (amend):`, `commit (initial):`)
+#       says this branch made something; a rebase preserves it, so honest work
+#       that was later rebased still answers.
 #     - once the branch has been retired after the work merged, the claimed head
 #       must be BOTH the local copy's own HEAD and contained in the local default
-#       branch. Bare containment is never enough: every commit already on the
-#       default branch is its own ancestor, so containment alone would pass any
-#       claim naming the default branch's tip. The merge-base test has no
-#       counterpart here because the branch ref it needs is gone; what stands in
-#       its place is that git refuses to delete a branch a worktree has checked
-#       out, so a worker still sitting on an un-retired fm/<task-id> can never
-#       reach this arm.
+#       branch, and the local copy's own history must record a commit it made.
+#       Bare containment is never enough: every commit already on the default
+#       branch is its own ancestor, so containment alone would pass any claim
+#       naming the default branch's tip. Retiring the branch deletes the branch
+#       reflog with it, so the authorship question is asked of the worktree's
+#       HEAD log, which survives and records the same commits.
+#     - a history that cannot be read, or whose oldest surviving entry is no
+#       longer the creation (`git gc` prunes entries past gc.reflogExpire), or
+#       that reaches back but records no commit, is all absence of evidence and
+#       reads unverified. Only a branch demonstrably still sitting on the commit
+#       it was created at is contradicted.
 #   scout
-#     - the claimed report= exists as a non-empty regular file. An absolute path
-#       is used as given (what bin/fm-brief.sh renders into a scout brief); a
-#       relative one is resolved against the home's data root, which is where
-#       every scout report lives, so a relocated FM_DATA_OVERRIDE resolves the
-#       same claim as an unrelocated one. A leading `data/` is the home-relative
-#       spelling of that root and names it rather than a directory beneath it.
+#     - the claimed report= exists as a non-empty regular file INSIDE this task's
+#       own directory under the home's data root. A file existing is not this
+#       task having produced it, so the path is bound to <data>/<task-id>/ the
+#       same way the local-only arm is bound to fm/<task-id>. An absolute path is
+#       used as given (what bin/fm-brief.sh renders into a scout brief); a
+#       relative one is resolved against the data root, so a relocated
+#       FM_DATA_OVERRIDE resolves the same claim as an unrelocated one. A leading
+#       `data/` is the home-relative spelling of that root and names it rather
+#       than a directory beneath it.
 #
 # A task whose meta records no mode= - the population spawned before mode= was
 # recorded - is routed by the shape of its own claim, because an absent record is
@@ -201,6 +212,18 @@ if [ "$KIND" = scout ]; then
     data/*) REPORT="$DATA/${REPORT#data/}" ;;
     *) REPORT="$DATA/$REPORT" ;;
   esac
+  # A file existing is not this task having produced it. Every scout report lives
+  # under the home's data root in the task's own directory, so a claim resolving
+  # anywhere else names someone else's deliverable however real that file is -
+  # the same binding the local-only arm makes by requiring branch = fm/<id>.
+  case "$REPORT" in
+    "$DATA/$ID/"?*) ;;
+    *)
+      verdict_is contradicted "the claimed report is not this task's own: $FM_DONE_CLAIM_REPORT resolves to $REPORT, outside $DATA/$ID/" \
+        "$REPORT"
+      finish
+      ;;
+  esac
   # A symlink is refused as evidence rather than followed, but refusing to read
   # something is not proof that it is false: the report may be perfectly present
   # behind the link. That is absence of evidence, so it names the link and reads
@@ -247,6 +270,36 @@ if ! fm_done_claim_head_valid "$HEAD_CLAIM"; then
   verdict_is unverified 'claim carries no full commit id'
   finish
 fi
+
+# The commit a named ref RECORDED, or empty when its log holds none. Movement is
+# not authorship: bin/fm-brief.sh's local-only contract tells a worker to rebase
+# onto the default branch when it advances, so a worker that commits nothing and
+# follows that instruction fast-forwards fm/<id> onto someone else's work. The
+# ref then differs from where it was created while having introduced nothing,
+# which is why every earlier version of this test - a merge base, then "the tip
+# moved" - passed a claim it should have refused. Only an entry git writes when a
+# commit is RECORDED says this branch authored something, so that is what is
+# read. A rebase preserves the original `commit:` entry, so honest work that was
+# later rebased still answers here.
+AUTHORED_AT=
+ref_recorded_a_commit() {  # <git-dir-owner> <ref>
+  local wt=$1 ref=$2 entry sha msg
+  AUTHORED_AT=
+  while IFS= read -r entry; do
+    sha=${entry%% *}
+    case "$entry" in *' '*) msg=${entry#* } ;; *) continue ;; esac
+    case "$sha" in *[!0-9a-f]*|'') continue ;; esac
+    case "$msg" in
+      'commit: '*|'commit (amend): '*|'commit (initial): '*)
+        AUTHORED_AT=$sha
+        return 0
+        ;;
+    esac
+  done <<EOF
+$(git -C "$wt" reflog show --format='%H %gs' "$ref" 2>/dev/null || true)
+EOF
+  return 1
+}
 
 # --- local-only: git is the whole authority ----------------------------------
 if [ "$MODE" = local-only ]; then
@@ -331,7 +384,16 @@ if [ "$MODE" = local-only ]; then
         "$BRANCH was created at $CREATED and its tip is still $TIP"
       finish
     fi
-    verdict_is verified "branch $BRANCH is at the claimed $HEAD_CLAIM, which it introduced after being created at $CREATED"
+    # The branch reflog reaches back to the creation entry, so it is this
+    # branch's whole history. A history with no commit in it is read as absence
+    # rather than falsity: this arm has been wrong three times by concluding too
+    # much from a true observation, and `unverified` refuses the claim just as
+    # firmly while never accusing a worker of something it cannot prove.
+    if ! ref_recorded_a_commit "$WT" "refs/heads/$BRANCH"; then
+      verdict_is unverified "branch $BRANCH is at the claimed $HEAD_CLAIM, but its history records no commit it made, so nothing establishes that this task authored that commit rather than inheriting it"
+      finish
+    fi
+    verdict_is verified "branch $BRANCH is at the claimed $HEAD_CLAIM, and its history records work it committed at $AUTHORED_AT"
     finish
   fi
   # The branch is gone. That is the normal end state once local-only work has
@@ -356,7 +418,15 @@ if [ "$MODE" = local-only ]; then
     finish
   fi
   if git -C "$WT" merge-base --is-ancestor "$HEAD_CLAIM" "$DEFAULT_REF" 2>/dev/null; then
-    verdict_is verified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT; its branch $BRANCH has been retired"
+    # Retiring the branch deletes its reflog with it, so the branch's own history
+    # is gone and the local copy's HEAD reflog is what survives. It records every
+    # commit this worktree made, which is the same authorship question the
+    # branch-exists arm asks, read off the only log still there to read.
+    if ! ref_recorded_a_commit "$WT" HEAD; then
+      verdict_is unverified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT, but its own history records no commit it made, so nothing establishes that this task authored that commit rather than inheriting it"
+      finish
+    fi
+    verdict_is verified "the local copy is at the claimed $HEAD_CLAIM, which it committed at $AUTHORED_AT, and it is on $DEFAULT; its branch $BRANCH has been retired"
     finish
   fi
   DEFAULT_TIP=$(git -C "$WT" rev-parse --verify --quiet "$DEFAULT_REF" 2>/dev/null || true)
@@ -402,8 +472,8 @@ fi
 # a pending or in-progress check. Deduplicated so the recorded fact stays short
 # and stable rather than repeating one word per check.
 VIEW=$(fm_run_timed "$GH_TIMEOUT" gh pr view "$PR_URL" \
-  --json state,headRefOid,url,statusCheckRollup \
-  -q '.state + "\t" + .headRefOid + "\t" + ([.statusCheckRollup[]? | (.conclusion // .status // .state // "UNKNOWN")] | unique | join(","))' \
+  --json state,headRefOid,headRefName,url,statusCheckRollup \
+  -q '.state + "\t" + .headRefOid + "\t" + (.headRefName // "") + "\t" + ([.statusCheckRollup[]? | (.conclusion // .status // .state // "UNKNOWN")] | unique | join(","))' \
   2>/dev/null) || VIEW=
 VIEW=$(printf '%s\n' "$VIEW" | head -1)
 if [ -z "$VIEW" ]; then
@@ -417,8 +487,13 @@ if [ "$PR_STATE" = "$VIEW" ]; then
   finish
 fi
 PR_HEAD=${REST%%$'\t'*}
-CHECKS=${REST#*$'\t'}
-[ "$PR_HEAD" != "$REST" ] || CHECKS=
+PR_BRANCH=
+CHECKS=
+if [ "$PR_HEAD" != "$REST" ]; then
+  REST=${REST#*$'\t'}
+  PR_BRANCH=${REST%%$'\t'*}
+  [ "$PR_BRANCH" = "$REST" ] || CHECKS=${REST#*$'\t'}
+fi
 [ -n "$CHECKS" ] || CHECKS='none reported'
 
 case "$PR_STATE" in
@@ -443,8 +518,25 @@ if [ "$PR_HEAD" != "$HEAD_CLAIM" ]; then
   finish
 fi
 
+# A direct-PR task has no validation run to bind the PR to it, so without this
+# the whole verification is "the claim and the forge agree about a head" - two
+# facts a worker could satisfy by naming any open PR whose head it states
+# correctly. That is consistency, not authorship. Every other arm binds its
+# evidence to this task by name (local-only to fm/<id>, scout to this task's own
+# data directory) and this one binds the same way, through the branch the forge
+# says the PR is built from. A no-mistakes task is already bound by the
+# validated-commit check below, which requires the run's branch to be this
+# worktree's own.
 if [ "$MODE" != no-mistakes ]; then
-  verdict_is verified "$PR_URL is $PR_STATE at the claimed $HEAD_CLAIM; checks: $CHECKS"
+  if [ -z "$PR_BRANCH" ]; then
+    verdict_is unverified "the forge reported no head branch for $PR_URL, so nothing establishes that this PR is this task's work"
+    finish
+  fi
+  if [ "$PR_BRANCH" != "fm/$ID" ]; then
+    verdict_is contradicted "$PR_URL is built from $PR_BRANCH, not this task's fm/$ID" "$PR_BRANCH"
+    finish
+  fi
+  verdict_is verified "$PR_URL is $PR_STATE at the claimed $HEAD_CLAIM from this task's $PR_BRANCH; checks: $CHECKS"
   finish
 fi
 

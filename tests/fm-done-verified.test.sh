@@ -56,6 +56,14 @@
 #        everything, and a changed world does not soften a contradiction
 #   (af) a held-back span containing multibyte prose presents whole lines only
 #   (ag) the unrecognised cap is per task, so one chatty worker starves nobody
+#   (ah) a local-only branch that MOVED without committing anything - the rebase
+#        and merge the brief itself instructs - is not verified, at either arm
+#   (ai) a direct-PR claim is bound to this task's own branch, and a scout claim
+#        to this task's own report directory: a real PR or file is not authorship
+#   (aj) a whitespace-only line inside a partly held-back span retires nothing:
+#        the span index and the byte counter agree about what counts as a line
+#   (ak) a verdict write that fails never suppresses the outcome report, which
+#        on the poll path would be silence plus a dead watcher
 #   (aa) a branch whose creation reflog entry has expired is unverified, not
 #        contradicted: the oldest SURVIVING entry is not the creation point
 #   (ab) a contradiction must carry the observation it contradicts with; one
@@ -253,7 +261,7 @@ test_head_not_the_pr_head_is_contradicted() {
   validated=$(git -C "$dir/wt" rev-parse 'HEAD~1')
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$validated	SUCCESS" verify "$dir")
+  result=$(FAKE_GH_OUT="OPEN	$validated	fm/task-v	SUCCESS" verify "$dir")
   [ "${result%%$'\t'*}" = 4 ] || fail "a head that is not the PR head did not exit contradicted: $result"
   case "$result" in *contradicted:*) ;; *) fail "a head mismatch was not contradicted: $result" ;; esac
   pass "a claim whose commit is not the PR's head is contradicted"
@@ -266,7 +274,7 @@ test_head_not_the_validated_commit_is_contradicted() {
   validated=$(git -C "$dir/wt" rev-parse 'HEAD~1')
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+  result=$(FAKE_GH_OUT="OPEN	$shipped	fm/task-v	SUCCESS" \
     FAKE_NM_STATUS="$(nm_status fm/task-v "$validated")" verify "$dir")
   [ "${result%%$'\t'*}" = 4 ] \
     || fail "shipping a commit the pipeline never validated did not exit contradicted: $result"
@@ -280,7 +288,7 @@ test_closed_unmerged_pr_is_contradicted() {
   shipped=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="CLOSED	$shipped	SUCCESS" verify "$dir")
+  result=$(FAKE_GH_OUT="CLOSED	$shipped	fm/task-v	SUCCESS" verify "$dir")
   [ "${result%%$'\t'*}" = 4 ] || fail "a closed-unmerged PR did not exit contradicted: $result"
   case "$result" in *"closed without merging"*) ;; *) fail "the contradiction did not name the close: $result" ;; esac
   pass "a claim on a PR closed without merging is contradicted"
@@ -290,7 +298,7 @@ test_legacy_claim_degrades_and_is_never_upgraded() {
   local dir result
   dir=$(make_world legacy-claim)
   printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="MERGED	deadbeef	SUCCESS" verify "$dir")
+  result=$(FAKE_GH_OUT="MERGED	deadbeef	fm/task-v	SUCCESS" verify "$dir")
   [ "${result%%$'\t'*}" = 3 ] || fail "a legacy claim did not exit unverified: $result"
   case "$result" in *"legacy claim, no commit identity"*) ;; *) fail "the legacy claim was not named as such: $result" ;; esac
   # The verdict token is the whole word after the exit code, so a check for
@@ -305,7 +313,7 @@ test_honest_claim_verifies_and_records_the_checks_state() {
   shipped=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+  result=$(FAKE_GH_OUT="OPEN	$shipped	fm/task-v	SUCCESS" \
     FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
   [ "${result%%$'\t'*}" = 0 ] || fail "an honest claim was not verified: $result"
   case "$result" in *"checks: SUCCESS"*) ;; *) fail "the checks state was not recorded as fact: $result" ;; esac
@@ -320,7 +328,7 @@ test_red_checks_do_not_by_themselves_contradict_a_claim() {
   shipped=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$shipped	FAILURE" \
+  result=$(FAKE_GH_OUT="OPEN	$shipped	fm/task-v	FAILURE" \
     FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
   [ "${result%%$'\t'*}" = 0 ] \
     || fail "the verifier judged the checks state instead of recording it: $result"
@@ -406,7 +414,7 @@ test_a_verdict_does_not_cover_a_later_claim() {
   shipped=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  FAKE_GH_OUT="OPEN	$shipped	SUCCESS" FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" \
+  FAKE_GH_OUT="OPEN	$shipped	fm/task-v	SUCCESS" FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" \
     verify "$dir" >/dev/null
   fm_done_claim_status "$dir/state" task-v
   [ "$FM_DONE_CLAIM_STATE" = verified ] \
@@ -657,7 +665,7 @@ establish_then_rerun() {  # <name> <rerun-gh-out>
   shipped=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+  result=$(FAKE_GH_OUT="OPEN	$shipped	fm/task-v	SUCCESS" \
     FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
   [ "${result%%$'\t'*}" = 0 ] || fail "setup error: the claim did not verify: $result"
   result=$(FAKE_GH_OUT="$rerun" FAKE_NM_STATUS="$(nm_status fm/task-v "$shipped")" verify "$dir")
@@ -685,7 +693,7 @@ test_a_contradiction_still_overwrites_an_established_record() {
   other=00112233445566778899aabbccddeeff00112233
   # The forge answers, and it answers with a different head: the claim is now
   # established false, so the protection above must not freeze the record.
-  out=$(establish_then_rerun contradiction-overwrites "OPEN	$other	SUCCESS") \
+  out=$(establish_then_rerun contradiction-overwrites "OPEN	$other	fm/task-v	SUCCESS") \
     || fail "the contradiction-overwrite fixture failed"
   dir=${out%%$'\t'*}
   result=${out#*$'\t'}
@@ -708,7 +716,7 @@ test_an_absent_mode_still_checks_the_validated_commit() {
     "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship"
   printf 'done: pr=https://github.com/o/r/pull/7 head=%s - shipped\n' "$shipped" \
     > "$dir/state/task-v.status"
-  result=$(FAKE_GH_OUT="OPEN	$shipped	SUCCESS" \
+  result=$(FAKE_GH_OUT="OPEN	$shipped	fm/task-v	SUCCESS" \
     FAKE_NM_STATUS="$(nm_status fm/task-v "$validated")" verify "$dir")
   [ "${result%%$'\t'*}" = 4 ] \
     || fail "a task with no recorded mode skipped the validated-commit check: $result"
@@ -1001,6 +1009,124 @@ test_capped_lines_return_even_when_a_recognised_line_follows_them() {
   pass "held-back prose survives a recognised line printed later in the same span"
 }
 
+# --- authorship, not movement ------------------------------------------------
+# The shape that defeated the two previous versions of this invariant, planted
+# exactly as this fleet produces it: a project repo whose default branch
+# advances, a linked worktree on fm/<task-id> created at the older base, a
+# worker that commits NOTHING, and then the rebase bin/fm-brief.sh's local-only
+# contract instructs it to do when the default branch has moved. The branch tip
+# then differs from where it was created while the branch has introduced
+# nothing, which is what "did something change" tests could not tell apart from
+# real work.
+test_a_local_only_claim_on_work_the_branch_never_made_is_not_verified() {
+  local how out dir default tip result
+  for how in rebase merge; do
+    out=$(make_local_world "local-no-work-$how") || fail "the local-only fixture failed"
+    dir=${out%%$'\t'*}
+    default=${out#*$'\t'}
+    # The worker commits nothing at all and does exactly what the brief says to
+    # do when the default branch has advanced.
+    git -C "$dir/wt" "$how" -q "$default" >/dev/null 2>&1 \
+      || fail "the fixture could not $how fm/task-v onto $default"
+    tip=$(git -C "$dir/wt" rev-parse HEAD)
+    [ "$tip" = "$(git -C "$dir/repo" rev-parse "refs/heads/$default")" ] \
+      || fail "the $how fixture did not leave fm/task-v on the default branch's tip"
+    [ "$tip" != "$(git -C "$dir/wt" reflog show --format=%H refs/heads/fm/task-v | tail -1)" ] \
+      || fail "the $how fixture did not move the branch off its creation point"
+    printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
+    result=$(verify "$dir")
+    [ "${result%%$'\t'*}" != 0 ] \
+      || fail "a claim on work its branch never made was verified after a $how: $result"
+    case "${result#*$'\t'}" in
+      *"records no commit it made"*) ;;
+      *) fail "the $how refusal did not name the missing authorship: $result" ;;
+    esac
+  done
+  pass "a local-only branch that moved without committing anything is not verified"
+}
+
+# The same question at the other local-only arm. Retiring the branch deletes its
+# reflog, so the authorship evidence has to come from the log that survives.
+test_a_retired_branch_claim_on_work_never_made_is_not_verified() {
+  local out dir default tip result
+  out=$(make_local_world local-retired-no-work) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  default=${out#*$'\t'}
+  git -C "$dir/wt" merge -q "$default" >/dev/null 2>&1 \
+    || fail "the fixture could not merge $default into fm/task-v"
+  tip=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" checkout -q --detach HEAD \
+    || fail "the fixture could not detach the local copy"
+  git -C "$dir/repo" branch -D fm/task-v >/dev/null 2>&1 \
+    || fail "the fixture could not retire fm/task-v"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" != 0 ] \
+    || fail "a retired-branch claim on work the copy never made was verified: $result"
+  case "${result#*$'\t'}" in
+    *"records no commit it made"*) ;;
+    *) fail "the retired-branch refusal did not name the missing authorship: $result" ;;
+  esac
+  pass "a retired local-only branch that committed nothing is not verified"
+}
+
+# --- a PR must be this task's, not merely a real one -------------------------
+# A direct-PR task has no validation run binding the PR to it, so the claim and
+# the forge agreeing about a head is consistency, not authorship: any open PR
+# whose head a worker states correctly would otherwise pass.
+test_a_direct_pr_claim_on_another_branch_is_not_verified() {
+  local dir result
+  dir=$(make_world direct-pr-foreign ship direct-PR)
+  printf 'done: pr=https://github.com/o/r/pull/9 head=%s - shipped\n' \
+    "$(git -C "$dir/wt" rev-parse HEAD)" > "$dir/state/task-v.status"
+  result=$(FAKE_GH_OUT="OPEN	$(git -C "$dir/wt" rev-parse HEAD)	somebody-elses-branch	SUCCESS" \
+    verify "$dir")
+  [ "${result%%$'\t'*}" != 0 ] \
+    || fail "a direct-PR claim naming another branch's PR was verified: $result"
+  [ "${result%%$'\t'*}" = 4 ] \
+    || fail "a PR the forge says is built from another branch was not contradicted: $result"
+  case "${result#*$'\t'}" in
+    *"somebody-elses-branch"*"fm/task-v"*) ;;
+    *) fail "the contradiction did not name both branches: $result" ;;
+  esac
+  pass "a direct-PR claim whose PR is built from another branch is contradicted"
+}
+
+# The honest direct-PR case, so the binding above is not vacuous, and the
+# absent-head-branch case, which is absence of evidence rather than falsity.
+test_a_direct_pr_claim_on_this_task_branch_verifies() {
+  local dir head result
+  dir=$(make_world direct-pr-own ship direct-PR)
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'done: pr=https://github.com/o/r/pull/9 head=%s - shipped\n' "$head" \
+    > "$dir/state/task-v.status"
+  result=$(FAKE_GH_OUT="OPEN	$head	fm/task-v	SUCCESS" verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "an honest direct-PR claim on this task's own branch was not verified: $result"
+
+  result=$(FAKE_GH_OUT="OPEN	$head		SUCCESS" verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a forge that reported no head branch was not unverified: $result"
+  pass "a direct-PR claim verifies on this task's own branch and never without one"
+}
+
+# --- a report must be this task's own deliverable ----------------------------
+test_a_scout_claim_on_another_tasks_report_is_not_verified() {
+  local dir result
+  dir=$(make_world scout-foreign scout scout)
+  mkdir -p "$dir/data/task-other"
+  printf 'somebody elses findings\n' > "$dir/data/task-other/report.md"
+  printf 'done: report=data/task-other/report.md - shipped\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" != 0 ] \
+    || fail "a scout claim naming another task's report was verified: $result"
+  case "${result#*$'\t'}" in
+    *"not this task's own"*) ;;
+    *) fail "the refusal did not say whose report it was: $result" ;;
+  esac
+  pass "a scout claim naming another task's report is not verified"
+}
+
 # --- the three shapes of terminal evidence -----------------------------------
 # A verdict is a statement about a world. Absence of evidence must never
 # downgrade one; positive evidence of falsity outranks everything; and a world
@@ -1085,6 +1211,30 @@ test_a_terminal_outcome_invents_no_verdict_without_a_claim() {
       || fail "a $outcome outcome gave a claimless task the state $FM_DONE_CLAIM_STATE"
   done
   pass "a terminal PR outcome invents no verdict for a task that never claimed done"
+}
+
+# A secondary record must never have a veto over the primary report. The verdict
+# write can fail for reasons that have nothing to do with the outcome, and a
+# closed-unmerged observation that goes unpublished is the exact rot this whole
+# path exists to catch - worse on the poll path, where a non-zero return kills
+# the watcher outright.
+test_a_failed_verdict_write_still_publishes_the_outcome() {
+  local claim dir out
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  dir=$(make_claim_world verdict-write-blocked "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  # A symlink at the verdict path is one real way fm_done_verdict_write refuses.
+  rm -f "$dir/state/task-v.done-verdict"
+  ln -s /dev/null "$dir/state/task-v.done-verdict" \
+    || fail "the fixture could not block the verdict path"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    && fail "a blocked verdict write was reported as a clean outcome"
+  out=$(cat "$dir/state/.wake-queue" 2>/dev/null || true)
+  case "$out" in
+    *"PR closed without merging"*) ;;
+    *) fail "a blocked verdict write suppressed the close report entirely: $out" ;;
+  esac
+  pass "a failed verdict write never suppresses the outcome report it follows"
 }
 
 # The precedence itself, driven through the record's owner. Each incoming
@@ -1217,6 +1367,47 @@ test_the_unrecognised_cap_is_per_task_not_per_drain() {
   pass "the unrecognised cap is per task, so one chatty worker cannot starve the rest"
 }
 
+# The span index the drain holds its cursor back with and the byte counter that
+# converts it are one number reached two ways, and they must agree about which
+# lines count. They do, because status_new_lines_since_cursor drops every
+# whitespace-only line before either sees it - so this pins that agreement from
+# the outside rather than trusting the reader to keep filtering. If it ever
+# stopped, a blank line in a partly presented span would shift the committed
+# endpoint a line further than the drain asked for, retiring a line the operator
+# was just told was held.
+test_a_blank_line_in_a_held_back_span_loses_nothing() {
+  local dir state status first second
+  dir=$(make_case unrecognised-blank-line)
+  state="$dir/state"
+  status="$state/task9.status"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursor"
+
+  {
+    printf '   \n'
+    printf 'prose alpha from the worker\n'
+    printf 'prose bravo from the worker\n'
+    printf 'prose charlie from the worker\n'
+  } >> "$status"
+
+  first="$dir/first.out"; second="$dir/second.out"
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" \
+    || fail "the capped drain failed on a span containing a blank line"
+  assert_grep 'prose alpha from the worker' "$first" \
+    "the capped drain printed nothing: $(cat "$first")"
+  assert_no_grep 'prose bravo from the worker' "$first" \
+    "the cap did not hold the second prose line back"
+
+  FM_DRAIN_UNRECOGNISED_MAX=9 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "the second drain failed"
+  assert_grep 'prose bravo from the worker' "$second" \
+    "a blank line in the span retired a held-back line: $(cat "$second")"
+  assert_grep 'prose charlie from the worker' "$second" \
+    "the rest of the held-back prose never came back: $(cat "$second")"
+  pass "a whitespace-only line in a held-back span costs the worker no words"
+}
+
 test_the_omitted_unrecognised_count_carries_its_header() {
   local dir state status out
   dir=$(make_case unrecognised-cap-zero)
@@ -1317,12 +1508,19 @@ test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
 test_a_pruned_reflog_is_unverified_not_contradicted
 test_a_contradiction_needs_the_observation_it_contradicts_with
+test_a_local_only_claim_on_work_the_branch_never_made_is_not_verified
+test_a_retired_branch_claim_on_work_never_made_is_not_verified
+test_a_direct_pr_claim_on_another_branch_is_not_verified
+test_a_direct_pr_claim_on_this_task_branch_verifies
+test_a_scout_claim_on_another_tasks_report_is_not_verified
 test_a_merge_marks_an_established_claim_stale
 test_a_close_contradicts_an_established_claim_in_the_record
 test_a_terminal_outcome_invents_no_verdict_without_a_claim
+test_a_failed_verdict_write_still_publishes_the_outcome
 test_verdict_write_precedence_keeps_the_stronger_statement
 test_a_held_back_span_with_multibyte_prose_presents_no_fragment
 test_the_unrecognised_cap_is_per_task_not_per_drain
+test_a_blank_line_in_a_held_back_span_loses_nothing
 test_the_omitted_unrecognised_count_carries_its_header
 test_capped_unrecognised_lines_return_on_the_next_drain
 test_capped_lines_return_even_when_a_recognised_line_follows_them
