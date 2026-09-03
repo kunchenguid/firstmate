@@ -138,6 +138,33 @@ printf 'signal: task.status done: transferred session\n'
 exit 0
 SH
       ;;
+    stalled-terminal-actionable)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+sleep 60 >/dev/null 2>&1 &
+holder=$!
+mkdir -p "$FM_HOME/state/.lock.acquire"
+printf '%s\n' "$holder" > "$FM_HOME/state/.lock.acquire/pid"
+printf '%s\n' "$holder" > "$FM_HOME/state/terminal-lease-holder"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: task.status done: stalled terminal lease\n'
+exit 0
+SH
+      ;;
+    stalled-reset-benign)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+sleep 60 >/dev/null 2>&1 &
+holder=$!
+mkdir -p "$FM_HOME/state/.lock.acquire"
+printf '%s\n' "$holder" > "$FM_HOME/state/.lock.acquire/pid"
+printf '%s\n' "$holder" > "$FM_HOME/state/terminal-lease-holder"
+printf 'watcher: FAILED - cycle ended without an actionable reason\n'
+exit 1
+SH
+      ;;
     slow-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -426,6 +453,41 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+test_stale_recovery_session_lease_timeout_publishes_failure() {
+  local dir holder out status started elapsed failure reset
+  dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-session-lease")
+  : > "$dir/state/task.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.lock.acquire"
+  printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+
+  started=$SECONDS
+  out=$(printf '%s\n' '{"session_id":"stale-lease"}' \
+    | FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 FM_HOME="$dir" "$FAKE_CLAUDE" -c \
+      '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  elapsed=$((SECONDS - started))
+  failure=$(failure_epoch_path "$dir") \
+    || fail "stalled stale recovery left no durable failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "stalled stale recovery must fail visibly"
+  [ "$elapsed" -lt 5 ] || fail "stalled stale recovery blocked the hook for ${elapsed}s"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed after stale recovery timed out"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "stale-recovery failure was not bound to the unchanged dead owner"
+  assert_present "$failure" "stalled stale recovery did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.9999999" \
+    "stalled stale recovery did not persist its owner-bound notice"
+  assert_contains "$out" "stale session lock recovery failed" \
+    "stalled stale recovery did not deliver its failure reason"
+  pass "auto-arm: stalled stale recovery publishes bounded owner-scoped failure state"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -634,6 +696,106 @@ test_stalled_session_lease_publishes_bound_failure() {
   expect_code 1 "$ledger_rc" "a successor session must ignore the prior owner's failure record"
   expect_code 1 "$notice_rc" "a successor session must ignore the prior owner's failure notice"
   pass "auto-arm: a stalled session lease yields bounded owner-scoped failure state"
+}
+
+test_terminal_session_lease_timeout_publishes_failure() {
+  local dir out status started elapsed holder failure
+  dir=$(make_primary_dir "$TMP_ROOT/stalled-terminal-session-lease")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" stalled-terminal-actionable
+
+  started=$SECONDS
+  out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$((SECONDS - started))
+  holder=$(cat "$dir/state/terminal-lease-holder" 2>/dev/null || true)
+  failure=$(failure_epoch_path "$dir") \
+    || fail "stalled terminal lease left no durable failure record"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "stalled terminal publication must fail visibly"
+  [ "$elapsed" -lt 5 ] || fail "stalled terminal publication blocked the hook for ${elapsed}s"
+  [ "$(epoch_outcome "$dir")" = arming ] \
+    || fail "terminal lease timeout unexpectedly committed the claimed generation"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] \
+    || fail "terminal lease timeout did not persist a failed fallback epoch"
+  assert_present "$failure" "terminal lease timeout did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" \
+    "terminal lease timeout did not persist its notice"
+  assert_contains "$out" "could not commit its terminal outcome" \
+    "terminal lease timeout did not deliver its failure notice"
+  pass "auto-arm: stalled terminal publication falls back to durable failure state"
+}
+
+test_reset_session_lease_timeout_publishes_failure() {
+  local dir out status started elapsed holder watcher identity failure
+  dir=$(make_primary_dir "$TMP_ROOT/stalled-reset-session-lease")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" stalled-reset-benign
+  sleep 60 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher") \
+    || fail "could not identify healthy watcher for reset lease timeout"
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+
+  started=$SECONDS
+  out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$((SECONDS - started))
+  holder=$(cat "$dir/state/terminal-lease-holder" 2>/dev/null || true)
+  failure=$(failure_epoch_path "$dir") \
+    || fail "stalled reset lease left no durable failure record"
+  kill "$holder" "$watcher" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+
+  expect_code 2 "$status" "stalled recovery reset must leave visible failure state"
+  [ "$elapsed" -lt 8 ] || fail "stalled recovery reset blocked the hook for ${elapsed}s"
+  [ "$(epoch_outcome "$dir")" = arming ] \
+    || fail "reset lease timeout unexpectedly committed the claimed generation"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] \
+    || fail "reset lease timeout did not persist a failed fallback epoch"
+  assert_present "$failure" "reset lease timeout did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" \
+    "reset lease timeout did not persist its notice"
+  assert_contains "$out" "could not commit its terminal outcome" \
+    "reset lease timeout did not deliver its failure notice"
+  pass "auto-arm: stalled recovery reset falls back to durable failure state"
+}
+
+test_successor_session_gets_own_failure_notice() {
+  local dir out1 out2 status1 status2 owner1 owner2 reset
+  dir=$(make_primary_dir "$TMP_ROOT/successor-failure-notice")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner1=$!
+  printf '%s\n' "$owner1" > "$dir/state/.lock"
+  out1=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner1" 2>/dev/null); status1=$?
+  kill "$owner1" 2>/dev/null || true
+  wait "$owner1" 2>/dev/null || true
+
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner2=$!
+  printf '%s\n' "$owner2" > "$dir/state/.lock"
+  out2=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner2" 2>/dev/null); status2=$?
+  reset=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_reset_fence "$1/state"' _ "$dir") \
+    || fail "could not read the failure notice reset fence"
+  kill "$owner2" 2>/dev/null || true
+  wait "$owner2" 2>/dev/null || true
+
+  expect_code 2 "$status1" "the first session must publish its failure notice"
+  expect_code 2 "$status2" "the successor session must publish its own failure notice"
+  assert_contains "$out1" "automatic supervision mechanism is broken" \
+    "the first session did not deliver its failure notice"
+  assert_contains "$out2" "automatic supervision mechanism is broken" \
+    "the successor treated the prior owner's notice as current"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner1" \
+    "the first session's owner-scoped notice disappeared"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner2" \
+    "the successor did not elect its owner-scoped notice"
+  pass "auto-arm: successor sessions do not inherit stale failure notices"
 }
 
 test_claude_daemon_losing_session_owner_cannot_commit() {
@@ -2047,12 +2209,17 @@ test_failure_sequence_compacts_at_recovery_reset() {
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
-  local dir out1 out2 status1 status2
+  local dir out1 out2 status1 status2 owner
   dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
-  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
-  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  out1=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status1=$?
+  out2=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status2=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
@@ -2106,22 +2273,27 @@ test_post_alarm_claim_failures_do_not_grow_episode_state() {
 }
 
 test_failure_notice_marker_write_refuses_delivery_and_retries() {
-  local dir marker out1 out2 out3 status1 status2 status3 gen1 delivered
+  local dir marker out1 out2 out3 status1 status2 status3 gen1 delivered owner
   dir=$(make_primary_dir "$TMP_ROOT/failed-marker-refusal")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
   marker="$dir/state/.claude-autoarm-failure-notified"
   ln -s "$dir/state/missing/notice" "$marker"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
 
-  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  out1=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status1=$?
   expect_code 0 "$status1" "an unrecordable failure notice must refuse delivery"
   [ -L "$marker" ] || fail "the failed marker write unexpectedly replaced its dangling symlink"
   [ "$(epoch_outcome "$dir")" = failed ] || fail "the refused generation must leave its terminal ledger outcome"
   gen1=$(epoch_field "$dir" epoch)
 
   rm -f "$marker"
-  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
-  out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
+  out2=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status2=$?
+  out3=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status3=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 2 "$status2" "a successor must retry and deliver after the marker path is restored"
   expect_code 2 "$status3" "a later failure must retain the Stop-owned retry"
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
@@ -2858,6 +3030,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
+test_stale_recovery_session_lease_timeout_publishes_failure
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
@@ -2865,6 +3038,9 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
+test_terminal_session_lease_timeout_publishes_failure
+test_reset_session_lease_timeout_publishes_failure
+test_successor_session_gets_own_failure_notice
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease

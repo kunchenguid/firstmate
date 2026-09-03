@@ -182,7 +182,8 @@ autoarm_claim_failure() {  # <reason>
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || autoarm_claim_failure 'stale session lock recovery failed'
+  "$SCRIPT_DIR/fm-lock.sh" --autoarm >/dev/null 2>&1 \
+    || autoarm_claim_failure 'stale session lock recovery failed'
   fm_session_lock_owned_by_self "$STATE" "$FM_ROOT" || autoarm_claim_failure 'stale session lock recovery did not restore current-session ownership'
   SESSION_OWNER_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$SESSION_OWNER_PID" in
@@ -417,7 +418,7 @@ fi
 # creating a repeated operator notice or manual-arm loop. The notice marker
 # commits in the same owned critical section as the winning failed write, so a
 # losing generation can neither consume nor deliver it.
-if [ ! -e "$FAILURE_NOTICE" ]; then
+if ! fm_autoarm_failure_notice_current "$STATE" "$FAILURE_NOTICE"; then
   if ! autoarm_session_still_owned \
     || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true

@@ -1630,6 +1630,12 @@ fm_autoarm_session_lease_timeout() {
   printf '%s\n' "$seconds"
 }
 
+fm_autoarm_session_lease_acquire() {  # <state-dir>
+  local state=$1 lease_timeout
+  lease_timeout=$(fm_autoarm_session_lease_timeout) || return 1
+  fm_lock_acquire_wait_bounded "$state/.lock.acquire" "$lease_timeout"
+}
+
 # Atomically publish this process as the owner of generation N+1, under one
 # short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
 # when a competing claimant won the race (the ledger holds an open claim), and
@@ -1637,7 +1643,7 @@ fm_autoarm_session_lease_timeout() {
 # computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace] [session-root] [session-owner-pid]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session_root=${3:-} session_owner=${4:-}
-  local transition lock epoch pid gen identity tmp session_lease='' lease_timeout
+  local transition lock epoch pid gen identity tmp session_lease=''
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
@@ -1650,8 +1656,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace] [session-root] [session-owner-p
   [ -n "$identity" ] || return 1
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
-    lease_timeout=$(fm_autoarm_session_lease_timeout) || return 1
-    fm_lock_acquire_wait_bounded "$session_lease" "$lease_timeout" || return 1
+    fm_autoarm_session_lease_acquire "$state" || return 1
     if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       fm_lock_release "$session_lease"
       return 2
@@ -2163,12 +2168,11 @@ _fm_autoarm_session_authorized() {  # <state-dir> <session-root> <expected-owner
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file] [session-root] [session-owner-pid] [owned|stale]
   local state=$1 baseline=$2 outcome=$3 marker=${4:-} session_root=${5:-}
-  local session_owner=${6:-} authority=${7:-owned} session_lease='' rc lease_timeout lease_rc
+  local session_owner=${6:-} authority=${7:-owned} session_lease='' rc lease_rc
   lease_rc=0
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
-    lease_timeout=$(fm_autoarm_session_lease_timeout) || return 1
-    fm_lock_acquire_wait_bounded "$session_lease" "$lease_timeout"
+    fm_autoarm_session_lease_acquire "$state"
     lease_rc=$?
     [ "$lease_rc" -eq 0 ] || session_lease=
     if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" "$authority"; then
@@ -2216,7 +2220,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
   pid=${BASHPID:-$$}
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
-    fm_lock_acquire_wait "$session_lease" || return 1
+    fm_autoarm_session_lease_acquire "$state" || return 1
     if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       fm_lock_release "$session_lease"
       return 2
@@ -2311,7 +2315,7 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root] [session-owner-pi
   pid=${BASHPID:-$$}
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
-    fm_lock_acquire_wait "$session_lease" || return 1
+    fm_autoarm_session_lease_acquire "$state" || return 1
     if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       fm_lock_release "$session_lease"
       return 2

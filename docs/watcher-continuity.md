@@ -14,10 +14,10 @@ Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) own
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 When Claude delivers the Stop hook from its daemon/background-spare tree, the hook reads boundary-preserved process argv through the declared Node toolchain and the macOS system process interface, then accepts `daemon` and `run` as its first command tokens plus exactly one unambiguous `--spawned-by` JSON argument as session-lock proof only if that argument names the live foreground Claude owner and the same resolved project root.
-A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
+A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh`'s bounded auto-arm mode before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 Each generation claim is published under the session-acquisition lease, records its authenticated foreground session owner, and stops being open as soon as that owner loses `state/.lock`.
-That lease wait is bounded, and claim failures that cannot obtain it remain visible through session-owner-bound failure records and notices that a successor session ignores.
+The turn-end guard contract bounds every auto-arm session-acquisition lease wait and keeps lease-timeout failures visible through session-owner-bound state.
 Once those gates pass, a recovery-claim failure authorizes its immutable record and episode marker against either the same authenticated owner or the exact unchanged stale owner observed before recovery, using the lease when available and owner-bound fallback state otherwise.
 An owned terminal outcome that cannot be committed publishes through that same independent failure path, and recovery compacts completed attempt tokens without losing the monotonic high-water fence.
 All normal claim-ledger transitions and positive recovery resets also abandon serialization after a bounded wait when the transition recovery lock remains unavailable.
