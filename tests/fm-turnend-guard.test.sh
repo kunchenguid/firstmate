@@ -116,6 +116,9 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -1104,6 +1107,14 @@ seed_claude_failure() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
 }
 
+write_independent_claim_failure() {  # <dir> <baseline> <epoch> <owner> [outcome]
+  local dir=$1 baseline=$2 epoch=$3 owner=$4 outcome=${5:-failed} path
+  path="$dir/state/.claude-autoarm-failure-epochs/${baseline//:/.}"
+  mkdir -p "${path%/*}"
+  printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
+    "$epoch" "$owner" "$outcome" "$baseline" "$(date +%s)" > "$path"
+}
+
 seed_claude_budget() {
   local dir=$1 count=$2 epoch=${3:-2}
   printf 'session=sess-claude-mode\ncount=%s\nepoch=%s\n' "$count" "$epoch" > "$dir/state/.turnend-claude-blocks"
@@ -1139,6 +1150,24 @@ run_integrated_autoarm() {
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1
+}
+
+run_integrated_autoarm_for_owner() {  # <dir> <foreground-lock-owner-pid>
+  local dir=$1 lock_owner=$2 rc=0
+  mkdir -p "$dir/fake-argv"
+  printf '%s\n' '{"session_id":"sess-claude-mode","stop_hook_active":false}' \
+    | FM_HOME="$dir" FM_TEST_LOCK_OWNER="$lock_owner" /bin/bash -c '
+        exec -a "$FM_HOME/fake-argv/claude" /bin/bash -c '\''
+          mkdir -p "$FM_HOME/proc/$$"
+          printf "%s\0" "$FM_HOME/fake-argv/claude" "$0" "$1" "$2" "$3" \
+            > "$FM_HOME/proc/$$/cmdline"
+          export FM_PROC_ROOT="$FM_HOME/proc"
+          "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+          rc=$?
+          exit "$rc"
+        '\'' daemon run --spawned-by "{\"label\":\"claude\",\"cwd\":\"$FM_HOME\",\"pid\":$FM_TEST_LOCK_OWNER}"
+      ' 2>&1 || rc=$?
+  return "$rc"
 }
 
 write_integrated_failed_arm() {
@@ -1237,14 +1266,19 @@ test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open() 
 }
 
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner() {
-  local dir fakebin ready release once guard_out guard_status auto_out auto_status guard_pid
+  local dir fakebin ready release once guard_out guard_status auto_out auto_status guard_pid owner
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-terminal-boundary")
   : > "$dir/state/task1.meta"
-  : > "$dir/state/.claude-autoarm-failure-notified"
-  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  seed_claude_budget "$dir" 4 3
   install_integrated_autoarm "$dir"
   write_integrated_failed_arm "$dir"
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  mkdir -p "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed session_owner_pid=%s updated_at=%s\n' \
+    "$owner" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 4 3
   fakebin="$dir/fakebin"
   ready="$dir/terminal-ready"
   release="$dir/terminal-release"
@@ -1277,9 +1311,11 @@ SH
   ) &
   guard_pid=$!
   IFS= read -r _ < "$ready"
-  auto_out=$(run_integrated_autoarm "$dir"); auto_status=$?
+  auto_out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); auto_status=$?
   printf 'release\n' > "$release"
   wait "$guard_pid"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 0 "$auto_status" "an owner starting inside the terminal window must lose the existing owner boundary"
   [ -z "$auto_out" ] || fail "excluded terminal-window owner produced output: $auto_out"
   assert_absent "$dir/state/arm-ran" "excluded terminal-window owner started an arm cycle"
@@ -1298,6 +1334,30 @@ test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
   expect_code 0 "$status" "--claude mode must allow the stop whose rewake the auto-arm already owns"
   [ -z "$out" ] || fail "--claude rewake-epoch allow produced output: $out"
   pass "fm-turnend-guard --claude: fresh rewake epoch prevents a duplicate continuation for the same event"
+}
+
+test_hook_claude_mode_rejects_prior_session_rewake() {
+  local dir fakebin owner successor out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-prior-session-rewake")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/hook-claude-prior-session-rewake-bin")
+  ln -s /bin/bash "$fakebin/claude"
+  "$fakebin/claude" -c 'sleep 60' &
+  owner=$!
+  "$fakebin/claude" -c 'sleep 60' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  printf 'epoch=3 owner_pid=999 outcome=rewake session_owner_pid=%s updated_at=%s\n' \
+    "$owner" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=20 run_hook_claude "$dir" true); status=$?
+  kill "$owner" "$successor" 2>/dev/null || true
+  wait "$owner" "$successor" 2>/dev/null || true
+
+  expect_code 2 "$status" "a prior session's fresh rewake must not authorize the successor stop"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the successor accepted a fresh rewake bound to the prior session"
+  pass "fm-turnend-guard --claude: fresh rewakes remain bound to their session owner"
 }
 
 # The 2026-08-14 lapse: a cycle armed, delivered one rewake, exited, and left its
@@ -1470,14 +1530,112 @@ test_hook_claude_mode_preserves_fresh_failed_progression() {
   pass "fm-turnend-guard --claude: fresh failed epochs preserve and advance monotonic fail-open progression"
 }
 
+test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-independent-claim-failure")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=17 owner_pid=999 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  write_independent_claim_failure "$dir" 17:999:rewake 123456 777
+  seed_claude_budget "$dir" 4 stale-main-epoch
+
+  out=$(run_hook_claude "$dir" true); status=$?
+
+  expect_code 0 "$status" "a bounded independent claim failure must reach the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the guard ignored the independent claim-failure epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the independent claim failure did not enter the attended progression"
+  pass "fm-turnend-guard --claude: independent claim failures override unrelated main-ledger success"
+}
+
+test_hook_claude_mode_accounts_claimant_scoped_failure() {
+  local dir claimant out status budget_epoch budget_count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-claimant-failure")
+  : > "$dir/state/task1.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  sleep 60 &
+  claimant=$!
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-epochs" \
+    "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=123 owner_pid=777 outcome=failed baseline=absent reset=0 updated_at=%s session_owner_pid=9999999 claimant_pid=%s\n' \
+    "$(date +%s)" "$claimant" \
+    > "$dir/state/.claude-autoarm-failure-epochs/absent.123"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$claimant"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+  budget_epoch=$(sed -n '3s/^epoch=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  expect_code 0 "$status" "the first claimant-scoped failure must own its Stop handoff"
+  [ -z "$out" ] || fail "claimant-scoped failure handoff produced output: $out"
+  [ "$budget_count" = 0 ] || fail "claimant-scoped failure did not initialize the failure budget"
+  [ "$budget_epoch" = failure:123:777 ] \
+    || fail "guard budget did not select the claimant-scoped failure epoch"
+  pass "fm-turnend-guard --claude: claimant-scoped failures drive guard budgeting"
+}
+
+test_hook_claude_mode_ignores_failure_superseded_by_later_success() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-superseded-claim-failure")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=18 owner_pid=888 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  write_independent_claim_failure "$dir" 17:999:arming 123456 777
+  seed_claude_budget "$dir" 4 failure:123456:777
+
+  out=$(run_hook_claude "$dir" true); status=$?
+
+  expect_code 0 "$status" "a later successful ledger transition must supersede an older claim failure"
+  [ -z "$out" ] || fail "superseded claim failure produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "superseded claim failure reached attended fail-open"
+  pass "fm-turnend-guard --claude: later success supersedes an older independent claim failure"
+}
+
+test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success() {
+  local dir out status now
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-superseded-legacy-failure")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  now=$(date +%s)
+  printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=%s\n' \
+    "$now" > "$dir/state/.claude-autoarm-failure-epoch"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    fixed_now=$2
+    date() { printf "%s\n" "$fixed_now"; }
+    pid=${BASHPID:-$$}
+    identity=$(fm_pid_identity "$pid") || exit
+    printf "epoch=18 owner_pid=%s outcome=arming updated_at=%s\n%s\n" \
+      "$pid" "$fixed_now" "$identity" > "$state/.claude-autoarm-epoch"
+    fm_autoarm_write_owned "$state" 18 rewake
+  ' _ "$dir" "$now" || fail "serialized rewake transition could not commit"
+  seed_claude_budget "$dir" 4 failure:123456:777
+
+  out=$(run_hook_claude "$dir" true); status=$?
+
+  expect_code 0 "$status" "a later terminal ledger transition must supersede an older legacy failure"
+  [ -z "$out" ] || fail "superseded legacy failure produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-epoch" "serialized ledger transition left the legacy failure current"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "superseded legacy failure reached attended fail-open"
+  pass "fm-turnend-guard --claude: later success supersedes an older legacy failure"
+}
+
 test_hook_claude_mode_integrated_monotonic_fail_open() {
-  local dir out status guard_out guard_status i pid identity count
+  local dir out status guard_out guard_status i pid identity count owner
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-integrated-fail-open")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
   write_integrated_failed_arm "$dir"
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
 
-  out=$(run_integrated_autoarm "$dir"); status=$?
+  out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
   expect_code 2 "$status" "the first exhausted auto-arm cycle must emit its one failure notice"
   assert_contains "$out" "automatic supervision mechanism is broken" "the first integrated failure notice is missing"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
@@ -1486,7 +1644,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   [ "$count" = 0 ] || fail "the first owned failure epoch must preserve a zero blocked-stop count, got $count"
 
   for i in 1 2 3 4; do
-    out=$(run_integrated_autoarm "$dir"); status=$?
+    out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
     [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
@@ -1500,7 +1658,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
     fi
   done
 
-  out=$(run_integrated_autoarm "$dir"); status=$?
+  out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
   expect_code 0 "$status" "the auto-arm must not re-trigger continuation after the final fail-open"
   [ -z "$out" ] || fail "post-fail-open auto-arm produced continuation output: $out"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
@@ -1516,7 +1674,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
-  out=$(run_integrated_autoarm "$dir"); status=$?
+  out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -rf "$dir/state/.watch.lock"
@@ -1529,10 +1687,69 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
   [ "$count" = 1 ] || fail "the independent post-recovery failure must start at count 1, got $count"
 
-  out=$(run_integrated_autoarm "$dir"); status=$?
+  out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 2 "$status" "a later failure after positive recovery must start a new episode"
   assert_contains "$out" "automatic supervision mechanism is broken" "the new failure episode notice was suppressed"
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
+}
+
+test_hook_claude_mode_repeated_claim_failures_reach_fail_open() {
+  local dir holder ready out status guard_out guard_status epoch previous='' count i owner
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-repeated-claim-failures")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  ready="$dir/state/transition-steal-ready"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    FM_LOCK_REQUIRE_IDENTITY=1 \
+      fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    : > "$2"
+    while :; do sleep 1; done
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
+
+  for i in 0 1 2 3 4; do
+    out=$(FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS=1 \
+      run_integrated_autoarm_for_owner "$dir" "$owner"); status=$?
+    expect_code 2 "$status" "claim failure $i must request a Stop-owned retry"
+    if [ "$i" -eq 0 ]; then
+      assert_contains "$out" "could not claim recovery" "the first claim failure did not emit its notice"
+    else
+      [ -z "$out" ] || fail "claim failure $i repeated the episode notice: $out"
+    fi
+    epoch=$(bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      fm_autoarm_failure_ledger_current "$1/state" || exit
+      printf "%s\n" "$FM_AUTOARM_FAILURE_EPOCH"
+    ' _ "$dir") || fail "claim failure $i did not publish current failure state"
+    [ "$epoch" != "$previous" ] || fail "claim failure $i reused progression epoch $epoch"
+    previous=$epoch
+
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+    if [ "$i" -eq 0 ]; then
+      expect_code 0 "$guard_status" "the first claim failure must own its initial handoff"
+    elif [ "$i" -lt 4 ]; then
+      expect_code 2 "$guard_status" "claim failure $i must advance the bounded block progression"
+      assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "claim failures reached fail-open too early"
+    else
+      expect_code 0 "$guard_status" "successive claim failures must reach the attended fail-open (count=${count:-missing})"
+      assert_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "repeated claim failures never reached fail-open"
+    fi
+  done
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  pass "fm-turnend-guard --claude: repeated claim failures advance to fail-open"
 }
 
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
@@ -1567,6 +1784,101 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful guard reset left the failure notice"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "successful guard reset left the attended alarm"
   pass "fm-turnend-guard --claude: reset contention preserves all episode state until retry"
+}
+
+test_hook_claude_mode_rechecks_health_inside_reset_boundary() {
+  local dir watcher identity holder ready killed guard status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset-health-race")
+  ready="$dir/state/transition-holder-ready"
+  killed="$dir/state/watcher-killed"
+  : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher") || fail "could not identify reset-race watcher"
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    identity=$(fm_pid_identity "${BASHPID:-$$}") || exit
+    FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire \
+      "$1/state/.claude-autoarm-transition.lock" "$identity" || exit
+    trap '\''kill "$2" 2>/dev/null || true; : > "$3"; exit 0'\'' TERM
+    : > "$4"
+    kill -STOP "${BASHPID:-$$}"
+  ' _ "$dir" "$watcher" "$killed" "$ready" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+
+  (FM_AUTOARM_TRANSITION_GRACE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    run_hook_claude "$dir" false > "$dir/guard.out"; printf '%s\n' "$?" > "$dir/guard.status") &
+  guard=$!
+  wait "$guard"
+  status=$(cat "$dir/guard.status" 2>/dev/null || true)
+  wait "$holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+
+  assert_present "$killed" "reset boundary did not exercise watcher death after the initial health check"
+  expect_code 2 "$status" "a watcher that dies before reset must keep the turn blocked"
+  assert_present "$dir/state/.turnend-claude-blocks" "health-race reset deleted the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "health-race reset deleted the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "health-race reset deleted the attended alarm"
+  assert_present "$dir/state/.claude-autoarm-epoch" "health-race reset deleted the failure epoch"
+  pass "fm-turnend-guard --claude: healthy reset rechecks under the transition boundary"
+}
+
+test_hook_claude_mode_stalled_transition_recovery_is_bounded() {
+  local dir home pid identity holder ready guard i status hung=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stalled-transition-recovery")
+  home=$(cd "$dir" && pwd)
+  ready="$dir/state/transition-steal-ready"
+  : > "$dir/state/task1.meta"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify stalled-transition watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    FM_LOCK_REQUIRE_IDENTITY=1 \
+      fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    : > "$2"
+    kill -STOP "${BASHPID:-$$}"
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
+  kill -STOP "$holder" 2>/dev/null || fail "transition steal holder did not remain live"
+
+  printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+    | CLAUDECODE=1 FM_HOME="$home" FM_AUTOARM_TRANSITION_ATTEMPTS=5 \
+      bash "$dir/bin/fm-turnend-guard.sh" --claude > "$dir/guard.out" 2>&1 &
+  guard=$!
+  i=0
+  while [ "$i" -lt 200 ] && kill -0 "$guard" 2>/dev/null; do sleep 0.01; i=$((i + 1)); done
+  if kill -0 "$guard" 2>/dev/null; then
+    hung=1
+    kill "$guard" 2>/dev/null || true
+  fi
+  wait "$guard" 2>/dev/null
+  status=$?
+  kill -0 "$holder" 2>/dev/null || fail "identity-recorded transition steal holder was signalled"
+  kill -CONT "$holder" 2>/dev/null || true
+  kill "$holder" "$pid" 2>/dev/null || true
+  wait "$holder" "$pid" 2>/dev/null || true
+
+  [ "$hung" -eq 0 ] || fail "healthy guard wedged behind a stalled transition steal holder"
+  expect_code 2 "$status" "a healthy guard must continue when transition recovery cannot serialize"
+  assert_present "$dir/state/.turnend-claude-blocks" "bounded transition recovery partially cleared the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "bounded transition recovery partially cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "bounded transition recovery partially cleared the attended alarm"
+  pass "fm-turnend-guard --claude: stalled transition recovery remains bounded"
 }
 
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
@@ -1648,6 +1960,51 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
 }
 
+test_hook_claude_mode_attended_alarm_is_session_owner_scoped() {
+  local dir out1 out2 out3 status1 status2 status3 owner1 owner2
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner-scoped-alarm")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/state/.claude-autoarm-failure-notified"
+
+  sleep 60 &
+  owner1=$!
+  printf '%s\n' "$owner1" > "$dir/state/.lock"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner1"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed session_owner_pid=%s updated_at=1\n' \
+    "$owner1" > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 3
+  out1=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status1=$?
+  expect_code 0 "$status1" "the first owner must reach its attended fail-open"
+  assert_contains "$out1" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "the first owner did not receive its attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed/0.$owner1" \
+    "the first owner did not claim its scoped alarm"
+
+  kill "$owner1" 2>/dev/null || true
+  wait "$owner1" 2>/dev/null || true
+  sleep 60 &
+  owner2=$!
+  printf '%s\n' "$owner2" > "$dir/state/.lock"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner2"
+  printf 'epoch=4 owner_pid=998 outcome=failed-suppressed session_owner_pid=%s updated_at=1\n' \
+    "$owner2" > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 3
+  out2=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status2=$?
+  expect_code 0 "$status2" "a predecessor alarm must not suppress the successor fail-open"
+  assert_contains "$out2" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "the successor did not receive its own attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed/0.$owner2" \
+    "the successor did not claim its scoped alarm"
+
+  out3=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status3=$?
+  kill "$owner2" 2>/dev/null || true
+  wait "$owner2" 2>/dev/null || true
+  expect_code 2 "$status3" "the successor alarm must remain one-time within its session"
+  assert_not_contains "$out3" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
+    "the successor alarm repeated within one failure episode"
+  pass "fm-turnend-guard --claude: attended alarms are session-owner scoped"
+}
+
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
   local no_notice notice_only out status
   no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
@@ -1690,6 +2047,7 @@ test_hook_claude_mode_allow_resets_budget() {
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_independent_claim_failure "$dir" absent 123456 777
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
@@ -1705,7 +2063,8 @@ test_hook_claude_mode_allow_resets_budget() {
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
-  [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
+  [ ! -e "$dir/state/.claude-autoarm-failure-epochs" ] || fail "positive watcher recovery must reset independent failure epochs"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive watcher recovery must reset the failure notice"
   [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "a later unhealthy chain must re-block from a fresh budget"
@@ -1953,6 +2312,7 @@ test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
+test_hook_claude_mode_rejects_prior_session_rewake
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim
 test_hook_claude_mode_blocks_on_pid_reused_arming_claim
 test_hook_claude_mode_blocks_on_stuck_arming_claim
@@ -1960,12 +2320,20 @@ test_hook_claude_mode_allows_on_open_generation_claim
 test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
+test_hook_claude_mode_consumes_independent_claim_failure_epoch
+test_hook_claude_mode_accounts_claimant_scoped_failure
+test_hook_claude_mode_ignores_failure_superseded_by_later_success
+test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
+test_hook_claude_mode_repeated_claim_failures_reach_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_rechecks_health_inside_reset_boundary
+test_hook_claude_mode_stalled_transition_recovery_is_bounded
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
+test_hook_claude_mode_attended_alarm_is_session_owner_scoped
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget

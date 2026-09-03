@@ -5,6 +5,7 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh --autoarm acquire with the auto-arm session-lease bound
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,8 +33,20 @@ if [ "${1:-}" = "status" ]; then
   if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
+AUTOARM_MODE=0
+[ "${1:-}" != "--autoarm" ] || AUTOARM_MODE=1
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+OWNER_PROOF=ancestry
+if [ "$AUTOARM_MODE" -eq 1 ]; then
+  if bridged_owner=$(fm_claude_daemon_spawned_by_session_owner "$FM_ROOT" 2>/dev/null); then
+    me=$bridged_owner
+    OWNER_PROOF=bridge
+  elif fm_claude_daemon_in_session_ancestry; then
+    echo "error: cannot authenticate auto-arm daemon session owner; operate read-only until resolved" >&2
+    exit 1
+  fi
+fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -73,7 +86,14 @@ if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
     echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
     exit 1
   fi
-  fm_lock_acquire_wait "$CLAIM_LOCK"
+  if [ "$AUTOARM_MODE" -eq 1 ]; then
+    fm_autoarm_session_lease_acquire "$STATE" || {
+      echo "error: session-lock acquisition lease stayed busy; operate read-only until resolved" >&2
+      exit 1
+    }
+  else
+    fm_lock_acquire_wait "$CLAIM_LOCK"
+  fi
 fi
 CLAIM_LOCK_HELD=1
 
@@ -90,6 +110,25 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+fi
+if ! fm_harness_pid_alive "$me"; then
+  echo "error: selected session owner is no longer live; operate read-only until resolved" >&2
+  exit 1
+fi
+if [ "$OWNER_PROOF" = bridge ]; then
+  current_owner=$(fm_claude_daemon_spawned_by_session_owner "$FM_ROOT" 2>/dev/null) || {
+    echo "error: auto-arm daemon session owner is no longer authenticated; operate read-only until resolved" >&2
+    exit 1
+  }
+else
+  current_owner=$(fm_harness_ancestry_pid 2>/dev/null) || {
+    echo "error: selected session owner is no longer in ancestry; operate read-only until resolved" >&2
+    exit 1
+  }
+fi
+if [ "$current_owner" != "$me" ]; then
+  echo "error: selected session owner changed during lock acquisition; operate read-only until resolved" >&2
+  exit 1
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2

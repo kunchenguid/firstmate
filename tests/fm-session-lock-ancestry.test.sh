@@ -38,7 +38,7 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_PROC_ROOT="$fakebin/proc" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -220,6 +220,139 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+write_claude_daemon_argv_ps() {  # <fakebin> <argv...>
+  local fakebin=$1
+  shift
+  mkdir -p "$fakebin/proc/900"
+  printf '%s\0' "$@" > "$fakebin/proc/900/cmdline"
+  {
+    printf '%s' "$1"
+    shift
+    printf ' %s' "$@"
+    printf '\n'
+  } > "$fakebin/args-900"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=|701:comm=) printf '%s\n' claude ;;
+  700:args=|701:args=) printf '%s\n' claude ;;
+  700:ppid=|701:ppid=) printf '%s\n' 1 ;;
+  900:comm=) printf '%s\n' claude ;;
+  900:args=) cat "$script_dir/args-900" ;;
+  900:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [label]
+  local fakebin=$1 spawned_cwd=$2 spawned_pid=$3 label=${4:-claude} json
+  json="{\"label\":\"$label\",\"cwd\":\"$spawned_cwd\",\"pid\":$spawned_pid}"
+  write_claude_daemon_argv_ps "$fakebin" \
+    /Users/u/.local/bin/claude daemon run --keep-alive --spawned-by "$json"
+}
+
+test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
+  local dir root state other fakebin json bad_json tool
+  dir="$TMP_ROOT/daemon-spawned-by"
+  root="$dir/home"
+  state="$root/state"
+  other="$dir/other"
+  mkdir -p "$state" "$other"
+  printf '700\n' > "$state/.lock"
+
+  fakebin=$(fm_fakebin "$dir/good")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700
+  for tool in python3 jq; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'" \
+    || fail "a Claude daemon spawned by the foreground lock owner did not claim the home without python3 or jq"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'"; then
+    fail "the daemon bridge accepted spawned-by metadata without a resolved project root"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-root")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$other" 700
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted a spawned-by cwd outside this project root"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-pid")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 701
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted spawned-by metadata naming a different foreground pid"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-label")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700 codex
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted spawned-by metadata for a non-Claude session label"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/poisoned-tail")
+  bad_json="{\"label\":\"codex\",\"cwd\":\"$other\",\"pid\":701}"
+  json="{\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude daemon run \
+    --spawned-by "$bad_json" --metadata "$json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted matching fields outside the spawned-by value"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/duplicate-flag")
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude daemon run \
+    --spawned-by "$json" --spawned-by "$json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted duplicate spawned-by values"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/duplicate-key")
+  bad_json="{\"label\":\"codex\",\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude daemon run --spawned-by "$bad_json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted ambiguous spawned-by JSON"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/escaped-duplicate-key")
+  bad_json="{\"\\u006cabel\":\"codex\",\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700}"
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude daemon run --spawned-by "$bad_json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted a duplicate spawned-by key encoded with a JSON escape"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/malformed-json")
+  bad_json="{\"label\":\"claude\",\"cwd\":\"$root\",\"pid\":700,}"
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude daemon run --spawned-by "$bad_json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted malformed spawned-by JSON"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/prompt-text")
+  write_claude_daemon_argv_ps "$fakebin" /Users/u/.local/bin/claude --print \
+    "daemon run --spawned-by $json"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted spawned-by text inside an ordinary Claude argument"
+  fi
+  pass "session-lock: Claude daemon spawned-by metadata bridges only to the matching foreground lock owner"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -232,6 +365,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
@@ -360,6 +494,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
