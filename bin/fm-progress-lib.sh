@@ -52,18 +52,6 @@
 #                           seconds attributed to each phase so far; the
 #                           interval between two observations is attributed to
 #                           the phase seen at the earlier one
-#   label=<suffix>          the last label suffix applied to the worker's Herdr
-#                           workspace, empty when none was applied; the label
-#                           refresh writes only this and the two fields below,
-#                           merged into the record as it is after its Herdr
-#                           call, never the phase or clock it loaded before
-#   label_attempt=<epoch>   when the last failed label refresh was attempted
-#                           (0 when none is pending), so a failing rename
-#                           retries on the cadence rather than every poll
-#   label_warned=<reason>   the failure reason last warned about (empty when
-#                           the last refresh succeeded), so one reason warns
-#                           once and warns again only after it changes or a
-#                           later success
 #   tick_at=<epoch>         when the watcher tick last re-read this task's
 #                           phase (0 before the first tick); fm_progress_tick
 #                           keys its FM_PROGRESS_REFRESH_SECS cadence on this
@@ -78,6 +66,28 @@
 #                           is treated as absent, so a re-dispatched or
 #                           relaunched incarnation of the same id starts its
 #                           accumulators again from its own spawn instant
+#
+# LABEL BOOKKEEPING, state/.progress.label-<id> (not .progress-<id>.<x>, which
+# is the record of the task id <id>.<x>), key=value lines, atomically
+# replaced by the label refresh (fm_progress_label_refresh, its only writer)
+# and removed with the record. The tick never writes this file and the
+# refresh never writes the record, so a refresh that resumes from a slow
+# Herdr call after a replacement tick published a later observation cannot
+# overwrite that observation, and a tick cannot overwrite a refresh's
+# bookkeeping:
+#   v=1
+#   label=<suffix>          the last label suffix applied to the worker's Herdr
+#                           workspace, empty when none was applied
+#   label_attempt=<epoch>   when the last failed label refresh was attempted
+#                           (0 when none is pending), so a failing rename
+#                           retries on the cadence rather than every poll
+#   label_warned=<reason>   the failure reason last warned about (empty when
+#                           the last refresh succeeded), so one reason warns
+#                           once and warns again only after it changes or a
+#                           later success
+#   spawn_gen=<gen>         the meta's spawn_gen it belongs to, bound like the
+#                           record, so a relaunched incarnation's fresh
+#                           workspace is decorated again
 # The first observation seeds observed= from the task's spawn instant (the
 # epoch inside spawn_gen=s<epoch>.<pid>.<random>, else the record's mtime), so
 # time before the first observation counts as implementing.
@@ -175,6 +185,16 @@ fm_progress_now() {
 
 fm_progress_record_path() {  # <state-dir> <id>
   printf '%s/.progress-%s' "$1" "$2"
+}
+
+fm_progress_label_path() {  # <state-dir> <id>
+  printf '%s/.progress.label-%s' "$1" "$2"
+}
+
+# fm_progress_record_remove <state-dir> <id>: retire the record and its label
+# bookkeeping together (teardown through `fm-progress.sh record`).
+fm_progress_record_remove() {  # <state-dir> <id>
+  rm -f "$(fm_progress_record_path "$1" "$2")" "$(fm_progress_label_path "$1" "$2")"
 }
 
 fm_progress_history_path() {  # <data-dir>
@@ -362,9 +382,6 @@ _fm_progress_rec_reset() {
   FM_PROGRESS_REC_SECS_WAITING=0
   FM_PROGRESS_REC_SECS_READY=0
   FM_PROGRESS_REC_SECS_OTHER=0
-  FM_PROGRESS_REC_LABEL=
-  FM_PROGRESS_REC_LABEL_ATTEMPT=
-  FM_PROGRESS_REC_LABEL_WARNED=
   FM_PROGRESS_REC_TICK_AT=0
   FM_PROGRESS_REC_SPAWN_GEN=
 }
@@ -398,9 +415,6 @@ fm_progress_record_load() {
       secs_waiting) FM_PROGRESS_REC_SECS_WAITING=$(_fm_progress_num "$value") ;;
       secs_ready) FM_PROGRESS_REC_SECS_READY=$(_fm_progress_num "$value") ;;
       secs_other) FM_PROGRESS_REC_SECS_OTHER=$(_fm_progress_num "$value") ;;
-      label) FM_PROGRESS_REC_LABEL=$value ;;
-      label_attempt) FM_PROGRESS_REC_LABEL_ATTEMPT=$(_fm_progress_num "$value") ;;
-      label_warned) FM_PROGRESS_REC_LABEL_WARNED=$value ;;
       tick_at) FM_PROGRESS_REC_TICK_AT=$(_fm_progress_num "$value") ;;
       spawn_gen) FM_PROGRESS_REC_SPAWN_GEN=$value ;;
     esac
@@ -450,9 +464,6 @@ fm_progress_record_write() {
     printf 'secs_waiting=%s\n' "$FM_PROGRESS_REC_SECS_WAITING"
     printf 'secs_ready=%s\n' "$FM_PROGRESS_REC_SECS_READY"
     printf 'secs_other=%s\n' "$FM_PROGRESS_REC_SECS_OTHER"
-    printf 'label=%s\n' "$FM_PROGRESS_REC_LABEL"
-    printf 'label_attempt=%s\n' "$FM_PROGRESS_REC_LABEL_ATTEMPT"
-    printf 'label_warned=%s\n' "$FM_PROGRESS_REC_LABEL_WARNED"
     printf 'tick_at=%s\n' "$FM_PROGRESS_REC_TICK_AT"
     printf 'spawn_gen=%s\n' "$FM_PROGRESS_REC_SPAWN_GEN"
   } > "$tmp"; then
@@ -515,6 +526,64 @@ fm_progress_observe() {
   FM_PROGRESS_REC_OBSERVED=$now
   FM_PROGRESS_REC_PHASE=$phase
   FM_PROGRESS_REC_STEP=$step
+}
+
+# --- label bookkeeping ------------------------------------------------------
+
+_fm_progress_label_reset() {
+  FM_PROGRESS_LABEL_REC_SUFFIX=
+  FM_PROGRESS_LABEL_REC_ATTEMPT=0
+  FM_PROGRESS_LABEL_REC_WARNED=
+}
+
+# fm_progress_label_load <state-dir> <id>: sets FM_PROGRESS_LABEL_REC_*; 1 when
+# absent, unreadable, or written for another incarnation of the id (its
+# spawn_gen differs from the meta's current one); every field is then reset.
+fm_progress_label_load() {
+  local file key value line meta gen=
+  _fm_progress_label_reset
+  file=$(fm_progress_label_path "$1" "$2")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      label) FM_PROGRESS_LABEL_REC_SUFFIX=$value ;;
+      label_attempt) FM_PROGRESS_LABEL_REC_ATTEMPT=$(_fm_progress_num "$value") ;;
+      label_warned) FM_PROGRESS_LABEL_REC_WARNED=$value ;;
+      spawn_gen) gen=$value ;;
+    esac
+  done < "$file"
+  meta="$1/$2.meta"
+  if [ -f "$meta" ] && [ "$gen" != "$(_fm_progress_meta_get "$meta" spawn_gen)" ]; then
+    _fm_progress_label_reset
+    return 1
+  fi
+  return 0
+}
+
+# fm_progress_label_write <state-dir> <id>: atomically publish
+# FM_PROGRESS_LABEL_REC_* bound to the meta's current spawn_gen; a successful
+# no-op once state/<id>.meta is gone, so a refresh in flight during teardown
+# never recreates retired bookkeeping.
+fm_progress_label_write() {
+  local file tmp meta
+  meta="$1/$2.meta"
+  [ -f "$meta" ] || return 0
+  file=$(fm_progress_label_path "$1" "$2")
+  tmp=$(mktemp "$file.XXXXXX" 2>/dev/null) || return 1
+  if ! {
+    printf 'v=1\n'
+    printf 'label=%s\n' "$FM_PROGRESS_LABEL_REC_SUFFIX"
+    printf 'label_attempt=%s\n' "$FM_PROGRESS_LABEL_REC_ATTEMPT"
+    printf 'label_warned=%s\n' "$FM_PROGRESS_LABEL_REC_WARNED"
+    printf 'spawn_gen=%s\n' "$(_fm_progress_meta_get "$meta" spawn_gen)"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
 # --- history ----------------------------------------------------------------
@@ -903,22 +972,24 @@ fm_progress_read() {
 # silent while that reason persists, warns again after the reason changes or a
 # later success, and retries on the cadence; a hand-changed label is only
 # re-read on that cadence, never renamed, until its journaled base returns.
-# Persists only the label bookkeeping it changed, merged into the record as it
-# is on disk after the Herdr call: that call is where a pass can stall while a
-# replacement tick publishes a fresher observation, and the phase, clock, and
-# accumulators loaded before the stall are never written back. Never touches
-# task or endpoint records.
+# Reads and writes only its own bookkeeping file (state/.progress.label-<id>),
+# never the observation record: the Herdr call is where a pass can stall while
+# a replacement tick publishes a fresher observation, and nothing this
+# function loaded before the stall can be written over it. The bookkeeping
+# names the suffix this pass actually applied, so if a late rename overtook a
+# replacement's the next cadence sees the mismatch and re-applies the current
+# suffix. Never touches task or endpoint records.
 fm_progress_label_refresh() {
-  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc reason label attempt warned
+  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc reason
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 0
   backend=$(_fm_progress_meta_get "$meta" backend)
   [ "$backend" = herdr ] || return 0
-  fm_progress_record_load "$state" "$id" || return 0
-  [ "$FM_PROGRESS_REC_LABEL" != "$suffix" ] || return 0
+  fm_progress_label_load "$state" "$id" || true
+  [ "$FM_PROGRESS_LABEL_REC_SUFFIX" != "$suffix" ] || return 0
   [ -n "$now" ] || now=$(fm_progress_now)
-  if [ "${FM_PROGRESS_REC_LABEL_ATTEMPT:-0}" -gt 0 ] \
-     && [ $((now - FM_PROGRESS_REC_LABEL_ATTEMPT)) -lt "$FM_PROGRESS_REFRESH_SECS" ]; then
+  if [ "$FM_PROGRESS_LABEL_REC_ATTEMPT" -gt 0 ] \
+     && [ $((now - FM_PROGRESS_LABEL_REC_ATTEMPT)) -lt "$FM_PROGRESS_REFRESH_SECS" ]; then
     return 0
   fi
   if ! declare -F fm_backend_source >/dev/null 2>&1; then
@@ -931,31 +1002,21 @@ fm_progress_label_refresh() {
   rc=$?
   case "$rc" in
     0)
-      label=$suffix
-      attempt=0
-      warned=
+      FM_PROGRESS_LABEL_REC_SUFFIX=$suffix
+      FM_PROGRESS_LABEL_REC_ATTEMPT=0
+      FM_PROGRESS_LABEL_REC_WARNED=
       ;;
     2) return 0 ;;
     *)
       reason=${FM_BACKEND_HERDR_PROGRESS_REASON:-failed}
-      if [ "$FM_PROGRESS_REC_LABEL_WARNED" != "$reason" ]; then
+      if [ "$FM_PROGRESS_LABEL_REC_WARNED" != "$reason" ]; then
         echo "warning: herdr progress label for $id: ${FM_BACKEND_HERDR_PROGRESS_MESSAGE:-$reason} (this repeats only if the reason changes)" >&2
       fi
-      label=$FM_PROGRESS_REC_LABEL
-      attempt=$now
-      warned=$reason
+      FM_PROGRESS_LABEL_REC_ATTEMPT=$now
+      FM_PROGRESS_LABEL_REC_WARNED=$reason
       ;;
   esac
-  # Re-read the record the Herdr call may have outlived (a retired one stays
-  # retired) and publish this pass's label bookkeeping on top of it, so the
-  # observation a replacement tick wrote meanwhile stands and the record still
-  # names the suffix last applied, which the next cadence corrects if a
-  # replacement's rename was overtaken.
-  fm_progress_record_load "$state" "$id" || return 0
-  FM_PROGRESS_REC_LABEL=$label
-  FM_PROGRESS_REC_LABEL_ATTEMPT=$attempt
-  FM_PROGRESS_REC_LABEL_WARNED=$warned
-  fm_progress_record_write "$state" "$id" || true
+  fm_progress_label_write "$state" "$id" || true
   return 0
 }
 
@@ -984,9 +1045,9 @@ fm_progress_tick() {
     # The record's clock never runs backwards. Two ticks can overlap only when
     # one outlives the watcher's marker age bound (a read wedged on Herdr) and
     # a replacement is launched beside it; the earlier-stamped pass then drops
-    # its observation instead of reverting the phase, clock, and label
-    # bookkeeping the later one published. Checked against the file right
-    # before the write, since the read above is where a pass can stall.
+    # its observation instead of reverting the phase and clock the later one
+    # published. Checked against the file right before the write, since the
+    # read above is where a pass can stall.
     [ "$(fm_progress_record_tick_at "$state" "$id")" -lt "$now" ] || continue
     FM_PROGRESS_REC_TICK_AT=$now
     fm_progress_record_write "$state" "$id" || true

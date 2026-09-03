@@ -31,9 +31,13 @@
 #       per tick, through the version 2 presentation journal only; silent on
 #       tmux and on a Herdr task without a bound projection; a failed rename
 #       warns and retries on the cadence, a hand-changed label is left alone;
-#       a refresh that resumes from a stalled rename after a replacement tick
-#       published a later observation writes only its label bookkeeping onto
-#       that observation, and the next cadence re-applies the current suffix
+#       the refresh keeps its bookkeeping (applied suffix, pending retry,
+#       warned reason) in its own state/.progress.label-<id>, bound to the
+#       task's spawn_gen and retired with the record, and never writes the
+#       observation record, so a refresh that resumes from a stalled rename
+#       after a replacement tick published a later observation leaves that
+#       observation byte-for-byte intact and the next cadence re-applies the
+#       current suffix
 #   (f) tick throttle: one phase re-read per cadence window per task, keyed on
 #       the tick's own stamp so a snapshot read between ticks never postpones
 #       it, and a pass stamped before the record's last tick drops its
@@ -488,7 +492,8 @@ test_label_refresh_on_change_only() {
   [ "$(rename_count "$d")" = 1 ] || fail "the first tick must rename once: $(cat "$d/herdr.log")"
   [ "$(cat "$d/label")" = "└ lab1 · implementing · 35 to 130 min · p:$TOKEN" ] \
     || fail "the decorated label keeps the token last: $(cat "$d/label")"
-  grep -q "^label= · implementing · 35 to 130 min$" "$d/state/.progress-lab1" || fail "the applied suffix is recorded"
+  grep -q "^label= · implementing · 35 to 130 min$" "$d/state/.progress.label-lab1" || fail "the applied suffix is recorded"
+  grep -q "^label" "$d/state/.progress-lab1" && fail "the observation record carries no label bookkeeping: $(cat "$d/state/.progress-lab1")"
   progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick
   [ "$(rename_count "$d")" = 1 ] || fail "an unchanged suffix must not rename again: $(cat "$d/herdr.log")"
   progress "$d" $((NOW + 240)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
@@ -501,6 +506,19 @@ test_label_refresh_on_change_only() {
   progress "$d" $((NOW + 480)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
   [ "$(rename_count "$d")" = 3 ] || fail "a bucket change renames exactly once: $(cat "$d/herdr.log")"
   [ "$(cat "$d/label")" = "└ lab1 · validating · 20 to 65 min · p:$TOKEN" ] || fail "label after the bucket change: $(cat "$d/label")"
+  # A relaunched incarnation gets a fresh, undecorated workspace: bookkeeping
+  # left by the older one, even naming the very suffix the new one computes,
+  # must not make that suffix look applied already.
+  write_task "$d" lab1 ship no-mistakes "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w2" "herdr_tab_id=w2:t2" "herdr_pane_id=w2:p2" "spawn_gen=s$((NOW + 540)).2.2"
+  printf 'v=1\nlabel= · validating · 25 to 70 min\nlabel_attempt=0\nlabel_warned=\nspawn_gen=s%s.1.1\n' "$NOW" > "$d/state/.progress.label-lab1"
+  printf '%s\n' "$base" > "$d/label"
+  : > "$d/herdr.log"
+  progress "$d" $((NOW + 540)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
+  [ "$(rename_count "$d")" = 1 ] || fail "a relaunched incarnation is decorated again: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ lab1 · validating · 25 to 70 min · p:$TOKEN" ] || fail "the fresh workspace carries the suffix: $(cat "$d/label")"
+  grep -q "^spawn_gen=s$((NOW + 540)).2.2$" "$d/state/.progress.label-lab1" || fail "the bookkeeping is bound to the current incarnation: $(cat "$d/state/.progress.label-lab1")"
+  progress "$d" $((NOW + 540)) x 0 record lab1 --discard >/dev/null
+  [ ! -e "$d/state/.progress.label-lab1" ] || fail "teardown's record retires the label bookkeeping with the record"
   pass "the label is renamed only when the phase or the rounded estimate changes, at most once per tick"
 }
 
@@ -531,8 +549,8 @@ test_label_refresh_failure_warns_once_per_reason() {
   grep -q "warning: herdr progress label for lab2: rename failed on workspace w2" "$d/err" || fail "a failed rename must warn: $(cat "$d/err")"
   [ "$(grep -c warning "$d/err")" = 1 ] || fail "one failure warns once: $(cat "$d/err")"
   [ "$(cat "$d/label")" = "$base" ] || fail "a failed rename leaves the label alone"
-  grep -q "^label_attempt=$NOW$" "$d/state/.progress-lab2" || fail "the failed attempt is recorded"
-  grep -q "^label_warned=rename-failed$" "$d/state/.progress-lab2" || fail "the warned reason is recorded: $(cat "$d/state/.progress-lab2")"
+  grep -q "^label_attempt=$NOW$" "$d/state/.progress.label-lab2" || fail "the failed attempt is recorded"
+  grep -q "^label_warned=rename-failed$" "$d/state/.progress.label-lab2" || fail "the warned reason is recorded: $(cat "$d/state/.progress.label-lab2")"
   grep -q '^worktree=' "$d/state/lab2.meta" || fail "task records stay untouched"
   : > "$d/herdr.log"
   FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 30)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
@@ -550,7 +568,7 @@ test_label_refresh_failure_warns_once_per_reason() {
   progress "$d" $((NOW + 360)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
   [ "$(cat "$d/label")" = "└ lab2 · implementing · 30 to 125 min · p:$TOKEN" ] || fail "the retry applies the label once the server answers: $(cat "$d/label")"
   [ ! -s "$d/err" ] || fail "a success is silent: $(cat "$d/err")"
-  grep -q "^label_warned=$" "$d/state/.progress-lab2" || fail "a success clears the warned reason: $(cat "$d/state/.progress-lab2")"
+  grep -q "^label_warned=$" "$d/state/.progress.label-lab2" || fail "a success clears the warned reason: $(cat "$d/state/.progress.label-lab2")"
   FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 450)) 'state: working · source: run-step · validating (running) · step: review' 0 tick 2> "$d/err"
   grep -q "rename failed on workspace w2" "$d/err" || fail "a failure after a success warns again: $(cat "$d/err")"
   # A label changed by hand: one warning, no rename attempts, decoration
@@ -577,10 +595,12 @@ test_label_refresh_failure_warns_once_per_reason() {
 # A tick stamped NOW+60 stalls inside its Herdr rename after it wrote the
 # record; the replacement stamped NOW+120 publishes the next phase and renames
 # the label again. When the stale rename lands and its refresh resumes, it must
-# not write back the phase, clock, and accumulators it loaded before the stall:
-# only the suffix it actually applied, which the next cadence then corrects.
+# leave the record exactly as the replacement wrote it (it never writes the
+# record, so no reload-then-write window exists for a later observation to
+# fall into) and note only the suffix it actually applied in its own
+# bookkeeping, which the next cadence then corrects.
 test_label_refresh_resumed_after_a_replacement_tick_keeps_its_observation() {
-  local d base rec stale
+  local d base rec stale published
   d=$(make_case label-stale)
   base="└ lab3 · p:$TOKEN"
   write_task "$d" lab3 ship no-mistakes "backend=herdr" "spawn_gen=s$NOW.1.1"
@@ -597,13 +617,15 @@ test_label_refresh_resumed_after_a_replacement_tick_keeps_its_observation() {
   observe "$d" $((NOW + 120)) 'state: working · source: run-step · ci running · step: ci' 0
   grep -q "^phase=ci$" "$rec" || fail "the replacement publishes the transition: $(cat "$rec")"
   [ "$(cat "$d/label")" = "└ lab3 · ci · 5 to 15 min · p:$TOKEN" ] || fail "the replacement renames the label: $(cat "$d/label")"
+  published=$(cat "$rec")
   wait "$stale" 2>/dev/null || true
   [ "$(cat "$d/label")" = "└ lab3 · validating · 25 to 70 min · p:$TOKEN" ] || fail "the stale rename landed last: $(cat "$d/label")"
+  [ "$(cat "$rec")" = "$published" ] || fail "a resumed refresh must leave the replacement's record byte-for-byte untouched: $(cat "$rec")"
   grep -q "^phase=ci$" "$rec" || fail "a resumed refresh must not revert the replacement's phase: $(cat "$rec")"
   grep -q "^since=$((NOW + 120))$" "$rec" || fail "a resumed refresh must not reset since: $(cat "$rec")"
   grep -q "^tick_at=$((NOW + 120))$" "$rec" || fail "the record's clock never runs backwards: $(cat "$rec")"
   grep -q "^secs_validating=60$" "$rec" || fail "the replacement's accumulators stand: $(cat "$rec")"
-  grep -q "^label= · validating · 25 to 70 min$" "$rec" || fail "the record names the suffix the stale rename applied: $(cat "$rec")"
+  grep -q "^label= · validating · 25 to 70 min$" "$d/state/.progress.label-lab3" || fail "the bookkeeping names the suffix the stale rename applied: $(cat "$d/state/.progress.label-lab3")"
   # The next cadence sees the record's suffix differ from the current one and
   # brings the label back in step.
   : > "$d/herdr.log"

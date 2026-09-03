@@ -3,7 +3,8 @@
 # progress phase and remaining-time guess for this home's live tasks.
 #
 # bin/fm-progress-lib.sh is the single owner of the phase model, the
-# observation record (state/.progress-<id>), the history record
+# observation record (state/.progress-<id>) and the label bookkeeping beside
+# it (state/.progress.label-<id>), the history record
 # (data/phase-history.jsonl), the default bands, and the label suffix; this
 # script is its executable surface.
 #
@@ -114,7 +115,7 @@ command_record() {
   [ -n "$id" ] || { usage >&2; exit 2; }
   fm_progress_id_valid "$id" || { echo "fm-progress: invalid task id: $id" >&2; exit 2; }
   if ! fm_progress_record_load "$STATE" "$id"; then
-    rm -f "$(fm_progress_record_path "$STATE" "$id")"
+    fm_progress_record_remove "$STATE" "$id"
     printf 'progress: no observation record for %s; nothing recorded\n' "$id"
     return 0
   fi
@@ -124,7 +125,7 @@ command_record() {
   mode=$(_fm_progress_meta_get "$meta" mode)
   [ -n "$mode" ] || { [ "$kind" = scout ] && mode=scout || mode=no-mistakes; }
   if [ "$discard" = 1 ] || [ "$kind" = secondmate ]; then
-    rm -f "$(fm_progress_record_path "$STATE" "$id")"
+    fm_progress_record_remove "$STATE" "$id"
     printf 'progress: observation record for %s removed without recording history\n' "$id"
     return 0
   fi
@@ -141,7 +142,7 @@ command_record() {
   else
     printf 'warning: progress history for %s could not be appended under %s; the observation record is dropped anyway\n' "$id" "$DATA" >&2
   fi
-  rm -f "$(fm_progress_record_path "$STATE" "$id")"
+  fm_progress_record_remove "$STATE" "$id"
   return 0
 }
 
