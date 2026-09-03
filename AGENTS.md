@@ -173,7 +173,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 For a no-mistakes ship, the same worker that implemented the change invokes and drives the pipeline through every synchronous gate or outcome.
 Firstmate never answers a worker-owned gate directly; its decision response to the worker must require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
-An ask-user finding returns to firstmate, which loads `ask-user-authority`, gets any required captain decision, and sends one exact response with the decision key and finding IDs.
+An ask-user finding returns to firstmate, which loads `ask-user-authority`, gets any required captain decision, and sends one exact response with the decision key and finding IDs; the implementation worker never answers its own finding.
 The worker must preserve pipeline-owned commits, follow structured branch-custody instructions after a terminal run, and never hand-edit, abort, restart, or start a second run while an active run owns the branch except for the documented complete-intent-supersession path.
 Judge validation by `bin/fm-crew-state.sh`; running and fixing states are working, parked states need a response, passed states are ready, and failed or cancelled states are failures.
 
@@ -317,6 +317,7 @@ That consent covers public replies and ordinary reversible lifecycle actions onl
 Load `fmx-respond` for mention, configuration-error, public-followup, milestone, or terminal Relay notifications.
 It owns classification, public-safety policy, replies, dismissal, task linking, and durable final-followup reconciliation.
 Only the home holding the consent and thread binding may post, so workers and secondmates never search for or reply to the public thread themselves.
+A promised final public reply is durable state, never conversation memory; never recover a terminal result by reading a worker's `done:` sentence.
 A Relay-only home still requires the live supervision cycle.
 
 ## Captain instruction precedence [FM-CAPTAIN-PRECEDENCE]
