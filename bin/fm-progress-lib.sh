@@ -125,7 +125,8 @@
 #                              (default 60; 0 disables the tick)
 #   FM_PROGRESS_TICK_MAX_SECS  age past which bin/fm-watch.sh treats its
 #                              state/.progress-tick.pid marker as stale even
-#                              while the pid it names is alive (default 600)
+#                              while the pid it names is alive, and terminates
+#                              and relaunches its own tick child (default 600)
 #   FM_PROGRESS_MIN_SAMPLES    finished tasks a phase needs before its median
 #                              is used (default 3)
 #   FM_PROGRESS_HISTORY_MAX    newest history records considered (default 200)

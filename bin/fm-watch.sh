@@ -1460,12 +1460,16 @@ home_summary_refresh_detached() {
 # from the proc root the way bin/fm-wake-lib.sh does, else a portable ps), and
 # the marker is younger than FM_PROGRESS_TICK_MAX_SECS, so a recycled pid or a
 # wedged child never suppresses the tick silently; anything else is stale and
-# reclaimed, with one warning when the age bound is what expired. That pid is
-# only probed, never signalled or waited on unless this process launched it,
-# and an unreadable marker never blocks the launch. Its warnings reach this
-# watcher's stderr; its failure never changes what a cycle decided, and it
-# writes no task or endpoint record.
+# reclaimed, with one warning when the age bound is what expired. The same age
+# bound governs the child this watcher launched itself: once it has run past
+# FM_PROGRESS_TICK_MAX_SECS (a hung Herdr call parks it indefinitely) the
+# watcher warns once, sends it TERM, reaps it, and relaunches on that poll. A
+# pid read from the marker is only probed, never signalled or waited on unless
+# this process launched it, and an unreadable marker never blocks the launch.
+# Its warnings reach this watcher's stderr; its failure never changes what a
+# cycle decided, and it writes no task or endpoint record.
 PROGRESS_TICK_PID=
+PROGRESS_TICK_LAUNCHED_AT=0
 PROGRESS_TICK_MARKER="$STATE/.progress-tick.pid"
 PROGRESS_TICK_MAX_SECS=${FM_PROGRESS_TICK_MAX_SECS:-600}
 case "$PROGRESS_TICK_MAX_SECS" in ''|*[!0-9]*) PROGRESS_TICK_MAX_SECS=600 ;; esac
@@ -1494,7 +1498,11 @@ progress_tick_detached() {
   [ "${FM_PROGRESS_REFRESH_SECS:-60}" != 0 ] || return 0
   if [ -n "$PROGRESS_TICK_PID" ]; then
     if kill -0 "$PROGRESS_TICK_PID" 2>/dev/null; then
-      return 0
+      if [ $(( $(date +%s) - PROGRESS_TICK_LAUNCHED_AT )) -le "$PROGRESS_TICK_MAX_SECS" ]; then
+        return 0
+      fi
+      echo "warning: progress tick $PROGRESS_TICK_PID launched by this watcher has run longer than ${PROGRESS_TICK_MAX_SECS}s; terminating it and relaunching" >&2
+      kill -TERM "$PROGRESS_TICK_PID" 2>/dev/null || true
     fi
     wait "$PROGRESS_TICK_PID" 2>/dev/null || true
     PROGRESS_TICK_PID=
@@ -1504,6 +1512,7 @@ progress_tick_detached() {
     FM_CREW_STATE_BIN="$FM_CREW_STATE_BIN" \
     "$SCRIPT_DIR/fm-progress.sh" tick </dev/null >/dev/null &
   PROGRESS_TICK_PID=$!
+  PROGRESS_TICK_LAUNCHED_AT=$(date +%s)
   tmp=$(umask 077; mktemp "$STATE/.progress-tick.pid.XXXXXX" 2>/dev/null) || return 0
   if ! printf '%s\n' "$PROGRESS_TICK_PID" > "$tmp" 2>/dev/null \
      || ! mv -f -- "$tmp" "$PROGRESS_TICK_MARKER" 2>/dev/null; then

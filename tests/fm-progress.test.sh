@@ -33,7 +33,8 @@
 #       marker keeps that single flight across processes (a live real tick
 #       child suppresses the launch; a dead pid, a recycled pid owned by an
 #       unrelated process, or a marker older than FM_PROGRESS_TICK_MAX_SECS is
-#       reclaimed)
+#       reclaimed); the watcher's own child past that bound is terminated and
+#       relaunched with one warning, while a young one is left alone
 #   (g) label grammar: the base is recovered from a decorated label and the
 #       token stays the last segment
 #   (h) an unreadable (unknown) observation never resets the last known
@@ -634,6 +635,10 @@ marker_moved_from() {  # <case> <pid>: the watcher has rewritten the marker
   [ "$(marker_of "$1")" != "$2" ]
 }
 
+gone() {  # <pid>: the process no longer exists
+  ! kill -0 "$1" 2>/dev/null
+}
+
 # tick_start <case>: run one real `fm-progress.sh tick` in the background whose
 # current-state read sleeps, so it stays alive as a genuine tick child; sets
 # TICK_PID.
@@ -732,6 +737,42 @@ test_watcher_tick_reclaims_marker_of_dead_process() {
   pass "a marker naming a dead process is reclaimed and the tick launches"
 }
 
+# The age bound also governs the child the watcher launched itself: a tick
+# wedged past FM_PROGRESS_TICK_MAX_SECS is terminated with one warning and a
+# fresh tick launched, without the marker being pre-written by the test.
+test_watcher_own_wedged_tick_child_past_max_is_terminated_and_relaunched() {
+  local d first
+  d=$(make_case watcher-own-wedged)
+  write_task "$d" wm4 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  FM_FAKE_CREW_STATE_SLEEP=30 FM_PROGRESS_TICK_MAX_SECS=1 watch_start "$d"
+  wait_for 80 test -s "$d/state/.progress-tick.pid" || { kill "$WATCH_PID" 2>/dev/null; fail "the watcher never launched the tick: $(cat "$d/watch.err")"; }
+  first=$(marker_of "$d")
+  wait_for 80 marker_moved_from "$d" "$first" || { kill "$WATCH_PID" 2>/dev/null; fail "an own tick child past the age bound must be reclaimed and a fresh tick launched: $(cat "$d/watch.err")"; }
+  wait_for 30 gone "$first" || { kill "$WATCH_PID" "$first" 2>/dev/null; fail "the wedged own child must have been terminated: $(ps -o pid=,args= -p "$first")"; }
+  [ "$(marker_of "$d")" != "$first" ] || { kill "$WATCH_PID" 2>/dev/null; fail "the marker must name the fresh tick child"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  grep -q "progress tick $first launched by this watcher has run longer than 1s" "$d/watch.err" \
+    || fail "terminating an own wedged child warns on the watcher's stderr: $(cat "$d/watch.err")"
+  pass "an own tick child wedged past FM_PROGRESS_TICK_MAX_SECS is terminated with a warning and a fresh tick launched"
+}
+
+# Control: a slow but young own child is left alone, without a warning.
+test_watcher_own_young_tick_child_is_left_alone() {
+  local d first
+  d=$(make_case watcher-own-young)
+  write_task "$d" wm5 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  FM_FAKE_CREW_STATE_SLEEP=30 FM_PROGRESS_TICK_MAX_SECS=600 watch_start "$d"
+  wait_for 80 test -s "$d/state/.progress-tick.pid" || { kill "$WATCH_PID" 2>/dev/null; fail "the watcher never launched the tick: $(cat "$d/watch.err")"; }
+  first=$(marker_of "$d")
+  sleep 3
+  [ "$(marker_of "$d")" = "$first" ] || { kill "$WATCH_PID" 2>/dev/null; fail "a young own tick child must not be replaced: marker $(marker_of "$d"), child $first"; }
+  kill -0 "$first" 2>/dev/null || { kill "$WATCH_PID" 2>/dev/null; fail "a young own tick child must be left running"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  kill "$first" 2>/dev/null || true
+  ! grep -q "launched by this watcher" "$d/watch.err" || fail "a young own tick child never warns: $(cat "$d/watch.err")"
+  pass "a young own tick child is left alone without a warning"
+}
+
 # ---------------------------------------------------------------------------
 # (g) label grammar in the Herdr adapter
 
@@ -775,6 +816,8 @@ test_watcher_tick_marker_of_live_tick_child_suppresses_launch
 test_watcher_tick_marker_of_unrelated_process_is_reclaimed
 test_watcher_tick_marker_older_than_max_is_reclaimed_with_a_warning
 test_watcher_tick_reclaims_marker_of_dead_process
+test_watcher_own_wedged_tick_child_past_max_is_terminated_and_relaunched
+test_watcher_own_young_tick_child_is_left_alone
 test_label_grammar
 test_unknown_observation_keeps_the_phase_clock
 test_running_long_starts_past_the_75th_percentile

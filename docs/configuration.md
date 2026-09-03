@@ -237,6 +237,7 @@ A transient unreadable state is shown as unknown but never resets the last known
 The record carries the task's `spawn_gen`, so a later dispatch or relaunch of the same id discards an older record and starts its accumulators again, and it is only ever written while the task's meta still exists, so a read in flight during teardown cannot recreate it.
 The watcher launches that read as a detached single-flight child each poll, so no current-state read ever sits on its loop; the child re-reads a task's phase no more often than `FM_PROGRESS_REFRESH_SECS` and renames its projected Herdr workspace only when the phase or the rounded estimate changes, at most once per pass and through the presentation journal alone; [Presentation spaces](herdr-backend.md#presentation-spaces) owns the label grammar and its safety limits.
 That cadence is keyed on the tick's own stamp inside the observation record, so a `/bearings` or fleet-snapshot read between two ticks never postpones the next label refresh, and the single flight holds across watcher restarts through `state/.progress-tick.pid`, which names the last tick child and counts as a running tick only while that pid is alive, its command line is the tick, and the marker is younger than `FM_PROGRESS_TICK_MAX_SECS`; anything else is reclaimed, with one warning when the age bound is what expired.
+The same bound applies to the tick child the watcher launched itself: once it has run longer than `FM_PROGRESS_TICK_MAX_SECS`, the watcher warns once, terminates that child, and relaunches the tick on that poll, so a hung Herdr call never stalls label refreshes silently.
 Nothing in this path changes a task's lifecycle, waits on the network, or writes a record another script owns; `bin/fm-progress.sh show <id>` prints one task's phase and guess, and `bin/fm-progress.sh history` prints the medians in use.
 
 ## Startup memory budget (config/startup-memory-budget)
@@ -857,7 +858,7 @@ FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort in
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FM_PROGRESS_REFRESH_SECS=60   # seconds between per-task progress phase re-reads in the detached watcher tick; 0 disables the tick (see "Progress phase and remaining-time guess")
-FM_PROGRESS_TICK_MAX_SECS=600  # age after which the watcher treats state/.progress-tick.pid as stale even while its pid is alive, reclaiming it with one warning
+FM_PROGRESS_TICK_MAX_SECS=600  # age after which the watcher treats state/.progress-tick.pid as stale even while its pid is alive, and terminates and relaunches its own tick child, warning once either way
 FM_PROGRESS_MIN_SAMPLES=3     # finished tasks a phase needs before its history median replaces the default band
 FM_PROGRESS_HISTORY_MAX=200   # newest data/phase-history.jsonl records considered when computing medians
 FM_CAPTAIN_HOLD_BIN=bin/fm-captain-hold.sh   # test override for the captain-hold predicate the progress phase consults
