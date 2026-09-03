@@ -814,6 +814,28 @@ test_home_addendum_reaches_ship_and_scout_briefs_only() {
   pass "fm-brief: config/brief-addendum.md reaches ship and scout briefs only"
 }
 
+test_ship_and_scout_briefs_forbid_claude_in_chrome() {
+  local home ship_brief scout_brief
+  home="$TMP_ROOT/forbid-extension-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forbid-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship_brief="$home/data/forbid-ship/brief.md"
+  assert_present "$ship_brief" "ship brief was not scaffolded"
+  assert_grep "mcp__claude-in-chrome__" "$ship_brief" \
+    "ship brief rule 3 must explicitly forbid the claude-in-chrome extension"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forbid-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout_brief="$home/data/forbid-scout/brief.md"
+  assert_present "$scout_brief" "scout brief was not scaffolded"
+  assert_grep "mcp__claude-in-chrome__" "$scout_brief" \
+    "scout brief rule 3 must explicitly forbid the claude-in-chrome extension"
+
+  pass "fm-brief: ship and scout briefs forbid the claude-in-chrome extension"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -836,3 +858,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_home_addendum_reaches_ship_and_scout_briefs_only
+test_ship_and_scout_briefs_forbid_claude_in_chrome
