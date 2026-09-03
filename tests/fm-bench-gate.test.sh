@@ -419,6 +419,41 @@ refuses "an outcome-dependent implementation probe" \
   "preregistered for all samples"
 pass "every refused plan names the correction it violates"
 
+# A track whose entrant seat is not an object used to reach the tuple check as a
+# bare string and abort the gate with an AttributeError, so the run carried no
+# verdict line and preflight never withdrew a standing clearance.
+BENCH="$TMP_ROOT/entrant-not-an-object"
+write_plan "$BENCH" 'plan["tracks"]["A"]["entrants"][1] = "Opus 5 High"'
+out=$(run_gate "$BENCH" plan-check) && status=0 || status=$?
+expect_code 1 "$status" "a track whose entrant seat is not an object is refused"
+assert_not_contains "$out" "Traceback" "a malformed entrant seat is a verdict, not a crash"
+assert_contains "$out" "BENCH_RESULT plan-check refused" "the malformed entrant seat still carries a verdict line"
+assert_contains "$out" "track.A.entrants fail every entrant must be an object declaring its tuple; malformed entrants at index 1"   "the refusal names the malformed seat by position"
+pass "a malformed entrant seat refuses by name instead of aborting the gate"
+
+BENCH="$TMP_ROOT/entrants-not-a-list"
+write_plan "$BENCH" 'plan["tracks"]["A"]["entrants"] = 5'
+out=$(run_gate "$BENCH" plan-check) && status=0 || status=$?
+expect_code 1 "$status" "a track whose entrant field is not a list is refused"
+assert_not_contains "$out" "Traceback" "a malformed entrant field is a verdict, not a crash"
+assert_contains "$out" "BENCH_RESULT plan-check refused" "the malformed entrant field still carries a verdict line"
+assert_contains "$out" "track.A.entrants fail entrants must be a non-empty list"   "the refusal names the malformed entrant field"
+pass "a malformed entrant field refuses by name instead of aborting the gate"
+
+BENCH="$TMP_ROOT/entrant-not-an-object-preflight"
+write_plan "$BENCH" 'plan["tracks"]["A"]["entrants"][1] = "Opus 5 High"'
+write_provenance "$BENCH" A1 cleared
+write_provenance "$BENCH" C1 cleared
+write_receipt "$BENCH"
+out=$(run_gate "$BENCH" preflight) && status=0 || status=$?
+expect_code 1 "$status" "a malformed entrant seat may not clear preflight"
+assert_not_contains "$out" "Traceback" "a malformed entrant seat is a preflight verdict, not a crash"
+assert_contains "$out" "BENCH_RESULT preflight refused" "the plan stage still carries a verdict line"
+assert_contains "$out" "track.A.entrants fail" "preflight names the malformed seat"
+assert_contains "$out" "BENCH_NOTE preflight the prior clearance is revoked"   "a malformed plan withdraws the standing clearance"
+assert_absent "$BENCH/preflight.receipt" "no stale clearance survives a malformed entrant seat"
+pass "a malformed entrant seat withdraws the standing clearance instead of stranding it"
+
 BENCH="$TMP_ROOT/spec-author-absent"
 write_plan "$BENCH" 'plan["tracks"]["B"].pop("spec_author")'
 out=$(run_gate "$BENCH" plan-check) && status=0 || status=$?

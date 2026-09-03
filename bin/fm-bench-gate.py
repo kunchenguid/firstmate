@@ -328,7 +328,7 @@ def as_sequence(value: Any) -> list[Any]:
 
 def track_candidates(track: dict[str, Any]) -> list[dict[str, Any]]:
     """Every scored output producer in a track: entrants plus any baseline."""
-    candidates = list(track.get("entrants") or [])
+    candidates = [item for item in as_sequence(track.get("entrants")) if isinstance(item, dict)]
     baseline = track.get("baseline")
     if isinstance(baseline, dict):
         candidates.append(baseline)
@@ -426,7 +426,7 @@ def check_plan(plan: dict[str, Any], report: Report) -> None:
         check_track(name, track, plan, report)
     sample_count = samples if isinstance(samples, int) and not isinstance(samples, bool) else 0
     capture_records = sum(
-        len(track.get("entrants") or []) * sample_count
+        len(as_sequence(track.get("entrants"))) * sample_count
         for track in tracks.values()
         if isinstance(track, dict) and track.get("capture_required") is True
     )
@@ -657,12 +657,19 @@ def check_track(name: str, track: dict[str, Any], plan: dict[str, Any], report: 
         report.fail(f"{prefix}.baseline_packets", "baseline_required true needs a baseline and three strata")
 
     entrants = track.get("entrants")
-    if isinstance(entrants, list) and entrants:
+    if not isinstance(entrants, list) or not entrants:
+        report.fail(f"{prefix}.entrants", "entrants must be a non-empty list")
+    elif not all(isinstance(item, dict) for item in entrants):
+        malformed = [str(index) for index, item in enumerate(entrants) if not isinstance(item, dict)]
+        report.fail(
+            f"{prefix}.entrants",
+            "every entrant must be an object declaring its tuple; malformed entrants at index "
+            + ", ".join(malformed),
+        )
+    else:
         report.ok(f"{prefix}.entrants", f"{len(entrants)} entrants")
         for candidate in track_candidates(track):
             check_candidate_tuple(prefix, candidate, report)
-    else:
-        report.fail(f"{prefix}.entrants", "entrants must be a non-empty list")
 
     check_track_panel(prefix, track, report)
     check_track_spec_seat(prefix, track, report)
@@ -1258,7 +1265,7 @@ def check_allowance(root: Path, plan: dict[str, Any], manifest: dict[str, Any], 
         for provider in required
     }
     field_sizes = {
-        str(candidate.get("metered_provider")): len(plan["tracks"][name].get("entrants") or [])
+        str(candidate.get("metered_provider")): len(as_sequence(plan["tracks"][name].get("entrants")))
         for name in (plan.get("tracks") or {})
         if isinstance(plan["tracks"][name], dict)
         for candidate in track_candidates(plan["tracks"][name])
@@ -2534,7 +2541,7 @@ def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, re
         (str(entrant.get("name", "")), str(packet.get("id", "")))
         for track in (plan.get("tracks") or {}).values()
         if isinstance(track, dict) and track.get("capture_required") is True
-        for entrant in (track.get("entrants") or [])
+        for entrant in as_sequence(track.get("entrants"))
         if isinstance(entrant, dict)
         for packet in (track.get("packets") or [])
         if isinstance(packet, dict)
@@ -2596,7 +2603,7 @@ def planned_sample_identities(plan: dict[str, Any]) -> set[tuple[str, str, str, 
             for packet in (track.get("packets") or [])
             if isinstance(packet, dict)
         ]
-        for entrant in (track.get("entrants") or []):
+        for entrant in as_sequence(track.get("entrants")):
             if isinstance(entrant, dict):
                 identities.update(
                     (str(track_name), "entrant", str(entrant.get("name", "")), packet)
@@ -4209,7 +4216,7 @@ def promote_track(
 ) -> None:
     prefix = f"promote.{name}"
     packet_ids = [str(item.get("id", "")) for item in (track.get("packets") or []) if isinstance(item, dict)]
-    entrants = [str(item.get("name", "")) for item in (track.get("entrants") or []) if isinstance(item, dict)]
+    entrants = [str(item.get("name", "")) for item in as_sequence(track.get("entrants")) if isinstance(item, dict)]
     baseline = track.get("baseline")
     baseline_name = str(baseline.get("name", "")) if isinstance(baseline, dict) else ""
     strata = [str(item) for item in (track.get("baseline_packets") or [])]
