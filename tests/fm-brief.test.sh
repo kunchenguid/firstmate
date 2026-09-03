@@ -366,7 +366,7 @@ test_no_mistakes_dod_wording() {
 }
 
 test_ask_user_escalation_format() {
-  local home id brief scout_id scout_brief
+  local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
   mkdir -p "$home/data"
   id="brief-ask-user-d1"
@@ -374,15 +374,15 @@ test_ask_user_escalation_format() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
 
-  # A no-mistakes ask-user gate must escalate as one status event plus one
-  # verbatim findings snapshot file, using that same shape even for a single
-  # finding, never paraphrased into the status line.
-  assert_grep "escalate the whole gate as one event plus one snapshot file" "$brief" \
+  # A no-mistakes ask-user gate must escalate its ask-user findings as one status
+  # event plus one verbatim findings snapshot file, using that same shape even
+  # for a single finding, never paraphrased into the status line.
+  assert_grep "escalate all ask-user findings as one event plus one snapshot file" "$brief" \
     "ship rule 6 lost the one-event-plus-snapshot-file ask-user contract"
-  assert_grep "using that same shape even when the gate holds only a single finding" "$brief" \
+  assert_grep "using that same shape even when the gate holds only a single ask-user finding" "$brief" \
     "ship rule 6 must require the same shape for a single finding"
-  assert_grep "verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
-    "ship rule 6 must require the verbatim axi finding fields"
+  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
+    "ship rule 6 must limit the verbatim axi slice to ask-user findings"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
   assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must render the exact needs-decision ask-user status line"
@@ -398,19 +398,15 @@ test_ask_user_escalation_format() {
   assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
     "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
 
-  # fm-promote.sh's ship-instructions.md claims a promoted worker's original
-  # escalation rules, including ask-user, "carry over unchanged" - so the
-  # scout brief's own rule 6 must already carry this identical format.
-  scout_id="brief-ask-user-scout-d2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$scout_id" some-proj --scout >/dev/null 2>&1
-  scout_brief="$home/data/$scout_id/brief.md"
-  assert_present "$scout_brief" "scout brief was not scaffolded"
-  assert_grep "escalate the whole gate as one event plus one snapshot file" "$scout_brief" \
-    "scout rule 6 must carry the same ask-user contract a promoted worker relies on"
-  assert_grep "$home/data/$scout_id/nm-<run>-findings.txt" "$scout_brief" \
-    "scout rule 6 must point the snapshot file under the scout's own task data directory"
+  for mode in direct-PR local-only; do
+    other_id="brief-no-ask-user-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
+    other_brief="$home/data/$other_id/brief.md"
+    assert_no_grep "nm-<run>-findings.txt" "$other_brief" \
+      "$mode brief received a no-mistakes-only escalation format"
+  done
 
-  pass "fm-brief.sh: ask-user findings escalate as one gate event plus a verbatim snapshot file"
+  pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
 test_ship_project_memory_wording() {

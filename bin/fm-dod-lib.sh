@@ -160,17 +160,12 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# Single owner of the ask-user escalation format referenced as "rule 6" by the
-# no-mistakes Definition of done below. Rendered into both the scout and ship
-# rule 6 in bin/fm-brief.sh so a promoted scout - whose rule 6 stays the scout
-# brief's rule 6 per bin/fm-promote.sh - carries the identical format a
-# freshly-spawned no-mistakes ship worker gets.
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
-   For a no-mistakes ask-user gate specifically, escalate the whole gate as one event plus one snapshot file, using that same shape even when the gate holds only a single finding: write every finding the gate reported, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
+   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
-   naming every finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
+   naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
 EOF
 }
 
@@ -215,7 +210,7 @@ This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisio
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format (one \`needs-decision\` event naming every finding id, plus a snapshot file holding those findings verbatim - the same shape even for a single finding) and stop.
+- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
