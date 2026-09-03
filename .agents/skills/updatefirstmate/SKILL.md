@@ -21,6 +21,8 @@ A running agent holds `AGENTS.md` and every skill it has already loaded frozen f
 That is why a second mate whose `AGENTS.md` or `.agents/skills/` changed is restarted rather than asked to re-read: a re-read appends a second copy of the mate's own job description with no defined precedence, and cannot reach a skill that is already loaded.
 A `bin/` change needs none of this, because every helper is executed fresh on each call.
 
+**One-time rollout note:** the first update that carries this restart design is still executed by the previous release, so eligible second mates receive its re-read message on that pass instead of a restart. After that update completes, run `bin/fm-secondmate-restart.sh <fm-id>...` once with those mate IDs; this change already ships that command, and later updates follow the normal flow below.
+
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
 It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
