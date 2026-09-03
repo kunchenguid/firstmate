@@ -228,6 +228,20 @@ reap_sleeper() {  # <pid>
   kill -KILL "$1" 2>/dev/null || true
 }
 
+# proc_is_alive <pid>
+# `kill -0` is the wrong liveness test here: these sleepers are children of the
+# test shell, and a signalled child stays a ZOMBIE until the shell reaps it -
+# a state `kill -0` reports as success, which would read a successfully killed
+# process as a survivor. Ask for the process state instead and treat Z as dead.
+proc_is_alive() {  # <pid>
+  local state
+  [ -n "${1:-}" ] || return 1
+  state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$state" ] || return 1
+  case "$state" in Z*) return 1 ;; esac
+  return 0
+}
+
 test_cleanup_sweeps_processes_leaked_in_its_own_root() {
   local child_out child_dir pid alive
   # The owning process registers the root, leaves a process running inside it,
@@ -250,7 +264,7 @@ test_cleanup_sweeps_processes_leaked_in_its_own_root() {
   assert_absent "$child_dir" "the fixture root survived its owning process's exit"
 
   alive=0
-  if kill -0 "$pid" 2>/dev/null; then
+  if proc_is_alive "$pid"; then
     alive=1
     reap_sleeper "$pid"
   fi
@@ -292,13 +306,13 @@ test_sweep_cannot_reach_outside_its_own_root() {
   fm_test_sweep_leaked_processes "$swept" || rc=$?
   expect_code 0 "$rc" "the sweep did not succeed on a well-formed fixture root"
 
-  kill -0 "$swept_pid" 2>/dev/null \
+  proc_is_alive "$swept_pid" \
     && { reap_sleeper "$swept_pid"; fail "the sweep left a process running inside the root it was given"; }
-  kill -0 "$sibling_pid" 2>/dev/null \
+  proc_is_alive "$sibling_pid" \
     || fail "the sweep reached another fixture root's process"
-  kill -0 "$prefixed_pid" 2>/dev/null \
+  proc_is_alive "$prefixed_pid" \
     || fail "the sweep reached a sibling whose path is a string prefix of the swept root"
-  kill -0 "$outside_pid" 2>/dev/null \
+  proc_is_alive "$outside_pid" \
     || fail "the sweep reached a process outside the swept root entirely"
 
   reap_sleeper "$sibling_pid"
@@ -340,14 +354,51 @@ test_sweep_refuses_unmarked_and_non_tmpdir_roots() {
   ' _ "$LIB" "$outside_tmpdir" || rc=$?
   expect_code 0 "$rc" "the sweep failed rather than skipping a non-TMPDIR root"
 
-  kill -0 "$unmarked_pid" 2>/dev/null \
+  proc_is_alive "$unmarked_pid" \
     || fail "the sweep signalled into a TMPDIR directory carrying no fixture marker"
-  kill -0 "$outside_pid" 2>/dev/null \
+  proc_is_alive "$outside_pid" \
     || fail "the sweep signalled into a marked directory outside TMPDIR"
 
   reap_sleeper "$unmarked_pid"
   reap_sleeper "$outside_pid"
   pass "the sweep skips roots that are unmarked or outside TMPDIR instead of signalling into them"
+}
+
+test_sweep_kills_a_process_that_ignores_term() {
+  local harness root pid alive
+  # The shape that actually leaked is TERM-resistant: the pane shell holding the
+  # fixture tree is an interactive login shell, and every one of the 99 found on
+  # this machine survived SIGTERM and needed SIGKILL. A sweep that only TERMed
+  # and waited would look correct against a plain `sleep` while still leaking
+  # the real thing, so pin the KILL pass against a process that ignores TERM.
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-stubborn)
+  root="$harness/stubborn"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  bash -c 'trap "" TERM; cd "$1" || exit 1; while :; do sleep 0.2; done' _ "$root" \
+    >/dev/null 2>&1 </dev/null &
+  pid=$!
+  disown
+  track_sleeper "$pid"
+  while ! kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
+  # Confirm it really is TERM-resistant, so this case cannot pass vacuously
+  # against a process that would have died to the TERM pass anyway.
+  kill -TERM "$pid" 2>/dev/null
+  sleep 0.5
+  proc_is_alive "$pid" \
+    || fail "the fixture process died to SIGTERM, so this case cannot prove the KILL pass"
+
+  fm_test_sweep_leaked_processes "$root" \
+    || fail "the sweep failed on a root holding a TERM-resistant process"
+
+  alive=0
+  if proc_is_alive "$pid"; then
+    alive=1
+    reap_sleeper "$pid"
+  fi
+  [ "$alive" -eq 0 ] \
+    || fail "a TERM-resistant process inside the fixture root survived the sweep"
+  pass "the sweep escalates to KILL for a process that ignores TERM"
 }
 
 test_sweep_never_reaches_a_registered_repo_checkout_dir() {
@@ -374,7 +425,7 @@ test_sweep_never_reaches_a_registered_repo_checkout_dir() {
   fm_test_sweep_leaked_processes "$repo_dir" \
     || fail "the sweep failed rather than skipping a repo-checkout directory"
 
-  kill -0 "$pid" 2>/dev/null || fail "the sweep signalled a process inside the repo checkout"
+  proc_is_alive "$pid" || fail "the sweep signalled a process inside the repo checkout"
   reap_sleeper "$pid"
   rm -rf "$repo_dir"
   pass "the sweep never reaches a registered directory inside the repo checkout"
@@ -420,7 +471,7 @@ test_orphan_sweep_reaps_processes_left_in_a_stale_root() {
 
   assert_absent "$stale_dir" "the orphan reaper left the stale fixture root behind"
   alive=0
-  if kill -0 "$pid" 2>/dev/null; then
+  if proc_is_alive "$pid"; then
     alive=1
     reap_sleeper "$pid"
   fi
@@ -438,6 +489,7 @@ test_orphan_sweep_reaps_read_only_package_tree
 test_cleanup_sweeps_processes_leaked_in_its_own_root
 test_sweep_cannot_reach_outside_its_own_root
 test_sweep_refuses_unmarked_and_non_tmpdir_roots
+test_sweep_kills_a_process_that_ignores_term
 test_sweep_never_reaches_a_registered_repo_checkout_dir
 test_sweep_never_signals_the_sweeping_shell
 test_orphan_sweep_reaps_processes_left_in_a_stale_root
