@@ -27,8 +27,18 @@
 #   none          no confinement; provided so the gate's own regression can
 #                 prove the probe set detects a real leak
 #
-# The environment is always scrubbed to an explicit allowlist (PATH, HOME, TMPDIR,
-# LANG, TERM), which is what denies the environment-leakage probe.
+# --purpose replay, the default, keeps networking disabled. --purpose entrant
+# requires all three provider flags and Docker specifically, because only
+# Docker's network inspection can prove the egress network is internal and
+# holds nothing but the credential-holding proxy; bwrap cannot enforce that
+# boundary and refuses it.
+#
+# The environment is always scrubbed to an explicit allowlist, which is what
+# denies the environment-leakage probe: PATH, HOME, TMPDIR, LANG, TERM, the
+# BENCH_PRIVATE_* pointers into this entrant's own layout, the probe's
+# PROCESS_INSPECTION_MARKER_FILE, and, under --purpose entrant, the proxy URL
+# as HTTP_PROXY, HTTPS_PROXY, and ALL_PROXY. Provider credentials stay at the
+# proxy and never cross into the confined command.
 set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
