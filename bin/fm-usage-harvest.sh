@@ -25,6 +25,9 @@
 #    "input_tokens":<int|null>,"cached_input_tokens":<int|null>,
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|pi-sessions|unavailable>}
+# A meta model= or effort= holding the literal "default" names no concrete id,
+# so the row records null for that field rather than the word itself, which is
+# the same spelling an absent line gets.
 #
 # Row identity is the PAIR task plus spawn_gen, not the task id alone, because
 # a task id is reusable: teardown retires a task's records, and a later spawn

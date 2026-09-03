@@ -12,8 +12,10 @@
 # the order they started. The per-model section aggregates rows, so it counts
 # each incarnation as its own task.
 #
-# Output is aligned plain text; an absent or unavailable field renders as
-# "-". The ledger's @tsv rows are read over the unit separator rather than the
+# Output is aligned plain text. In the per-task rows an absent or unavailable
+# field renders as "-", while the per-model totals group rows carrying no model
+# under "?" and count an absent token field as zero.
+# The ledger's @tsv rows are read over the unit separator rather than the
 # tab, because tab is an IFS whitespace character and an empty field would
 # otherwise collapse and shift every later column left.
 #
