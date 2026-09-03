@@ -134,6 +134,7 @@ run_copilot_hook_fixture() {  # <fakebin> <dir> <mode> <payload-file> [extra env
 make_claude_compat_fixture() {
   local dir=$1
   mkdir -p "$dir/bin" "$dir/.claude"
+  git -C "$dir" init -q
   : > "$dir/AGENTS.md"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-claude-compat-hook.sh" "$dir/bin/"
   cp "$ROOT/.claude/settings.json" "$dir/.claude/settings.json"
@@ -350,6 +351,28 @@ EOF
   pass "Claude compatibility hooks still run under actual Claude with inherited Copilot markers"
 }
 
+test_claude_compatibility_hooks_find_worktree_root_from_subdir() {
+  local dir fakebin command out rc count=0
+  dir="$TMP_ROOT/claude-compat-subdir"
+  fakebin="$dir/fakebin"
+  make_ps "$fakebin"
+  make_claude_compat_fixture "$dir"
+  mkdir -p "$dir/subdir/nested"
+  while IFS= read -r command; do
+    count=$((count + 1))
+    out=$(cd "$dir/subdir/nested" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' \
+      sh -c "$command" <<'EOF' 2>&1
+{"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
+EOF
+)
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "Claude compatibility hook $count failed from a repository subdirectory: $out"
+    [ -n "$out" ] || fail "Claude compatibility hook $count did not resolve the worktree root from a repository subdirectory"
+  done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
+  [ "$count" -gt 0 ] || fail "no Claude compatibility hooks were exercised"
+  pass "Claude compatibility hooks resolve their worktree root from repository subdirectories"
+}
+
 test_environment_marker_wins
 test_process_shapes_are_anchored
 test_actual_host_overrides_inherited_markers
@@ -362,5 +385,6 @@ test_primary_hook_registration
 test_non_cli_hook_surface_stands_down
 test_claude_compatibility_hooks_stand_down
 test_claude_compatibility_hooks_run_under_actual_claude_with_inherited_copilot_markers
+test_claude_compatibility_hooks_find_worktree_root_from_subdir
 
 echo "# all fm-copilot-harness tests passed"

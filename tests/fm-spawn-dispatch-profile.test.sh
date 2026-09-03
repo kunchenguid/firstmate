@@ -518,7 +518,7 @@ test_copilot_threads_autonomy_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "copilot --allow-all --no-ask-user --model 'gpt-5.6-sol' --effort 'max' -i" \
     "copilot launch did not carry autonomy, model, effort, and interactive prompt flags"
-  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
+  assert_contains "$launch" "env -u CLAUDECODE -u CLAUDE_PROJECT_DIR -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
     "copilot launch did not clear foreign primary markers"
   assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
   hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
@@ -536,6 +536,25 @@ test_copilot_threads_autonomy_model_and_effort() {
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=idle source=copilot-hook" \
     "copilot agentStop hook did not settle semantic busy state"
   pass "copilot launch and generated worker hooks carry the complete adapter contract"
+}
+
+test_copilot_launch_clears_inherited_claude_project_dir() {
+  local rec id out status launch stale_root
+  id=profile-copilot-claude-project-dir-z6h
+  rec=$(make_spawn_case profile-copilot-claude-project-dir copilot "$id")
+  read_case_record "$rec"
+  stale_root="$CASE_DIR/other-worktree"
+  mkdir -p "$stale_root"
+
+  out=$(CLAUDE_PROJECT_DIR="$stale_root" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn under inherited CLAUDE_PROJECT_DIR should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CLAUDECODE -u CLAUDE_PROJECT_DIR" \
+    "copilot launch did not clear the inherited Claude project root"
+  assert_not_contains "$launch" "$stale_root" \
+    "copilot launch leaked the spawning Claude worktree into the worker command"
+  pass "copilot launch clears inherited Claude project roots before entering another worktree"
 }
 
 test_copilot_preserves_repository_owned_hook_files() {
@@ -990,6 +1009,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
+test_copilot_launch_clears_inherited_claude_project_dir
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
 test_copilot_worker_hook_rejects_symlink_paths
