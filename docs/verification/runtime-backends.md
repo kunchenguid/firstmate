@@ -1398,3 +1398,34 @@ The live probe loads the tracked watcher extension through Pi's real resource lo
 It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
 The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
 A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+## OMP candidate tool containment
+
+The OMP adapter and manifest are review-only.
+They may report requested and rendered settings for exact `omp/17.2.9`, but those records are not effective consumer proof; effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
+No supported session-free consumer pinned to that exact artifact has been established.
+
+Two measured findings bound which consumer surfaces remain worth attempting.
+On 2026-08-24, source review invalidated an earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it falls outside this candidate's no-session and no-network verification authority.
+The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove `omp/17.2.9` behavior.
+
+The opt-in proof gate fails closed without resolving or executing any OMP candidate:
+
+```sh
+FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
+```
+
+```text
+not ok - requested omp/17.2.9 has no supported session-free configuration and tool consumer; executable provenance, version, and effective behavior remain unproven; candidate remains dormant without resolving or executing OMP
+```
+
+The requested release metadata does not establish immutable executable provenance, installed version, or any effective consumer behavior.
+OMP remains hard dormant and non-runnable.
+The tmux-only development exception does not lift dormancy or establish any missing proof.
+Before dormancy can be reconsidered, all three independent mandatory prerequisites must pass:
+
+1. Immutable executable provenance and exact `omp/17.2.9` version binding.
+2. Supported session-free consumer proof pinned to that same exact artifact, covering effective configuration, fallback isolation, and effective tool construction.
+3. Separately gated ATX-2170 First Mate interrupt, exit, and relaunch verification.
+
+No prerequisite substitutes for another.

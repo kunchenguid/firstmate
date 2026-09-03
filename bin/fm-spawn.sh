@@ -111,7 +111,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -175,6 +175,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts
+#     __OMPAGENTDIR__ isolated OMP agent directory under the task temp root
+#     __OMPCWD__   isolated OMP project-settings directory under the task temp root
+#     __OMPMODEL__ quoted explicit provider/model selected for the OMP candidate
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -203,6 +207,15 @@
 # and every refusal; a failed registration stops this spawn rather than launching
 # a worker that would wedge on the dialog. A --secondmate launch never runs it,
 # so a claude secondmate home keeps its own one-time trust decision.
+# omp (Oh My Pi) is a dormant candidate for crewmate and scout work only.
+# Every runnable selection is refused until a supported session-free consumer
+# proves exact 17.2.9 configuration and tool containment and ATX-2170 separately
+# proves First Mate interrupt, exit, and relaunch control.
+# The candidate requires an explicit --harness omp, an explicit qualified
+# provider/model, and backend=tmux; it never resolves or probes an executable
+# while dormant, never runs as a secondmate, and never inherits trace context.
+# bin/fm-omp-candidate-artifacts.sh owns its review-only manifest, isolated
+# settings, input policy, and lifecycle extension.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -459,6 +472,47 @@ else
   fi
 fi
 
+# The OMP candidate's model value must be caller-explicit and fully qualified.
+# Validation is structural only; this never queries a model catalog or candidate.
+require_omp_launch_model() {
+  if [ "$MODEL_SET" -ne 1 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: omp requires an explicit --model <provider>/<model> flag on every spawn; without one omp would resolve the provider itself" >&2
+    return 1
+  fi
+  if [[ ! $MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "error: omp --model must be exactly '<provider>/<model>' - one slash between two identifier segments of letters, digits, dot, underscore, or dash (got '$MODEL')" >&2
+    return 1
+  fi
+}
+
+refuse_omp_secondmate() {
+  echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  return 1
+}
+
+refuse_omp_unverified_gates() {
+  echo "error: omp is dormant until a supported session-free omp/17.2.9 consumer proves effective configuration and tool containment, immutable executable provenance is established, and ATX-2170 independently verifies First Mate interrupt, exit, and relaunch control; no mandatory gate substitutes for another; refusing every runnable OMP launch" >&2
+  return 1
+}
+
+# The bounded development exception is adapter-local: OMP requires tmux while
+# dormant, without changing the fleet default or any other adapter's resolution.
+require_omp_tmux_backend() {
+  if [ "$BACKEND" != tmux ]; then
+    echo "error: omp requires backend=tmux for bounded candidate development; resolved backend '$BACKEND' is not authorized for this adapter" >&2
+    return 1
+  fi
+}
+
+# Raw launch text is never executed to classify this candidate.
+# Any whitespace-delimited word whose basename is the candidate command claims
+# the OMP identity and must use the named adapter path instead.
+raw_launch_selects_omp() {
+  local raw=$1
+  local pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?omp([[:space:];|&()]|$)'
+  [[ $raw =~ $pattern ]]
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -500,6 +554,12 @@ spawn_remote_secondmate() {
     harness=$positional
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+  fi
+  if [ "$harness" = omp ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    refuse_omp_secondmate
+    return 1
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
@@ -1012,6 +1072,23 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
+# A caller-explicit fresh OMP selection is completely classifiable before any
+# backend validation or task lock, so an Orca request names the tmux exception
+# instead of contacting the rejected backend.
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" = omp ]; then
+  if [ "$KIND" = secondmate ]; then
+    refuse_omp_secondmate
+    exit 1
+  fi
+  require_omp_launch_model || exit 1
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    BACKEND=$BACKEND_ARG
+  else
+    BACKEND=$(fm_backend_name)
+  fi
+  require_omp_tmux_backend || exit 1
+  refuse_omp_unverified_gates || exit 1
+fi
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -1202,7 +1279,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1377,12 +1454,17 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template ;;
     *) return 1 ;;
   esac
 }
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    if raw_launch_selects_omp "$ARG3"; then
+      echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, and inherited paths never select it" >&2
+      exit 1
+    fi
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
@@ -1418,6 +1500,22 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$HARNESS" = omp ]; then
+  if [ "$HARNESS_SET" -ne 1 ]; then
+    echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, configured, and recorded omp selections are not allowed" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ]; then
+    refuse_omp_secondmate
+    exit 1
+  fi
+  require_omp_launch_model || exit 1
+  require_omp_tmux_backend || exit 1
+  refuse_omp_unverified_gates || exit 1
+fi
+
+# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
+# instance, so it needs a primary supervision protocol; muse has none, and its
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
@@ -1567,7 +1665,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2677,7 +2775,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2847,6 +2945,15 @@ export default function (pi: any) {
 }
 EOF
       ;;
+    omp)
+      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" prepare \
+        "$TASK_TMP/omp-agent" "$TASK_TMP/omp-cwd" || exit 1
+      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" extension \
+        "$STATE/$ID.omp-ext.ts" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" || exit 1
+      OMP_AGENT_DIR="$TASK_TMP/omp-agent"
+      OMP_CWD="$TASK_TMP/omp-cwd"
+      ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
       # probes and the evidence). Neither Codex path is usable on the
@@ -3007,7 +3114,10 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$HARNESS" = omp ]; then
+  SPAWN_TRACE_EFFECTIVE=off
+  SPAWN_TRACEPARENT=
+elif [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
@@ -3145,6 +3255,10 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
+sq_ompagentdir=$(shell_quote "${OMP_AGENT_DIR:-}")
+sq_ompcwd=$(shell_quote "${OMP_CWD:-}")
+sq_ompmodel=$(shell_quote "$MODEL")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
@@ -3156,6 +3270,10 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
+LAUNCH=${LAUNCH//__OMPAGENTDIR__/$sq_ompagentdir}
+LAUNCH=${LAUNCH//__OMPCWD__/$sq_ompcwd}
+LAUNCH=${LAUNCH//__OMPMODEL__/$sq_ompmodel}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
@@ -3164,7 +3282,7 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|omp)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
@@ -3199,6 +3317,11 @@ if [ "$KIND" = secondmate ]; then
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+
+if [ "$HARNESS" = omp ]; then
+  refuse_omp_unverified_gates
+  exit 1
 fi
 
 spawn_record_traceparent() {

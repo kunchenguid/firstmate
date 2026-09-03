@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse, plus the dormant OMP candidate boundary.
 user-invocable: false
 metadata:
   internal: true
@@ -36,6 +36,8 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse and Gemini are verified only for crewmate and scout work, never a secondmate or primary.
+OMP is an unverified crewmate/scout candidate and remains hard dormant.
+Never resolve, probe, execute, dispatch, or describe OMP as live-ready; its selected reference owns the bounded tmux-only development contract and independent activation gates.
 
 ## Detection
 
@@ -90,7 +92,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "kimi": "references/harness/kimi.md",
     "cursor": "references/harness/cursor.md",
     "gemini": "references/harness/gemini.md",
-    "muse": "references/harness/muse.md"
+    "muse": "references/harness/muse.md",
+    "omp": "references/harness/omp.md"
   }
 }
 ```
