@@ -1332,44 +1332,67 @@ fm_autoarm_failure_reset_fence() {  # <state-dir>
   printf '%s\n' "$value"
 }
 
+fm_autoarm_failure_reset_in_progress() {  # <state-dir>
+  [ -e "$1/.claude-autoarm-failure-resetting" ] \
+    || [ -L "$1/.claude-autoarm-failure-resetting" ]
+}
+
 fm_autoarm_failure_reset_advance() {  # <state-dir>
-  local state=$1 fence current latest next pid tmp path needed=0
+  local state=$1 fence resetting current latest next pid tmp path needed=0
   fence="$state/.claude-autoarm-failure-reset"
+  resetting="$state/.claude-autoarm-failure-resetting"
   if [ -e "$fence" ] || [ -L "$fence" ]; then
     [ -f "$fence" ] && [ ! -L "$fence" ] || return 1
   fi
   current=$(fm_autoarm_failure_reset_fence "$state") || return 1
-  latest=$(fm_autoarm_failure_sequence_latest "$state") || return 1
-  [ "$latest" -le "$current" ] || needed=1
-  for path in \
-    "$state/.turnend-claude-blocks" \
-    "$state/.claude-autoarm-failure-epoch" \
-    "$state/.claude-autoarm-failure-epochs" \
-    "$state/.claude-autoarm-failure-notified" \
-    "$state/.claude-autoarm-failure-alarmed"
-  do
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      needed=1
-      break
+  if [ -e "$resetting" ] || [ -L "$resetting" ]; then
+    [ -f "$resetting" ] && [ ! -L "$resetting" ] || return 1
+    next=$(cat "$resetting" 2>/dev/null) || return 1
+    case "$next" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$current" -le "$next" ] || return 1
+  else
+    latest=$(fm_autoarm_failure_sequence_latest "$state") || return 1
+    [ "$latest" -le "$current" ] || needed=1
+    for path in \
+      "$state/.turnend-claude-blocks" \
+      "$state/.claude-autoarm-failure-epoch" \
+      "$state/.claude-autoarm-failure-epochs" \
+      "$state/.claude-autoarm-failure-notified" \
+      "$state/.claude-autoarm-failure-alarmed"
+    do
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        needed=1
+        break
+      fi
+    done
+    [ "$needed" -eq 1 ] || return 0
+    next=$(fm_autoarm_failure_sequence_next "$state") || return 1
+    pid=${BASHPID:-$$}
+    tmp="$resetting.tmp.$pid"
+    if ! printf '%s\n' "$next" > "$tmp" 2>/dev/null \
+      || ! mv -f "$tmp" "$resetting" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
     fi
-  done
-  [ "$needed" -eq 1 ] || return 0
-  next=$(fm_autoarm_failure_sequence_next "$state") || return 1
+  fi
   pid=${BASHPID:-$$}
   tmp="$fence.tmp.$pid"
-  if ! printf '%s\n' "$next" > "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$fence" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
+  if [ "$current" -ne "$next" ]; then
+    if ! printf '%s\n' "$next" > "$tmp" 2>/dev/null \
+      || ! mv -f "$tmp" "$fence" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
   fi
   fm_autoarm_failure_sequence_compact "$state" "$next" || return 1
   return 0
 }
 
 _fm_failure_episode_clear() {  # <state-dir>
-  local state=$1 path failure_dir notice
+  local state=$1 path failure_dir notice resetting
   failure_dir="$state/.claude-autoarm-failure-epochs"
   notice="$state/.claude-autoarm-failure-notified"
+  resetting="$state/.claude-autoarm-failure-resetting"
   for path in \
     "$state/.turnend-claude-blocks" \
     "$state/.claude-autoarm-failure-epoch" \
@@ -1408,6 +1431,7 @@ _fm_failure_episode_clear() {  # <state-dir>
     done
     rmdir "$failure_dir" 2>/dev/null || return 1
   fi
+  rm -f "$resetting" 2>/dev/null || return 1
   return 0
 }
 
@@ -1793,6 +1817,7 @@ fm_autoarm_failure_ledger_current() {  # <state-dir>
 
 fm_autoarm_failure_notice_current() {  # <state-dir> <marker-file>
   local state=$1 marker=$2 reset
+  fm_autoarm_failure_reset_in_progress "$state" && return 1
   reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     [ "$reset" = 0 ]
@@ -1820,6 +1845,7 @@ fm_autoarm_failure_episode_current() {  # <state-dir> <marker-file>
 
 fm_autoarm_failure_notice_claim() {  # <state-dir> <marker-file> <claim-id> <reset-fence>
   local state=$1 marker=$2 claim_id=$3 reset=$4 current pid marker_tmp target
+  fm_autoarm_failure_reset_in_progress "$state" && return 4
   current=$(fm_autoarm_failure_reset_fence "$state") || return 1
   [ "$current" = "$reset" ] || return 4
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
@@ -1833,7 +1859,8 @@ fm_autoarm_failure_notice_claim() {  # <state-dir> <marker-file> <claim-id> <res
     return 1
   fi
   current=$(fm_autoarm_failure_reset_fence "$state") || return 1
-  if [ "$current" != "$reset" ]; then
+  if [ "$current" != "$reset" ] \
+    || fm_autoarm_failure_reset_in_progress "$state"; then
     rmdir "$marker" 2>/dev/null || true
     return 4
   fi
@@ -1850,7 +1877,8 @@ fm_autoarm_failure_notice_claim() {  # <state-dir> <marker-file> <claim-id> <res
     rm -f "$marker_tmp" 2>/dev/null || true
     return 1
   }
-  if [ "$current" != "$reset" ]; then
+  if [ "$current" != "$reset" ] \
+    || fm_autoarm_failure_reset_in_progress "$state"; then
     rm -f "$marker_tmp" 2>/dev/null || true
     return 4
   fi
@@ -1884,6 +1912,7 @@ _fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outco
     *) return 1 ;;
   esac
   pid=${BASHPID:-$$}
+  fm_autoarm_failure_reset_in_progress "$state" && return 4
   current_reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
   [ "$current_reset" = "$reset" ] || return 4
   failure_dir="$state/.claude-autoarm-failure-epochs"
@@ -1914,6 +1943,7 @@ _fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outco
     return 1
   fi
   failure_epoch=$FM_AUTOARM_FAILURE_EPOCH
+  fm_autoarm_failure_reset_in_progress "$state" && return 4
   current_reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
   [ "$current_reset" = "$reset" ] || return 4
   if [ -z "$marker" ]; then
@@ -1931,16 +1961,27 @@ _fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outco
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
   local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition current final failure_epoch reset final_reset
-  local current_outcome current_identity revoked publish_rc
+  local current_outcome current_identity revoked publish_rc reset_rc
   transition="$state/.claude-autoarm-transition.lock"
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
+  if fm_autoarm_failure_reset_in_progress "$state"; then
+    fm_autoarm_failure_transition_acquire "$state" || return 4
+    fm_failure_episode_reset "$state" transition-held
+    reset_rc=$?
+    fm_lock_release "$transition"
+    [ "$reset_rc" -ne 0 ] || return 4
+    return 1
+  fi
   reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
   failure_epoch=$(fm_autoarm_failure_sequence_next "$state") || return 1
   final_reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
-  [ "$final_reset" = "$reset" ] || return 4
+  if [ "$final_reset" != "$reset" ] \
+    || fm_autoarm_failure_reset_in_progress "$state"; then
+    return 4
+  fi
   if ! fm_autoarm_failure_transition_acquire "$state"; then
     _fm_autoarm_claim_failure_publish \
       "$state" "$baseline" "$outcome" "$failure_epoch" "$reset" "$marker"
@@ -1960,6 +2001,21 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
       4) return 4 ;;
       *) return 1 ;;
     esac
+  fi
+  final_reset=$(fm_autoarm_failure_reset_fence "$state") || {
+    fm_lock_release "$transition"
+    return 1
+  }
+  if fm_autoarm_failure_reset_in_progress "$state"; then
+    fm_failure_episode_reset "$state" transition-held
+    reset_rc=$?
+    fm_lock_release "$transition"
+    [ "$reset_rc" -ne 0 ] || return 4
+    return 1
+  fi
+  if [ "$final_reset" != "$reset" ]; then
+    fm_lock_release "$transition"
+    return 4
   fi
   current=$(fm_autoarm_claim_signature "$state")
   if [ "$current" != "$baseline" ]; then

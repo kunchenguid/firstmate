@@ -1104,6 +1104,146 @@ test_failure_allocation_cannot_adopt_later_reset_fence() {
   pass "auto-arm: failure allocation cannot adopt a later recovery fence"
 }
 
+test_reset_transaction_blocks_new_fence_publication() {
+  local dir state ready release resetter publisher reset_rc publish_rc before after i
+  dir=$(make_primary_dir "$TMP_ROOT/reset-transaction-publication")
+  state="$dir/state"
+  ready="$state/reset-fence-visible"
+  release="$state/reset-clear-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" || fail "could not seed failure state for reset transaction"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    mv() {
+      local arg target= rc
+      for arg in "$@"; do target=$arg; done
+      command mv "$@"
+      rc=$?
+      if [ "$rc" -eq 0 ] && [ "$target" = "$state/.claude-autoarm-failure-reset" ] \
+        && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      return "$rc"
+    }
+    fm_failure_episode_reset "$state"
+    printf "%s\n" "$?" > "$state/reset-transaction-rc"
+  ' _ "$dir" "$ready" "$release" &
+  resetter=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$resetter" 2>/dev/null || true
+    wait "$resetter" 2>/dev/null || true
+    fail "reset transaction did not expose its fenced cleanup window"
+  fi
+  assert_present "$state/.claude-autoarm-failure-resetting" "reset exposed its next fence without an in-progress marker"
+  before=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+    printf "%s\n" "$?" > "$1/state/reset-window-publisher-rc"
+  ' _ "$dir" &
+  publisher=$!
+  wait "$publisher" || fail "reset-window publisher fixture exited unexpectedly"
+  publish_rc=$(cat "$state/reset-window-publisher-rc")
+  after=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+  expect_code 4 "$publish_rc" "failure publication must stand down while reset cleanup is in progress"
+  [ "$after" -eq "$before" ] || fail "reset-window publisher added a new-fence failure record"
+
+  : > "$release"
+  wait "$resetter" || fail "reset transaction could not complete cleanup"
+  reset_rc=$(cat "$state/reset-transaction-rc")
+  expect_code 0 "$reset_rc" "reset transaction did not complete after its cleanup window"
+  assert_absent "$state/.claude-autoarm-failure-resetting" "completed reset left its transaction marker"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "completed reset left failure records"
+  assert_absent "$state/.claude-autoarm-failure-notified" "completed reset left the failure notice"
+  pass "auto-arm: reset transactions reject publication until cleanup completes"
+}
+
+test_stale_reset_transaction_is_completed_before_publication() {
+  local dir state ready release resetter rc retry_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/stale-reset-transaction")
+  state="$dir/state"
+  ready="$state/stale-reset-ready"
+  release="$state/stale-reset-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" || fail "could not seed failure state for stale reset recovery"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    mv() {
+      local arg target= rc
+      for arg in "$@"; do target=$arg; done
+      command mv "$@"
+      rc=$?
+      if [ "$rc" -eq 0 ] && [ "$target" = "$state/.claude-autoarm-failure-reset" ] \
+        && [ "$stalled" -eq 0 ]; then
+        stalled=1
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.01; done
+      fi
+      return "$rc"
+    }
+    fm_failure_episode_reset "$state"
+  ' _ "$dir" "$ready" "$release" &
+  resetter=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$resetter" 2>/dev/null || true
+    wait "$resetter" 2>/dev/null || true
+    fail "stale reset fixture did not reach its cleanup window"
+  fi
+  kill "$resetter" 2>/dev/null || true
+  wait "$resetter" 2>/dev/null || true
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  rc=$?
+  expect_code 4 "$rc" "the first publisher after a stale reset must complete recovery and stand down"
+  assert_absent "$state/.claude-autoarm-failure-resetting" "stale reset transaction was not completed"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "stale reset recovery left old failure records"
+  assert_absent "$state/.claude-autoarm-failure-notified" "stale reset recovery left the old notice"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" 17:700:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir"
+  retry_rc=$?
+  expect_code 0 "$retry_rc" "publication after stale reset recovery must create current durable state"
+  assert_present "$state/.claude-autoarm-failure-epochs" "post-recovery publication did not persist a failure record"
+  assert_present "$state/.claude-autoarm-failure-notified" "post-recovery publication did not persist its notice"
+  pass "auto-arm: stale reset transactions complete before later publication"
+}
+
 test_lockless_failure_notice_is_released_after_ledger_advance() {
   local dir state ready release publisher rc notice_rc i
   dir=$(make_primary_dir "$TMP_ROOT/lockless-ledger-advance")
@@ -2113,6 +2253,8 @@ test_stale_failure_publisher_cannot_emit_after_success
 test_recovery_reset_cannot_be_followed_by_stalled_failure_publication
 test_lockless_failure_publication_cannot_cross_recovery_reset
 test_failure_allocation_cannot_adopt_later_reset_fence
+test_reset_transaction_blocks_new_fence_publication
+test_stale_reset_transaction_is_completed_before_publication
 test_lockless_failure_notice_is_released_after_ledger_advance
 test_failure_reader_rejects_record_superseded_during_selection
 test_terminal_commit_failure_publishes_independent_failure
