@@ -138,7 +138,9 @@
 # Aggregate bound (rotation): one resident home scheduler durably claims at
 #   most one roster position in each FM_PR_FOLLOW_ROTATION_SLOT-second wall
 #   slot, then advances to the next sorted identity regardless of elapsed or
-#   skipped slots. A restart in the same slot cannot repeat the claim. The
+#   skipped slots. A restart in the same slot cannot repeat the claim, and a
+#   reconfigured slot size rescales that durable record into the new cadence
+#   rather than dropping it, so a served window is never replayed early. The
 #   largest default burst is 31 GETs while a backfill scan is active, or 372
 #   requests per hour for the whole home; ordinary GitHub polling is at most 25.
 #   With T=max(slot,31 x fetch-timeout), an open PR starts within N x T and a
@@ -2105,7 +2107,7 @@ scheduler_state_store() {
 }
 
 rotation_claim() {
-  local now slot served=-1 last='' round=0 stored_slot=$ROTATION_SLOT line key value s first='' target='' wrapped=0
+  local now slot served=-1 last='' round=0 stored_slot=$ROTATION_SLOT served_until line key value s first='' target='' wrapped=0
   local seen_served=0 seen_last=0 seen_round=0 seen_slot=0
   ROT_TARGET=
   ROT_ROUND=0
@@ -2150,7 +2152,18 @@ rotation_claim() {
       return 1
     fi
   fi
-  [ "$stored_slot" = "$ROTATION_SLOT" ] || served=-1
+  # A reconfigured cadence makes the stored index meaningless as an index, but
+  # the wall-clock window it covered is still served, so rescale it instead of
+  # discarding it: dropping the marker would let a shrunk slot immediately
+  # replay a window already paid for and burst past the aggregate bound.
+  if [ "$stored_slot" != "$ROTATION_SLOT" ] && [ "$served" -ge 0 ]; then
+    served_until=$(((served + 1) * stored_slot))
+    if [ "$served_until" -gt "$now" ]; then
+      served=$(((served_until - 1) / ROTATION_SLOT))
+    else
+      served=-1
+    fi
+  fi
   if [ "$served" -ge "$slot" ]; then
     fm_lock_release "$(roster_lock_path)"
     return 1

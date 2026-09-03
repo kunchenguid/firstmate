@@ -1663,8 +1663,49 @@ done
 [ "$measured" -eq 1 ] || fail "two restarts never fitted inside one rotation slot"
 [ "$restarted_bursts" -le 1 ] \
   || fail "restarting within one served slot repeated $restarted_bursts poll bursts"
+# Reconfiguring the cadence must reinterpret the durable served record, not
+# discard it: the record is an index in the slot size that wrote it, so a
+# shrunk slot may not replay a wall-clock window that is still served.
+stop_scheduler() {
+  pkill -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
+  pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
+}
+# The scheduler cursor is the adapter's durable scheduler state file; seeding
+# it is how a prior cadence's record is placed under test deterministically.
+seed_served_slot() {  # <home> <served-slot> <slot-seconds>
+  local f="$1/state/pr-follow/scheduler.cursor"
+  printf 'served_slot=%s\nlast_sid=\nround=0\nslot_seconds=%s\n' "$2" "$3" > "$f" || return 1
+  chmod 600 "$f"
+}
+stop_scheduler
+rot_now=$(date +%s)
+# Keep the seeded 600-second window from expiring under the measurement.
+rot_rem=$(( 600 - rot_now % 600 ))
+[ "$rot_rem" -ge 10 ] || { sleep "$rot_rem"; rot_now=$(date +%s); }
+seed_served_slot "$H" "$(( rot_now / 600 ))" 600 || fail "could not seed the served slot record"
 FM_PR_FOLLOW_ROTATION_SLOT=1
 export FM_PR_FOLLOW_ROTATION_SLOT
+: > "$GH_TEST_POLL_LOG"
+restart_runner "$H" || fail "the runner did not restart after the rotation slot shrank"
+sleep 4
+shrunk_bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
+[ "$shrunk_bursts" -eq 0 ] \
+  || fail "shrinking the rotation slot replayed a served window: $shrunk_bursts poll bursts"
+# The rescale must not stall either: once the recorded window has elapsed, the
+# reconfigured scheduler claims again.
+stop_scheduler
+rot_now=$(date +%s)
+seed_served_slot "$H" "$(( rot_now / 2 - 1 ))" 2 || fail "could not seed the elapsed slot record"
+: > "$GH_TEST_POLL_LOG"
+restart_runner "$H" || fail "the runner did not restart after the elapsed window was seeded"
+resumed_bursts=0
+for _ in $(seq 1 100); do
+  resumed_bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
+  [ "$resumed_bursts" -ge 1 ] && break
+  sleep 0.1
+done
+[ "$resumed_bursts" -ge 1 ] \
+  || fail "an elapsed served window never resumed polling after the rotation slot changed"
 pass "rotation keeps every source polled at a bounded aggregate rate"
 
 printf 'all fm-procevent-pr-follow tests passed\n'
