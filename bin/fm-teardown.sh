@@ -33,7 +33,10 @@
 # is sound rather than an oversight: nothing between it and the status
 # retirement it precedes can refuse, and a remote task's logs live on another
 # machine, so its row is source=unavailable with no local worktree to scan.
-# A retired secondmate home's own ledger is not migrated into this home's.
+# The nested host-local teardown skips its append after removing that remote
+# home, because its ledger lived inside the removed home and recreating it would
+# undo the retirement. A retired secondmate home's own ledger is not migrated
+# into this home's; the surviving parent writes the remote task's row instead.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -3055,10 +3058,15 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # recognizes the identical row instead of duplicating it. The two backlog
 # failures further down exit after that log is gone, where a rerun could only
 # measure a degraded zero-turn row, so having appended already is what protects
-# the real numbers. The append stays best effort, and it runs only when the
-# scan actually staged a row, so one failed scan warns once here rather than
-# warning again for a staging file it already reported.
-if [ -n "${USAGE_STAGE_MAIN:-}" ] && [ -s "$USAGE_STAGE_MAIN" ]; then
+# the real numbers. The append stays best effort, and it runs only when the scan
+# actually staged a row, so one failed scan warns once here rather than warning
+# again for a staging file it already reported. A nested remote secondmate
+# teardown is the one deliberate skip: its STATE and DATA both live inside the
+# home removed above, so appending now would recreate that retired home. The
+# outer remote teardown records the task in its surviving parent ledger.
+if [ "$KIND" = secondmate ] && [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  :
+elif [ -n "${USAGE_STAGE_MAIN:-}" ] && [ -s "$USAGE_STAGE_MAIN" ]; then
   "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
     || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 fi
