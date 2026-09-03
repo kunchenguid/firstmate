@@ -266,7 +266,7 @@ def track_families(track: dict[str, Any]) -> set[str]:
 
 
 def track_requires_specification(track: dict[str, Any]) -> bool:
-    return any(key in track for key in ("capture_required", "wave", "spec_author", "spec_audit"))
+    return track.get("specification_required") is True
 
 
 def check_plan(plan: dict[str, Any], report: Report) -> None:
@@ -343,14 +343,30 @@ def check_plan(plan: dict[str, Any], report: Report) -> None:
             report.fail(f"plan.track.{name}", "track must be an object")
             continue
         check_track(name, track, plan, report)
-
-
+    sample_count = samples if isinstance(samples, int) and not isinstance(samples, bool) else 0
+    capture_records = sum(
+        len(track.get("entrants") or []) * sample_count
+        for track in tracks.values()
+        if isinstance(track, dict) and track.get("capture_required") is True
+    )
+    report.require(
+        capture_records == 30,
+        "plan.capture_scope",
+        "the positively declared capture field produces exactly 30 UI records",
+        f"the frozen plan must positively declare a complete 30-record UI capture field, got {capture_records}",
+    )
 def check_promotion_rule(plan: dict[str, Any], report: Report) -> None:
     rule = plan.get("promotion_rule")
     if not isinstance(rule, dict):
         report.fail("plan.promotion_rule", "promotion_rule must be an object")
         return
     samples = plan.get("samples_per_entrant")
+    baseline_sample_count = (
+        plan.get("samples_per_baseline")
+        if isinstance(plan.get("samples_per_baseline"), int)
+        and not isinstance(plan.get("samples_per_baseline"), bool)
+        else 0
+    )
     report.require(
         rule.get("type") == "paired-sweep",
         "promotion.type",
@@ -390,10 +406,12 @@ def check_promotion_rule(plan: dict[str, Any], report: Report) -> None:
             isinstance(delta, (int, float))
             and not isinstance(delta, bool)
             and delta <= 0
-            and losses == 1,
+            and isinstance(losses, int)
+            and not isinstance(losses, bool)
+            and 0 <= losses < baseline_sample_count,
             "promotion.baseline_veto",
             "baseline veto bounds recorded",
-            "baseline_veto needs max_negative_mean_quality_delta <= 0 and max_losses_of_three == 1",
+            "baseline_veto needs max_negative_mean_quality_delta <= 0 and a loss maximum below samples_per_baseline",
         )
     else:
         report.fail("promotion.baseline_veto", "baseline_veto must be an object")
@@ -498,9 +516,16 @@ def check_track(name: str, track: dict[str, Any], plan: dict[str, Any], report: 
     else:
         report.fail(f"{prefix}.packets", "packets must be a list of objects")
 
+    baseline_required = track.get("baseline_required")
+    report.require(
+        isinstance(baseline_required, bool),
+        f"{prefix}.baseline_scope",
+        "baseline capability explicitly declared",
+        "baseline_required must explicitly declare true or false",
+    )
     baseline = track.get("baseline")
     strata = track.get("baseline_packets")
-    if isinstance(baseline, dict):
+    if baseline_required is True and isinstance(baseline, dict):
         expected = packet_ids[0:5:2] if len(packet_ids) >= 5 else []
         report.require(
             isinstance(strata, list) and strata == expected and len(expected) == 3,
@@ -508,13 +533,15 @@ def check_track(name: str, track: dict[str, Any], plan: dict[str, Any], report: 
             f"baseline runs the preregistered stratified subset {expected}",
             f"baseline_packets must be the preregistered stratified subset {expected}, got {strata!r}",
         )
-    else:
+    elif baseline_required is False:
         report.require(
-            not strata,
+            not isinstance(baseline, dict) and not strata,
             f"{prefix}.baseline_packets",
-            "no baseline declared and no baseline strata",
-            "baseline_packets requires a declared baseline",
+            "baseline explicitly not required and no baseline strata declared",
+            "baseline_required false conflicts with a baseline or baseline_packets",
         )
+    elif baseline_required is True:
+        report.fail(f"{prefix}.baseline_packets", "baseline_required true needs a baseline and three strata")
 
     entrants = track.get("entrants")
     if isinstance(entrants, list) and entrants:
@@ -535,12 +562,28 @@ def check_track(name: str, track: dict[str, Any], plan: dict[str, Any], report: 
         "an implementation probe must be preregistered for all samples or removed",
     )
 
-    if track.get("capture_required") is True:
+    capture_required = track.get("capture_required")
+    report.require(
+        isinstance(capture_required, bool),
+        f"{prefix}.capture_scope",
+        "neutral capture explicitly required"
+        if capture_required is True
+        else "neutral capture explicitly not required",
+        "capture_required must explicitly declare true or false",
+    )
+    if capture_required is True:
         report.require(
             track.get("wave") == "single-complete",
             f"{prefix}.wave",
             "the whole field runs as one complete wave",
             "a capture track must declare wave 'single-complete'; no partial field may start",
+        )
+    elif capture_required is False:
+        report.require(
+            "wave" not in track,
+            f"{prefix}.wave",
+            "no capture wave declared for this track",
+            "wave may be declared only when capture_required is true",
         )
 
 
@@ -558,7 +601,17 @@ def check_candidate_tuple(prefix: str, candidate: dict[str, Any], report: Report
     if not has_effort_axis and candidate.get("effort") is not None:
         report.fail(check, f"{name} declares no effort axis but pins effort {candidate.get('effort')!r}")
         return
-    report.ok(check, f"{name} pinned to {candidate['harness']}/{candidate['model']}")
+    metered_provider = candidate.get("metered_provider")
+    if "metered_provider" not in candidate or (
+        metered_provider is not False and not nonempty_str(metered_provider)
+    ):
+        report.fail(check, f"{name} must explicitly declare a metered provider name or false")
+        return
+    if str(candidate.get("harness", "")).strip().lower() == "cursor" and metered_provider is False:
+        report.fail(check, f"{name} uses Cursor but declares no metered provider")
+        return
+    metering = str(metered_provider) if metered_provider is not False else "unmetered"
+    report.ok(check, f"{name} pinned to {candidate['harness']}/{candidate['model']} ({metering})")
 
 
 def check_track_panel(prefix: str, track: dict[str, Any], report: Report) -> None:
@@ -604,8 +657,20 @@ def check_track_panel(prefix: str, track: dict[str, Any], report: Report) -> Non
 
 def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) -> None:
     """Correction 3: the spec author may not judge, and each spec is audited pre-freeze."""
-    if not track_requires_specification(track):
-        report.ok(f"{prefix}.spec_seat", "no specification-required design seat")
+    specification_required = track.get("specification_required")
+    if not isinstance(specification_required, bool):
+        report.fail(f"{prefix}.spec_seat", "specification_required must explicitly declare true or false")
+        return
+    if specification_required is False:
+        stray = sorted(key for key in ("spec_author", "spec_audit") if key in track)
+        conflicts = (["capture_required"] if track.get("capture_required") is True else []) + stray
+        report.require(
+            not conflicts,
+            f"{prefix}.spec_seat",
+            "specification explicitly not required",
+            "specification_required false conflicts with neutral capture or design-seat fields: "
+            + ", ".join(conflicts),
+        )
         return
 
     author = track.get("spec_author")
@@ -616,6 +681,12 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
         and nonempty_str(author.get("name"))
         and nonempty_str(author.get("family"))
     )
+    if not author_valid:
+        report.fail(
+            f"{prefix}.spec_seat",
+            "track requires a specification but spec_author must name an author and family",
+        )
+        return
 
     judge_families = {
         str(judge.get("family", "")).strip().lower()
@@ -647,22 +718,12 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
     # Keeping the design seat is a fixed captain choice, so a same-family entrant
     # is not refused. It is a residual recognition channel, and the review's rule
     # is that residual channels are disclosed rather than left silent.
-    adjacent = (
-        sorted(
-            str(candidate.get("name"))
-            for candidate in track_candidates(track)
-            if str(candidate.get("family", "")).strip().lower() == author_family
-        )
-        if author_valid
-        else []
+    adjacent = sorted(
+        str(candidate.get("name"))
+        for candidate in track_candidates(track)
+        if str(candidate.get("family", "")).strip().lower() == author_family
     )
-    if not author_valid:
-        adjacency_valid = False
-        report.fail(
-            f"{prefix}.spec_author_family_adjacency",
-            "spec_author must name an author and family before family adjacency can be evaluated",
-        )
-    elif adjacent:
+    if adjacent:
         disclosed = sorted(str(item) for item in (author.get("family_adjacency_disclosed") or []))
         adjacency_valid = disclosed == adjacent
         report.require(
@@ -705,7 +766,7 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
             or item.get("verdict") != "accepted"
         ):
             bad.append(str(item.get("packet", "<unnamed>")))
-    audits_independent = audits_valid and author_valid and not bad
+    audits_independent = audits_valid and not bad
     report.require(
         audits_independent,
         f"{prefix}.spec_audit_independent",
@@ -713,8 +774,7 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
         f"specification audits are not independent, pre-freeze, or accepted: {', '.join(bad)}",
     )
     report.require(
-        author_valid
-        and author_not_judge
+        author_not_judge
         and author_not_entrant
         and adjacency_valid
         and audit_coverage_valid
@@ -810,6 +870,39 @@ def check_one_provenance(
         report.fail(check, "entrant-family exposure found: " + "; ".join(contaminated))
         return False
 
+    required_roles = {"author", "reviewer", "judge"}
+    identified_roles = {
+        str(participant.get("role")).strip().lower()
+        for participant in participants
+        if isinstance(participant, dict)
+    }
+    role_absences = record.get("role_absences")
+    if role_absences is None:
+        role_absences = {}
+    if not isinstance(role_absences, dict):
+        report.fail(check, "role_absences must map an absent original role to a positive reason")
+        return False
+    malformed_absences = sorted(
+        str(role)
+        for role, reason in role_absences.items()
+        if role not in required_roles or not nonempty_str(reason) or role in identified_roles
+    )
+    if malformed_absences:
+        report.fail(
+            check,
+            "role absence declarations are malformed or contradict identified participants: "
+            + ", ".join(malformed_absences),
+        )
+        return False
+    missing_roles = sorted(required_roles - identified_roles - set(role_absences))
+    if missing_roles:
+        report.fail(
+            check,
+            "original participant roles are not covered; identify or positively declare absent: "
+            + ", ".join(missing_roles),
+        )
+        return False
+
     checked = {str(item).strip().lower() for item in (record.get("checked_families") or [])}
     if not entrant_families <= checked:
         report.fail(
@@ -819,7 +912,11 @@ def check_one_provenance(
         )
         return False
 
-    report.ok(check, f"{len(participants)} original participants positively identified, no entrant-family exposure")
+    absent_detail = f", {len(role_absences)} roles positively absent" if role_absences else ""
+    report.ok(
+        check,
+        f"{len(participants)} original participants positively identified{absent_detail}, no entrant-family exposure",
+    )
     return True
 
 
@@ -1445,10 +1542,29 @@ def probe_entrants(
 
 
 def check_evaluator(root: Path, plan: dict[str, Any], report: Report) -> None:
-    expected_captures = build_manifest(plan)["totals"]["capture_records"]
-    if expected_captures == 0:
-        report.ok("evaluator.scope", "no track requires neutral capture")
+    tracks = plan.get("tracks")
+    if not isinstance(tracks, dict) or not tracks:
+        report.fail("evaluator.scope", "tracks must be a non-empty object with explicit capture declarations")
         return
+    undeclared = sorted(
+        str(name)
+        for name, track in tracks.items()
+        if not isinstance(track, dict) or not isinstance(track.get("capture_required"), bool)
+    )
+    if undeclared:
+        report.fail(
+            "evaluator.scope",
+            "capture_required must explicitly declare true or false for tracks: " + ", ".join(undeclared),
+        )
+        return
+    expected_captures = build_manifest(plan)["totals"]["capture_records"]
+    if expected_captures != 30:
+        report.fail(
+            "evaluator.scope",
+            f"the frozen plan must positively declare a complete 30-record UI capture field, got {expected_captures}",
+        )
+        return
+    report.ok("evaluator.scope", "the positively declared capture field requires exactly 30 UI records")
     base = root / "evaluator"
     check_evaluator_lock(base, report)
     weights = check_evaluator_score_map(base, report)
@@ -1891,6 +2007,7 @@ def validate_archived_evaluator_declaration(
     argv = rerun.get("argv")
     expected = rerun.get("result_hash")
     scored_inputs = rerun.get("scored_inputs")
+    perturbations = rerun.get("input_perturbations")
     if not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str) or not argv[0]:
         return None, "archived evaluator argv must name exactly one executable evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
@@ -1901,6 +2018,12 @@ def validate_archived_evaluator_declaration(
         or not all(isinstance(item, str) and item for item in scored_inputs)
     ):
         return None, "archived evaluator scored_inputs must name at least one restored candidate file"
+    if (
+        not isinstance(perturbations, dict)
+        or len(set(scored_inputs)) != len(scored_inputs)
+        or set(perturbations) != set(scored_inputs)
+    ):
+        return None, "archived evaluator input_perturbations must define every scored input exactly once"
     files = record.get("files")
     groups = record.get("groups")
     if not isinstance(files, dict) or argv[0] not in files:
@@ -1920,8 +2043,89 @@ def validate_archived_evaluator_declaration(
             return None, f"archived evaluator scored input escapes the restored candidate: {relative}"
         if not candidate.is_file():
             return None, f"archived evaluator scored input is not a restored candidate file: {relative}"
+        perturbation = perturbations.get(relative)
+        if (
+            not isinstance(perturbation, dict)
+            or perturbation.get("kind") != "json-value"
+            or not isinstance(perturbation.get("pointer"), str)
+            or not perturbation.get("pointer").startswith("/")
+        ):
+            return None, f"archived evaluator scored input needs a json-value perturbation pointer: {relative}"
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            current = json_pointer_value(document, perturbation["pointer"])
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            return None, f"archived evaluator scored input perturbation is invalid for {relative}: {exc}"
+        if not isinstance(current, (str, int, float, bool)) or current is None:
+            return None, f"archived evaluator perturbation pointer must select a scalar value: {relative}"
         input_paths.append(Path(relative))
-    return {"argv": argv[0], "expected": expected, "input_paths": input_paths}, "archived evaluator declaration validated"
+    return {
+        "argv": argv[0],
+        "expected": expected,
+        "input_paths": input_paths,
+        "perturbations": perturbations,
+    }, "archived evaluator declaration validated"
+
+
+def json_pointer_value(document: Any, pointer: str) -> Any:
+    current = document
+    for raw_part in pointer.removeprefix("/").split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            raise ValueError(f"JSON pointer {pointer!r} does not resolve")
+    return current
+
+
+def randomized_string_like(value: str, entropy: bytes) -> str:
+    if not value:
+        return entropy.hex()
+    output: list[str] = []
+    changed = False
+    for index, character in enumerate(value):
+        if character.islower() and character.isascii():
+            alphabet = "abcdefghijklmnopqrstuvwxyz"
+        elif character.isupper() and character.isascii():
+            alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        elif character.isdigit() and character.isascii():
+            alphabet = "0123456789"
+        else:
+            output.append(character)
+            continue
+        replacement = alphabet[(alphabet.index(character) + 1 + entropy[index % len(entropy)]) % len(alphabet)]
+        output.append(replacement)
+        changed = changed or replacement != character
+    if not changed:
+        return value + entropy.hex()
+    return "".join(output)
+
+
+def perturb_json_input(path: Path, pointer: str, entropy: bytes) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.removeprefix("/").split("/")]
+    parent = document
+    for part in parts[:-1]:
+        parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+    leaf = parts[-1]
+    current = parent[int(leaf)] if isinstance(parent, list) else parent[leaf]
+    if isinstance(current, bool):
+        replacement: Any = not current
+    elif isinstance(current, int):
+        replacement = current + 1 + int.from_bytes(entropy[:4], "big")
+    elif isinstance(current, float):
+        replacement = current + 1.0 + int.from_bytes(entropy[:4], "big") / 2**32
+    elif isinstance(current, str):
+        replacement = randomized_string_like(current, entropy)
+    else:
+        raise ValueError(f"JSON pointer {pointer!r} does not select a supported scalar")
+    if isinstance(parent, list):
+        parent[int(leaf)] = replacement
+    else:
+        parent[leaf] = replacement
+    path.write_text(json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
 
 
 def rerun_archived_evaluator(
@@ -1935,6 +2139,7 @@ def rerun_archived_evaluator(
     evaluator_name = declaration["argv"]
     expected = declaration["expected"]
     input_paths = declaration["input_paths"]
+    perturbations = declaration["perturbations"]
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as first_workspace, tempfile.TemporaryDirectory(
             prefix="fm-bench-evaluator-"
@@ -1954,13 +2159,15 @@ def rerun_archived_evaluator(
                 run_roots.append((scratch, run_tree))
             genuine_scratch, genuine_tree = run_roots[0]
             perturbed_scratch, perturbed_tree = run_roots[1]
-            perturbation = os.urandom(32)
             for relative in input_paths:
                 perturbed_input = (perturbed_tree / relative).resolve()
                 if not is_within(perturbed_input, perturbed_tree.resolve()):
                     return False, f"archived evaluator scored input cannot be perturbed inside scratch: {relative}"
-                with perturbed_input.open("ab") as handle:
-                    handle.write(perturbation)
+                perturb_json_input(
+                    perturbed_input,
+                    perturbations[str(relative)]["pointer"],
+                    os.urandom(32),
+                )
             genuine = subprocess.run(
                 confined_evaluator_command(wrapper, genuine_scratch, genuine_scratch / evaluator_name, genuine_tree),
                 stdout=subprocess.PIPE,
@@ -1969,7 +2176,12 @@ def rerun_archived_evaluator(
                 timeout=60,
             )
             perturbed = subprocess.run(
-                confined_evaluator_command(wrapper, perturbed_scratch, perturbed_scratch / evaluator_name, perturbed_tree),
+                confined_evaluator_command(
+                    wrapper,
+                    perturbed_scratch,
+                    perturbed_scratch / evaluator_name,
+                    perturbed_tree,
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -1977,7 +2189,7 @@ def rerun_archived_evaluator(
             )
     except subprocess.TimeoutExpired:
         return False, "archived evaluator exceeded the 60-second restore-drill limit"
-    except OSError as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         return False, f"archived evaluator could not execute: {exc}"
     if genuine.returncode != 0:
         detail = genuine.stderr.decode("utf-8", "replace").strip()
@@ -1986,7 +2198,10 @@ def rerun_archived_evaluator(
     if perturbed.returncode != 0:
         detail = perturbed.stderr.decode("utf-8", "replace").strip()
         suffix = f": {detail}" if detail else ""
-        return False, f"archived evaluator confinement or execution exited {perturbed.returncode}{suffix}"
+        return False, (
+            "perturbed evaluator run was inconclusive because the declared form-preserving input "
+            f"exited {perturbed.returncode}{suffix}"
+        )
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
@@ -2249,7 +2464,7 @@ def promote_evaluate(root: Path, plan: dict[str, Any], report: Report) -> None:
         track = plan["tracks"][name]
         if not isinstance(track, dict):
             continue
-        promote_track(name, track, results, samples, baseline_samples, margin_bar, report)
+        promote_track(name, track, results, samples, baseline_samples, margin_bar, rule.get("baseline_veto"), report)
     print("BENCH_NOTE promote no benchmark candidate ships directly; every candidate is archived then discarded")
 
 
@@ -2260,6 +2475,7 @@ def promote_track(
     samples: int,
     baseline_samples: int,
     margin_bar: float,
+    baseline_veto: Any,
     report: Report,
 ) -> None:
     prefix = f"promote.{name}"
@@ -2272,10 +2488,29 @@ def promote_track(
     track_results = [record for record in results if str(record.get("track")) == name]
     scored = [record for record in track_results if record.get("status") == "scored"]
     voided = [record for record in track_results if record.get("status") == "void"]
-    if voided:
+    scored_pairs = {
+        (str(record.get("candidate")), str(record.get("packet")))
+        for record in scored
+        if record.get("role") == "entrant"
+    }
+    unreplaced_voids = [
+        record
+        for record in voided
+        if record.get("role") != "entrant"
+        or (str(record.get("candidate")), str(record.get("packet"))) not in scored_pairs
+    ]
+    if unreplaced_voids:
+        missing = sorted(
+            f"{record.get('candidate')}@{record.get('packet')}" for record in unreplaced_voids
+        )
         report.fail(
             f"{prefix}.voids",
-            f"{len(voided)} voided samples have no scored replacement; a void reruns the same approved sample",
+            f"voided samples remain without scored replacements: {', '.join(missing)}",
+        )
+    else:
+        report.ok(
+            f"{prefix}.voids",
+            f"all {len(voided)} voided samples have scored replacements on the same entrant and packet",
         )
 
     complete = True
@@ -2302,7 +2537,7 @@ def promote_track(
         else:
             report.ok(f"{prefix}.baseline.sample_count", f"{baseline_samples} baseline samples on the preregistered strata")
 
-    if not complete or voided:
+    if not complete or unreplaced_voids:
         report.fail(f"{prefix}.verdict", "no standing route: the sample set is incomplete")
         return
 
@@ -2359,7 +2594,9 @@ def promote_track(
         report.fail(f"{prefix}.verdict", "no standing route")
         return
 
-    if baseline_name and not baseline_veto_clear(prefix, winner, baseline_name, strata, scored, report):
+    if baseline_name and not baseline_veto_clear(
+        prefix, winner, baseline_name, strata, scored, baseline_veto, report
+    ):
         report.fail(f"{prefix}.verdict", "no standing route: the baseline regression veto fired")
         return
 
@@ -2367,8 +2604,27 @@ def promote_track(
 
 
 def baseline_veto_clear(
-    prefix: str, winner: str, baseline_name: str, strata: list[str], scored: list[dict[str, Any]], report: Report
+    prefix: str,
+    winner: str,
+    baseline_name: str,
+    strata: list[str],
+    scored: list[dict[str, Any]],
+    bounds: Any,
+    report: Report,
 ) -> bool:
+    if not isinstance(bounds, dict):
+        report.fail(f"{prefix}.baseline_veto", "the frozen plan has no baseline veto bounds")
+        return False
+    mean_floor = bounds.get("max_negative_mean_quality_delta")
+    loss_ceiling = bounds.get("max_losses_of_three")
+    if (
+        not isinstance(mean_floor, (int, float))
+        or isinstance(mean_floor, bool)
+        or not isinstance(loss_ceiling, int)
+        or isinstance(loss_ceiling, bool)
+    ):
+        report.fail(f"{prefix}.baseline_veto", "the frozen baseline veto bounds are not numeric")
+        return False
     deltas: list[float] = []
     losses = 0
     for packet in strata:
@@ -2403,13 +2659,23 @@ def baseline_veto_clear(
         if delta < 0:
             losses += 1
     mean_delta = sum(deltas) / len(deltas)
-    if mean_delta < 0:
-        report.fail(f"{prefix}.baseline_veto", f"mean quality delta against the baseline is {mean_delta:.3f}")
+    if mean_delta < float(mean_floor):
+        report.fail(
+            f"{prefix}.baseline_veto",
+            f"mean quality delta {mean_delta:.3f} is below the declared floor {float(mean_floor):.3f}",
+        )
         return False
-    if losses >= 2:
-        report.fail(f"{prefix}.baseline_veto", f"{winner} loses {losses} of {len(strata)} baseline packets")
+    if losses > loss_ceiling:
+        report.fail(
+            f"{prefix}.baseline_veto",
+            f"{winner} loses {losses} of {len(strata)} baseline packets, above the declared maximum {loss_ceiling}",
+        )
         return False
-    report.ok(f"{prefix}.baseline_veto", f"no regression against the baseline (mean delta {mean_delta:.3f}, {losses} loss)")
+    report.ok(
+        f"{prefix}.baseline_veto",
+        f"baseline bounds hold (mean delta {mean_delta:.3f} >= {float(mean_floor):.3f}, "
+        f"{losses} <= {loss_ceiling} losses)",
+    )
     return True
 
 
@@ -2543,7 +2809,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Benchmark directory layout: benchmark.json (the frozen plan), packets/, ground-truth/, "
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
-            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs, and the generated "
+            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs "
+            "and evaluator_rerun.input_perturbations, and the generated "
             "preflight.receipt and archive/restore-drill.json."
         ),
     )
