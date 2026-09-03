@@ -143,6 +143,58 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+fm_session_resolve_dir() {  # <dir>
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+fm_claude_spawned_by_label() {  # <process-args>
+  printf '%s\n' "$1" | sed -n 's/.*"label":[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+fm_claude_spawned_by_cwd() {  # <process-args>
+  printf '%s\n' "$1" | sed -n 's/.*"cwd":[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+fm_claude_spawned_by_pid() {  # <process-args>
+  printf '%s\n' "$1" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+}
+
+fm_claude_daemon_spawned_by_matches() {  # <process-args> <lock-pid> <root-real>
+  local args=$1 lock_pid=$2 root_real=$3 label spawned_pid spawned_cwd spawned_real
+  case " $args " in
+    *" daemon run "*"--spawned-by "*) ;;
+    *) return 1 ;;
+  esac
+  label=$(fm_claude_spawned_by_label "$args")
+  [ "$label" = claude ] || return 1
+  spawned_pid=$(fm_claude_spawned_by_pid "$args")
+  [ "$spawned_pid" = "$lock_pid" ] || return 1
+  spawned_cwd=$(fm_claude_spawned_by_cwd "$args")
+  [ -n "$spawned_cwd" ] || return 1
+  spawned_real=$(fm_session_resolve_dir "$spawned_cwd") || return 1
+  [ "$spawned_real" = "$root_real" ]
+}
+
+fm_claude_daemon_spawned_by_lock_owner() {  # <lock-pid> <root>
+  local lock_pid=$1 root=${2:-} root_real pids pid comm args
+  [ -n "$root" ] || return 1
+  root_real=$(fm_session_resolve_dir "$root") || return 1
+  fm_harness_pid_alive "$lock_pid" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || continue
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_process_matches "$comm" "$args" || continue
+    [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || continue
+    fm_claude_daemon_spawned_by_matches "$args" "$lock_pid" "$root_real" && return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
@@ -160,8 +212,13 @@ fm_harness_pid_alive() {
 # and an inner pid when a harness-named daemon parents the session. A missing
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
-fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+# Claude Code 2.1 can also fire Stop hooks from a daemon/bg-spare process tree
+# whose pid is not below the foreground session process that wrote state/.lock.
+# When the optional root argument is supplied, the daemon's own --spawned-by
+# JSON may bridge that gap, but only when it names the live Claude lock owner
+# and the same resolved project root.
+fm_session_lock_owned_by_self() {  # <state-dir> [root]
+  local state=$1 root=${2:-} lock_pid pids pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -172,5 +229,6 @@ fm_session_lock_owned_by_self() {
   done <<EOF
 $pids
 EOF
+  fm_claude_daemon_spawned_by_lock_owner "$lock_pid" "$root" && return 0
   return 1
 }

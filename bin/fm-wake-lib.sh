@@ -1295,6 +1295,66 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   return 0
 }
 
+# Publish a terminal failed generation for an eligible hook invocation that
+# could not claim an arming generation. This is a diagnostic handoff, not an
+# open claim: it is allowed to omit pid identity when identity collection is the
+# failure itself, and it refuses to overwrite a fresh terminal/open outcome from
+# a competing generation that already owns this Stop event.
+fm_autoarm_claim_failure_commit() {  # <state-dir> <grace> <fresh-seconds> <outcome> [marker-file]
+  local state=$1 grace=$2 fresh=$3 outcome=$4 marker=${5:-} lock epoch pid gen identity tmp age
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
+  case "$fresh" in
+    ''|*[!0-9]*|0) fresh=15 ;;
+  esac
+  case "$outcome" in
+    failed|failed-suppressed) ;;
+    *) return 1 ;;
+  esac
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  fm_lock_try_acquire "$lock" || return 1
+  if fm_autoarm_claim_open "$state" "$grace"; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  if fm_autoarm_ledger_read "$state"; then
+    age=$(fm_path_age "$epoch")
+    if [ "$age" -lt "$fresh" ]; then
+      case "$FM_AUTOARM_OUTCOME" in
+        rewake|failed|failed-suppressed)
+          fm_lock_release "$lock"
+          return 2
+          ;;
+      esac
+    fi
+  fi
+  gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
+  case "$gen" in
+    ''|*[!0-9]*) gen=0 ;;
+  esac
+  gen=$((gen + 1))
+  tmp="$epoch.tmp.$pid"
+  if ! {
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+        "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$identity" ] || printf '%s\n' "$identity"
+    } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
 # Write a new outcome for a generation this process still owns, re-verified
 # under the micro-mutex so a superseded owner can never clobber a newer claim.
 # With a fourth argument, create that marker after the ledger rename in the same

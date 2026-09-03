@@ -202,6 +202,21 @@ run_autoarm_bg() {
   RUN_AUTOARM_BG_PID=$!
 }
 
+run_autoarm_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
+  local dir=$1 lock_owner=$2 rc=0
+  mkdir -p "$dir/fake-argv"
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" FM_TEST_LOCK_OWNER="$lock_owner" /bin/bash -c '
+        exec -a "$FM_HOME/fake-argv/claude" /bin/bash -c '"'"'
+          "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+          rc=$?
+          exit "$rc"
+        '"'"' daemon run --spawned-by "{\"label\":\"claude\",\"cwd\":\"$FM_HOME\",\"pid\":$FM_TEST_LOCK_OWNER}"
+      ' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -358,6 +373,28 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
   pass "auto-arm: resolves the outermost pid of a nested contiguous claude ancestry (bg-spare chain)"
 }
 
+test_claude_daemon_spawned_by_foreground_lock_owner_arms() {
+  local dir out status owner lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-spawned-by")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  expect_code 2 "$status" "a Claude daemon spawned by the foreground session must arm and rewake"
+  [ "$lock_after" = "$owner" ] || fail "daemon bridge rewrote the foreground session lock: expected $owner, got $lock_after"
+  [ -e "$dir/state/arm-ran" ] || fail "daemon-delivered Stop hook did not arm"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "daemon-delivered Stop hook did not record outcome=rewake"
+  assert_contains "$out" "firstmate watcher wake" "daemon-delivered Stop hook did not translate the wake"
+  pass "auto-arm: Claude daemon spawned-by metadata lets the foreground-owned home arm"
+}
+
 test_inert_when_fleet_idle() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/idle")
@@ -434,6 +471,30 @@ test_failed_close_rewakes_with_failure_banner() {
   [ "$(epoch_outcome "$dir")" = failed ] || fail "epoch must record outcome=failed, got: $(epoch_outcome "$dir")"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "failure must exhaust exactly two bounded arm attempts"
   pass "auto-arm: bounded failure verification emits one automatic-mechanism alarm"
+}
+
+test_claim_path_failure_records_failed_epoch_and_marker() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/claim-path-failure")
+  : > "$dir/state/task.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  write_arm_fixture "$dir" actionable
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+
+  out=$(printf '%s\n' '{"session_id":"stale-claim-failure"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+
+  expect_code 2 "$status" "an eligible hook that cannot recover the session lock must report a failed claim"
+  assert_contains "$out" "could not claim recovery" "claim failure did not describe the failed claim path"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "claim failure did not write the failure marker"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "claim failure did not record outcome=failed"
+  [ "$(epoch_field "$dir" owner_pid)" != 9999999 ] || fail "claim failure left the dead session owner as the auto-arm owner"
+  assert_absent "$dir/state/arm-ran" "claim failure armed after the recovery claim failed"
+  pass "auto-arm: failed claim paths leave a durable failed epoch and marker"
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
@@ -720,6 +781,25 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
   assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
+}
+
+test_stale_terminal_epoch_dead_owner_does_not_prevent_next_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/dead-terminal-epoch")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  record_autoarm_epoch "$dir" 8121 9999999 rewake
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+
+  expect_code 2 "$status" "a stale terminal epoch naming a dead owner must not block the next claim"
+  [ -e "$dir/state/arm-ran" ] || fail "dead-owner terminal epoch left the home unarmed"
+  assert_contains "$out" "firstmate watcher wake" "dead-owner terminal epoch did not allow wake translation"
+  [ "$(epoch_field "$dir" epoch)" -gt 8121 ] || fail "dead-owner terminal epoch was not superseded"
+  [ "$(epoch_field "$dir" owner_pid)" != 9999999 ] || fail "new claim still names the dead owner"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "new claim did not record outcome=rewake"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "dead-owner terminal epoch should not create a failure marker"
+  pass "auto-arm: stale terminal epochs naming dead owners are superseded by the next claim"
 }
 
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
@@ -1156,10 +1236,12 @@ test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
+test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
+test_claim_path_failure_records_failed_epoch_and_marker
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
@@ -1170,6 +1252,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_stale_terminal_epoch_dead_owner_does_not_prevent_next_claim
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed

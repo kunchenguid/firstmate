@@ -220,6 +220,71 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [label]
+  local fakebin=$1 spawned_cwd=$2 spawned_pid=$3 label=${4:-claude}
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  700:comm=|701:comm=) printf '%s\n' claude ;;
+  700:args=|701:args=) printf '%s\n' claude ;;
+  700:ppid=|701:ppid=) printf '%s\n' 1 ;;
+  900:comm=) printf '%s\n' claude ;;
+  900:args=) printf '%s\n' '/Users/u/.local/bin/claude daemon run --keep-alive --spawned-by {"label":"$label","cwd":"$spawned_cwd","pid":$spawned_pid}' ;;
+  900:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner() {
+  local dir root state other fakebin
+  dir="$TMP_ROOT/daemon-spawned-by"
+  root="$dir/home"
+  state="$root/state"
+  other="$dir/other"
+  mkdir -p "$state" "$other"
+  printf '700\n' > "$state/.lock"
+
+  fakebin=$(fm_fakebin "$dir/good")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'" \
+    || fail "a Claude daemon spawned by the foreground lock owner did not claim the home"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'"; then
+    fail "the daemon bridge accepted spawned-by metadata without a resolved project root"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-root")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$other" 700
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted a spawned-by cwd outside this project root"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-pid")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 701
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted spawned-by metadata naming a different foreground pid"
+  fi
+
+  fakebin=$(fm_fakebin "$dir/wrong-label")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700 codex
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "the daemon bridge accepted spawned-by metadata for a non-Claude session label"
+  fi
+  pass "session-lock: Claude daemon spawned-by metadata bridges only to the matching foreground lock owner"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +425,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_claude_daemon_spawned_by_bridge_claims_foreground_lock_owner
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
