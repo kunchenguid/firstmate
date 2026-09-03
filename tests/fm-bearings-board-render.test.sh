@@ -267,6 +267,27 @@ test_a_filter_combination_with_no_matches_stays_graceful() {
   pass "a filter combination with no matches degrades to a plain empty state"
 }
 
+test_hiding_a_picked_charted_row_clears_its_selection() {
+  local home payload out
+  home=$(make_home filter-clears-pick)
+  payload=$(multi_repo_payload)
+  # Tick the jt2627s charted item's dispatch checkbox directly (bypassing its
+  # own click handler, same as a captain's real click would leave it), then
+  # filter the project away and confirm the now-invisible pick is cleared
+  # rather than silently riding along to a dispatch order.
+  out=$(render_payload "$home" "$payload" '[
+    {"selector":".bb-pick","container":"bb-charted","match":{"value":"ch-jt-1"},"set":{"checked":true}},
+    {"selector":".bb-chip","match":{"group":"repo","key":"interactp"}}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.charted[0].hidden == true and .charted[0].checked == false)
+      and (.charted[1].hidden == false)
+      and (.dispatch.disabled == true)
+      and (.dispatch.count | test("pick queued work"))
+  ' >/dev/null || fail "a filtered-out charted pick must be cleared, not silently dispatched: $out"
+  pass "filtering away a picked charted row clears its selection instead of dispatching it invisibly"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
@@ -277,3 +298,4 @@ test_project_filter_narrows_the_stack_and_the_other_sections
 test_type_filter_narrows_only_the_stack_not_the_other_sections
 test_clear_filters_restores_everything
 test_a_filter_combination_with_no_matches_stays_graceful
+test_hiding_a_picked_charted_row_clears_its_selection

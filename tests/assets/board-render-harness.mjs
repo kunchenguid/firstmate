@@ -3,10 +3,17 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html> [clicks-json]
-// clicks-json (optional): an array of {"id":"<element id>"} or
-// {"selector":".bb-chip","match":{"group":"repo","key":"alpha"}} objects,
-// clicked in order after the initial render, so filter-bar interactions can
-// be exercised the same way a captain's click would.
+// clicks-json (optional): an array of actions replayed in order after the
+// initial render, so filter-bar and dispatch-picker interactions can be
+// exercised the same way a captain's click would:
+//   {"id":"<element id>"} or
+//   {"selector":".bb-chip","container":"<id, default bb-filterbar>","match":{...}}
+//     both click the found element (matched against its dataset or, when a
+//     match value isn't found there, the same-named property, e.g. "value"
+//     for a checkbox);
+//   the same shape with a "set" object instead of a click assigns those
+//   properties directly (e.g. {"set":{"checked":true}} to tick a checkbox
+//   without going through its own click handler).
 // Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}],
 // filterbar:{chips,clearHidden}, deck:{...}, sections:{...} }
 import { readFileSync } from "node:fs";
@@ -121,11 +128,12 @@ new Function(script)();
 for (const c of clicks) {
   const target = c.id
     ? byId.get(c.id)
-    : (byId.get("bb-filterbar") || new Node("div"))
+    : (byId.get(c.container || "bb-filterbar") || new Node("div"))
         .querySelectorAll(c.selector)
-        .find((n) => !c.match || Object.entries(c.match).every(([k, v]) => n.dataset[k] === v));
+        .find((n) => !c.match || Object.entries(c.match).every(([k, v]) => (k in n.dataset ? n.dataset[k] : n[k]) === v));
   if (!target) throw new Error("harness click target not found: " + JSON.stringify(c));
-  target.click();
+  if (c.set) Object.assign(target, c.set);
+  else target.click();
 }
 
 const badgesOf = (row) =>
@@ -144,11 +152,14 @@ const charted = ch.children
   .filter((r) => r.className.split(/\s+/).includes("bb-row"))
   .map((row) => {
     const main = row.children.find((c) => c.className.includes("bb-row__main"));
+    const pick = row.children.find((c) => c.className.includes("bb-pick") && !c.className.includes("spacer"));
     return {
       title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
       sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
       badges: badgesOf(row),
-      pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
+      pickable: !!pick,
+      checked: !!pick && !!pick.checked,
+      hidden: !!row.hidden,
     };
   });
 // A fail-closed render replaces the page body instead of the board sections, so
@@ -205,4 +216,11 @@ const sections = {
   charted: sectionState("bb-charted"),
 };
 
-process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText, filterbar, deck, sections }) + "\n");
+// The Charted Next dispatch bar: what it currently tells the captain and
+// whether the "queue dispatch order" button would fire.
+const dispatch = {
+  count: (byId.get("bb-dispatch-count") || new Node("span")).textContent,
+  disabled: !!(byId.get("bb-dispatch-btn") || new Node("button")).disabled,
+};
+
+process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText, filterbar, deck, sections, dispatch }) + "\n");

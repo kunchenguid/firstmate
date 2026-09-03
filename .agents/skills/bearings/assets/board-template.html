@@ -586,16 +586,30 @@ __FM_BEARINGS_BOARD_DATA__
   }
   function refreshSectionFilterable(entry) {
     var visibleCount = 0;
+    var pickCleared = false;
     entry.rows.forEach(function (row) {
       var ok = activeRepos.size === 0 || activeRepos.has(row.dataset.repo);
       row.hidden = !ok;
-      if (ok) visibleCount++;
+      if (ok) {
+        visibleCount++;
+        return;
+      }
+      /* a filtered-out row must never keep an invisible dispatch pick: the
+         captain would otherwise queue work from a project he can no longer
+         see on the screen. Only Charted rows ever carry a .bb-pick, so this
+         is a no-op for Underway/Landed. */
+      var hiddenPick = row.querySelectorAll(".bb-pick:checked")[0];
+      if (hiddenPick) {
+        hiddenPick.checked = false;
+        pickCleared = true;
+      }
     });
     if (entry.filteredEmptyNode) { entry.filteredEmptyNode.remove(); entry.filteredEmptyNode = null; }
     if (entry.rows.length && visibleCount === 0) {
       entry.filteredEmptyNode = el("div", "bb-empty", "No " + entry.label + " match this project.");
       entry.container.appendChild(entry.filteredEmptyNode);
     }
+    if (pickCleared) refreshBar();
   }
 
   /* Captain's Call deck: every item renders as the same full card */

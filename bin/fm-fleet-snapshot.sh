@@ -1187,19 +1187,40 @@ snapshot_collection_cleanup() {
   [ -z "$SNAPSHOT_COLLECT_DIR" ] || rm -rf -- "$SNAPSHOT_COLLECT_DIR"
   SNAPSHOT_COLLECT_DIR=
   SNAPSHOT_SUMMARY_FILTER=
+}
+# Deliberately separate from snapshot_collection_cleanup: secondmate_current_json
+# calls that one explicitly, mid-script, as soon as remote-ledger collection is
+# done - well before the backlog/tasks files this cleans up are done being read
+# by the final jq assembly. Keeping this in its own function means that early,
+# explicit call can never delete a file still in use; only the EXIT trap below
+# runs it.
+snapshot_args_cleanup() {
   [ -z "$SNAPSHOT_ARGS_DIR" ] || rm -rf -- "$SNAPSHOT_ARGS_DIR"
   SNAPSHOT_ARGS_DIR=
 }
-trap snapshot_collection_cleanup EXIT
+snapshot_exit_cleanup() {
+  snapshot_collection_cleanup
+  snapshot_args_cleanup
+}
+trap snapshot_exit_cleanup EXIT
 
-# Write $1 to a private temp file under SNAPSHOT_ARGS_DIR (created lazily) and
-# print its path, so callers can pass large JSON to jq via --rawfile instead
-# of as a command-line argument.
+# Create SNAPSHOT_ARGS_DIR if it does not already exist. MUST be called as a
+# plain statement, never inside command substitution: a caller that runs it
+# via `$(...)` only mutates SNAPSHOT_ARGS_DIR in that subshell, so the EXIT
+# trap in the parent never sees it and the directory leaks.
+snapshot_ensure_args_dir() {
+  [ -z "$SNAPSHOT_ARGS_DIR" ] || return 0
+  SNAPSHOT_ARGS_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot-args.XXXXXX")
+}
+
+# Write $1 to a private temp file under SNAPSHOT_ARGS_DIR (the caller must
+# have already run snapshot_ensure_args_dir as a plain statement) and print
+# its path, so callers can pass large JSON to jq via --rawfile instead of as
+# a command-line argument. Safe to call via command substitution itself,
+# since it only reads SNAPSHOT_ARGS_DIR and never sets it.
 snapshot_json_arg_file() {  # <json-content>
   local f
-  if [ -z "$SNAPSHOT_ARGS_DIR" ]; then
-    SNAPSHOT_ARGS_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot-args.XXXXXX") || return 1
-  fi
+  [ -n "$SNAPSHOT_ARGS_DIR" ] || return 1
   f=$(umask 077; mktemp "$SNAPSHOT_ARGS_DIR/arg.XXXXXX") || return 1
   printf '%s' "$1" > "$f" || return 1
   printf '%s' "$f"
@@ -1660,6 +1681,11 @@ TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed
 # A large backlog (many held items with long hold reasons) can exceed the
 # kernel's argv limit if embedded directly in a jq invocation, so hand these
 # blobs to jq on disk via --rawfile instead of as command-line arguments.
+# snapshot_ensure_args_dir runs as a plain statement (not `$(...)`) so its
+# SNAPSHOT_ARGS_DIR assignment lands in this shell, where the EXIT trap can
+# see it and remove it.
+snapshot_ensure_args_dir \
+  || { echo "fm-fleet-snapshot: temp directory creation failed" >&2; exit 1; }
 BACKLOG_JSON_FILE=$(snapshot_json_arg_file "$BACKLOG_JSON") \
   || { echo "fm-fleet-snapshot: backlog temp file failed" >&2; exit 1; }
 TASKS_JSON_FILE=$(snapshot_json_arg_file "$TASKS_JSON") \

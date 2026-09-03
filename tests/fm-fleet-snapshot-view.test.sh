@@ -928,9 +928,31 @@ test_large_held_backlog_survives_argv_limit() {
   pass "fleet snapshot handles a backlog large enough to exceed the kernel argv limit"
 }
 
+test_snapshot_leaves_no_args_tempdir_behind() {
+  local home tmpdir leftover
+  home=$(make_home args-tempdir-leak)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] leftover-check - A held item (repo: alpha) (kind: ship) (hold: captain review) (hold-kind: captain)
+
+## Done
+EOF
+  tmpdir="$TMP_ROOT/args-tempdir-scratch"
+  mkdir -p "$tmpdir"
+  TMPDIR="$tmpdir" FM_HOME="$home" "$SNAPSHOT" --json >/dev/null \
+    || fail "snapshot run failed while checking for a leaked temp directory"
+  leftover=$(find "$tmpdir" -maxdepth 1 -name 'fm-fleet-snapshot-args.*')
+  [ -z "$leftover" ] \
+    || fail "the backlog/tasks temp directory survived the snapshot run: $leftover"
+  pass "the snapshot's private argv-workaround temp directory is cleaned up on exit"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_large_held_backlog_survives_argv_limit
+test_snapshot_leaves_no_args_tempdir_behind
 test_home_summary_excludes_secondmate_from_child_inventory
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
