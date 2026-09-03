@@ -199,6 +199,14 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+`cursor` is refused for every ordinary unattended kind (ship, scout, and secondmate), because its `--auto-review` classifier can park the pane on a prompt nobody is there to answer while the pane still reads as busy, so route unattended work to `codex` or `claude` instead.
+It stays available for exactly two cases, each requiring the per-spawn flag `--cursor-exemption attended` (a person is in the pane) or `--cursor-exemption envelope:<name>` (a worker governed by the named, separately proven outer isolation envelope).
+The flag is deliberately per invocation rather than an exported variable, so one attended launch cannot silently exempt a later unattended spawn, and the grant is recorded as `cursor_exemption=` in the task's meta for audit.
+An envelope name must be letters, digits, `.`, `_`, or `-` starting on a letter or digit, and an explicitly passed grant is refused outright on a non-cursor harness on the local and remote spawn routes alike rather than recorded where a later relaunch onto cursor could read it back.
+A grant only inherited from a task's own record is dropped rather than refused when that task restarts onto a non-cursor harness, so a harness switch away from cursor succeeds and silently discards the grant.
+Across a relaunch or a `--secondmate` spawn, the two paths that restart an existing task from its own record, an `envelope:<name>` grant is inherited and an `attended` one never is, while a fresh ship or scout spawn always requires the flag.
+Automatic liveness recovery reaches only a REMOTE cursor secondmate; a local one is reported as an unverified harness and needs an explicit relaunch.
+The control plane evaluates a relaunch against the grant that will really be in force, so an unexemptable task is refused before its agent is stopped.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
@@ -544,7 +552,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH:`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
