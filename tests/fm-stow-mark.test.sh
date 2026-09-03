@@ -80,6 +80,7 @@ append_turn() {  # <path> <context-tokens>
 run_owned() {  # <home> <cmd...>
   local home=$1
   shift
+  # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fake harness child
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     "$@"
@@ -94,6 +95,7 @@ run_check() {  # <home> <transcript> [session]
 run_guard_owned() {  # <home> <transcript> [session] [guard-args...]
   local home=$1 transcript=$2 session=${3:-sess-1}
   shift 3 2>/dev/null || shift "$#"
+  # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fake harness child
   printf '{"session_id":"%s","transcript_path":"%s","stop_hook_active":false}' "$session" "$transcript" \
     | CLAUDECODE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
@@ -778,6 +780,7 @@ test_guard_never_nudges_outside_claude_lock_owning_primary() {
   expect_code 0 "$status" "a session that does not own the lock allows"
   [ -z "$out" ] || fail "unowned Claude session produced output: $out"
   # Claude mode without a transcript in the payload.
+  # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fake harness child
   out=$(printf '{"session_id":"sess-1","stop_hook_active":false}' \
     | CLAUDECODE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
