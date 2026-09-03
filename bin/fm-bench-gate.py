@@ -251,9 +251,12 @@ def sha256_bytes(data: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 16), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise GateError(f"benchmark evidence cannot be read: {path} ({exc})") from exc
     return digest.hexdigest()
 
 
@@ -4302,6 +4305,12 @@ def baseline_veto_clear(
             "the frozen baseline veto bounds exceed the zero mean floor or one-loss outer limit",
         )
         return False
+    if not strata:
+        report.fail(
+            f"{prefix}.baseline_veto",
+            "the frozen plan declares a baseline with no preregistered veto strata to measure it on",
+        )
+        return False
     deltas: list[float] = []
     losses = 0
     for packet in strata:
@@ -4385,7 +4394,7 @@ def evidence_entries(root: Path) -> list[tuple[str, str, int, str]]:
         elif stat.S_ISREG(mode):
             try:
                 digest = sha256_file(path)
-            except OSError:
+            except (OSError, GateError):
                 entries.append((relative, "unreadable", stat.S_IMODE(mode), ""))
                 return
             entries.append((relative, "file", stat.S_IMODE(mode), digest))
@@ -4595,7 +4604,10 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
                 "launch evidence is unreadable, symlinked, or a special file, so no clearance "
                 "can bind it: " + ", ".join(unusable),
             )
+            revoked = receipt.is_file()
             receipt.unlink(missing_ok=True)
+            if revoked:
+                print("BENCH_NOTE preflight the prior clearance is revoked")
             print("BENCH_NOTE preflight no entrant may launch")
             return
         write_json(
