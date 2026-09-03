@@ -577,7 +577,7 @@ EOF
 }
 
 test_lock_takeover_stays_read_only_while_a_sweep_holds_the_lease() {
-  local rec home root log next_owner new_owner out rc started elapsed waited=0
+  local rec home root log next_owner new_owner out expected rc started elapsed waited=0
   rec=$(new_world sweep-lease)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -594,7 +594,7 @@ EOF
   next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
   started=$(date +%s)
   rc=0
-  out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
+  out=$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   [ "$rc" -ne 0 ] || fail "lock takeover succeeded while the prior sweep was mutating"
@@ -605,12 +605,12 @@ EOF
     || fail "the lease-blocked takeover replaced the prior owner"
 
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the leased sweep never settled"
-  out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
+  out=$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) \
     || fail "lock takeover still failed after the sweep released its lease"
   new_owner=$(cat "$home/state/.lock")
-  assert_contains "$out" "lock acquired: harness pid $new_owner" \
-    "the fleet lock did not record the harness owner reported by acquisition"
+  expected="lock acquired: harness pid $new_owner"
+  assert_contains "$out" "$expected" "the fleet lock did not record the session owner reported by acquisition"
   [ "$new_owner" != "$$" ] || fail "the prior harness still owned the lock after takeover"
   pass "fm-startup-network: fleet-lock takeover cannot overlap a mutating sweep"
 }

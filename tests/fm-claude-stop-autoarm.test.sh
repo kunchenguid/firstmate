@@ -14,6 +14,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# A suite launched from Codex inherits the live parent thread marker, which
+# would make the fake Claude fixtures publish a Codex session identity.
+unset CODEX_THREAD_ID CODEX_SESSION_ID
+
 TMP_ROOT=$(fm_test_tmproot fm-claude-stop-autoarm)
 fm_git_identity fmtest fmtest@example.invalid
 

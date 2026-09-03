@@ -1265,10 +1265,10 @@ launch_template() {
     # isolation contract. The binary is resolved rather than named because
     # `cursor` is not the CLI (the installed names are cursor-agent and the
     # legacy alias agent), and the foreign primary markers are cleared so an
-    # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
-    # only reads the environment. Cursor exposes no effort flag, so the shared
+    # inherited harness identity cannot outrank cursor's own marker or session
+    # lock in a process that only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2970,9 +2970,12 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+# A child harness must establish its own session markers. In particular, an
+# inherited Codex thread id still has a live writer lock in the parent and would
+# otherwise let the child publish the parent's identity into another home.
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    LAUNCH="env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

@@ -32,9 +32,9 @@ This deliberately inverts the previous nudge matcher, which fired on `startup|re
 Compaction is covered where a tracked adapter delivers that source because a compacted session has lost exactly the digest it needs, and resume is excluded from the run because it restores that digest instead of losing it.
 
 Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
-The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
+The full digest clears that completion record after acquiring the lock and republishes the lock owner's session identity only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
 `bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
-On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.
+On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its shared ownership check stays silent whenever this session already holds the lock.
 
 `bin/fm-session-start.sh --reemit` owns which work a re-emit skips, its true-start AGENTS.md baseline, and its supported stale-instruction refresh pairs; its header is the single owner of those mechanics.
 
@@ -58,8 +58,8 @@ The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-pred
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
 
-Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
-If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+Before printing, the nudge wrapper asks `bin/fm-session-lock-lib.sh` whether this harness session owns `state/.lock`, using the same Codex writer-lock identity or bounded process-ancestry proof as `bin/fm-lock.sh`.
+If that shared owner verifies the lock as this session's own, session start already ran and the wrapper stays silent.
 Every ordinary transport path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 The run wrapper's internal `--pi-prerequisite` mode uses silent exit 3 only for an intentional gate or scope stand-down, letting Pi distinguish ineligibility from an eligible empty native result without changing any harness hook's exit contract.
 A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.

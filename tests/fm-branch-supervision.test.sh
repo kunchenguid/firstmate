@@ -490,6 +490,24 @@ test_lease_exclusivity_release_stale_and_sweep() {
   pass "lease exclusivity, same-actor refresh, release, staleness, and sweep hold"
 }
 
+test_codex_session_identity_never_becomes_a_lease_pid() {
+  local home lease_pid fabricated_pid
+  home="$TMP_ROOT/codex-lease-home"
+  fabricated_pid=999999999999999999999999999999
+  mkdir -p "$home/state"
+  printf 'codex:%s\n' "$fabricated_pid" > "$home/state/.lock"
+
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim task-codex --actor main \
+    || fail "claim under a Codex session identity failed"
+  lease_pid=$(cut -f2 "$home/state/.lease-task-codex")
+  case "$lease_pid" in
+    ''|*[!0-9]*) fail "Codex fallback produced a malformed lease pid: $lease_pid" ;;
+  esac
+  [ "$lease_pid" != "$fabricated_pid" ] \
+    || fail "Codex thread digits were fabricated into the lease holder pid"
+  pass "a Codex session identity falls back to the claiming process for lease liveness"
+}
+
 # --- guards in the mutating entrypoints ---------------------------------------
 
 test_mutating_scripts_refuse_the_other_actors_lease() {
@@ -843,6 +861,7 @@ test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_lease_exclusivity_release_stale_and_sweep
+test_codex_session_identity_never_becomes_a_lease_pid
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched

@@ -14,6 +14,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
+| Session identity | Codex tool subprocesses carry `CODEX_THREAD_ID`/`CODEX_SESSION_ID`, and codex-cli 0.150.1 holds `<codex-state-root>/thread-writer-locks/<thread-id>.lock` for the active writer's lifetime; Firstmate accepts the marker only while that flock is held. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
@@ -31,6 +32,7 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 ## Primary integration
 
 The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
+The session-lock identity and hidden-ancestry fallback were verified on 2026-08-30 with codex-cli 0.150.1 and util-linux flock 2.41.3.
 The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard.sh`.
 Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` for the same one-block loop safety used by the guard's default mode.
 
