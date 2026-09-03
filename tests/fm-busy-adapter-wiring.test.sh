@@ -326,7 +326,8 @@ test_copilot_hooks_semantic_lifecycle() {
   assert_grep 'session=parent' "$binding" "userPromptSubmitted did not latch the parent session"
 
   rm -f "$state/$id.turn-ended"
-  run_copilot_hook "$hooks" agentStop '{"sessionId":"parent"}' || fail "agentStop hook command failed"
+  run_copilot_hook "$hooks" agentStop '{"stopReason":"end_turn","stop_hook_active":false}' \
+    || fail "agentStop hook command failed"
   [ -f "$state/$id.turn-ended" ] || fail "agentStop no longer touches the notification marker"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "agentStop must classify 'idle copilot-hook', got '$out'"
@@ -337,7 +338,7 @@ test_copilot_hooks_semantic_lifecycle() {
   [ "$out" = "busy copilot-hook" ] || fail "a later top-level session must re-open busy state, got '$out'"
   assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after agentStop"
 
-  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"next-parent"}' || fail "sessionEnd hook command failed"
+  run_copilot_hook "$hooks" sessionEnd '{"reason":"other"}' || fail "sessionEnd hook command failed"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "sessionEnd must classify idle, got '$out'"
   assert_absent "$binding" "sessionEnd must clear the bound parent session"
@@ -391,6 +392,39 @@ test_copilot_agent_stop_clears_binding_after_turnend_touch_failure() {
   [ "$out" = "busy copilot-hook" ] || fail "the next top-level session must re-open busy state after a failed turn-end touch, got '$out'"
   assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after a failed turn-end touch"
   pass "copilot agentStop clears its binding even when turn-end touch fails"
+}
+
+test_copilot_settle_clears_binding_after_idle_write_failure() {
+  local event rec id out state hooks binding
+  for event in agentStop sessionEnd; do
+    id="busy-copilot-idle-fail-$event"
+    rec=$(make_spawn_case "copilot-idle-fail-$event" copilot "$id")
+    read_case_record "$rec"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "copilot spawn should succeed: $out"
+    state="$HOME_DIR/state"
+    hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+    binding="$state/$id.copilot-session"
+
+    run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' \
+      || fail "$event parent latch hook failed"
+    mkdir "$state/$id.busy-state.lock"
+    export FM_BUSY_LOCK_STALE_SECS=999
+    run_copilot_hook "$hooks" "$event" '{"sessionId":"parent"}' \
+      || fail "$event hook command must preserve Copilot's always-zero lifecycle contract"
+    unset FM_BUSY_LOCK_STALE_SECS
+    rmdir "$state/$id.busy-state.lock"
+    assert_absent "$binding" "$event must clear the parent binding after an idle-write failure"
+
+    run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"next-parent"}' \
+      || fail "$event next parent latch hook failed"
+    assert_grep 'session=next-parent' "$binding" \
+      "$event idle-write failure prevented the next top-level session from rebinding"
+    out=$(classify copilot "$id" "$state")
+    [ "$out" = "busy copilot-hook" ] \
+      || fail "$event next top-level session must restore busy state after the failed settle, got '$out'"
+  done
+  pass "copilot parent settlement clears stale bindings after idle-write failures"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -541,6 +575,7 @@ test_gemini_is_refused_as_a_secondmate
 test_copilot_hooks_semantic_lifecycle
 test_copilot_hooks_ignore_foreign_sessions
 test_copilot_agent_stop_clears_binding_after_turnend_touch_failure
+test_copilot_settle_clears_binding_after_idle_write_failure
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

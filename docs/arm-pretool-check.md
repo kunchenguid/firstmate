@@ -101,7 +101,7 @@ Approved setup nodes are:
 - `source <x-mode path>` or `. <x-mode path>`.
 - `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
 
-For Copilot `shell_completed` watcher-notification provenance, the stricter `watcher-arm` classifier accepts only the optional x-mode source pair in the current verified root followed by `exec` of that same root's `bin/fm-watch-arm.sh`. Any `cd`, `export`, inline assignment, alternate absolute path, bundled command, pipeline, backgrounding, or detached form is rejected.
+For Copilot `shell_completed` watcher-notification provenance, command-bearing payloads use the stricter `watcher-arm` classifier: it accepts only the optional x-mode source pair in the current verified root followed by `exec` of that same root's `bin/fm-watch-arm.sh`. Any `cd`, `export`, inline assignment, alternate absolute path, bundled command, pipeline, backgrounding, or detached form is rejected. Commandless title-only payloads are trusted only when they also carry Copilot's exact successful watcher title/message shape and the hook can atomically claim a recent private completion receipt published by that same root/home's real `bin/fm-watch-arm.sh`.
 
 The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
 An absolute x-mode path outside the active home is not an approved setup node.

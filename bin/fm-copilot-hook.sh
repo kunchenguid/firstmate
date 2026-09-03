@@ -7,21 +7,30 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-copilot-watcher-receipt-lib.sh
+. "$SCRIPT_DIR/fm-copilot-watcher-receipt-lib.sh"
 MODE=${1:-}
+
+copilot_hook_real_dir() {
+  local dir=${1:-}
+  [ -n "$dir" ] || return 1
+  CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P
+}
 
 copilot_hook_root() {
   pwd -P 2>/dev/null
 }
 
 copilot_hook_home() {
-  local root=${1:-}
-  printf '%s\n' "${FM_HOME:-$root}"
+  local root=${1:-} home
+  home=${FM_HOME:-$root}
+  copilot_hook_real_dir "$home" || printf '%s\n' "$home"
 }
 
 copilot_hook_state() {
-  local root=${1:-} home
-  home=$(copilot_hook_home "$root")
-  printf '%s\n' "${FM_STATE_OVERRIDE:-$home/state}"
+  local root=${1:-} state
+  state=${FM_STATE_OVERRIDE:-$(copilot_hook_home "$root")/state}
+  copilot_hook_real_dir "$state" || printf '%s\n' "$state"
 }
 
 copilot_notification_has_named_watcher_completion() {
@@ -38,20 +47,25 @@ copilot_notification_has_named_watcher_completion() {
 }
 
 copilot_notification_has_watcher_completion() {
-  local payload=${1:-} root home policy command verdict saw_command=0
+  local payload=${1:-} root=${2:-} home=${3:-} state=${4:-}
+  local policy command verdict saw_command=0 can_classify=0
   [ -n "$payload" ] || return 1
+  [ -n "$root" ] && [ -n "$home" ] && [ -n "$state" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$payload" | jq -e '.notification_type == "shell_completed"' >/dev/null 2>&1 || return 1
-  command -v node >/dev/null 2>&1 || return 1
-  root=$(copilot_hook_root) || return 1
-  home=$(copilot_hook_home "$root")
   policy="$SCRIPT_DIR/fm-arm-command-policy.mjs"
-  [ -f "$policy" ] || return 1
+  if command -v node >/dev/null 2>&1 && [ -f "$policy" ]; then
+    can_classify=1
+  fi
   while IFS= read -r -d '' command; do
     [ -n "$command" ] || continue
     saw_command=1
+    [ "$can_classify" -eq 1 ] || continue
     verdict=$(node "$policy" watcher-arm --root "$root" --home "$home" --command "$command" 2>/dev/null || true)
-    [ "$verdict" = watch-arm ] && return 0
+    if [ "$verdict" = watch-arm ]; then
+      fm_copilot_watch_receipt_claim "$root" "$home" "$state" >/dev/null 2>&1 || return 1
+      return 0
+    fi
   done < <(printf '%s' "$payload" | jq -j '
   [
     .command,
@@ -71,8 +85,9 @@ copilot_notification_has_watcher_completion() {
   | unique[]
   | ., "\u0000"
 ' 2>/dev/null)
-  [ "$saw_command" -eq 0 ] && copilot_notification_has_named_watcher_completion "$payload" && return 0
-  return 1
+  [ "$saw_command" -eq 0 ] || return 1
+  copilot_notification_has_named_watcher_completion "$payload" || return 1
+  fm_copilot_watch_receipt_claim "$root" "$home" "$state"
 }
 
 # shellcheck source=bin/fm-hook-host-lib.sh
@@ -91,6 +106,12 @@ case "$MODE" in
     jq -Rs '{additionalContext:.}' < "$OUT"
     ;;
   pretool-arm)
+    ROOT=$(copilot_hook_root) || exit 0
+    HOME=$(copilot_hook_home "$ROOT")
+    STATE=$(copilot_hook_state "$ROOT")
+    # shellcheck source=bin/fm-primary-scope-lib.sh
+    . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+    fm_primary_scope_matches "$ROOT" "$STATE" || exit 0
     exec "$SCRIPT_DIR/fm-arm-pretool-check.sh" --copilot
     ;;
   pretool-cd)
@@ -118,12 +139,13 @@ case "$MODE" in
   notification)
     PAYLOAD=$(cat 2>/dev/null || true)
     [ -n "$PAYLOAD" ] || exit 0
-    copilot_notification_has_watcher_completion "$PAYLOAD" || exit 0
     ROOT=$(copilot_hook_root) || exit 0
+    HOME=$(copilot_hook_home "$ROOT")
     STATE=$(copilot_hook_state "$ROOT")
     # shellcheck source=bin/fm-primary-scope-lib.sh
     . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
     fm_primary_scope_matches "$ROOT" "$STATE" || exit 0
+    copilot_notification_has_watcher_completion "$PAYLOAD" "$ROOT" "$HOME" "$STATE" || exit 0
     # shellcheck source=bin/fm-operational-input.sh
     . "$SCRIPT_DIR/fm-operational-input.sh"
     BODY='FIRSTMATE WATCHER WAKE: shell_completed: bin/fm-watch-arm.sh

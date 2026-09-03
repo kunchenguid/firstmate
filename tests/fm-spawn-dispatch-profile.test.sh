@@ -581,6 +581,79 @@ test_copilot_launch_clears_inherited_claude_project_dir() {
   pass "copilot launch clears inherited Claude project roots before entering another worktree"
 }
 
+test_copilot_accepts_only_verified_session_trust() {
+  local rec id out status capture dialog key_log kill_log launch_marker hooks
+  id=profile-copilot-trust-z6ht
+  rec=$(make_spawn_case profile-copilot-trust copilot "$id")
+  read_case_record "$rec"
+  capture="$CASE_DIR/trust-pane"
+  dialog="$CASE_DIR/trust-dialog"
+  key_log="$CASE_DIR/trust-keys"
+  kill_log="$CASE_DIR/trust-kills"
+  launch_marker="$CASE_DIR/copilot-launched"
+  : > "$capture"
+  cat > "$dialog" <<EOF
+Confirm folder trust
+$WT_DIR
+Do you trust the files in this folder?
+❯ 1. Yes
+2. Yes, and remember this folder for future sessions
+3. No (Esc)
+EOF
+
+  out=$(FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_FAKE_TMUX_TRUST_DIALOG_FILE="$dialog" \
+    FM_FAKE_TMUX_TRUST_KEY_LOG="$key_log" \
+    FM_FAKE_TMUX_TRUST_CLEAR_ON_ENTER=1 \
+    FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER="$launch_marker" \
+    FM_FAKE_TMUX_KILL_LOG="$kill_log" \
+    FM_TEST_COPILOT_TRUST_POLLS=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn should accept the verified session-only trust default"
+  [ "$(cat "$key_log")" = Enter ] || fail "copilot trust handling did not send exactly one verified Enter"
+  [ "$(cat "$capture")" = 'Copilot ready' ] || fail "copilot trust handling did not verify the dialog cleared"
+  assert_absent "$HOME_DIR/user-home/.copilot/config.json" \
+    "copilot trust handling persisted a disposable worktree in the user config"
+  assert_absent "$kill_log" "a successful Copilot trust acceptance killed the endpoint"
+
+  id=profile-copilot-trust-refuse-z6hu
+  rec=$(make_spawn_case profile-copilot-trust-refuse copilot "$id")
+  read_case_record "$rec"
+  capture="$CASE_DIR/trust-pane"
+  dialog="$CASE_DIR/trust-dialog"
+  key_log="$CASE_DIR/trust-keys"
+  kill_log="$CASE_DIR/trust-kills"
+  launch_marker="$CASE_DIR/copilot-launched"
+  : > "$capture"
+  cat > "$dialog" <<EOF
+Confirm folder trust
+$WT_DIR
+Do you trust the files in this folder?
+1. Yes
+❯ 2. Yes, and remember this folder for future sessions
+3. No (Esc)
+EOF
+
+  out=$(FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_FAKE_TMUX_TRUST_DIALOG_FILE="$dialog" \
+    FM_FAKE_TMUX_TRUST_KEY_LOG="$key_log" \
+    FM_FAKE_TMUX_TRUST_CLEAR_ON_ENTER=1 \
+    FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER="$launch_marker" \
+    FM_FAKE_TMUX_KILL_LOG="$kill_log" \
+    FM_TEST_COPILOT_TRUST_POLLS=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "copilot spawn accepted a non-default remembered-trust selection"
+  assert_contains "$out" "did not match the verified session-only default selection" \
+    "copilot trust refusal did not name the changed dialog"
+  assert_absent "$key_log" "copilot trust refusal sent a key to a non-default selection"
+  assert_present "$kill_log" "copilot trust refusal left the attempted endpoint running"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  assert_absent "$hooks" "copilot trust refusal left its generated worker hook behind"
+  pass "copilot spawn accepts only the exact session-only trust default and cleans up refusals"
+}
+
 test_copilot_launch_scrubs_foreign_harness_markers() {
   local rec id out status launch parent_case harness_seen marker_seen
 
@@ -1562,6 +1635,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
 test_copilot_launch_clears_inherited_claude_project_dir
+test_copilot_accepts_only_verified_session_trust
 test_copilot_launch_scrubs_foreign_harness_markers
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses

@@ -2921,6 +2921,70 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+copilot_capture() {
+  fm_backend_capture "$BACKEND" "$T" 80 "$W"
+}
+
+COPILOT_TRUST_ERROR=
+copilot_trust_dialog_exact() {  # <pane>
+  local pane=$1
+  printf '%s\n' "$pane" | grep -Fq 'Confirm folder trust' || return 1
+  printf '%s\n' "$pane" | grep -Fq "$WT" || return 1
+  printf '%s\n' "$pane" | grep -Fq 'Do you trust the files in this folder?' || return 1
+  printf '%s\n' "$pane" | grep -Fq '❯ 1. Yes' || return 1
+  printf '%s\n' "$pane" | grep -Fq '2. Yes, and remember this folder for future sessions' || return 1
+  printf '%s\n' "$pane" | grep -Fq '3. No (Esc)' || return 1
+}
+
+copilot_wait_for_session_trust() {
+  local pane i=0 verify=0 max=${FM_COPILOT_TRUST_POLLS:-40}
+  local interval=${FM_COPILOT_TRUST_POLL_INTERVAL:-0.25}
+  while [ "$i" -lt "$max" ]; do
+    if ! pane=$(copilot_capture 2>/dev/null); then
+      COPILOT_TRUST_ERROR="Copilot trust surface could not be read"
+      return 1
+    fi
+    if printf '%s\n' "$pane" | grep -Fq 'Confirm folder trust'; then
+      if ! copilot_trust_dialog_exact "$pane"; then
+        COPILOT_TRUST_ERROR="Copilot trust dialog did not match the verified session-only default selection"
+        return 1
+      fi
+      if ! spawn_send_key "$T" Enter; then
+        COPILOT_TRUST_ERROR="Copilot session-only trust confirmation could not be submitted"
+        return 1
+      fi
+      while [ "$verify" -lt "$max" ]; do
+        if ! pane=$(copilot_capture 2>/dev/null); then
+          COPILOT_TRUST_ERROR="Copilot trust acceptance could not be verified"
+          return 1
+        fi
+        if ! printf '%s\n' "$pane" | grep -Fq 'Confirm folder trust'; then
+          return 0
+        fi
+        verify=$((verify + 1))
+        [ "$verify" -ge "$max" ] || sleep "$interval"
+      done
+      COPILOT_TRUST_ERROR="Copilot trust dialog remained after session-only confirmation"
+      return 1
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
+}
+
+copilot_endpoint_cleanup() {
+  [ "$BACKEND" = orca ] && return 0
+  local tab_id=
+  [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
+  fm_backend_kill "$BACKEND" "$T" "$tab_id" "$W" 2>/dev/null || true
+}
+
+copilot_spawn_fail() {
+  echo "error: $1; inspect window $T" >&2
+  copilot_endpoint_cleanup
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -3962,6 +4026,14 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+case "$HARNESS" in
+  copilot*)
+    if ! copilot_wait_for_session_trust; then
+      copilot_spawn_fail "${COPILOT_TRUST_ERROR:-Copilot trust verification failed}"
+      exit 1
+    fi
+    ;;
+esac
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

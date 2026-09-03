@@ -262,6 +262,8 @@ test_direct_policy_contract() {
   mkdir -p "$sibling_root/config"
   : > "$sibling_root/config/x-mode.env"
   assert_watcher_arm_policy direct-current-root watch-arm '[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-current-root-extra-argv other '[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh --help'
+  assert_watcher_arm_policy direct-current-root-restart-argv other '[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh --restart'
   assert_watcher_arm_policy direct-sibling-root other 'cd ../policy-sibling-root && [ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh'
   assert_watcher_arm_policy direct-fm-home-rebind other 'export FM_HOME=/tmp/other; exec ./bin/fm-watch-arm.sh'
   assert_watcher_arm_policy direct-state-override-rebind other 'export FM_STATE_OVERRIDE=/tmp/other; exec ./bin/fm-watch-arm.sh'

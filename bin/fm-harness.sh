@@ -28,9 +28,9 @@
 # falls back to process ancestry.
 # COPILOT_CLI is the one local exception: ancestry stays authoritative because
 # that marker can be inherited by a nested foreign harness, but when ancestry is
-# inconclusive the existing positive Gemini and Rovo markers still keep their
-# established precedence and only the ambiguous Copilot/Claude/Cursor conflict
-# falls back to Copilot.
+# inconclusive the existing positive Gemini, Rovo, Pi, pi-signed, and Grok
+# markers still keep their established precedence and only the ambiguous
+# Copilot/Claude/Cursor conflict falls back to Copilot.
 # Record each newly verified env marker and ancestry shape here.
 set -u
 
@@ -95,6 +95,8 @@ copilot_marker_fallback_allowed() {
   [ "${GEMINI_CLI:-}" = "1" ] && return 1
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && return 1
   [ "${ROVODEV_CLI:-}" = "1" ] && return 1
+  [ "${PI_CODING_AGENT:-}" = "true" ] && return 1
+  [ "${GROK_AGENT:-}" = "1" ] && return 1
   return 0
 }
 
@@ -103,8 +105,9 @@ detect_own() {
   # COPILOT_CLI reaches nested child harnesses, so a Copilot-marked process
   # first asks ancestry which harness is actually running.
   # When ancestry is inconclusive, only the ambiguous inherited Claude/Cursor
-  # conflict falls back to Copilot; Gemini and Rovo keep their established own
-  # marker precedence because they are not always ancestry-detectable.
+  # conflict falls back to Copilot; Gemini, Rovo, Pi/pi-signed, and Grok keep
+  # their established own marker precedence because they are not always
+  # ancestry-detectable.
   if [ "${COPILOT_CLI:-}" = "1" ]; then
     ancestry=$(detect_ancestry 2>/dev/null || true)
     if [ -n "$ancestry" ]; then

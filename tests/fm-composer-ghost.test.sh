@@ -384,7 +384,7 @@ test_copilot_half_box_requires_complete_rules() {
   pass "fm_tmux_composer_state: Copilot half-box emptiness requires complete width-matched rules"
 }
 
-test_tmux_copilot_detection_falls_back_to_current_command() (
+test_tmux_copilot_detection_requires_foreground_identity() (
   # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_pane_is_copilot.
   tmux() {
     case "$*" in
@@ -401,8 +401,10 @@ test_tmux_copilot_detection_falls_back_to_current_command() (
       *) return 1 ;;
     esac
   }
-  fm_tmux_pane_is_copilot fakepane || fail "pane_current_command=copilot must keep the tmux Copilot gate true when ps lacks argv zero"
-  pass "fm_tmux_pane_is_copilot falls back to pane_current_command"
+  if fm_tmux_pane_is_copilot fakepane; then
+    fail "pane_current_command=copilot must not keep the tmux Copilot gate true when foreground identity contradicts it"
+  fi
+  pass "fm_tmux_pane_is_copilot requires foreground identity"
 )
 
 test_copilot_cursorless_fallback_requires_identity() (
@@ -780,7 +782,7 @@ test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_proven_box_bottom_border_cursor_classifies_content
 test_copilot_half_box_requires_complete_rules
-test_tmux_copilot_detection_falls_back_to_current_command
+test_tmux_copilot_detection_requires_foreground_identity
 test_copilot_cursorless_fallback_requires_identity
 test_pi_identity_requires_readable_busy_state
 test_bordered_busy_signatures_are_pending

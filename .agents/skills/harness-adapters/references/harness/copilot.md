@@ -20,7 +20,8 @@ The current hook and launch contract was refreshed against Copilot CLI 1.0.83-3 
 | Composer | Complete half-box using a `╻` plus `▄` top rule, `┃`-prefixed content, and a width-matched `╹` plus `▀` bottom rule. |
 
 The CLI may show a repository trust prompt before hooks and project instructions load.
-Accept the remembered trust choice only for a repository the captain intends to trust, then verify the initial instructions begin processing.
+Firstmate accepts only the exact verified default `Yes` selection for the current session, verifies that the dialog clears, and never writes the disposable worktree into the user's remembered `trustedFolders`.
+An unreadable, changed, or non-default dialog stops the spawn without sending a key.
 
 ## Detection and liveness
 

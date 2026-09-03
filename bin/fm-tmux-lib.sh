@@ -122,10 +122,11 @@ EOF
 #     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
 #     process (pi, pi-signed, pi-launcher - docs/verification/
 #     runtime-backends.md "Agent liveness name sources"), falling back to
-#     tmux's own foreground-derived #{pane_current_command}. A pane whose
-#     agent died to a shell has no pi foreground process and gets NO identity,
-#     which is exactly what keeps the strict blank-row rule honest: a blank
-#     row between two stale rules stays unknown.
+#     tmux's own foreground-derived #{pane_current_command} only for Pi's
+#     verified launcher/title surfaces. A pane whose agent died to a shell has
+#     no pi foreground process and gets NO identity, which is exactly what
+#     keeps the strict blank-row rule honest: a blank row between two stale
+#     rules stays unknown.
 #   - status: Pi's verified busy footer via fm_pane_is_busy, mapped onto the
 #     idle/working vocabulary herdr's probe reports natively.
 # Copilot needs only a live identity because the complete half-box proves its
@@ -145,7 +146,6 @@ fm_tmux_composer_identity() {  # <target>
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher|Pi) found=pi ;;
-      copilot) found=copilot ;;
     esac
   fi
   [ -n "$found" ] || return 1
@@ -230,10 +230,6 @@ fm_tmux_pane_is_copilot() {  # <target>
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
       ;;
-  esac
-  comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
-  case "${comm##*/}" in
-    copilot) return 0 ;;
   esac
   return 1
 }

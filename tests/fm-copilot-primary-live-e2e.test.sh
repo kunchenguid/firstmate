@@ -35,67 +35,41 @@ mkdir -p "$REPO/.github/hooks" "$REPO/hooks" "$REPO/bin" "$REPO/state"
 git -C "$REPO" init -q
 : > "$REPO/AGENTS.md"
 
-cat > "$REPO/.github/hooks/live.json" <<'JSON'
-{
-  "version": 1,
-  "hooks": {
-    "sessionStart": [
-      {
-        "type": "command",
-        "bash": "./hooks/session-start.sh",
-        "cwd": ".",
-        "timeoutSec": 10
-      }
-    ],
-    "preToolUse": [
-      {
-        "type": "command",
-        "matcher": "bash",
-        "bash": "./hooks/pretool-arm.sh",
-        "cwd": ".",
-        "timeoutSec": 10
-      }
-    ],
-    "agentStop": [
-      {
-        "type": "command",
-        "bash": "./hooks/agent-stop.sh",
-        "cwd": ".",
-        "timeoutSec": 10
-      }
-    ],
-    "notification": [
-      {
-        "type": "command",
-        "matcher": "shell_completed",
-        "bash": "./hooks/notification.sh",
-        "cwd": ".",
-        "timeoutSec": 10
-      }
-    ]
-  }
-}
-JSON
+cp "$ROOT/.github/hooks/fm-primary.json" "$REPO/.github/hooks/fm-primary.json"
 
-cat > "$REPO/hooks/session-start.sh" <<'SH'
+cp "$ROOT/bin/fm-copilot-hook.sh" "$REPO/bin/fm-copilot-hook-real.sh"
+cp "$ROOT/bin/fm-copilot-watcher-receipt-lib.sh" "$ROOT/bin/fm-hook-host-lib.sh" \
+   "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
+   "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+   "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-arm-command-policy.mjs" \
+   "$REPO/bin/"
+cat > "$REPO/bin/fm-copilot-hook.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+mode=${1:-}
+payload=$(cat 2>/dev/null || true)
+printf '%s\n' "$mode" >> .hook-modes.log
+printf '%s' "$payload" > ".hook-$mode-payload.json"
+printf '%s' "$payload" | ./bin/fm-copilot-hook-real.sh "$mode"
+SH
+chmod +x "$REPO/bin/fm-copilot-hook.sh" "$REPO/bin/fm-copilot-hook-real.sh" "$REPO/bin/fm-arm-pretool-check.sh" "$REPO/bin/fm-operational-input.sh"
+
+cat > "$REPO/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 cat > .session-start-payload.json
 jq -cn '{additionalContext:"Include LIVE_SESSION_START_OK in every response."}'
 SH
-
-cp "$ROOT/bin/fm-copilot-hook.sh" "$ROOT/bin/fm-hook-host-lib.sh" \
-   "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
-   "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
-   "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-arm-command-policy.mjs" \
-   "$REPO/bin/"
-chmod +x "$REPO/bin/fm-copilot-hook.sh" "$REPO/bin/fm-arm-pretool-check.sh" "$REPO/bin/fm-operational-input.sh"
+chmod +x "$REPO/bin/fm-sessionstart-run.sh"
 cat > "$REPO/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-copilot-watcher-receipt-lib.sh"
 printf '%s\n' LIVE_WATCHER_ARM_STARTED > .watch-arm-ran
 sleep 1
 printf '%s\n' signal: live copilot watcher > state/live.status
+fm_copilot_watch_receipt_publish "$(pwd -P)" "$(pwd -P)" "$(pwd -P)/state"
 SH
 chmod +x "$REPO/bin/fm-watch-arm.sh"
 
@@ -119,21 +93,21 @@ printf '%s\n' 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain
 SH
 chmod +x "$REPO/bin/fm-wake-drain.sh"
 
-cat > "$REPO/hooks/pretool-arm.sh" <<'SH'
+cat > "$REPO/bin/fm-cd-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-payload=$(cat)
-printf '%s' "$payload" > .pretool-payload.json
-printf '%s' "$payload" | ./bin/fm-copilot-hook.sh pretool-arm
+cat >/dev/null
+jq -cn '{permissionDecision:"allow"}'
 SH
+chmod +x "$REPO/bin/fm-cd-pretool-check.sh"
 
-cat > "$REPO/hooks/agent-stop.sh" <<'SH'
+cat > "$REPO/bin/fm-subagent-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-payload=$(cat)
-printf '%s' "$payload" > .agent-stop-payload.json
-printf '%s' "$payload" | ./bin/fm-copilot-hook.sh agent-stop
+cat >/dev/null
+jq -cn '{permissionDecision:"allow"}'
 SH
+chmod +x "$REPO/bin/fm-subagent-pretool-check.sh"
 
 cat > "$REPO/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -148,16 +122,7 @@ if [ "$count" -eq 1 ]; then
 fi
 exit 0
 SH
-chmod +x "$REPO/hooks/"*.sh "$REPO/bin/fm-turnend-guard.sh"
-
-cat > "$REPO/hooks/notification.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-payload=$(cat)
-printf '%s' "$payload" > .notification-payload.json
-printf '%s' "$payload" | ./bin/fm-copilot-hook.sh notification
-SH
-chmod +x "$REPO/hooks/notification.sh"
+chmod +x "$REPO/bin/fm-turnend-guard.sh"
 
 git -C "$REPO" add .
 git -C "$REPO" -c user.name='Firstmate Tests' -c user.email=tests@example.invalid \
@@ -224,15 +189,21 @@ assert_contains "$(pane_text)" "LIVE_SESSION_START_OK LIVE_AGENT_STOP_OK" \
 assert_absent "$REPO/.watch-arm-ran" "preToolUse did not deny the protected watcher-arm command"
 [ "$(cat "$REPO/.agent-stop-count" 2>/dev/null)" -ge 1 ] \
   || fail "agentStop did not invoke the shared turn-end guard"
-jq -e '(.source == "startup" or .source == "new") and (.sessionId | type) == "string"' \
-  "$REPO/.session-start-payload.json" >/dev/null \
-  || fail "sessionStart payload did not use the documented camelCase shape"
+if ! jq -e '(.source == "startup" or .source == "new") and (.sessionId | type) == "string"' \
+    "$REPO/.session-start-payload.json" >/dev/null 2>&1; then
+  printf 'hook modes:\n%s\n' "$(cat "$REPO/.hook-modes.log" 2>/dev/null || true)" >&2
+  fail "sessionStart payload did not use the documented camelCase shape"
+fi
 jq -e '.toolName == "bash" and (.toolArgs.command == "bin/fm-watch-arm.sh &")' \
-  "$REPO/.pretool-payload.json" >/dev/null \
-  || fail "preToolUse payload did not reach the shared Copilot watcher-arm policy path"
+  "$REPO/.hook-pretool-arm-payload.json" >/dev/null \
+  || fail "preToolUse payload did not reach the shared Copilot watcher-arm policy path through the tracked hook file"
 jq -e '.stopReason == "end_turn" and (.stop_hook_active | type) == "boolean"' \
-  "$REPO/.agent-stop-payload.json" >/dev/null \
-  || fail "agentStop payload did not carry the documented bounded-continuation fields"
+  "$REPO/.hook-agent-stop-payload.json" >/dev/null \
+  || fail "agentStop payload did not carry the documented bounded-continuation fields through the tracked hook file"
+case "$(cat "$REPO/.hook-modes.log")" in
+  *session-start*pretool-arm*agent-stop*) ;;
+  *) fail "tracked hook file did not invoke the expected session-start/pretool-arm/agent-stop modes" ;;
+esac
 
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 WATCHER_PROMPT='Run exactly `bin/fm-watch-arm.sh` as its own attached asynchronous bash task and then stop. After a later Firstmate watcher wake arrives, follow that Firstmate watcher wake instruction exactly and then reply exactly LIVE_WATCH_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh unless a Firstmate watcher wake tells you to.'
@@ -247,22 +218,22 @@ assert_contains "$(pane_text)" "LIVE_WATCH_NOTIFICATION_OK" \
   || fail "Copilot did not run the exact WAKE_ACK_REQUIRED acknowledgement after the watcher notification"
 [ "$(cat "$REPO/.wake-ack-args" 2>/dev/null)" = '--ack-through live-seq' ] \
   || fail "Copilot did not use the exact WAKE_ACK_REQUIRED acknowledgement command"
-jq -e '.notification_type == "shell_completed"' "$REPO/.notification-payload.json" >/dev/null \
-  || fail "the watcher completion did not emit Copilot's shell_completed notification"
+jq -e '.notification_type == "shell_completed"' "$REPO/.hook-notification-payload.json" >/dev/null \
+  || fail "the watcher completion did not emit Copilot's shell_completed notification through the tracked hook file"
 
-rm -f "$REPO/.wake-drain-count" "$REPO/.wake-ack-count" "$REPO/.wake-ack-args" "$REPO/.notification-payload.json"
+rm -f "$REPO/.wake-drain-count" "$REPO/.wake-ack-count" "$REPO/.wake-ack-args" "$REPO/.hook-notification-payload.json"
 UNRELATED_PROMPT='Run this exact bash command as an attached background task: sleep 1; printf LIVE_BACKGROUND_DONE > background-result. Wait for its completion notification and then reply exactly LIVE_UNRELATED_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh unless a Firstmate watcher wake arrives.'
 submit "$UNRELATED_PROMPT"
 wait_for_file "$REPO/background-result" 300 "the unrelated background task result"
-wait_for_file "$REPO/.notification-payload.json" 120 "the unrelated completion notification"
+wait_for_file "$REPO/.hook-notification-payload.json" 120 "the unrelated completion notification"
 wait_for_pane "LIVE_UNRELATED_NOTIFICATION_OK" 120 "the unrelated completion response"
 assert_contains "$(pane_text)" "LIVE_UNRELATED_NOTIFICATION_OK" \
   "an unrelated completion notification did not resume Copilot cleanly"
 [ "$(cat "$REPO/background-result" 2>/dev/null)" = LIVE_BACKGROUND_DONE ] \
   || fail "the unrelated attached background shell task did not complete"
 assert_absent "$REPO/.wake-drain-count" "an unrelated completion notification incorrectly triggered bin/fm-wake-drain.sh"
-jq -e '.notification_type == "shell_completed"' "$REPO/.notification-payload.json" >/dev/null \
-  || fail "the unrelated background completion did not emit Copilot's shell_completed notification"
+jq -e '.notification_type == "shell_completed"' "$REPO/.hook-notification-payload.json" >/dev/null \
+  || fail "the unrelated background completion did not emit Copilot's shell_completed notification through the tracked hook file"
 
 pass "Copilot live hooks: denial, stop continuation, watcher wake, and inert unrelated notifications ($COPILOT_VERSION)"
 
