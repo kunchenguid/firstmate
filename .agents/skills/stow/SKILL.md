@@ -180,7 +180,8 @@ Approved project-level destinations are not produced by stow: they ship normally
   Because this destination is local and untracked, it is also the JIT home for private conditional knowledge that no committed surface may hold.
 - An already-existing user-owned local on-demand note with an established trigger, after confirming it is untracked, private, and able to hold the quoted entry.
   The pass may add the entry to that existing owner but never creates a new note, skill, or trigger for this purpose.
-- A project's existing committed `AGENTS.md`, for project-intrinsic knowledge useful to nearly every session of that project, through a normal crewmate ship task using `bin/fm-ensure-agents-md.sh` and the project's registered delivery mode.
+- A project's existing committed `AGENTS.md`, for project-intrinsic knowledge useful to nearly every session of that project, through a normal crewmate ship task on the project's registered delivery mode.
+  The ship brief carries the memory-layout reconciliation step only when firstmate owns that repo's agent-memory convention, so route the knowledge into the memory file the project already keeps.
 - A project-level skill in the project's own repository, for situation-conditional knowledge within one project, through the same ship-task path.
 
 Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firstmate's own `AGENTS.md`, which is always-loaded for every fleet session; `docs/` alone, which is never agent-loaded on demand, though a skill body may point into docs for depth; and any committed surface for private content.
@@ -221,7 +222,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
-     Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
+     Route it through a normal ship task so a crewmate records it through the project's delivery path, into the memory file that project already keeps.
    - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
    - For task-scoped notes, inspect the item with `tasks-axi show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `tasks-axi update <id> --body-file <path>`.
      Use `--archive-body` when recoverability matters.

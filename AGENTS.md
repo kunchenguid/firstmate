@@ -260,7 +260,8 @@ Route durable knowledge to its most specific owner:
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
 Firstmate never writes a project's `AGENTS.md` directly.
-A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
+A crewmate records durable knowledge lazily through the project's selected delivery path, into the memory file that project already keeps and preserving that file's existing name and structure, preferring pointers to authoritative sources over copied detail.
+Reconciling a project's memory-file layout with `bin/fm-ensure-agents-md.sh` is separate authority that ship briefs withhold by default: scaffold with `--ensure-agents-md` only for a repo whose agent-memory convention firstmate owns, never to restructure a `CLAUDE.md` another team maintains.
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for its memory curation, knowledge routing, and persistence of the open work records this session is holding; it files and corrects only the open work that session is holding, and never reconciles the backlog against repository or PR reality.
 

@@ -286,8 +286,10 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+ensure-agents-md on a scout brief|brief-refused-b5 some-proj --scout --ensure-agents-md|--ensure-agents-md applies only to ship briefs
+ensure-agents-md on a secondmate charter|brief-refused-b6 --secondmate --no-projects --ensure-agents-md|--ensure-agents-md applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and misplaced --ensure-agents-md are refused, never silently dropped"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -365,14 +367,20 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# The opted-in form is the one that may reconcile a project's memory-file
+# layout, so its authoring bar is asserted against a brief scaffolded WITH
+# --ensure-agents-md. The default form is covered by
+# test_project_memory_layout_authority_is_opt_in.
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --ensure-agents-md >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "bin/fm-ensure-agents-md.sh .\` in the worktree" "$brief" \
+    "opted-in project-memory contract lost the fm-ensure-agents-md.sh run step"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
@@ -380,6 +388,68 @@ test_ship_project_memory_wording() {
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+}
+
+# Reconciling a project's agent-memory FILE LAYOUT is authority firstmate only
+# has over repos whose convention it owns. A repo belonging to another team can
+# keep a CLAUDE.md its own maintainers wrote, and converting that file into an
+# @AGENTS.md pointer is a change they never asked for. The generated brief is
+# where that has to be settled: a worker who reads the brief carefully and obeys
+# it must not end up making the change, so the default brief hands over no
+# fm-ensure-agents-md.sh path at all and states the prohibition instead.
+test_project_memory_layout_authority_is_opt_in() {
+  local home id brief mode
+  home="$TMP_ROOT/memory-authority-home"
+  mkdir -p "$home/data"
+
+  # Every ship mode defaults to the no-authority form, including the exact
+  # command shape that produced the incident: a third-party repo, local-only.
+  for id_mode in "brief-memory-off-nm:no-mistakes" "brief-memory-off-dp:direct-PR" "brief-memory-off-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" merlin --mode "$mode" >/dev/null 2>&1 \
+      || fail "$id: default ship brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "bin/fm-ensure-agents-md.sh" "$brief" \
+      "$id: default brief still hands the worker a runnable fm-ensure-agents-md.sh path"
+    assert_grep "memory-file layout NOT firstmate-owned" "$brief" \
+      "$id: default brief did not declare that it grants no memory-layout authority"
+    assert_grep "do NOT create, rename, convert, replace, or delete" "$brief" \
+      "$id: default brief did not forbid restructuring the project memory files"
+    assert_grep "An existing \`CLAUDE.md\` stays exactly the file it is" "$brief" \
+      "$id: default brief did not protect an existing CLAUDE.md by name"
+    assert_grep "must be regenerated with \`--ensure-agents-md\`" "$brief" \
+      "$id: default brief did not name the flag that grants the authority"
+    assert_grep "do not add that step to this brief by hand" "$brief" \
+      "$id: default brief did not forbid hand-adding the step it withholds"
+    assert_grep "add the knowledge as ordinary content to that existing file, preserving its name, structure, and conventions" "$brief" \
+      "$id: default brief lost the instruction to record knowledge in the memory file the project already keeps"
+    assert_grep "Record only knowledge useful to almost every future session" "$brief" \
+      "$id: default brief lost the durable-knowledge bar"
+    assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
+      "$id: default brief lost pointer-over-copy guidance"
+    assert_grep "append a single \`note:\` line carrying that knowledge to the status file rule 4 names" "$brief" \
+      "$id: default brief left the no-memory-file report directive without a channel"
+    assert_grep "A single \`note:\` line is permitted for exactly one purpose" "$brief" \
+      "$id: status protocol did not permit the note: line the project-memory section requires"
+    assert_grep "No step-by-step FYI progress lines" "$brief" \
+      "$id: the note: permission weakened the ban on FYI progress lines"
+    assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+      "$id: note: leaked into the enumerated status states instead of staying one permitted line"
+  done
+
+  # The opt-in restores the reconciling form for a repo firstmate does own.
+  id="brief-memory-on-lo"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode local-only --ensure-agents-md >/dev/null 2>&1 \
+    || fail "$id: opted-in ship brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "scaffolded with \`--ensure-agents-md\`" "$brief" \
+    "$id: opted-in brief did not record which flag granted the authority"
+  assert_grep "bin/fm-ensure-agents-md.sh .\` in the worktree" "$brief" \
+    "$id: opted-in brief lost the fm-ensure-agents-md.sh run step"
+  assert_no_grep "memory-file layout NOT firstmate-owned" "$brief" \
+    "$id: opted-in brief still carries the no-authority declaration"
+  pass "fm-brief.sh: project memory-layout authority is off by default and opt-in per task"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -751,6 +821,8 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "you may host the Lavish review loop yourself" "$brief" \
     "scout brief must mention the option to host a Lavish review loop"
+  assert_no_grep "A single \`note:\` line is permitted" "$brief" \
+    "scout scaffold carries a note: permission whose only purpose is a project-memory section it does not have"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -759,6 +831,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
+  assert_no_grep "A single \`note:\` line is permitted" "$brief" \
+    "secondmate charter carries a note: permission whose only purpose is a project-memory section it does not have"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
@@ -772,6 +846,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_project_memory_layout_authority_is_opt_in
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

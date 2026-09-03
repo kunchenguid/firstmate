@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--ensure-agents-md]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -52,11 +52,28 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
+# Ship tasks include a project-memory section carrying the AGENTS.md authoring
+# bar: widely useful knowledge only, pointers over copied detail.
+# Reconciling a project's memory-FILE LAYOUT is a separate authority and is off
+# by default, because a repo firstmate does not own may keep a CLAUDE.md its own
+# maintainers wrote, and converting it into an @AGENTS.md pointer is a change
+# they never asked for. Without --ensure-agents-md the section instead forbids
+# running fm-ensure-agents-md.sh and forbids creating, renaming, converting, or
+# replacing AGENTS.md and CLAUDE.md, and directs durable knowledge into the
+# memory file the project already has, as it already is.
+# When that project keeps no memory file at all, the default section routes the
+# knowledge to firstmate as a single note: line on the task's status file; the
+# ship scaffold's status protocol permits that one line for that one purpose,
+# adding no state and relaxing nothing else about status appends.
+# --ensure-agents-md opts a ship brief back into the reconciling form: it runs
+# fm-ensure-agents-md.sh and adds that script's self-governance section when a
+# touched project AGENTS.md lacks it. Pass it only for a repo whose agent-memory
+# convention firstmate owns. Like --herdr-lab it must be explicit, because {TASK}
+# is filled after scaffolding and the caller-supplied repo string cannot reliably
+# identify whose repo this is; the default brief names the flag loudly so an
+# omitted opt-in is never silent.
+# It is refused on scout and secondmate scaffolds, which carry no project-memory
+# section, so a misplaced flag fails rather than being silently dropped.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -108,6 +125,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+ENSURE_AGENTS_MD=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -129,6 +147,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --ensure-agents-md) ENSURE_AGENTS_MD=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -163,6 +182,14 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+# Only ship briefs carry a project-memory section, so the opt-in is refused
+# rather than dropped anywhere else: a silently ignored --ensure-agents-md would
+# read as authority the generated brief does not actually grant.
+if [ "$KIND" != ship ] && [ "$ENSURE_AGENTS_MD" -eq 1 ]; then
+  echo "error: --ensure-agents-md applies only to ship briefs; a scout writes a report and a secondmate charter carries no project-memory section" >&2
   exit 1
 fi
 
@@ -395,6 +422,35 @@ case "$MODE" in
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
+# Project-memory authority. Recording knowledge in the file a project already
+# keeps is always in scope; reconciling that project's memory-FILE LAYOUT is not,
+# and is granted only by an explicit --ensure-agents-md. The default section
+# states the prohibition and names the flag, so a worker reading carefully is
+# steered away from the conversion rather than towards it.
+if [ "$ENSURE_AGENTS_MD" -eq 1 ]; then
+IFS= read -r -d '' MEMORY_SECTION <<EOF || true
+# Project memory
+This brief was explicitly scaffolded with \`--ensure-agents-md\`: firstmate owns this repo's agent-memory convention, so reconciling its memory-file layout is in scope for this task.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Record only project knowledge useful to almost every future session.
+For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+EOF
+else
+IFS= read -r -d '' MEMORY_SECTION <<'EOF' || true
+# Project memory - memory-file layout NOT firstmate-owned
+**HARD SAFETY GATE:** this brief grants no authority over this project's agent-memory file layout.
+Do NOT run `fm-ensure-agents-md.sh` here, and do NOT create, rename, convert, replace, or delete `AGENTS.md` or `CLAUDE.md`.
+An existing `CLAUDE.md` stays exactly the file it is. It belongs to this project's own maintainers, and turning it into an `@AGENTS.md` pointer is a change they never asked for.
+If this task produced durable project-intrinsic knowledge and the project already keeps a memory file, add the knowledge as ordinary content to that existing file, preserving its name, structure, and conventions.
+Record only knowledge useful to almost every future session, and prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If the project keeps no memory file, do not create one: append a single `note:` line carrying that knowledge to the status file rule 4 names, so it reaches firstmate instead.
+If firstmate does own this repo's memory-file convention, the brief must be regenerated with `--ensure-agents-md`; do not add that step to this brief by hand.
+EOF
+fi
+MEMORY_SECTION=${MEMORY_SECTION%$'\n'}
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -423,6 +479,9 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   A single \`note:\` line is permitted for exactly one purpose - carrying durable project
+   knowledge to firstmate when the Project memory section sends you here because the project
+   keeps no memory file - and it authorises no other use of \`note:\`.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
@@ -440,12 +499,7 @@ $RULE1
 
 $INBOX_SECTION
 
-# Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$MEMORY_SECTION
 
 $DOD
 EOF
