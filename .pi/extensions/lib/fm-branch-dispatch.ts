@@ -34,6 +34,20 @@ export interface UnreadWakeScope {
    */
   eligibleSeqs: string[];
   /**
+   * The exact task ids the eligible signal/stale rows name (a signal row by
+   * its status-log key, a stale row through the task metadata recording that
+   * endpoint). The branch may report only these tasks, or `fleet`, while it
+   * handles the wake; a task it merely remembers is refused (docs/
+   * pi-supervision-branch.md "Autonomy"). Empty for a heartbeat.
+   */
+  eligibleTasks: string[];
+  /**
+   * Every task with a live state/<task>.meta at scan time. A heartbeat review
+   * may report any of them; a task with no live record cannot receive an
+   * outcome.
+   */
+  liveTasks: string[];
+  /**
    * True only when this scan itself is untrustworthy: the queue or its
    * metadata could not be read, a line fails the structural tab-field check,
    * or an unresolvable signal/stale row was found. False whenever the scan
@@ -47,8 +61,24 @@ export interface UnreadWakeScope {
   corrupted: boolean;
 }
 
-const EMPTY_SCOPE: UnreadWakeScope = { status: "empty", eligible: false, projects: [], eligibleSeqs: [], corrupted: false };
-const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, projects: [], eligibleSeqs: [], corrupted: true };
+const EMPTY_SCOPE: UnreadWakeScope = {
+  status: "empty",
+  eligible: false,
+  projects: [],
+  eligibleSeqs: [],
+  eligibleTasks: [],
+  liveTasks: [],
+  corrupted: false,
+};
+const UNSAFE_SCOPE: UnreadWakeScope = {
+  status: "unsafe",
+  eligible: false,
+  projects: [],
+  eligibleSeqs: [],
+  eligibleTasks: [],
+  liveTasks: [],
+  corrupted: true,
+};
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
 // (docs/pi-supervision-branch.md "Autonomy"; docs/watcher-continuity.md
@@ -92,6 +122,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
+  // The task id behind each key a signal or stale row may carry: the task id
+  // itself, or the endpoint its metadata records.
+  const taskByKey = new Map<string, string>();
+  const liveTasks: string[] = [];
   try {
     for (const name of readdirSync(state)) {
       if (!name.endsWith(".meta")) continue;
@@ -99,9 +133,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      liveTasks.push(task);
       if (project) {
         metadata.set(task, project);
-        if (window) metadata.set(window, project);
+        taskByKey.set(task, task);
+        if (window) {
+          metadata.set(window, project);
+          taskByKey.set(window, task);
+        }
       }
     }
   } catch {
@@ -109,6 +148,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   }
 
   const eligibleSeqs: string[] = [];
+  const eligibleTasks = new Set<string>();
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -126,18 +166,21 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       continue;
     }
     let project = "";
+    let task = "";
     if (kind === "signal") {
-      const task = key.replace(/\.(?:status|turn-ended)$/, "");
+      task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
     } else if (kind === "stale") {
+      task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
       return UNSAFE_SCOPE;
     }
-    if (!project) return UNSAFE_SCOPE;
+    if (!project || !task) return UNSAFE_SCOPE;
     projects.add(project);
+    eligibleTasks.add(task);
     eligibleSeqs.push(seq);
   }
   const eligible = eligibleSeqs.length > 0;
@@ -148,7 +191,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   // empty eligible set, so reading eligibility off the claim set rather than
   // off the heartbeat flag changes no pre-existing outcome and keeps a
   // heartbeat from being offered with nothing to hand over.)
-  return { status: eligible ? "safe" : "unsafe", eligible, projects: [...projects], eligibleSeqs, corrupted: false };
+  return {
+    status: eligible ? "safe" : "unsafe",
+    eligible,
+    projects: [...projects],
+    eligibleSeqs,
+    eligibleTasks: [...eligibleTasks],
+    liveTasks,
+    corrupted: false,
+  };
 }
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a

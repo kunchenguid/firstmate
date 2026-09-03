@@ -328,6 +328,27 @@ test_missing_index_self_heals_on_first_drain() {
   pass "a missing outcome index self-heals on the first drain and suppresses its handled status"
 }
 
+# The rebuild recreates the caches from lifetime history; a task teardown
+# already removed (no record, no status log) must not get its footprint back.
+test_index_rebuild_skips_a_retired_task() {
+  local dir state
+  dir=$(make_case index-rebuild-retired)
+  state="$dir/state"
+  printf 'working: still going\n' > "$state/live.status"
+  printf '%s\n' \
+    '{"seq":1,"epoch":1700000000,"task":"retired","wake":"","verdict":"captain","summary":"merged long ago","silent":false,"statusEndpoint":0,"statusIdent":"-"}' \
+    '{"seq":2,"epoch":1700000001,"task":"live","wake":"","verdict":"routine","summary":"healthy","silent":false,"statusEndpoint":0,"statusIdent":"-"}' \
+    > "$state/branch-outcomes.jsonl"
+  printf '2\n' > "$state/.branch-outcomes-cursor"
+  FM_STATE_OVERRIDE="$state" "$OUTCOMES" processed-init > "$dir/init.out" 2>&1 \
+    || fail "processed-init failed: $(cat "$dir/init.out")"
+  [ -f "$state/.branch-outcome-index-ready" ] || fail "rebuild did not publish the ready marker"
+  [ -f "$state/.live.branch-outcome-index" ] || fail "rebuild skipped a task that still has a status log"
+  [ ! -e "$state/.retired.branch-outcome-index" ] \
+    || fail "rebuild resurrected the outcome index of a task with no record and no status log"
+  pass "outcome index rebuild leaves a retired task without an index"
+}
+
 test_uncovered_event_surfaces_on_first_drain_without_index() {
   local dir state out body
   dir=$(make_case index-selfheal-uncovered)
@@ -516,6 +537,7 @@ test_output_failure_does_not_commit_the_backstop_receipt
 test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
 test_missing_index_self_heals_on_first_drain
+test_index_rebuild_skips_a_retired_task
 test_uncovered_event_surfaces_on_first_drain_without_index
 test_malformed_outcome_store_fails_closed_without_pi_advice
 test_held_lock_mode_rejects_an_unlocked_caller

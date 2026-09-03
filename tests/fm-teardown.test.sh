@@ -569,6 +569,9 @@ test_local_only_fork_remote_allows() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
+  # The supervision branch's bounded per-task outcome cache is a footprint of
+  # the retired task, not a record anything reads after it is gone.
+  printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -577,6 +580,21 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
+    || fail "fork-allow: teardown left the task's branch outcome index behind"
+  # The supervision branch reports the teardown it just performed AFTER the
+  # task's records are gone (bin/fm-branch-prompt.sh); that report must be
+  # stored, must publish its ready sequence, and must not recreate the index.
+  post_seq=$(FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-x1 --verdict captain --summary 'PR merged and cleaned up') \
+    || fail "fork-allow: post-teardown branch report was refused"
+  [ "$post_seq" = 1 ] || fail "fork-allow: post-teardown branch report got seq $post_seq, expected 1"
+  grep -q '"task":"task-x1"' "$case_dir/state/branch-outcomes.jsonl" \
+    || fail "fork-allow: post-teardown branch report was not stored"
+  [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
+    || fail "fork-allow: post-teardown branch report recreated the retired task index"
+  [ "$(cat "$case_dir/state/.branch-outcome-index-ready")" = 1 ] \
+    || fail "fork-allow: post-teardown branch report did not publish its ready sequence"
   jq -e --arg id task-x1 '
     .schema == "fm-secondmate-home-summary.v1"
     and all(.endpoints[]; .id != $id)

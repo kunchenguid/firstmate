@@ -44,6 +44,11 @@
 #     before append and published only after the cache update; processed-init
 #     rebuilds every cache before publishing it, so interruption or upgrade
 #     fails closed without making each drain scan lifetime history.
+#     bin/fm-teardown.sh removes a retired task's cache with its other records,
+#     and both append and the rebuild skip the cache for a task that has
+#     neither a live meta nor a status log (the outcome itself is still
+#     stored), so the branch's report of a teardown it just performed leaves
+#     no index behind.
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
@@ -264,6 +269,11 @@ rebuild_outcome_indexes() {
   ' "$STORE") || return 1
   while IFS=$(printf '\t') read -r task seq epoch endpoint ident; do
     [ -n "$task" ] || continue
+    # A retired task (no live record, no status log) has no reader for its
+    # cache: the drain backstop compares an index against that task's status
+    # log, which is gone with the task. Rebuilding it would only resurrect the
+    # footprint teardown just removed.
+    [ -e "$STATE/$task.meta" ] || [ -e "$STATE/$task.status" ] || continue
     if [ -z "$endpoint" ] || [ -z "$ident" ]; then
       f="$STATE/$task.status"
       endpoint=0
@@ -460,7 +470,17 @@ case "$CMD" in
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
       "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
-    if ! write_outcome_index "$TASK" "$SEQ" || ! publish_outcome_index_ready "$SEQ"; then
+    # A task with neither a live meta nor a status log is retired: the branch
+    # reports the teardown it just performed, and writing the index here would
+    # recreate the footprint teardown removed. The outcome itself is still
+    # stored and delivered; only the reader-less cache is skipped.
+    if { [ -e "$STATE/$TASK.meta" ] || [ -e "$STATE/$TASK.status" ]; } \
+        && ! write_outcome_index "$TASK" "$SEQ"; then
+      fm_lock_release "$LOCK"
+      echo "error: outcome was stored but its bounded task index could not be updated" >&2
+      exit 1
+    fi
+    if ! publish_outcome_index_ready "$SEQ"; then
       fm_lock_release "$LOCK"
       echo "error: outcome was stored but its bounded task index could not be updated" >&2
       exit 1
