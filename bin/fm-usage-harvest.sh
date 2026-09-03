@@ -269,7 +269,7 @@ LEDGER_LOCK_HELD=0
 harvest_cleanup() {
   local rc=$?
   [ "$LEDGER_LOCK_HELD" != 1 ] || fm_lock_release "$LEDGER_LOCK" || true
-  [ -z "$REFDIR" ] || rm -rf -- "$REFDIR"
+  [ -z "$REFDIR" ] || rm -rf -- "$REFDIR" || true
   return "$rc"
 }
 trap harvest_cleanup EXIT

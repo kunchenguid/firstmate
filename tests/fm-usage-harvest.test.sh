@@ -1458,6 +1458,105 @@ SH
   pass "teardown integration: one failed scan yields exactly one diagnostic"
 }
 
+# The staging directory is removed in teardown's exit trap, which runs under
+# set -eu, so a removal that fails must not become the run's own exit status:
+# teardown is fail-closed machinery whose callers read a non-zero exit as a
+# refusal that retained the task's records.
+teardown_stage_cleanup_failure_case() {
+  local proj wt id fb state data config out tmp holder status
+  id=usageharvstagerm1
+  proj="$TMP_ROOT/stagerm-proj"; wt="$TMP_ROOT/stagerm-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb="$TMP_ROOT/stagerm-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/treehouse"
+  tmp="$TMP_ROOT/stagerm-tmp"
+  holder="$tmp/holder"
+  mkdir -p "$holder"
+  # The staging directory itself stays writable, so the scan stages its row and
+  # the append reads it back normally, but its PARENT is not, so removing the
+  # staging directory at exit fails.
+  cat > "$fb/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *fm-usage-stage.XXXXXX)
+      mkdir -p "$holder/fm-usage-stage.pinned" || exit 1
+      chmod 500 "$holder"
+      printf '%s\\n' "$holder/fm-usage-stage.pinned"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_MKTEMP" "\$@"
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/mktemp"
+  state="$TMP_ROOT/stagerm-state"; config="$TMP_ROOT/stagerm-config"; data="$TMP_ROOT/stagerm-data"
+  mkdir -p "$state" "$config" "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  printf 'working: scouting\n' > "$state/$id.status"
+
+  out=$(PATH="$fb:$PATH" TMPDIR="$tmp" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/stagerm-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/stagerm-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/stagerm-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  chmod 700 "$holder" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "a staging cleanup failure must not fail an otherwise complete teardown"$'\n'"$out"
+  assert_contains "$out" "teardown $id complete" "teardown still reports completion"
+  [ -s "$data/usage-ledger.jsonl" ] \
+    || fail "the completed run appended no row"$'\n'"$out"
+  pass "teardown integration: a failing staging cleanup cannot flip the exit status"
+}
+
+# The harvester removes its own ref directory in its exit trap, under the same
+# set -eu rules, so a removal that fails must not report a harvest that
+# actually appended its row as a failure teardown would warn about.
+harvest_refdir_cleanup_failure_case() {
+  local id=usageharvrefdir1 wt="$TMP_ROOT/.no-mistakes/wt-usageharvrefdir1"
+  local data home fb tmp holder out status
+  data=$(harvest_case "$id" claude "$wt" claude-meta-model default)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  fb="$TMP_ROOT/refdir-fakebin"
+  tmp="$TMP_ROOT/refdir-tmp"
+  holder="$tmp/holder"
+  mkdir -p "$fb" "$holder"
+  # The ref directory is writable, so the window refs are stamped as usual, but
+  # its parent is not, so removing it at exit fails.
+  cat > "$fb/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *fm-usage-harvest.XXXXXX)
+      mkdir -p "$holder/fm-usage-harvest.pinned" || exit 1
+      chmod 500 "$holder"
+      printf '%s\\n' "$holder/fm-usage-harvest.pinned"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_MKTEMP" "\$@"
+SH
+  chmod +x "$fb/mktemp"
+
+  out=$(PATH="$fb:$PATH" TMPDIR="$tmp" "$HARVEST" "$id" 2>&1)
+  status=$?
+  chmod 700 "$holder" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "a ref-directory cleanup failure must not report a successful harvest as failed"$'\n'"$out"
+  assert_contains "$(cat "$data/usage-ledger.jsonl")" "\"task\":\"$id\"" \
+    "the harvest that reported success appended its row"
+  pass "usage harvest: a failing ref-directory cleanup cannot flip the exit status"
+}
+
 teardown_case() {
   local proj wt id fb state data config out
   id=usageharvtd1
@@ -1888,4 +1987,6 @@ teardown_nested_child_case
 teardown_pool_order_case
 teardown_refusal_case
 teardown_single_diagnostic_case
+teardown_stage_cleanup_failure_case
+harvest_refdir_cleanup_failure_case
 teardown_case

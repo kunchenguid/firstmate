@@ -320,7 +320,7 @@ teardown_release_locks() {
     CONTROL_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
-  [ -z "$USAGE_STAGE_DIR" ] || rm -rf -- "$USAGE_STAGE_DIR"
+  [ -z "$USAGE_STAGE_DIR" ] || rm -rf -- "$USAGE_STAGE_DIR" || true
   USAGE_STAGE_DIR=
   return "$status"
 }
