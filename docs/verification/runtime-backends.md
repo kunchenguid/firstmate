@@ -204,6 +204,16 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+The adapter-source refusal boundary was reverified on 2026-08-25 with GNU bash 3.2.57(1)-release (arm64-apple-darwin25), the stock macOS shell where a failed `.` builtin can abort before a trailing `|| return 1`.
+
+```sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh
+```
+
+Observed output included `FM_TEST_END exit=0 duration_ms=216034 gate_skip=false`, `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`, and 58 `ok` results with no `not-ok` results.
+The 58-result teardown run includes a missing-Herdr-adapter case that exits non-zero, emits the existing `nothing was changed` refusal, and preserves the isolated copy and durable task records.
+The companion `tests/fm-backend-adapter-source.test.sh` regression covers missing and unreadable adapter files across tmux, Herdr, Zellij, Orca, and cmux, proving that each caller reaches its refusal branch.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
