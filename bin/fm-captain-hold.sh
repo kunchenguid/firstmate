@@ -160,6 +160,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-done-claim-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-done-claim-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -350,18 +353,22 @@ meta_value() {  # <meta> <key>
 }
 
 origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
+  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last
   open=$(status_open_decisions "$status_file")
   [ -n "$open" ] || return 0
   [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
+  # A task that has finished has no open decisions left to fold. Only a
+  # terminal line the task spoke in its own voice says it finished, which
+  # bin/fm-done-claim-lib.sh owns for every reader: a routed phase closing with
+  # `done [key=<slug>]` would otherwise silently drop the task's still-open
+  # decisions - including the very keyed decisions that phase belongs to.
   if [ "$kind" != secondmate ]; then
     last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
+    if fm_done_claim_own_terminal_verb "$last" >/dev/null; then
+      return 0
+    fi
   fi
   printf '%s' "$open"
 }

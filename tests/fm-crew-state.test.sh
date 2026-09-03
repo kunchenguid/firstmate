@@ -950,6 +950,93 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
 }
 
+# A TERMINAL verb only reports the whole task terminal when the task spoke it in
+# its own voice. bin/fm-brief.sh instructs workers to close a routed phase with
+# `done [key=<work-slug>]`; that closes one sub-event, and reading it as the
+# task's own completion reports a whole task finished on a line that never said
+# so. The unkeyed positive control is what stops this passing vacuously.
+test_a_keyed_done_is_not_the_tasks_own_terminal_state() {
+  reset_fakes
+  local d out
+  d=$(new_case keyed-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-kt
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-kt.meta" "window=fm:fm-feat-kt" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working [key=docs]: starting\ndone [key=docs]: that routed phase landed\n' \
+    > "$d/state/feat-kt.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-kt
+  out=$(run_crew_state "$d" feat-kt)
+  assert_not_contains "$out" "state: done" "a closed routed phase reported the whole task done"
+  assert_not_contains "$out" "state: failed" "a closed routed phase reported the whole task failed"
+
+  reset_fakes
+  d=$(new_case unkeyed-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-ut
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ut.meta" "window=fm:fm-feat-ut" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: the work did not land\n' > "$d/state/feat-ut.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ut
+  out=$(run_crew_state "$d" feat-ut)
+  assert_contains "$out" "state: failed" "the task's own terminal line must still be its state"
+  assert_contains "$out" "source: status-log" "the task's own terminal line comes from the status log"
+  pass "a keyed sub-event is not the task's terminal state, and its own line still is"
+}
+
+# EXHAUSTIVENESS, and what it does and does not prove. "Is this line the task
+# speaking its own terminal outcome" has ONE owner in bin/fm-done-claim-lib.sh
+# because five private answers to it are how the fleet's readers came to
+# disagree about a single line. This feeds one keyed `done [key=...]` into a
+# fixture and asserts that the task-level answers AGREE across separate
+# consumers - the current-state reader and the fleet snapshot's current_state -
+# so a reader that answers privately shows up as a disagreement rather than as
+# silence.
+#
+# What it proves: the covered readers agree. What it cannot prove: that a reader
+# added later calls the shared predicate at all. That is why the predicate has
+# one owner and every call site points at it. The other consumers of the same
+# question are pinned by their own suites, each with the same keyed/unkeyed
+# pair: the two upward delivery paths in tests/fm-inactive-reconcile.test.sh and
+# the captain-decision fold in tests/fm-captain-hold-lifecycle.test.sh.
+test_every_reader_agrees_about_a_keyed_terminal_line() {
+  local d out snapshot state
+  for state in keyed unkeyed; do
+    reset_fakes
+    d=$(new_case "agree-$state")
+    make_repo_on_branch "$d/wt" "fm/feat-ag-$state"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-ag.meta" "window=fm:fm-feat-ag" "worktree=$d/wt" "kind=ship" "harness=claude"
+    if [ "$state" = keyed ]; then
+      printf 'done [key=docs]: that routed phase landed\n' > "$d/state/feat-ag.status"
+    else
+      printf 'done: the whole task finished\n' > "$d/state/feat-ag.status"
+    fi
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-ag
+    out=$(run_crew_state "$d" feat-ag)
+    snapshot=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+      FM_DATA_OVERRIDE="$d/data" "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>/dev/null \
+      | jq -r '.. | objects | select(.id? == "feat-ag") | .current_state.state // ""' | head -1)
+    if [ "$state" = keyed ]; then
+      assert_not_contains "$out" "state: done" "the current-state reader read a closed routed phase as done"
+      case "$snapshot" in
+        done|done-unverified) fail "the fleet snapshot read a closed routed phase as $snapshot" ;;
+      esac
+    else
+      assert_contains "$out" "state: done" "the task's own terminal line stopped being its state"
+      case "$snapshot" in
+        done|done-unverified) ;;
+        *) fail "the fleet snapshot disagreed about the task's own terminal line: '$snapshot'" ;;
+      esac
+    fi
+  done
+  pass "the current-state reader and the fleet snapshot agree about a keyed terminal line"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -1596,6 +1683,8 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_a_keyed_done_is_not_the_tasks_own_terminal_state
+test_every_reader_agrees_about_a_keyed_terminal_line
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

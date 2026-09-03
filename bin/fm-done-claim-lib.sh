@@ -175,6 +175,40 @@ fm_done_claim_own_voice() {  # <trimmed-line> <bare-verb>
   [ "$head" = "${2:-}" ]
 }
 
+# The one owner of "is this status line the task speaking its own TERMINAL
+# OUTCOME". Prints the bare verb (`done` or `failed`) and returns 0; returns 1
+# for every other line, including a line whose verb IS terminal but is spoken by
+# a sub-event. Every reader that decides a task has finished - the current-state
+# reader, both upward delivery paths in bin/fm-inactive-reconcile.sh, and the
+# captain-hold decision fold - calls this rather than re-deriving the answer
+# from `status_line_verb`, which reads through decoration by design. Five
+# private copies of this question are how the readers came to disagree about one
+# line; there is one implementation so they cannot again.
+#
+# SCOPE BOUNDARY, and it is narrow on purpose. This is for TERMINAL OUTCOMES
+# only. The same key-blindness exists in readers of `paused`, `blocked` and
+# `needs-decision`, and there it is load-bearing rather than defective: a routed
+# phase that is blocked or paused genuinely IS a supervision concern of the task
+# it belongs to, and the keyed-decision fold is built on keys meaning exactly
+# that. Only a terminal outcome makes an untrue statement about the whole task
+# when a sub-event speaks it. Do not "finish the job" by widening this to the
+# other verbs; that would be a behaviour change resting on a false premise.
+fm_done_claim_own_terminal_verb() {  # <status-line>
+  local line=${1:-} trimmed
+  trimmed=${line#"${line%%[![:space:]]*}"}
+  case "$trimmed" in
+    done*)
+      fm_done_claim_own_voice "$trimmed" 'done' || return 1
+      printf 'done'
+      ;;
+    failed*)
+      fm_done_claim_own_voice "$trimmed" 'failed' || return 1
+      printf 'failed'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # The task's STANDING terminal claim, or empty when it has none. A status log is
 # an append-only event log, so the newest `done:` the task itself spoke is the one
 # under test; earlier claims were superseded by whatever the worker did next.

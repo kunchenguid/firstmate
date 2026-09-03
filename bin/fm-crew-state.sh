@@ -152,16 +152,27 @@ log_last_line() {
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
 map_log_state() {  # <line>
+  local terminal
   if status_is_paused "$1"; then
     echo paused
+    return
+  fi
+  # A TERMINAL verb is only this task's outcome when the task spoke it in its
+  # own voice; bin/fm-done-claim-lib.sh owns that question for every reader.
+  # A routed phase closing with `done [key=<slug>]` says one sub-event finished,
+  # not that the task did, and reading it as `done` would report a whole task
+  # complete on a line that never claimed as much. The non-terminal verbs below
+  # stay deliberately key-blind: a routed phase that is blocked or paused really
+  # is a supervision concern of the task it belongs to.
+  if terminal=$(fm_done_claim_own_terminal_verb "$1"); then
+    echo "$terminal"
     return
   fi
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    done)           echo "done" ;;
-    failed)         echo failed ;;
+    done|failed)    echo unknown ;;
     *)              echo unknown ;;
   esac
 }
@@ -317,7 +328,7 @@ nm_gate_findings_count() {
 # decided here - emit()'s guard still downgrades an unverified claim - this only
 # answers "did the worker report a PR", which is what the ci-step override needs.
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
+  [ "$(fm_done_claim_own_terminal_verb "$LOG_LINE" || true)" = "done" ] || return 1
   if fm_done_claim_parse "$LOG_LINE" && [ -n "$FM_DONE_CLAIM_PR" ]; then
     return 0
   fi

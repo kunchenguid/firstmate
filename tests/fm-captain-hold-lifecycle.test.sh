@@ -1268,6 +1268,34 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# A finished task has no open decisions left to fold, but only a terminal line
+# the task spoke in its OWN voice says it finished. A routed phase closing with
+# `done [key=<slug>]` closes one sub-event, and folding the task away on it would
+# let `complete --none` attest that nothing is open while the captain's questions
+# still stand. The unkeyed control proves the fold still closes on the real thing.
+test_a_keyed_phase_close_does_not_fold_away_open_decisions() {
+  local home id
+  home=$(make_home keyed-close-decisions)
+  id=sample-systems-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample systems" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  cat > "$home/state/$id.status" <<'EOF'
+working: report drafted
+needs-decision [key=route]: choose route north or route south
+done [key=docs]: that routed phase landed
+EOF
+  if run_captain "$home" complete "$id" --none > "$home/keyed.out" 2> "$home/keyed.err"; then
+    fail "a closed routed phase folded the task's open captain call away and attested --none"
+  fi
+
+  printf 'done: the whole task finished\n' >> "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none > "$home/own.out" 2> "$home/own.err" \
+    || fail "the task's own terminal line did not fold its open decisions away: $(cat "$home/own.err")"
+  pass "only the task's own terminal line folds its open captain decisions away"
+}
+
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
 # work must never be the act that closes the captain's own row: the deliverable
@@ -1544,6 +1572,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_a_keyed_phase_close_does_not_fold_away_open_decisions
 test_teardown_never_closes_a_captain_held_task
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog

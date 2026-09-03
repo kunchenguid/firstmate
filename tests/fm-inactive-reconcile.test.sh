@@ -258,6 +258,33 @@ test_a_later_established_claim_corrects_the_parents_record() {
   pass "a claim established after it was reported unverified corrects the parent's record once"
 }
 
+# Both upward delivery paths must agree with the rest of the fleet about what a
+# terminal outcome is. A routed phase closing with `done [key=<slug>]` - the
+# shape bin/fm-brief.sh instructs - is one sub-event finishing, so it must not be
+# delivered upward as the child's completion by the ledger path, and it must not
+# make the crew-state backstop stand down as though the outcome were already
+# owned. The unkeyed control keeps both halves honest.
+test_a_keyed_phase_close_is_not_the_childs_terminal_outcome() {
+  make_world keyed-ledger; bind_secondmate local
+  write_child "$MATE" child 'done [key=docs]: that routed phase landed'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  ! grep -q 'child-outcome-child-' "$MAIN/state/mate.status" 2>/dev/null \
+    || fail "a closed routed phase was delivered upward as the child's outcome: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+
+  # The backstop must still see this child, because the ledger path does not own
+  # an outcome the child never stated.
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "the crew-state backstop stood down for a child whose ledger states no outcome: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+
+  make_world unkeyed-ledger; bind_secondmate local
+  write_child "$MATE" child 'failed: the work did not land'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -q '^failed \[key=child-outcome-child-failed-' "$MAIN/state/mate.status" \
+    || fail "the child's own terminal line was not delivered upward: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "a closed routed phase is neither delivered as the child's outcome nor allowed to silence the backstop"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -858,6 +885,7 @@ test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_ledger_delivery_downgrades_an_unestablished_claim
 test_a_later_established_claim_corrects_the_parents_record
+test_a_keyed_phase_close_is_not_the_childs_terminal_outcome
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

@@ -462,12 +462,11 @@ $unread
 EOF
   hold_unread_remainder "$current" "$through" "$held_back" "$snapshot" || return 1
 
-  # The count is part of the section, never a bare line on its own: with the cap
-  # set to 0 and only unrecognised lines unread, the loop above prints no header.
+  # The count is part of a section the loop above has already opened: the cap is
+  # clamped to a minimum of one and the counter resets per task, so the first
+  # surfaced line of every task always prints and a non-zero omission always has
+  # a header in front of it.
   if [ "$omitted" -gt 0 ]; then
-    if [ "$shown" -eq 0 ]; then
-      printf '%s\n' "$header" || return 1
-    fi
     printf 'UNREAD STATUS: %d more unrecognised line(s) held for the next drain; read them now in the task status log.\n' \
       "$omitted" || return 1
   fi

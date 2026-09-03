@@ -359,7 +359,9 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 
 # The whole terminal line a child's ledger ends in, or non-zero when the ledger
 # is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line.
+# not end in a terminal line the child spoke in its own voice. A routed phase
+# closing with `done [key=<slug>]` is a sub-event, not the child finishing, and
+# bin/fm-done-claim-lib.sh owns that distinction for every reader.
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
@@ -367,10 +369,8 @@ child_terminal_ledger_line() { # <status>
   case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
   snapshot=${snapshot%"$marker"}
   last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
-  case "$(status_line_verb "$last")" in
-    done|failed) printf '%s\n' "$last" ;;
-    *) return 1 ;;
-  esac
+  fm_done_claim_own_terminal_verb "$last" >/dev/null || return 1
+  printf '%s\n' "$last"
 }
 
 # Claim one already-delivered inactive fallback as the delivery of this ledger
@@ -407,7 +407,7 @@ report_child_ledger_locked() { # <id> <meta>
   local id=$1 meta=$2 status last previous state verb claim note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
-  state=$(status_line_verb "$last")
+  state=$(fm_done_claim_own_terminal_verb "$last") || return 0
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   # The same rule report_to_parent applies, at the other delivery path into the
@@ -525,8 +525,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
-  if [ -n "$self" ]; then
-    case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
+  if [ -n "$self" ] && fm_done_claim_own_terminal_verb "$last" >/dev/null; then
+    return 0
   fi
   # bin/fm-crew-state.sh reports an unverified terminal CLAIM as
   # `done-unverified`, and that is still a terminal outcome nobody has
