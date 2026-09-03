@@ -302,6 +302,18 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Fresh-pane execution readiness
+
+[`herdr-backend.md`](../herdr-backend.md#current-transport-behavior) owns the current startup-readiness contract.
+The portable regressions exercise the split-token marker through the adapter and drive `fm-spawn.sh` with deterministic delayed-ready and permanent-busy panes:
+
+```sh
+tests/fm-backend-herdr.test.sh
+tests/fm-spawn-herdr-shell-ready.test.sh
+```
+
+They prove that echoed command text cannot satisfy readiness, a delayed shell releases `treehouse get` only after the marker executes, and timeout or unreadable state fails closed without submitting `treehouse get`.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
