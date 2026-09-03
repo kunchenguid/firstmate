@@ -26,6 +26,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# An exported TASKS_AXI_BACKEND would outrank each case's .tasks.toml fixture
+# in fm_tasks_axi_backend, so the backend cases must start from a clean slate.
+unset TASKS_AXI_BACKEND || :
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
@@ -105,6 +109,53 @@ case "\${1:-}" in
     ;;
 esac
 exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+record_tasks_axi_calls() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+make_beads_tasks_axi_stub() {  # <case-dir> <id>
+  local case_dir=$1 id=$2
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+case "\${1:-}" in
+  --version)
+    printf '%s\n' '0.2.5'
+    ;;
+  update)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  show)
+    [ "\${2:-}" = "$id" ] || exit 1
+    if [ "\${3:-}" = --file ]; then
+      printf '%s\n' 'error: beads show failed' >&2
+      printf '%s\n' 'code: UNKNOWN' >&2
+      exit 1
+    fi
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$id"
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
@@ -371,13 +422,36 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   id=atomic-dispatch-b1
   case_dir=$(make_home dispatch-ok "$id")
   add_item "$case_dir" "$id"
+  cp "$ROOT/.tasks.toml" "$(home_of "$case_dir")/.tasks.toml"
+  record_tasks_axi_calls "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
   assert_contains "$out" "spawned $id" "spawn did not report success"
   assert_present "$(home_of "$case_dir")/state/$id.meta" "spawn published no record"
+  assert_grep "show $id --file $(backlog_of "$case_dir")" \
+    "$case_dir/tasks-axi-calls" \
+    "markdown dispatch did not pass the backlog file to show"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "spawn reported success with its backlog item still $(row_state "$case_dir" "$id")"
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
+}
+
+test_dispatch_omits_the_file_for_a_beads_show() {
+  local case_dir home id out
+  id=atomic-dispatch-beads-b1
+  case_dir=$(make_home dispatch-beads "$id")
+  home=$(home_of "$case_dir")
+  printf '%s\n' 'backend = "beads"' '[beads]' 'path = ".beads"' \
+    'prefix = "atomic"' > "$home/.tasks.toml"
+  make_beads_tasks_axi_stub "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "Beads spawn failed: $out"
+  assert_contains "$out" "spawned $id" "Beads spawn did not report success"
+  assert_grep "show $id" "$case_dir/tasks-axi-calls" \
+    "Beads dispatch did not probe the backlog row"
+  assert_no_grep "show $id --file" "$case_dir/tasks-axi-calls" \
+    "Beads dispatch passed the markdown file to show"
+  pass "dispatch omits the markdown file when probing a Beads backlog"
 }
 
 test_dispatch_refuses_a_pending_authoritative_close() {
@@ -2223,6 +2297,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 }
 
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_dispatch_omits_the_file_for_a_beads_show
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_refuses_a_blocked_row_before_creating_resources

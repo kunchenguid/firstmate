@@ -24,13 +24,15 @@
 # unresolvable configured data directory or incompatible tasks-axi instead
 # returns 2 so callers refuse before mutation.
 #
-# ADDRESSING. Every call passes `--file <data>/backlog.md` so the mutation lands
-# in the home that owns the task regardless of the caller's working directory,
-# and runs from that data directory's parent so the same home's `.tasks.toml`
-# supplies done_keep and the archive path. The parent of the data directory is
-# the addressing root rather than FM_HOME, so a home whose data directory is
-# relocated keeps its backlog and its archive together. A root with no
-# `.tasks.toml` gets tasks-axi's built-in defaults.
+# ADDRESSING. Every mutation call passes `--file <data>/backlog.md` so the
+# change lands in the home that owns the task regardless of the caller's
+# working directory, and runs from that data directory's parent so the same
+# home's `.tasks.toml` supplies done_keep and the archive path. Row probes pass
+# `--file` only for the markdown backend and otherwise run from the addressing
+# root so backend-owned state remains discoverable. The parent of the data
+# directory is the addressing root rather than FM_HOME, so a home whose data
+# directory is relocated keeps its backlog and its archive together. A root
+# with no `.tasks.toml` gets tasks-axi's built-in defaults.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -194,7 +196,7 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked title command_status
+  local data authorized_data=$1 file id=$2 out state held blocked title command_status root
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -214,8 +216,16 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   fi
-  out=$(cd "$(fm_backlog_root "$data")" 2>/dev/null && tasks-axi show "$id" \
-      --file "$file" 2>&1)
+  root=$(fm_backlog_root "$data") || {
+    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
+    return 1
+  }
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    out=$(cd "$root" 2>/dev/null && tasks-axi show "$id" \
+        --file "$file" 2>&1)
+  else
+    out=$(cd "$root" 2>/dev/null && tasks-axi show "$id" 2>&1)
+  fi
   command_status=$?
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
