@@ -477,8 +477,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
+    # true/working, done, stopped, or failed. A crew genuinely parked at a gate
+    # still gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced by each supervisor's span classification (fm-classify-lib.sh's
@@ -514,7 +514,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     # genuinely did not complete - so a stopped run gets its own terminal word.
     # Nothing else narrows: fm-classify-lib.sh's crew_absorb_class absorbs a
     # wake only for `working`/`paused`, which a cancelled run was not before
-    # this and is not now, and every other reader renders the word verbatim.
+    # this and is not now, and bin/fm-fleet-snapshot.sh's in-flight inventory
+    # check counts `stopped` as terminal alongside `done`/`failed`; every other
+    # reader renders the word verbatim. Accepted consequence: a cancelled run
+    # that is then abandoned gets no durable outcome record and no captain
+    # presentation from bin/fm-inactive-reconcile.sh, and shows only in the
+    # fleet table as stopped / run-step - the deliberate price of not asserting
+    # a failure that did not happen.
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;

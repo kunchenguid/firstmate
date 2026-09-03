@@ -728,7 +728,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.kind != "secondmate")
-         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed" or .current_state.state == "stopped"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
