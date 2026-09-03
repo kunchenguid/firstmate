@@ -892,6 +892,32 @@ assert_contains "$out" "ground-truth is missing planned packet inputs: C6" \
 assert_absent "$BENCH/freeze.json" "an incomplete private input set writes no freeze"
 pass "every planned packet and ground-truth input must exist before freezing"
 
+# The freeze walks with is_file(), which succeeds on a mode-000 regular file,
+# so hashing it must refuse by name rather than raise out of the gate.
+if [ "$(id -u)" != 0 ]; then
+  BENCH="$TMP_ROOT/freeze-unreadable-input"
+  write_plan "$BENCH"
+  write_freeze_inputs "$BENCH"
+  chmod 000 "$BENCH/packets/A1/packet.md"
+  out=$(run_gate "$BENCH" freeze) && status=0 || status=$?
+  expect_code 1 "$status" "a private input the gate cannot read is refused"
+  assert_not_contains "$out" "Traceback" "an unreadable private input is a verdict, not a crash"
+  assert_contains "$out" "benchmark evidence cannot be read" "the refusal names the unreadable input"
+  assert_contains "$out" "packets/A1/packet.md" "the refusal is file-specific"
+  assert_contains "$out" "BENCH_RESULT freeze refused" "the refusal still carries a verdict line"
+  assert_absent "$BENCH/freeze.json" "an unreadable private input writes no freeze"
+  chmod 644 "$BENCH/packets/A1/packet.md"
+  out=$(run_gate "$BENCH" freeze) || fail "the same inputs must freeze once readable: $out"
+  chmod 000 "$BENCH/packets/A1/packet.md"
+  out=$(run_gate "$BENCH" freeze-check) && status=0 || status=$?
+  chmod 644 "$BENCH/packets/A1/packet.md"
+  expect_code 1 "$status" "a private input that becomes unreadable withdraws the freeze"
+  assert_not_contains "$out" "Traceback" "rechecking an unreadable private input is a verdict, not a crash"
+  assert_contains "$out" "benchmark evidence cannot be read" "the recheck names the unreadable input"
+  assert_contains "$out" "BENCH_RESULT freeze-check refused" "the recheck still carries a verdict line"
+  pass "an unreadable private input refuses by name instead of crashing the freeze"
+fi
+
 BENCH="$TMP_ROOT/freeze-late"
 write_plan "$BENCH"
 printf '{"K7":"Fable 5 High"}\n' > "$BENCH/key.json"
@@ -3413,6 +3439,20 @@ assert_contains "$out" "subject to the captain's explicit word" "promotion still
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
 
+# promote-evaluate never runs check_plan, so a baseline declared with no
+# preregistered strata reaches the veto with nothing to average.
+BENCH="$TMP_ROOT/promote-empty-strata"
+write_plan "$BENCH" \
+  'plan["tracks"]["A"]["baseline_packets"] = []; plan.pop("samples_per_baseline", None)'
+write_results "$BENCH" sweep
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "a baseline with no veto strata cannot promote"
+assert_not_contains "$out" "Traceback" "an unmeasurable baseline is a verdict, not a crash"
+assert_contains "$out" "promote.A.baseline_veto fail" "the veto refuses by name on the affected track"
+assert_contains "$out" "no preregistered veto strata" "the refusal names the missing strata"
+assert_contains "$out" "BENCH_RESULT promote-evaluate refused" "the refusal still carries a verdict line"
+pass "a declared baseline with no veto strata refuses instead of dividing by zero"
+
 BENCH="$TMP_ROOT/promote-panel-tamper"
 write_plan "$BENCH"
 write_results "$BENCH" sweep
@@ -3675,6 +3715,8 @@ ALLOWANCE
   assert_contains "$out" "launch evidence is unreadable, symlinked, or a special file" \
     "preflight names the evidence the spawn boundary would reject"
   assert_contains "$out" "packets/A1/fixture.bin" "the refusal names the symlinked input"
+  assert_contains "$out" "BENCH_NOTE preflight the prior clearance is revoked" \
+    "an operator whose field was cleared is told the clearance was withdrawn"
   assert_contains "$out" "BENCH_NOTE preflight no entrant may launch" "no field is cleared"
   assert_absent "$BENCH/preflight.receipt" "no receipt is minted over evidence the launch check refuses"
   out=$(guard "bench-b1-k7" "$BENCH")
