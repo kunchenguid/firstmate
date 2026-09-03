@@ -159,10 +159,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
+CAPTAIN_CONTROL_LOCK=
+CAPTAIN_CONTROL_LOCK_HELD=0
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
+  fi
+  if [ "$CAPTAIN_CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CAPTAIN_CONTROL_LOCK" || true
+    CAPTAIN_CONTROL_LOCK_HELD=0
   fi
 }
 trap captain_hold_cleanup EXIT
@@ -193,6 +199,12 @@ validate_one_line() {  # <label> <value>
   case "$value" in
     *$'\n'*|*$'\r'*) fail "$label must be one line" ;;
   esac
+}
+
+acquire_task_control_lock() {  # <task-id>
+  CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
+  fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
+  CAPTAIN_CONTROL_LOCK_HELD=1
 }
 
 sha256_text() {  # <text>
@@ -428,6 +440,7 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
+  acquire_task_control_lock "$id"
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
@@ -514,6 +527,7 @@ command_answer() {
   done
   validate_slug task-id "$id"
   load_decision "$decision_file"
+  acquire_task_control_lock "$id"
   require_tasks_axi
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
@@ -936,7 +950,9 @@ EOF
 # two comma-separated listing fields are read - both are slugs that precede any
 # quoted title - so a title containing commas or quotes cannot shift them.
 open_task_ids() {
-  tasks_axi list 2>/dev/null | awk -F, '
+  local data
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  fm_backlog_row_list "$data" 2>/dev/null | awk -F, '
     /^  [A-Za-z0-9._-]+,/ {
       id = $1
       sub(/^ +/, "", id)

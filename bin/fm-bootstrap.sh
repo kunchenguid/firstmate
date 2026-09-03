@@ -1192,7 +1192,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta meta_lock id row label has_record=0 gate_status
+  local marker meta control_lock meta_lock id row label has_record=0 gate_status
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1223,8 +1223,13 @@ backlog_record_reconcile() {
       return 2
     fi
     label=$(basename "$marker" .backlog-close)
+    control_lock="$STATE/.control-$label.lock"
     meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
-    fm_lock_try_acquire "$meta_lock" || continue
+    fm_lock_try_acquire "$control_lock" || continue
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      fm_lock_release "$control_lock"
+      continue
+    fi
     if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
       case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
         closed)
@@ -1247,6 +1252,7 @@ backlog_record_reconcile() {
       echo "BACKLOG_RECONCILE: $label: recorded backlog close could not be replayed: $FM_BACKLOG_TRANSITION_ERROR"
     fi
     fm_lock_release "$meta_lock"
+    fm_lock_release "$control_lock"
   done
 
   # A home that owns no records has nothing to pair, so it never pays for a

@@ -219,6 +219,18 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   fi
 }
 
+fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
+  local data=$1 file root
+  shift
+  file=$(fm_backlog_file "$data") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    (cd "$root" 2>/dev/null && tasks-axi list "$@" --file "$file" 2>&1)
+  else
+    (cd "$root" 2>/dev/null && tasks-axi list "$@" 2>&1)
+  fi
+}
+
 fm_backlog_row_probe() {  # <data-dir> <id>
   local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -887,6 +899,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE
+    if [ "${row_state%% *}" != done ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      mode=retain
+    fi
   else
     if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
       FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
