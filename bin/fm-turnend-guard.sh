@@ -352,10 +352,11 @@ autoarm_owns_recovery() {
 }
 
 terminal_fail_open() {
-  local pid role old_session old_count
+  local pid role old_session old_count alarm_rc
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
   failure_episode_verified || return 1
-  [ ! -e "$FAILURE_ALARM" ] || return 1
+  fm_autoarm_failure_alarm_current \
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" && return 1
   # A live open generation claim is a concurrent recovery decision to step
   # aside for, exactly like the legacy live-owner case below.
   fm_autoarm_claim_open "$STATE" "$GRACE" && return 2
@@ -391,7 +392,8 @@ terminal_fail_open() {
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if [ "$role" != terminal-check ] || [ "$old_session" != "$SESSION_ID" ] \
     || [ "$old_count" -le "$BLOCK_BUDGET" ] || ! failure_episode_verified \
-    || [ -e "$FAILURE_ALARM" ]; then
+    || fm_autoarm_failure_alarm_current \
+      "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM"; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 1
@@ -411,7 +413,10 @@ terminal_fail_open() {
     fm_lock_release "$OWNER_LOCK"
     return 2
   fi
-  if ! (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
+  fm_autoarm_failure_alarm_claim \
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$SESSION_ID:$old_count"
+  alarm_rc=$?
+  if [ "$alarm_rc" -ne 0 ]; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 1

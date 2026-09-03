@@ -798,6 +798,40 @@ test_successor_session_gets_own_failure_notice() {
   pass "auto-arm: successor sessions do not inherit stale failure notices"
 }
 
+test_successor_session_ignores_predecessor_attended_alarm() {
+  local dir out status owner1 owner2
+  dir=$(make_primary_dir "$TMP_ROOT/successor-attended-alarm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner1=$!
+  printf '%s\n' "$owner1" > "$dir/state/.lock"
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-notified" \
+    "$dir/state/.claude-autoarm-failure-alarmed"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner1"
+  : > "$dir/state/.claude-autoarm-failure-alarmed/0.$owner1"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed session_owner_pid=%s updated_at=1\n' \
+    "$owner1" > "$dir/state/.claude-autoarm-epoch"
+  kill "$owner1" 2>/dev/null || true
+  wait "$owner1" 2>/dev/null || true
+
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner2=$!
+  printf '%s\n' "$owner2" > "$dir/state/.lock"
+  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner2" 2>/dev/null); status=$?
+  kill "$owner2" 2>/dev/null || true
+  wait "$owner2" 2>/dev/null || true
+
+  expect_code 2 "$status" "a predecessor alarm must not suppress the successor auto-arm"
+  assert_contains "$out" "fixture-win actionable" \
+    "the successor did not deliver its actionable watcher close"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed/0.$owner1" \
+    "the successor unexpectedly rewrote the predecessor alarm"
+  pass "auto-arm: successor sessions ignore predecessor attended alarms"
+}
+
 test_claude_daemon_losing_session_owner_cannot_commit() {
   local dir out owner successor hook status i
   dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-transfer-commit")
@@ -2319,13 +2353,23 @@ test_unverified_clean_close_exhausts_retries() {
 }
 
 test_post_alarm_actionable_close_is_suppressed() {
-  local dir out status
+  local dir out status owner
   dir=$(make_primary_dir "$TMP_ROOT/post-alarm-actionable")
   : > "$dir/state/task.meta"
-  : > "$dir/state/.claude-autoarm-failure-notified"
-  : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-notified" \
+    "$dir/state/.claude-autoarm-failure-alarmed"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner"
+  : > "$dir/state/.claude-autoarm-failure-alarmed/0.$owner"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed session_owner_pid=%s updated_at=1\n' \
+    "$owner" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 0 "$status" "an actionable result after attended fail-open must not continue"
   [ -z "$out" ] || fail "post-alarm actionable result produced continuation output: $out"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm actionable result cleared the failure notice"
@@ -3041,6 +3085,7 @@ test_stalled_session_lease_publishes_bound_failure
 test_terminal_session_lease_timeout_publishes_failure
 test_reset_session_lease_timeout_publishes_failure
 test_successor_session_gets_own_failure_notice
+test_successor_session_ignores_predecessor_attended_alarm
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease

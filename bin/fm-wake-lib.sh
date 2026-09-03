@@ -1387,22 +1387,24 @@ fm_autoarm_failure_reset_advance() {  # <state-dir>
 }
 
 _fm_failure_episode_clear() {  # <state-dir>
-  local state=$1 path failure_dir notice resetting
+  local state=$1 path child failure_dir notice alarm resetting
   failure_dir="$state/.claude-autoarm-failure-epochs"
   notice="$state/.claude-autoarm-failure-notified"
+  alarm="$state/.claude-autoarm-failure-alarmed"
   resetting="$state/.claude-autoarm-failure-resetting"
   for path in \
     "$state/.turnend-claude-blocks" \
-    "$state/.claude-autoarm-failure-epoch" \
-    "$state/.claude-autoarm-failure-alarmed"
+    "$state/.claude-autoarm-failure-epoch"
   do
     [ ! -d "$path" ] || [ -L "$path" ] || return 1
   done
-  if { [ -e "$notice" ] || [ -L "$notice" ]; } \
-    && { { [ ! -f "$notice" ] || [ -L "$notice" ]; } \
-      && { [ ! -d "$notice" ] || [ -L "$notice" ]; }; }; then
-    return 1
-  fi
+  for path in "$notice" "$alarm"; do
+    if { [ -e "$path" ] || [ -L "$path" ]; } \
+      && { { [ ! -f "$path" ] || [ -L "$path" ]; } \
+        && { [ ! -d "$path" ] || [ -L "$path" ]; }; }; then
+      return 1
+    fi
+  done
   if { [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; } \
     && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
     return 1
@@ -1411,17 +1413,19 @@ _fm_failure_episode_clear() {  # <state-dir>
   rm -f \
     "$state/.turnend-claude-blocks" \
     "$state/.claude-autoarm-failure-epoch" \
-    "$state/.claude-autoarm-failure-alarmed" \
     2>/dev/null || return 1
-  if [ -d "$notice" ]; then
-    for path in "$notice"/* "$notice"/.[!.]* "$notice"/..?*; do
-      [ -e "$path" ] || [ -L "$path" ] || continue
-      [ -f "$path" ] && [ ! -L "$path" ] && rm -f "$path" 2>/dev/null || return 1
-    done
-    rmdir "$notice" 2>/dev/null || return 1
-  else
-    rm -f "$notice" 2>/dev/null || return 1
-  fi
+  for path in "$notice" "$alarm"; do
+    if [ -d "$path" ]; then
+      for child in "$path"/* "$path"/.[!.]* "$path"/..?*; do
+        [ -e "$child" ] || [ -L "$child" ] || continue
+        [ -f "$child" ] && [ ! -L "$child" ] \
+          && rm -f "$child" 2>/dev/null || return 1
+      done
+      rmdir "$path" 2>/dev/null || return 1
+    else
+      rm -f "$path" 2>/dev/null || return 1
+    fi
+  done
   if [ -d "$failure_dir" ]; then
     for path in "$failure_dir"/* "$failure_dir"/.[!.]* "$failure_dir"/..?*; do
       [ -e "$path" ] || [ -L "$path" ] || continue
@@ -1877,14 +1881,18 @@ fm_autoarm_failure_ledger_current() {  # <state-dir>
 
 fm_autoarm_failure_notice_current() {  # <state-dir> <marker-file>
   local state=$1 marker=$2 reset session_owner final_session_owner
+  FM_AUTOARM_FAILURE_NOTICE_RESET=
+  FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER=
   fm_autoarm_failure_reset_in_progress "$state" && return 1
   reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
-    [ "$reset" = 0 ]
-    return
+    [ "$reset" = 0 ] || return 1
+    FM_AUTOARM_FAILURE_NOTICE_RESET=$reset
+    return 0
   fi
   [ -d "$marker" ] && [ ! -L "$marker" ] || return 1
   if [ -f "$marker/$reset" ] && [ ! -L "$marker/$reset" ]; then
+    FM_AUTOARM_FAILURE_NOTICE_RESET=$reset
     return 0
   fi
   session_owner=$(cat "$state/.lock" 2>/dev/null || true)
@@ -1892,13 +1900,31 @@ fm_autoarm_failure_notice_current() {  # <state-dir> <marker-file>
   [ -f "$marker/$reset.$session_owner" ] \
     && [ ! -L "$marker/$reset.$session_owner" ] || return 1
   final_session_owner=$(cat "$state/.lock" 2>/dev/null || true)
-  [ "$final_session_owner" = "$session_owner" ]
+  [ "$final_session_owner" = "$session_owner" ] || return 1
+  FM_AUTOARM_FAILURE_NOTICE_RESET=$reset
+  FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER=$session_owner
+  return 0
 }
 
 fm_autoarm_failure_episode_current() {  # <state-dir> <marker-file>
-  local state=$1 marker=$2 current final outcome
+  local state=$1 marker=$2 current final outcome reset notice_owner episode_owner
+  local final_reset final_notice_owner ledger_owner
+  FM_AUTOARM_FAILURE_EPISODE_RESET=
+  FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER=
   fm_autoarm_failure_notice_current "$state" "$marker" || return 1
-  fm_autoarm_failure_ledger_current "$state" && return 0
+  reset=$FM_AUTOARM_FAILURE_NOTICE_RESET
+  notice_owner=$FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER
+  if fm_autoarm_failure_ledger_current "$state"; then
+    ledger_owner=${FM_AUTOARM_FAILURE_SESSION_OWNER:-}
+    if [ -n "$notice_owner" ] && [ -n "$ledger_owner" ] \
+      && [ "$notice_owner" != "$ledger_owner" ]; then
+      return 1
+    fi
+    episode_owner=${ledger_owner:-$notice_owner}
+    FM_AUTOARM_FAILURE_EPISODE_RESET=$reset
+    FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER=$episode_owner
+    return 0
+  fi
   current=$(fm_autoarm_claim_signature "$state")
   fm_autoarm_ledger_read "$state" || return 1
   outcome=$FM_AUTOARM_OUTCOME
@@ -1906,9 +1932,100 @@ fm_autoarm_failure_episode_current() {  # <state-dir> <marker-file>
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
+  ledger_owner=$FM_AUTOARM_SESSION_OWNER
+  if [ -n "$ledger_owner" ]; then
+    [ "$(cat "$state/.lock" 2>/dev/null || true)" = "$ledger_owner" ] || return 1
+  fi
+  if [ -n "$notice_owner" ] && [ -n "$ledger_owner" ] \
+    && [ "$notice_owner" != "$ledger_owner" ]; then
+    return 1
+  fi
+  episode_owner=${ledger_owner:-$notice_owner}
   final=$(fm_autoarm_claim_signature "$state")
   [ "$final" = "$current" ] || return 1
-  fm_autoarm_failure_notice_current "$state" "$marker"
+  fm_autoarm_failure_notice_current "$state" "$marker" || return 1
+  final_reset=$FM_AUTOARM_FAILURE_NOTICE_RESET
+  final_notice_owner=$FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER
+  [ "$final_reset" = "$reset" ] && [ "$final_notice_owner" = "$notice_owner" ] || return 1
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_OUTCOME" = "$outcome" ] \
+    && [ "$FM_AUTOARM_SESSION_OWNER" = "$ledger_owner" ] || return 1
+  if [ -n "$ledger_owner" ]; then
+    [ "$(cat "$state/.lock" 2>/dev/null || true)" = "$ledger_owner" ] || return 1
+  fi
+  FM_AUTOARM_FAILURE_EPISODE_RESET=$reset
+  FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER=$episode_owner
+  return 0
+}
+
+fm_autoarm_failure_alarm_current() {  # <state-dir> <notice-marker> <alarm-marker>
+  local state=$1 notice=$2 alarm=$3 reset notice_owner episode_owner target
+  local final_reset final_notice_owner
+  fm_autoarm_failure_notice_current "$state" "$notice" || return 1
+  reset=$FM_AUTOARM_FAILURE_NOTICE_RESET
+  notice_owner=$FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER
+  if [ -n "$notice_owner" ]; then
+    target="$alarm/$reset.$notice_owner"
+  else
+    fm_autoarm_failure_episode_current "$state" "$notice" || return 1
+    episode_owner=$FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER
+    [ -z "$episode_owner" ] || return 1
+    if [ -f "$alarm" ] && [ ! -L "$alarm" ]; then
+      [ "$reset" = 0 ] || return 1
+      target=$alarm
+    else
+      target="$alarm/$reset"
+    fi
+  fi
+  [ -f "$target" ] && [ ! -L "$target" ] || return 1
+  fm_autoarm_failure_notice_current "$state" "$notice" || return 1
+  final_reset=$FM_AUTOARM_FAILURE_NOTICE_RESET
+  final_notice_owner=$FM_AUTOARM_FAILURE_NOTICE_SESSION_OWNER
+  [ "$final_reset" = "$reset" ] && [ "$final_notice_owner" = "$notice_owner" ] \
+    || return 1
+  [ -f "$target" ] && [ ! -L "$target" ]
+}
+
+fm_autoarm_failure_alarm_claim() {  # <state-dir> <notice-marker> <alarm-marker> <claim-id>
+  local state=$1 notice=$2 alarm=$3 claim_id=$4 reset session_owner target rc
+  fm_autoarm_failure_episode_current "$state" "$notice" || return 4
+  reset=$FM_AUTOARM_FAILURE_EPISODE_RESET
+  session_owner=$FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER
+  if [ -n "$session_owner" ]; then
+    if [ -f "$alarm" ] && [ ! -L "$alarm" ]; then
+      rm -f "$alarm" 2>/dev/null || return 1
+    elif [ -e "$alarm" ] || [ -L "$alarm" ]; then
+      [ -d "$alarm" ] && [ ! -L "$alarm" ] || return 1
+      target="$alarm/$reset"
+      if [ -f "$target" ] && [ ! -L "$target" ]; then
+        rm -f "$target" 2>/dev/null || return 1
+      elif [ -e "$target" ] || [ -L "$target" ]; then
+        return 1
+      fi
+    fi
+  fi
+  fm_autoarm_failure_notice_claim \
+    "$state" "$alarm" "$claim_id" "$reset" "$session_owner"
+  rc=$?
+  case "$rc" in
+    0)
+      if fm_autoarm_failure_episode_current "$state" "$notice" \
+        && [ "$FM_AUTOARM_FAILURE_EPISODE_RESET" = "$reset" ] \
+        && [ "$FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER" = "$session_owner" ] \
+        && fm_autoarm_failure_alarm_current "$state" "$notice" "$alarm"; then
+        return 0
+      fi
+      fm_autoarm_failure_notice_release \
+        "$alarm" "$claim_id" "$reset" "$session_owner" || return 1
+      return 4
+      ;;
+    2)
+      fm_autoarm_failure_alarm_current "$state" "$notice" "$alarm" \
+        && return 2
+      return 4
+      ;;
+    *) return "$rc" ;;
+  esac
 }
 
 fm_autoarm_failure_notice_claim() {  # <state-dir> <marker-file> <claim-id> <reset-fence> [session-owner-pid]

@@ -59,8 +59,9 @@
 # already owns, instead of forcing a duplicate continuation for the same event
 # epoch. The episode-fenced marker directory
 # state/.claude-autoarm-failure-notified atomically deduplicates the last-resort notice,
-# and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
-# suppresses any later automatic continuation in that unresolved episode.
+# and the reset/session-owner-scoped state/.claude-autoarm-failure-alarmed
+# bounds the attended fail-open and suppresses later automatic continuation in
+# that unresolved episode without affecting a successor session.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -148,9 +149,8 @@ autoarm_session_still_owned() {
 }
 
 autoarm_alarm_current() {
-  [ -f "$FAILURE_ALARM" ] && [ ! -L "$FAILURE_ALARM" ] || return 1
-  fm_autoarm_failure_episode_current "$STATE" "$FAILURE_NOTICE" || return 1
-  [ -f "$FAILURE_ALARM" ] && [ ! -L "$FAILURE_ALARM" ]
+  fm_autoarm_failure_alarm_current \
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM"
 }
 
 autoarm_claim_failure() {  # <reason>
@@ -377,7 +377,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   fi
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    [ -e "$FAILURE_ALARM" ] && exit 0
+    autoarm_alarm_current && exit 0
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -386,7 +386,7 @@ fi
 
 # After the synchronous guard has consumed the episode's attended fail-open,
 # do not create another exit-2 continuation that could defeat it.
-if [ -e "$FAILURE_ALARM" ]; then
+if autoarm_alarm_current; then
   autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
