@@ -119,12 +119,13 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 SESSION_AUTHENTICATED=1
+LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+case "$LOCK_PID" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
+SESSION_OWNER_PID=$LOCK_PID
 if ! fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"; then
   SESSION_AUTHENTICATED=0
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
-  esac
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
@@ -141,8 +142,9 @@ need_supervision || exit 0
 CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
 
 autoarm_session_still_owned() {
-  [ "$SESSION_AUTHENTICATED" -eq 0 ] \
-    || fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"
+  [ "$SESSION_AUTHENTICATED" -eq 1 ] \
+    && _fm_autoarm_session_authorized \
+      "$STATE" "$FM_ROOT" "$SESSION_OWNER_PID" owned
 }
 
 autoarm_alarm_current() {
@@ -152,10 +154,12 @@ autoarm_alarm_current() {
 }
 
 autoarm_claim_failure() {  # <reason>
-  local reason=$1 failure_rc
-  autoarm_session_still_owned || exit 0
+  local reason=$1 failure_rc authority=owned
+  [ "$SESSION_AUTHENTICATED" -eq 1 ] || authority=stale
   autoarm_alarm_current && exit 0
-  fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE"
+  fm_autoarm_claim_failure_commit \
+    "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE" \
+    "$FM_ROOT" "$SESSION_OWNER_PID" "$authority"
   failure_rc=$?
   case "$failure_rc" in
     0|3)
@@ -180,6 +184,10 @@ autoarm_claim_failure() {  # <reason>
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || autoarm_claim_failure 'stale session lock recovery failed'
   fm_session_lock_owned_by_self "$STATE" "$FM_ROOT" || autoarm_claim_failure 'stale session lock recovery did not restore current-session ownership'
+  SESSION_OWNER_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$SESSION_OWNER_PID" in
+    ''|*[!0-9]*) autoarm_claim_failure 'stale session lock recovery did not publish a valid owner' ;;
+  esac
   SESSION_AUTHENTICATED=1
 fi
 
@@ -198,7 +206,7 @@ fi
 autoarm_session_still_owned || exit 0
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
 autoarm_session_still_owned || exit 0
-fm_autoarm_claim_next "$STATE" "$GRACE"
+fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
   [ "$CLAIM_RC" -eq 2 ] && exit 0
@@ -210,7 +218,7 @@ if [ "$CLAIM_RC" -ne 0 ]; then
         fm_autoarm_release_abandoned "$STATE" "$GRACE" \
           || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
         autoarm_session_still_owned || exit 0
-        fm_autoarm_claim_next "$STATE" "$GRACE"
+        fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
         CLAIM_RC=$?
         [ "$CLAIM_RC" -eq 0 ] \
           || { [ "$CLAIM_RC" -eq 2 ] && exit 0; autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'; }
@@ -243,9 +251,9 @@ autoarm_commit() {  # <outcome> [marker-file]
   local commit_rc failure_rc terminal_baseline pid
   autoarm_session_still_owned || return 2
   if [ -n "${2:-}" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT" "$SESSION_OWNER_PID"
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID"
   fi
   commit_rc=$?
   autoarm_session_still_owned || return 2
@@ -255,7 +263,8 @@ autoarm_commit() {  # <outcome> [marker-file]
   pid=${BASHPID:-$$}
   terminal_baseline="$MY_GEN:$pid:arming"
   fm_autoarm_claim_failure_commit \
-    "$STATE" "$terminal_baseline" failed "$FAILURE_NOTICE"
+    "$STATE" "$terminal_baseline" failed "$FAILURE_NOTICE" \
+    "$FM_ROOT" "$SESSION_OWNER_PID" owned
   failure_rc=$?
   case "$failure_rc" in
     0|3)
@@ -277,7 +286,9 @@ autoarm_commit() {  # <outcome> [marker-file]
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
   autoarm_session_still_owned || return 0
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" >/dev/null 2>&1 || true
+  fm_autoarm_write_owned \
+    "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID" \
+    >/dev/null 2>&1 || true
 }
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -352,7 +363,7 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  fm_autoarm_reset_owned "$STATE" "$MY_GEN" "$FM_ROOT"
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" "$FM_ROOT" "$SESSION_OWNER_PID"
   RESET_RC=$?
   if [ "$RESET_RC" -eq 0 ]; then
     autoarm_record clean

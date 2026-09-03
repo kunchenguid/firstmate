@@ -1566,15 +1566,16 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 }
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
-# FM_AUTOARM_OUTCOME, and FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
-# line 2 - identity is never substituted from a lock, so a transient
-# micro-mutex hold or a reused pid can never authenticate a stale entry).
+# FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION_OWNER, and FM_AUTOARM_IDENTITY (line
+# 2 of the entry, and ONLY line 2 - identity is never substituted from a lock,
+# so a transient micro-mutex hold or a reused pid cannot authenticate a stale entry).
 fm_autoarm_ledger_read() {  # <state-dir>
   local state=$1 epoch
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_GEN=
   FM_AUTOARM_OWNER=
   FM_AUTOARM_OUTCOME=
+  FM_AUTOARM_SESSION_OWNER=
   FM_AUTOARM_IDENTITY=
   FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
   FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
@@ -1582,6 +1583,10 @@ fm_autoarm_ledger_read() {  # <state-dir>
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  FM_AUTOARM_SESSION_OWNER=$(_fm_autoarm_epoch_field "$epoch" session_owner_pid 2>/dev/null || true)
+  if [ -n "$FM_AUTOARM_SESSION_OWNER" ]; then
+    case "$FM_AUTOARM_SESSION_OWNER" in *[!0-9]*) return 1 ;; esac
+  fi
   FM_AUTOARM_IDENTITY=$(sed -n '2p' "$epoch" 2>/dev/null || true)
   return 0
 }
@@ -1596,7 +1601,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # build's entry gets its deference from its held role-carrying lock through
 # the legacy shim, and anything else must not defer.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current session_owner
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
@@ -1608,6 +1613,11 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
+  if [ -n "$FM_AUTOARM_SESSION_OWNER" ]; then
+    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+    session_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
+    [ "$session_owner" = "$FM_AUTOARM_SESSION_OWNER" ] || return 1
+  fi
   if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
     && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
     return 1
@@ -1620,8 +1630,9 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 # when a competing claimant won the race (the ledger holds an open claim), and
 # 1 when the micro-mutex is contended, the mandatory identity cannot be
 # computed, or the write failed.
-fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} transition lock epoch pid gen identity tmp
+fm_autoarm_claim_next() {  # <state-dir> [grace] [session-root] [session-owner-pid]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session_root=${3:-} session_owner=${4:-}
+  local transition lock epoch pid gen identity tmp session_lease=''
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
@@ -1632,14 +1643,27 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   pid=${BASHPID:-$$}
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
-  fm_autoarm_transition_try_acquire "$state" || return 1
+  if [ -n "$session_root" ]; then
+    session_lease="$state/.lock.acquire"
+    fm_lock_acquire_wait "$session_lease" || return 1
+    if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
+      fm_lock_release "$session_lease"
+      return 2
+    fi
+  fi
+  if ! fm_autoarm_transition_try_acquire "$state"; then
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+    return 1
+  fi
   if ! fm_lock_try_acquire "$lock"; then
     fm_lock_release "$transition"
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
     return 1
   fi
   if fm_autoarm_claim_open "$state" "$grace"; then
     fm_lock_release "$lock"
     fm_lock_release "$transition"
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
     return 2
   fi
   gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
@@ -1648,17 +1672,23 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   esac
   gen=$((gen + 1))
   tmp="$epoch.tmp.$pid"
-  if ! printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
-      "$gen" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+  if ! {
+      printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s' \
+        "$gen" "$pid" "$(date +%s)"
+      [ -z "$session_owner" ] || printf ' session_owner_pid=%s' "$session_owner"
+      printf '\n%s\n' "$identity"
+    } > "$tmp" 2>/dev/null \
     || ! fm_autoarm_retire_legacy_failure "$state" \
     || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
     fm_lock_release "$transition"
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
     return 1
   fi
   fm_lock_release "$lock"
   fm_lock_release "$transition"
+  [ -z "$session_lease" ] || fm_lock_release "$session_lease"
   # shellcheck disable=SC2034 # Read by callers after the claim succeeds.
   FM_AUTOARM_MY_GEN=$gen
   return 0
@@ -1959,7 +1989,7 @@ _fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outco
   esac
 }
 
-fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
+_fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
   local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition current final failure_epoch reset final_reset
   local current_outcome current_identity revoked publish_rc reset_rc
   transition="$state/.claude-autoarm-transition.lock"
@@ -2048,6 +2078,42 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   return "$publish_rc"
 }
 
+_fm_autoarm_session_authorized() {  # <state-dir> <session-root> <expected-owner-pid> <owned|stale>
+  local state=$1 session_root=$2 expected_owner=$3 authority=$4 current_owner
+  case "$expected_owner" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+  current_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
+  [ "$current_owner" = "$expected_owner" ] || return 1
+  case "$authority" in
+    owned)
+      command -v fm_session_lock_owned_by_self >/dev/null 2>&1 || return 1
+      fm_session_lock_owned_by_self "$state" "$session_root"
+      ;;
+    stale)
+      command -v fm_harness_pid_alive >/dev/null 2>&1 || return 1
+      ! fm_harness_pid_alive "$expected_owner"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file] [session-root] [session-owner-pid] [owned|stale]
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} session_root=${5:-}
+  local session_owner=${6:-} authority=${7:-owned} session_lease='' rc
+  if [ -n "$session_root" ]; then
+    session_lease="$state/.lock.acquire"
+    fm_lock_acquire_wait "$session_lease" || return 1
+    if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" "$authority"; then
+      fm_lock_release "$session_lease"
+      return 4
+    fi
+  fi
+  _fm_autoarm_claim_failure_commit "$state" "$baseline" "$outcome" "$marker"
+  rc=$?
+  [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+  return "$rc"
+}
+
 _fm_autoarm_terminal_locks_release() {  # <session-lease-or-empty> <owner-lock> <transition-lock>
   fm_lock_release "$2"
   fm_lock_release "$3"
@@ -2062,9 +2128,9 @@ _fm_autoarm_terminal_locks_release() {  # <session-lease-or-empty> <owner-lock> 
 # ordering could permanently suppress a notice whose ledger write never won.
 # Returns 0 committed, 2 refused (superseded, session-refused, or required-marker
 # failure), and 1 unable (bounded contention or ledger-write failure).
-fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-root]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} session_root=${5:-}
-  local transition lock epoch session_lease='' pid identity tmp i marker_rc reset
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-root] [session-owner-pid]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} session_root=${5:-} session_owner=${6:-}
+  local transition lock epoch session_lease='' pid identity ledger_session_owner tmp i marker_rc reset
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
@@ -2072,8 +2138,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
     fm_lock_acquire_wait "$session_lease" || return 1
-    if ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
-      || ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+    if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       fm_lock_release "$session_lease"
       return 2
     fi
@@ -2100,17 +2165,21 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
+  ledger_session_owner=$FM_AUTOARM_SESSION_OWNER
   if [ -n "$session_root" ] \
-    && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
-      || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
+    && { [ "$ledger_session_owner" != "$session_owner" ] \
+      || ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; }; then
     _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"
   if ! {
-      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s' \
         "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$ledger_session_owner" ] \
+        || printf ' session_owner_pid=%s' "$ledger_session_owner"
+      printf '\n'
       [ -z "$identity" ] || printf '%s\n' "$identity"
     } > "$tmp" 2>/dev/null \
     || ! fm_autoarm_retire_legacy_failure "$state" \
@@ -2121,7 +2190,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
   fi
   if [ -n "$marker" ]; then
     if [ -n "$session_root" ] \
-      && ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+      && ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
       return 2
     fi
@@ -2144,22 +2213,26 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
 # <gen> owned by this process. A superseded owner must go silent instead of
 # arming, mutating shared state, or emitting.
 fm_autoarm_still_owner() {  # <state-dir> <gen>
-  local state=$1 gen=$2 pid
+  local state=$1 gen=$2 pid session_owner
   pid=${BASHPID:-$$}
   fm_autoarm_ledger_read "$state" || return 1
-  [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
+  [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ] || return 1
+  [ -z "$FM_AUTOARM_SESSION_OWNER" ] && return 0
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+  session_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
+  [ "$session_owner" = "$FM_AUTOARM_SESSION_OWNER" ]
 }
 
-fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root]
-  local state=$1 gen=$2 session_root=${3:-} transition lock session_lease='' pid
+fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root] [session-owner-pid]
+  local state=$1 gen=$2 session_root=${3:-} session_owner=${4:-}
+  local transition lock session_lease='' pid ledger_session_owner
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   pid=${BASHPID:-$$}
   if [ -n "$session_root" ]; then
     session_lease="$state/.lock.acquire"
     fm_lock_acquire_wait "$session_lease" || return 1
-    if ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
-      || ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+    if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; then
       fm_lock_release "$session_lease"
       return 2
     fi
@@ -2178,9 +2251,10 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root]
     _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
+  ledger_session_owner=$FM_AUTOARM_SESSION_OWNER
   if [ -n "$session_root" ] \
-    && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
-      || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
+    && { [ "$ledger_session_owner" != "$session_owner" ] \
+      || ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" owned; }; then
     _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi

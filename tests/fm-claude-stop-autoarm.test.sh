@@ -328,6 +328,37 @@ fm_lock_acquire_wait() {
 SH
 }
 
+pause_claim_epoch_publish() {
+  cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
+mv() {
+  local arg target=''
+  for arg in "$@"; do target=$arg; done
+  if [ "$target" = "$STATE/.claude-autoarm-epoch" ]; then
+    : > "$STATE/claim-publish-waiting"
+    while [ ! -e "$STATE/claim-publish-release" ]; do sleep 0.01; done
+  fi
+  command mv "$@"
+}
+SH
+}
+
+run_bound_claim_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
+  local dir=$1 lock_owner=$2
+  mkdir -p "$dir/fake-argv"
+  FM_HOME="$dir" FM_TEST_LOCK_OWNER="$lock_owner" /bin/bash -c '
+    exec -a "$FM_HOME/fake-argv/claude" /bin/bash -c '"'"'
+      mkdir -p "$FM_HOME/proc/$$"
+      printf "%s\0" "$FM_HOME/fake-argv/claude" "$0" "$1" "$2" "$3" \
+        > "$FM_HOME/proc/$$/cmdline"
+      export FM_PROC_ROOT="$FM_HOME/proc"
+      . "$FM_HOME/bin/fm-wake-lib.sh"
+      . "$FM_HOME/bin/fm-session-lock-lib.sh"
+      fm_autoarm_claim_next "$FM_HOME/state" 300 "$FM_HOME" "$FM_TEST_LOCK_OWNER"
+      printf "%s\n" "$?" > "$FM_HOME/state/bound-claim-rc"
+    '"'"' daemon run --spawned-by "{\"label\":\"claude\",\"cwd\":\"$FM_HOME\",\"pid\":$FM_TEST_LOCK_OWNER}"
+  '
+}
+
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -512,6 +543,52 @@ SH
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "daemon-delivered Stop hook did not record outcome=rewake"
   assert_contains "$out" "firstmate watcher wake" "daemon-delivered Stop hook did not translate the wake"
   pass "auto-arm: Claude daemon spawned-by metadata lets the foreground-owned home arm"
+}
+
+test_generation_claim_is_bound_to_serialized_session_owner() {
+  local dir owner claimant successor claim_rc open_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-bound-generation")
+  pause_claim_epoch_publish "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_bound_claim_from_claude_daemon_bridge "$dir" "$owner" &
+  claimant=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/claim-publish-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/claim-publish-waiting" ]; then
+    kill "$claimant" "$owner" 2>/dev/null || true
+    wait "$claimant" "$owner" 2>/dev/null || true
+    fail "daemon claim did not reach its publication boundary"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/successor-lock-rc"
+    sleep 60
+  ' &
+  successor=$!
+  sleep 0.1
+  [ "$(cat "$dir/state/.lock")" = "$owner" ] \
+    || fail "successor replaced the session owner during generation publication"
+  : > "$dir/state/claim-publish-release"
+  wait "$claimant" || fail "bound daemon claim fixture exited unexpectedly"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/successor-lock-rc" ]; do sleep 0.01; i=$((i + 1)); done
+  claim_rc=$(cat "$dir/state/bound-claim-rc" 2>/dev/null || true)
+  expect_code 0 "$claim_rc" "daemon generation claim did not publish under its session lease"
+  expect_code 0 "$(cat "$dir/state/successor-lock-rc" 2>/dev/null || true)" "successor did not acquire after claim publication"
+  [ "$(epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "generation did not retain its authenticated foreground session owner"
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_claim_open "$1/state" 300' _ "$dir"
+  open_rc=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 1 "$open_rc" "a generation must close after its bound session owner loses the home"
+  pass "auto-arm: generation claims serialize and remain bound to their session owner"
 }
 
 test_claude_daemon_losing_session_owner_cannot_commit() {
@@ -859,6 +936,50 @@ SH
   [ "$(epoch_field "$dir" owner_pid)" != 9999999 ] || fail "claim failure left the dead session owner as the auto-arm owner"
   assert_absent "$dir/state/arm-ran" "claim failure armed after the recovery claim failed"
   pass "auto-arm: failed claim paths leave a durable failed epoch and marker"
+}
+
+test_stale_recovery_loser_cannot_publish_failure_into_successor_session() {
+  local dir out hook successor status i
+  dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-successor-race")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  write_arm_fixture "$dir" actionable
+  cp "$dir/bin/fm-lock.sh" "$dir/bin/fm-lock-real.sh"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/state/recovery-waiting"
+while [ ! -e "$FM_HOME/state/recovery-release" ]; do sleep 0.01; done
+exit 1
+SH
+  chmod +x "$dir/bin/fm-lock.sh" "$dir/bin/fm-lock-real.sh"
+
+  printf '%s\n' '{"session_id":"stale-recovery-race"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' \
+      > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/recovery-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$dir/state/recovery-waiting" ] || fail "stale recovery did not reach its failure boundary"
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock-real.sh" >/dev/null 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/successor-lock-rc"
+    sleep 60
+  ' &
+  successor=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/successor-lock-rc" ]; do sleep 0.01; i=$((i + 1)); done
+  expect_code 0 "$(cat "$dir/state/successor-lock-rc" 2>/dev/null || true)" "successor did not win stale-lock recovery"
+  : > "$dir/state/recovery-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "obsolete stale-recovery hook must stand down after a successor acquires"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "obsolete stale-recovery hook published a failure epoch"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "obsolete stale-recovery hook published a failure marker"
+  assert_absent "$dir/state/arm-ran" "obsolete stale-recovery hook armed in the successor session"
+  pass "auto-arm: stale recovery failures are fenced from successor sessions"
 }
 
 test_live_claim_mutex_holder_cannot_hide_failure() {
@@ -1765,6 +1886,67 @@ SH
   pass "auto-arm: unavailable terminal commits publish durable independent failure state"
 }
 
+test_terminal_failure_fallback_cannot_publish_after_session_transfer() {
+  local dir out owner hook successor status i
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-fallback-session-transfer")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  cat >> "$dir/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_write_owned() {
+  return 1
+}
+
+fm_lock_acquire_wait() {
+  local lockdir=$1 count
+  if [ "$lockdir" = "$STATE/.lock.acquire" ]; then
+    count=$(cat "$STATE/session-lease-count" 2>/dev/null || true)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$STATE/session-lease-count"
+    if [ "$count" -eq 2 ]; then
+      : > "$STATE/terminal-fallback-waiting"
+      while [ ! -e "$STATE/terminal-fallback-release" ]; do sleep 0.01; done
+    fi
+  fi
+  while ! fm_lock_try_acquire "$lockdir"; do sleep 0.01; done
+}
+SH
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-fallback-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/terminal-fallback-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "terminal fallback did not reach its session authorization boundary"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/successor-lock-rc"
+    sleep 60
+  ' &
+  successor=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/successor-lock-rc" ]; do sleep 0.01; i=$((i + 1)); done
+  expect_code 0 "$(cat "$dir/state/successor-lock-rc" 2>/dev/null || true)" "successor did not acquire before terminal fallback publication"
+  : > "$dir/state/terminal-fallback-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "obsolete terminal fallback must stand down after session transfer"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "obsolete terminal fallback published a failure epoch"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "obsolete terminal fallback published a failure marker"
+  pass "auto-arm: terminal failure fallback is fenced from successor sessions"
+}
+
 test_terminal_commit_supersession_stays_silent() {
   local dir status
   dir=$(make_primary_dir "$TMP_ROOT/terminal-commit-superseded")
@@ -2118,8 +2300,14 @@ record_autoarm_epoch() {
 
 epoch_field() {
   local dir=$1 field=$2
-  sed -n "s/^.*[[:space:]]\{0,1\}$field=\([A-Za-z0-9_-]*\).*\$/\1/p" \
-    "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true
+  awk -v field="$field" '
+    NR == 1 {
+      for (i = 1; i <= NF; i += 1) {
+        split($i, pair, "=")
+        if (pair[1] == field) { print pair[2]; exit }
+      }
+    }
+  ' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
 test_abandoned_owner_claim_is_reclaimed_and_rearms() {
@@ -2537,20 +2725,23 @@ test_superseded_owner_never_reinvokes_the_arm() {
 #      superseded and goes completely silent (exit 0, no banner, no ledger
 #      write), so one supersession episode produces exactly one translation.
 test_superseded_owner_goes_silent_and_never_double_translates() {
-  local dir a_out a_pid b_out b_status c_out c_status a_status i count
+  local dir a_out a_pid b_out b_status c_out c_status a_status i count session_owner
   dir=$(make_primary_dir "$TMP_ROOT/v2-superseded-silence")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" blocking-actionable
   a_out="$dir/state/a.out"
-  run_autoarm_bg "$dir" "$a_out"
-  a_pid=$RUN_AUTOARM_BG_PID
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  session_owner=$!
+  printf '%s\n' "$session_owner" > "$dir/state/.lock"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$session_owner" > "$a_out" 2>&1 &
+  a_pid=$!
   i=0
   while [ "$(epoch_outcome "$dir")" != arming ] || [ ! -e "$dir/state/arm-ran" ]; do
     [ "$i" -lt 50 ] || fail "owner A never published its arming claim"
     sleep 0.1
     i=$((i + 1))
   done
-  b_out=$(run_autoarm "$dir" 2>/dev/null); b_status=$?
+  b_out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$session_owner" 2>/dev/null); b_status=$?
   expect_code 0 "$b_status" "a firing during a live open claim must defer promptly (no mutex is held across arming)"
   [ -z "$b_out" ] || fail "deferring firing produced output: $b_out"
   count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
@@ -2559,17 +2750,20 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
   kill -0 "$a_pid" 2>/dev/null || fail "owner A finished before the supersession could be exercised"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
-  c_out=$(run_autoarm "$dir" 2>/dev/null); c_status=$?
+  c_out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$session_owner" 2>/dev/null); c_status=$?
   expect_code 2 "$c_status" "the superseding generation must translate its own close"
   assert_contains "$c_out" "firstmate watcher wake" "the superseding generation must carry the rewake banner"
   wait "$a_pid"
   a_status=$?
   expect_code 0 "$a_status" "the superseded owner must exit 0 instead of double-translating"
-  [ ! -s "$a_out" ] || fail "the superseded owner emitted output after losing its generation: $(cat "$a_out")"
+  [ -z "$(sed '/^RC=0$/d' "$a_out")" ] \
+    || fail "the superseded owner emitted output after losing its generation: $(cat "$a_out")"
   [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the superseded owner advanced the ledger past its successor: $(epoch_field "$dir" epoch)"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "the superseding generation's outcome was overwritten: $(epoch_outcome "$dir")"
   count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
   [ "$count" -eq 2 ] || fail "expected exactly the owner and superseder arms, saw $count"
+  kill "$session_owner" 2>/dev/null || true
+  wait "$session_owner" 2>/dev/null || true
   pass "auto-arm: a superseded owner goes silent - one supersession episode, one translation, no held mutex"
 }
 
@@ -2624,6 +2818,7 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
+test_generation_claim_is_bound_to_serialized_session_owner
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease
@@ -2635,6 +2830,7 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
+test_stale_recovery_loser_cannot_publish_failure_into_successor_session
 test_live_claim_mutex_holder_cannot_hide_failure
 test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
@@ -2655,6 +2851,7 @@ test_lockless_failure_notice_is_released_after_ledger_advance
 test_lockless_failure_notice_is_released_when_reset_starts
 test_failure_reader_rejects_record_superseded_during_selection
 test_terminal_commit_failure_publishes_independent_failure
+test_terminal_failure_fallback_cannot_publish_after_session_transfer
 test_terminal_commit_supersession_stays_silent
 test_failure_sequence_compacts_at_recovery_reset
 test_failed_cycles_notify_once_and_keep_retrying
