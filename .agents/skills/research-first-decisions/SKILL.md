@@ -48,6 +48,7 @@ Both passes are required; the second is where the plan earns its value.
 
 Stop when the stop rules are met, and record which rule fired.
 Diminishing returns is a valid stop; running out of patience is not, and neither is finding an answer you like.
+Where English sources are thin on a candidate, promote - but do not require - searches in other languages, including Chinese, Russian, German, French, Spanish, Korean, Japanese, and others; write every finding entering the packet in English, cite its original language and title, and save nothing in another language.
 
 ## 3. Source hierarchy
 
@@ -58,6 +59,7 @@ Secondary sources are leads, never authority.
 Blog posts, comparison articles, benchmarks by third parties, forum answers, aggregator summaries, and model recollection point at a claim worth checking; they never settle it.
 Trace every load-bearing claim to a primary source before it enters the packet, and mark any claim that could not be traced as unverified rather than promoting it.
 Prefer the current version of a primary source over a dated one, and record the version or date a claim was read at, because a true-in-2023 fact presented undated is a future wrong answer.
+Among primary sources, modern academic papers, current standards, and current methods outrank older ones on the same claim.
 
 ## 4. Decision packet
 
@@ -75,6 +77,7 @@ It carries the frozen plan and its amendments, the evidence per candidate with p
   Without these the packet silently expires into a false claim.
 - **Consumption records** - which task consumed this packet, named explicitly.
   A selection nobody records consuming gets re-researched or, worse, quietly re-decided.
+  The research that produced a finding updates the project's research log with its dated section, lookup heading, and last-reviewed line as part of the packet, never as a later task.
 
 Keep the packet's reasoning summary concise and material.
 Record what decided it, not a transcript of the search.
@@ -98,6 +101,8 @@ Building each candidate locally and picking the one that felt best substitutes a
 Where a comparison genuinely cannot be settled from primary sources, continue the research or route the ambiguity to the captain, recording BENCHMARK FURTHER or DEFER rather than settling it with a local measurement.
 Keep proof of an ADOPT option bounded to its named integration claim, and record its result back into the packet.
 If that proof fails, record the failed integration claim and return the decision to research or the captain; the proof does not select a replacement or change a disposition itself.
+
+Open-source libraries, and the ways other good applications solve the same problem, are legitimate candidates and sources; referencing or copying their code is allowed when its licence permits and its origin is cited, and copied code is localized to the project's conventions, contracts, and tests rather than pasted.
 
 ## Boundaries
 
