@@ -272,6 +272,11 @@ The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
+A pi process that exits without emitting its end-of-session hook leaves a different kind of husk: Herdr's screen-detection defers entirely to Pi's own lifecycle hooks, so an `agent get` still reports the last status it was told (`idle`) forever, with no fallback screen read to notice the process is gone.
+The classifier proves this case with the same strict bare-idle-shell proof used elsewhere in this file, plus a second `agent get` still reporting `idle`, and reports it as `stale-idle` rather than folding it into `dead` or `alive`.
+`stale-idle` is not a husk `fm_backend_herdr_create_task` will replace, because that close path has no revalidation immediately before the close; it is a dedicated relaunch case instead.
+`bin/fm-spawn.sh --relaunch` accepts a `stale-idle` endpoint as agent-free and requires the identical proof again immediately before it sends the replacement's first input, so a registration that resolves back to a genuine agent between the initial check and the send still refuses.
+
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
