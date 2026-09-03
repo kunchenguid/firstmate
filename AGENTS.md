@@ -166,12 +166,13 @@ Delivery mode and `yolo` are independent.
 With `yolo` off, every PR merge and local landing needs current captain approval; with it on, firstmate may land green in-scope routine work.
 Never merge red work, approve your own PR, or infer authority for destructive, irreversible, or security-sensitive work.
 Load `ask-user-authority` before deciding an ask-user finding.
-Use `bin/fm-pr-merge.sh` for task PRs and `bin/fm-merge-local.sh` for approved local landings.
+Use `bin/fm-pr-merge.sh` for task PRs and `bin/fm-merge-local.sh` for approved local landings; never call a lower-level merge command around their guards.
+After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validation
 
 For a no-mistakes ship, the same worker that implemented the change invokes and drives the pipeline through every synchronous gate or outcome.
-Firstmate never answers a worker-owned gate directly and never permits `no-mistakes axi run --yes`.
+Firstmate never answers a worker-owned gate directly; its decision response to the worker must forbid `--yes` and require the worker to process every synchronous return until completion or a genuinely new escalation.
 An ask-user finding returns to firstmate, which loads `ask-user-authority`, gets any required captain decision, and sends one exact response with the decision key and finding IDs.
 The worker must preserve pipeline-owned commits, follow structured branch-custody instructions after a terminal run, and never hand-edit, abort, restart, or start a second run while an active run owns the branch except for the documented complete-intent-supersession path.
 Judge validation by `bin/fm-crew-state.sh`; running and fixing states are working, parked states need a response, passed states are ready, and failed or cancelled states are failures.
