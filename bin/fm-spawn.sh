@@ -2451,6 +2451,104 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# A worker parked on a first-launch trust or bypass-permissions dialog reports
+# the exact same semantic busy-state as one actually processing its brief
+# (bin/fm-busy-lib.sh seeds busy/fm-spawn before this point, and no harness
+# hook fires while its own dialog blocks input), so nothing distinguished the
+# two until a stale wake, 40 minutes into the incident that motivated this
+# check (data/learnings.md, "Harness/dispatch mechanics", 2026-09-03). Detect
+# and clear each harness's own verified dialog synchronously here, before this
+# script ever reports success, instead of trusting the launch blind.
+#
+# Signature and remedy pairs are verified per-harness evidence recorded in the
+# harness-adapters skill, never invented here: a harness with no entry below
+# is not known to gate on a matchable string, so spawn_trust_prompt_check only
+# prints a pane-capture reminder for it (see its harness-reference note)
+# instead of guessing at a match or a key sequence.
+spawn_trust_prompt_signature() {  # <harness> -> required grep -F line(s), one per line
+  case "$1" in
+    # references/harness/claude.md: default selection is "No, exit".
+    claude*) printf '%s\n' 'Is this a project you created or one you trust?' 'No, exit' ;;
+    # references/harness/codex.md
+    codex) printf '%s\n' 'Do you trust the contents of this directory?' ;;
+  esac
+}
+
+spawn_trust_prompt_remedy() {  # <harness> -> key(s) to send in order, one per line
+  case "$1" in
+    # Down moves off the default "No, exit" onto the trusted choice; Enter
+    # accepts it. Never bare Enter, which would select the default and exit.
+    claude*) printf '%s\n' Down Enter ;;
+    # codex.md: "Accept it with Enter and verify the instructions begin processing."
+    codex) printf '%s\n' Enter ;;
+  esac
+}
+
+spawn_trust_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+spawn_trust_pane_matches() {  # <pane> <signature-lines>
+  local pane=$1 sig=$2 line
+  [ -n "$sig" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$pane" | grep -Fq -- "$line" || return 1
+  done <<EOF
+$sig
+EOF
+  return 0
+}
+
+spawn_trust_prompt_check() {  # <harness>
+  local harness=$1 sig remedy key pane
+  # A trust dialog is a static rendered screen, not something the harness has
+  # to "think" toward, so it is already on screen within a poll or two of the
+  # launch Enter. detect_polls stays short (default ~1.5s total) because this
+  # runs on EVERY claude/codex spawn, including the overwhelming majority that
+  # never show the dialog; clear_polls can afford to run longer (default ~2.5s)
+  # because it only runs once a dialog was actually detected.
+  local detect_polls=${FM_TRUST_DETECT_POLLS:-6}
+  local clear_polls=${FM_TRUST_CLEAR_POLLS:-10}
+  local interval=${FM_TRUST_POLL_INTERVAL:-0.25}
+  sig=$(spawn_trust_prompt_signature "$harness")
+  if [ -z "$sig" ]; then
+    case "$harness" in
+      pi|pi-signed)
+        echo "note: $harness has no verified trust-dialog match string (see references/harness/pi.md); inspect window $T's pane within the next ~20s to confirm $ID is processing its brief, not parked on an uncleared first-launch trust dialog" >&2
+        ;;
+    esac
+    return 0
+  fi
+  local i=0
+  while [ "$i" -lt "$detect_polls" ]; do
+    pane=$(spawn_trust_capture)
+    spawn_trust_pane_matches "$pane" "$sig" && break
+    i=$((i + 1))
+    [ "$i" -ge "$detect_polls" ] || sleep "$interval"
+  done
+  spawn_trust_pane_matches "$pane" "$sig" || return 0
+
+  remedy=$(spawn_trust_prompt_remedy "$harness")
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    spawn_send_key "$T" "$key"
+    sleep 0.3
+  done <<EOF
+$remedy
+EOF
+
+  i=0
+  while [ "$i" -lt "$clear_polls" ]; do
+    pane=$(spawn_trust_capture)
+    spawn_trust_pane_matches "$pane" "$sig" || return 0
+    i=$((i + 1))
+    [ "$i" -ge "$clear_polls" ] || sleep "$interval"
+  done
+  echo "error: $harness worker $ID is parked on its first-launch trust dialog in window $T and the recorded remedy ($(printf '%s' "$remedy" | tr '\n' ' ')) did not clear it; inspect the pane, clear it by hand with FM_HOME=$FM_HOME $FM_ROOT/bin/fm-send.sh $T --key <key>, then re-run the spawn or relaunch" >&2
+  return 1
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3134,6 +3232,8 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
+elif ! spawn_trust_prompt_check "$HARNESS"; then
+  exit 1
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

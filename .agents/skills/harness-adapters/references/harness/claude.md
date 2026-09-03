@@ -14,7 +14,8 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 
 Fresh-worktree or first-machine launch may show trust or bypass-permissions confirmation.
-Inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
+The trust dialog's default selection is "No, exit", verified 2026-09-03 after a worker sat parked on it for 40 minutes reporting indistinguishable `busy (fm-spawn)`; accept it with `--key Down` then `--key Enter`, never bare Enter, which would select the default and exit instead.
+`../../../bin/fm-spawn.sh` detects this exact dialog (`Is this a project you created or one you trust?` plus `No, exit`) after every claude launch and sends that same Down-then-Enter remedy itself, failing the spawn loudly if it does not clear; a manual `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Down` then `--key Enter` remains the fallback for a dialog that renders outside that check's window or a bypass-permissions confirmation it does not match.
 
 ## Composer ghost
 

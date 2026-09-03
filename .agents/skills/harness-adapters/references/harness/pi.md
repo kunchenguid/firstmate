@@ -32,6 +32,8 @@ Multiple positional arguments become separate queued messages; the spawn templat
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
 Accept it with Enter and verify the instructions begin processing.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
+No exact on-screen string is recorded here yet, so `../../../bin/fm-spawn.sh` cannot match and auto-clear it; a Pi or Pi-signed spawn instead prints a loud reminder to inspect the pane within the readiness window, per its dialog registry note.
+Capture the exact string on the next observed occurrence and land it there so this dialog gets the same automatic handling as Claude's and Codex's.
 
 ## Worker turn-end extension
 

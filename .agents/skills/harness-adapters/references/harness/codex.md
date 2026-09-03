@@ -18,6 +18,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
+`../../../bin/fm-spawn.sh` detects this exact string after every codex launch and sends that same Enter itself, failing the spawn loudly if it does not clear.
 
 ## Skill popup
 
