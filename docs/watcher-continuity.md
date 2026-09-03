@@ -17,11 +17,12 @@ When Claude delivers the Stop hook from its daemon/background-spare tree outside
 A numeric session-lock owner that fails the shared live, non-zombie `fm_harness_pid_alive` predicate is eligible for recovery through `bin/fm-lock.sh`'s bounded auto-arm mode before a generation is claimed, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 Each new generation claim is published under the session-acquisition lease, records its authenticated foreground session owner, and stops being open as soon as that owner loses `state/.lock`; unbound pre-upgrade entries retain their existing compatibility proof until superseded.
-After those gates, inability to recover the session lock, claim a generation, or commit an owned result leaves durable failure state fenced to the unchanged lock owner and scoped to the authenticated claimant rather than absence; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns the lease bounds, failure records, notice election, and recovery-reset contract.
+After those gates, inability to recover the session lock, claim a generation, or commit an owned result leaves durable owner-fenced failure state rather than silence.
+[`turnend-guard.md`](turnend-guard.md#harness-integrations) owns the lease bounds, failure records, notice and alarm ownership, selector limit, and recovery-reset contract.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
 An exhausted arm failure or eligible claim/publication failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
-The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, claimant-scoped attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
+The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, episode-owner-scoped attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 ## Actionable wake ordering

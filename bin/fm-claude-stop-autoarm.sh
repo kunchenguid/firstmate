@@ -61,9 +61,10 @@
 # already owns, instead of forcing a duplicate continuation for the same event
 # epoch. The episode-fenced marker directory
 # state/.claude-autoarm-failure-notified atomically deduplicates the last-resort notice,
-# and the reset/session-owner-scoped state/.claude-autoarm-failure-alarmed
-# bounds the attended fail-open and suppresses later automatic continuation in
-# that unresolved episode without affecting a successor session.
+# and the reset/episode-owner-scoped state/.claude-autoarm-failure-alarmed
+# follows an authenticated claimant when present, falls back to the session
+# owner for an unbound episode, and bounds the attended fail-open without
+# letting a stale predecessor suppress a successor session.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
