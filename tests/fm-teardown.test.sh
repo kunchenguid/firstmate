@@ -69,6 +69,8 @@
 #        refusal must NOT claim the head lacks the work (nothing was compared)
 #   (ai) a second safety pass whose own PR lookup fails         -> REFUSE without
 #        reprinting the PR the first pass resolved
+#   (aj) landed content, but the path intersection cannot run   -> REFUSE + says why
+#        (fail closed: an uncomputable comparison is never a landed verdict)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -468,6 +470,18 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" fetch -q origin "$branch"
   rm -rf "$tmp"
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
+# Override comm so the touched-vs-differing path intersection cannot be computed,
+# standing in for a missing comm or a process substitution bash cannot allocate.
+add_failing_comm() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/comm" <<'SH'
+#!/usr/bin/env bash
+echo "comm: unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/comm"
 }
 
 # Override gh-axi so every call fails, simulating an API/network error.
@@ -1527,6 +1541,37 @@ test_second_safety_pass_does_not_reprint_the_first_passes_pr() {
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "pr-ref-not-carried-over: teardown completed despite the refusal"
   pass "a safety pass whose own PR lookup fails reports no PR from an earlier pass"
+}
+
+# (aj) the fixture of (the content fallback allows) exactly, except the intersection
+# itself cannot be computed -> REFUSE and say the check could not run. content_in_default
+# runs inside an `if !` condition, so errexit is suppressed for the whole call: an
+# unchecked failure there would leave an empty result reading as "nothing unaccounted
+# for" and tear down work that is on no remote.
+test_uncomputable_path_intersection_refuses_instead_of_allowing() {
+  local case_dir rc
+  case_dir=$(make_case intersection-uncomputable)
+  write_meta "$case_dir" no-mistakes ship
+  # Identical to the content-fallback ALLOW case, so the only thing that can change
+  # the verdict is the broken intersection.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_failing_comm "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "intersection-uncomputable: teardown should refuse when the path comparison cannot be computed"
+  grep -q REFUSED "$case_dir/stderr" || fail "intersection-uncomputable: no REFUSED line in stderr"
+  assert_grep 'could not check the default branch' "$case_dir/stderr" \
+    "intersection-uncomputable: the refusal did not say the check could not run"
+  assert_grep 'cannot intersect the touched paths' "$case_dir/stderr" \
+    "intersection-uncomputable: the refusal did not name the step that failed"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "intersection-uncomputable: teardown removed the task record despite the refusal"
+  pass "an intersection that cannot be computed refuses rather than declaring the work landed"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -4117,6 +4162,7 @@ test_unreachable_default_branch_refuses_and_says_so
 test_refusal_names_commits_a_merged_pr_does_not_contain
 test_refusal_never_claims_an_uncompared_pr_head_lacks_the_work
 test_second_safety_pass_does_not_reprint_the_first_passes_pr
+test_uncomputable_path_intersection_refuses_instead_of_allowing
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses

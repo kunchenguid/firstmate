@@ -1485,10 +1485,23 @@ content_in_default() {
   fi
   # Both sides are sorted by the same command under the same collation, so comm's
   # set intersection is exact rather than dependent on git's own output order.
-  touched=$(printf '%s\n' "$touched" | LC_ALL=C sort -u)
-  differing=$(printf '%s\n' "$differing" | LC_ALL=C sort -u)
-  unaccounted=$(LC_ALL=C comm -12 \
-    <(printf '%s\n' "$touched") <(printf '%s\n' "$differing"))
+  # Every step is status-checked: this function runs inside an `if !` condition,
+  # which suppresses errexit for the whole call, so a step that failed silently
+  # would leave an empty result reading as "nothing unaccounted for" - the exact
+  # permissive verdict this gate exists to prevent.
+  if ! touched=$(printf '%s\n' "$touched" | LC_ALL=C sort -u); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot order the paths the commits that are on no remote changed"
+    return 1
+  fi
+  if ! differing=$(printf '%s\n' "$differing" | LC_ALL=C sort -u); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot order the paths that differ from $ref"
+    return 1
+  fi
+  if ! unaccounted=$(LC_ALL=C comm -12 \
+      <(printf '%s\n' "$touched") <(printf '%s\n' "$differing")); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot intersect the touched paths with what $ref does not match"
+    return 1
+  fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     TEARDOWN_UNACCOUNTED_PATHS+=("$path")
