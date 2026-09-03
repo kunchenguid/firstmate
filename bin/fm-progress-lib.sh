@@ -65,7 +65,10 @@
 #                           phase (0 before the first tick); fm_progress_tick
 #                           keys its FM_PROGRESS_REFRESH_SECS cadence on this
 #                           field alone, so no other read can postpone a
-#                           label refresh
+#                           label refresh, and never writes a pass stamped
+#                           older than it, so a tick that outlived the
+#                           watcher's marker age bound cannot turn the clock
+#                           back over its replacement's observation
 #   spawn_gen=<gen>         the meta's spawn_gen this record belongs to; a
 #                           record whose spawn_gen differs from the meta's
 #                           current one (or has none while the meta has one)
@@ -410,6 +413,16 @@ fm_progress_record_load() {
   fi
   [ -n "$FM_PROGRESS_REC_SINCE" ] || FM_PROGRESS_REC_SINCE=$FM_PROGRESS_REC_OBSERVED
   return 0
+}
+
+# fm_progress_record_tick_at <state-dir> <id>: the tick_at= the record carries
+# on disk right now, 0 when absent or unreadable; the tick's stale-pass check.
+fm_progress_record_tick_at() {
+  local rec value
+  rec=$(fm_progress_record_path "$1" "$2")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || { printf '0'; return 0; }
+  value=$(sed -n 's/^tick_at=//p' "$rec" 2>/dev/null | head -n 1)
+  _fm_progress_num "$value"
 }
 
 # fm_progress_record_write <state-dir> <id>: atomically publish FM_PROGRESS_REC_*;
@@ -951,6 +964,13 @@ fm_progress_tick() {
       continue
     fi
     fm_progress_read "$state" "$data" "$id" '' '' "$now" || continue
+    # The record's clock never runs backwards. Two ticks can overlap only when
+    # one outlives the watcher's marker age bound (a read wedged on Herdr) and
+    # a replacement is launched beside it; the earlier-stamped pass then drops
+    # its observation instead of reverting the phase, clock, and label
+    # bookkeeping the later one published. Checked against the file right
+    # before the write, since the read above is where a pass can stall.
+    [ "$(fm_progress_record_tick_at "$state" "$id")" -lt "$now" ] || continue
     FM_PROGRESS_REC_TICK_AT=$now
     fm_progress_record_write "$state" "$id" || true
     fm_progress_label_refresh "$state" "$id" "$FM_PROGRESS_LABEL_SUFFIX" "$now" || true

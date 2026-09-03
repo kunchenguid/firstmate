@@ -33,7 +33,9 @@
 #       warns and retries on the cadence, a hand-changed label is left alone
 #   (f) tick throttle: one phase re-read per cadence window per task, keyed on
 #       the tick's own stamp so a snapshot read between ticks never postpones
-#       it; the real watcher launches the tick as a detached single-flight
+#       it, and a pass stamped before the record's last tick drops its
+#       observation so an overlapping stale tick never turns the clock back;
+#       the real watcher launches the tick as a detached single-flight
 #       child that never holds its poll loop, and its state/.progress-tick.pid
 #       marker keeps that single flight across processes (a live real tick
 #       child suppresses the launch; a dead pid, a recycled pid owned by an
@@ -597,6 +599,36 @@ test_tick_reads_phase_once_per_cadence() {
   pass "the tick re-reads each task's phase once per cadence window and can be disabled"
 }
 
+# Two ticks overlap only when one outlives the watcher's marker age bound (its
+# read wedged) and a replacement is launched beside it. The earlier-stamped pass
+# finishes its read after the replacement has published a fresher observation:
+# it must drop its own rather than turn the record's clock back and revert the
+# phase, since, and tick_at the replacement wrote.
+test_tick_stamped_before_the_records_last_tick_drops_its_observation() {
+  local d rec stale
+  d=$(make_case stale-pass)
+  write_task "$d" sp1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
+  rec="$d/state/.progress-sp1"
+  grep -q "^tick_at=$NOW$" "$rec" || fail "the seeding tick stamps the record: $(cat "$rec")"
+  # The stale pass: stamped NOW+60, parked in its current-state read (the fake
+  # logs the read before it sleeps, so the park is observable).
+  : > "$d/crew.log"
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" FM_FAKE_CREW_STATE_SLEEP=2 FM_PROGRESS_REFRESH_SECS=1 \
+    progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick &
+  stale=$!
+  wait_for 40 test -s "$d/crew.log" || { kill "$stale" 2>/dev/null; fail "the stale pass never started its read"; }
+  # The replacement: stamped later, sees the transition, and publishes it.
+  observe "$d" $((NOW + 120)) 'state: working · source: run-step · validating (running) · step: review' 0
+  grep -q "^phase=validating$" "$rec" || fail "the replacement publishes the transition: $(cat "$rec")"
+  wait "$stale" 2>/dev/null || true
+  grep -q "^phase=validating$" "$rec" || fail "a pass stamped before the record's last tick must not revert its phase: $(cat "$rec")"
+  grep -q "^since=$((NOW + 120))$" "$rec" || fail "a stale pass must not reset since: $(cat "$rec")"
+  grep -q "^tick_at=$((NOW + 120))$" "$rec" || fail "the record's clock never runs backwards: $(cat "$rec")"
+  grep -q "^secs_implementing=120$" "$rec" || fail "the replacement's accumulators stand: $(cat "$rec")"
+  pass "a tick pass stamped before the record's last tick drops its observation instead of turning the clock back"
+}
+
 # The real watcher launches the tick as a detached single-flight child: the
 # poll loop keeps beating while a slow current-state read is in flight, the
 # record still appears, and a second cycle never doubles a running tick.
@@ -844,6 +876,7 @@ test_label_refresh_on_change_only
 test_label_refresh_skips_without_projection_or_on_tmux
 test_label_refresh_failure_warns_once_per_reason
 test_tick_reads_phase_once_per_cadence
+test_tick_stamped_before_the_records_last_tick_drops_its_observation
 test_watcher_launches_tick_detached_with_single_flight
 test_watcher_tick_marker_of_live_tick_child_suppresses_launch
 test_watcher_tick_marker_of_unrelated_process_is_reclaimed
