@@ -33,6 +33,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
 }
@@ -589,6 +590,50 @@ test_generation_claim_is_bound_to_serialized_session_owner() {
 
   expect_code 1 "$open_rc" "a generation must close after its bound session owner loses the home"
   pass "auto-arm: generation claims serialize and remain bound to their session owner"
+}
+
+test_stalled_session_lease_publishes_bound_failure() {
+  local dir holder successor out status started elapsed failure reset owner ledger_rc notice_rc
+  dir=$(make_primary_dir "$TMP_ROOT/stalled-session-lease")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.lock.acquire"
+  printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+
+  started=$SECONDS
+  out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$((SECONDS - started))
+  owner=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  failure=$(failure_epoch_path "$dir") || fail "stalled session lease left no durable failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+
+  expect_code 2 "$status" "a stalled session lease must fail visibly"
+  [ "$elapsed" -lt 5 ] || fail "stalled session lease blocked the hook for ${elapsed}s"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed without obtaining the session lease"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "fallback failure was not bound to the observed session owner"
+  assert_present "$failure" "stalled session lease did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "stalled session lease did not persist its owner-bound notice"
+  assert_contains "$out" "could not claim recovery" \
+    "stalled session lease did not deliver its failure notice"
+
+  sleep 60 &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_ledger_current "$1/state"' _ "$dir"
+  ledger_rc=$?
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_notice_current "$1/state" "$1/state/.claude-autoarm-failure-notified"' _ "$dir"
+  notice_rc=$?
+  kill "$successor" "$holder" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$ledger_rc" "a successor session must ignore the prior owner's failure record"
+  expect_code 1 "$notice_rc" "a successor session must ignore the prior owner's failure notice"
+  pass "auto-arm: a stalled session lease yields bounded owner-scoped failure state"
 }
 
 test_claude_daemon_losing_session_owner_cannot_commit() {
@@ -1897,7 +1942,7 @@ fm_autoarm_write_owned() {
   return 1
 }
 
-fm_lock_acquire_wait() {
+fm_lock_acquire_wait_bounded() {
   local lockdir=$1 count
   if [ "$lockdir" = "$STATE/.lock.acquire" ]; then
     count=$(cat "$STATE/session-lease-count" 2>/dev/null || true)
@@ -2819,6 +2864,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_generation_claim_is_bound_to_serialized_session_owner
+test_stalled_session_lease_publishes_bound_failure
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease
