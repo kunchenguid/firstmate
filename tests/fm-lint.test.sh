@@ -265,6 +265,18 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+fm_lint_stub_actionlint() {
+  local fakebin=$1
+  cat > "$fakebin/actionlint" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -version ]; then
+  printf '1.7.12\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
 test_fast_mode_disables_extended_analysis() {
   local tmp fakebin log mode_log telemetry fixture out
   tmp=$(fm_test_tmproot fm-lint-fast-mode)
@@ -367,6 +379,7 @@ test_changed_mode_lints_only_the_changed_file() {
   fm_lint_stub_git "$fakebin"
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   target="bin/fm-install-shellcheck.sh"
   fm_lint_write_diff_file "$diff_file" "$target" "README.md"
@@ -431,10 +444,13 @@ test_explicit_path_bypasses_changed_logic() {
 }
 
 test_zero_changed_files_exits_clean() {
-  local tmp fakebin diff_file out rc
+  local tmp fakebin log diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   : > "$diff_file"
 

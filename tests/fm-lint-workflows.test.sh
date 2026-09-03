@@ -15,6 +15,19 @@ LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
+ensure_pinned_actionlint() {
+  local tool_dir resolved=
+  if command -v actionlint >/dev/null 2>&1; then
+    resolved=$(actionlint -version | awk 'NR==1 {print; exit}')
+  fi
+  [ "$resolved" != "$REQUIRED" ] || return 0
+  tool_dir=$(fm_test_tmproot fm-lint-wf-actionlint)
+  "$INSTALLER" "$tool_dir" >/dev/null \
+    || fail "could not install actionlint $REQUIRED for workflow behavior tests"
+  PATH="$tool_dir:$PATH"
+  export PATH
+}
+
 # Official sha256 values from actionlint_1.7.12_checksums.txt on the v1.7.12
 # release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12). Tests
 # compare installer behavior against these published digests, not script source.
@@ -514,6 +527,7 @@ SH
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
+ensure_pinned_actionlint
 test_pins_an_explicit_version
 test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
