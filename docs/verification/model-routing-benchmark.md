@@ -16,6 +16,8 @@ It also requires every in-root private store to be ignored by Git and absent fro
 The portable gate suite also proves that a benchmark launch resolves the cleared wrapper, its recorded private layout, and its distinct provider boundary before delivery, while an ordinary task id remains unchanged, an unavailable wrapper refuses the benchmark launch, and a remote route cannot bypass the local confinement proof.
 Its Docker-interface fixture starts two entrant wrappers concurrently on different internal networks with different proxy containers, and refuses a layout that assigns the same network boundary to siblings.
 It also proves that a wrapper which returns probe denials but is not the trusted launch-capable confinement wrapper cannot clear `isolation-verify`.
+The same test carries the launch-capable live proof, gated on `FM_BENCH_RUNTIME_IMAGE`, `FM_BENCH_PROVIDER_NETWORK`, `FM_BENCH_PROVIDER_PROXY`, `FM_BENCH_PROVIDER_PROXY_CONTAINER`, `FM_BENCH_HARNESS_BIN`, and a reachable `docker`: it starts the real benchmark harness inside the entrant wrapper and fails unless that harness runs with provider-only egress and no credential in its environment.
+Without that environment the run prints a skip line in place of that third result, so the live harness proof is still unmeasured on this host and the entrant field stays held until it is supplied and recorded here.
 
 ## Per-mechanism results
 
