@@ -10,6 +10,12 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
+# A REMOTE secondmate home follows that same primary commit. Its host cannot read
+# this object store, so bin/fm-spawn.sh and bin/fm-bootstrap.sh hand the commit to
+# bin/fm-remote-secondmate-control.sh, which imports it on that host and then runs
+# THIS ff_target with it as the base, so the guards below stay the only copy of the
+# ancestry rules.
+#
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
 # never touches the network. A standalone clone moves through that path only when
@@ -222,6 +228,20 @@ changed_instr() {
     fi
   done
   printf '%s' "$out"
+}
+
+# Translate one remote home sync leg's failure into an operator-actionable
+# reason. The remote leg refuses a command shape it does not recognize with this
+# status, which on this leg can only mean that host's Firstmate copy predates the
+# parent-targeted sync it was just asked for; every other failure already carries
+# its own diagnostic.
+REMOTE_SYNC_UNSUPPORTED_STATUS=2
+remote_sync_failure_reason() { # <exit-status> <output>
+  if [ "$1" = "$REMOTE_SYNC_UNSUPPORTED_STATUS" ]; then
+    printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
+    return 0
+  fi
+  first_line "$2"
 }
 
 dirty_status() {
