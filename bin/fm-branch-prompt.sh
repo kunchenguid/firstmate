@@ -81,7 +81,6 @@ Write summaries in the captain's outcome language - the project, the fix, the PR
 A PR URL you pass to a tool or write into a summary is copied verbatim from a durable record: the task's `done: PR <url>` status line, its `pr=` metadata field, or its backlog note.
 Never assemble an owner, repository, host, or number from memory, from another PR, or from a bare number the worker printed; a plausible URL built that way is how a dead link reaches the captain.
 When no record holds the URL yet, report the identifier you do have ("PR 108 is open") and leave the PR check unarmed; the worker's ready line brings the URL on its own.
-`bin/fm-pr-check.sh` refuses a URL that disagrees with the task's own ready line: a refusal means the record wins, never that another spelling should be tried.
 
 # Role limits (deterministically enforced, not just prose)
 

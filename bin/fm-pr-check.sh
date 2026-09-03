@@ -5,15 +5,6 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-#
-# Before anything is recorded, the requested URL is compared offline with the
-# task's own ready lines (fm_pr_status_ready_urls in bin/fm-pr-lib.sh): when
-# the status log's done lines name one or more PR/MR URLs, the argument must be
-# one of them, so a URL assembled from memory can never displace the worker's
-# own report as recorded truth. A log naming no URL leaves the argument as the
-# only source, exactly as before. No forge is consulted for that decision, and
-# a refusal prints both spellings so the caller copies the recorded one or has
-# the worker correct its line rather than re-spelling the argument.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -49,19 +40,6 @@ NUMBER=$FM_PR_NUMBER
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
-  exit 1
-fi
-
-# Copy-or-refuse against the task's own record (header). The worker's done line
-# is the one source the caller cannot have composed, so a disagreeing argument
-# is refused before any side effect instead of recorded as this task's PR.
-READY_URLS=$(fm_pr_status_ready_urls "$STATE" "$ID")
-if [ -n "$READY_URLS" ] && ! printf '%s\n' "$READY_URLS" | grep -qxF -- "$URL"; then
-  {
-    printf "error: refusing to record %s because the task's own ready line names a different PR\n" "$URL"
-    printf '%s\n' "$READY_URLS" | LC_ALL=C sort -u | sed 's/^/  reported by the worker: /'
-    printf 'copy the reported URL, or steer the worker to append a corrected done: PR <url> line\n'
-  } >&2
   exit 1
 fi
 
