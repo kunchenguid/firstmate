@@ -1160,10 +1160,21 @@ crew_dispatch_validate() {
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (configured_profiles | map(.harness) | index("cursor")) then
+          "cursor-advisory:cursor is ineligible for ordinary dispatch here: these rules resolve the harness for crewmate and scout spawns, both of which are unattended, and cursor is refused for every ordinary unattended kind. A rule naming cursor is satisfied only when the spawn itself also passes --cursor-exemption attended or --cursor-exemption envelope:<name>; without one it validates clean here and is refused at spawn time. Name a harness verified for unattended work, such as codex or claude, unless every spawn routed by this rule will carry a grant."
         else empty
         end
     end
   ' "$file" 2>/dev/null || true)
+  # A cursor rule is USABLE under a stated condition, unlike the schema failures
+  # above it, so it is reported as its own advisory rather than folded into the
+  # invalid-file channel that says the config cannot work at all.
+  case "$err" in
+    cursor-advisory:*)
+      echo "CREW_DISPATCH: config/crew-dispatch.json - ${err#cursor-advisory:}"
+      return 0
+      ;;
+  esac
   if [ -n "$err" ]; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
