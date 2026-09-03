@@ -424,16 +424,15 @@ SH
 
 # A local verification round names the subjects it cares about. Exercise begin/end
 # markers from real fixture processes to prove that a plain list of script paths
-# gets the same bounded automatic scheduling and the same automatic per-script
-# bound as --changed, so verifying several subjects is one bounded concurrent run
-# rather than a serial chain of separate `bash tests/X.test.sh` invocations.
+# gets bounded automatic scheduling without changing its per-script timeout
+# contract, so verifying several subjects is one bounded concurrent run rather
+# than a serial chain of separate `bash tests/X.test.sh` invocations.
 test_script_list_uses_bounded_automatic_concurrency() {
   local tmp repo script parallel_shape serial_shape mixed_shape expected_jobs
-  local timeout_repo timeout_script rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  rm -f "$repo/bin/fm-timeout-lib.sh"
   # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
   # fm-backend-orca is not, so it must still land in the serial tail.
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
@@ -484,36 +483,14 @@ assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
 assert serial["selection"].split(";")[-1] == "jobs=1"
 PYJSON
 
-  # A named script inherits the same automatic bound --changed applies, so a
-  # verification round never has to guess a shorter one of its own.
-  timeout_repo="$tmp/timeout-repo"
-  timeout_script=tests/fm-calm-pi-extension.test.sh
-  mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
-  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
-  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
-fm_run_timed() {
-  [ "$1" -eq 900 ] || return 99
-  return 124
-}
-SH
-  cat >"$timeout_repo/$timeout_script" <<'SH'
-#!/usr/bin/env bash
-touch should-not-run
-echo "not ok - automatic timeout helper was bypassed"
-SH
-  chmod +x "$timeout_repo/bin/fm-test-run.sh" "$timeout_repo/$timeout_script"
-  set +e
-  (cd "$timeout_repo" && bin/fm-test-run.sh "$timeout_script") \
-    >"$tmp/timeout.out" 2>"$tmp/timeout.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 1 ] || fail "a named script hitting the automatic bound must fail the run, got $rc"
-  grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
-    || fail "a named script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
-  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the named script"
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-backend-orca.test.sh) \
+    >"$tmp/named.out" 2>"$tmp/named.err" \
+    || fail "a named script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
+  grep -Eq '^FM_TEST_END .+ tests/fm-backend-orca\.test\.sh exit=0 ' "$tmp/named.out" \
+    || fail "a named script did not run without an automatic bound: $(cat "$tmp/named.out")"
 
   rm -rf "$tmp"
-  pass "a plain script list defaults to bounded automatic scheduling with the automatic per-script bound"
+  pass "a plain script list defaults to bounded automatic concurrency without an automatic timeout"
 }
 
 test_family_proofs_run_in_separate_concurrent_phases() {
@@ -1079,9 +1056,6 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
-  # A named script carries the runner's automatic per-script bound, so the
-  # fixture repo ships the bound's owner exactly as the real repo does.
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1

@@ -61,12 +61,10 @@
 #                   serially after that group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). Plain
-#                   --changed and a plain list of script paths apply 900s
-#                   automatically: no real script approaches it, so it only
-#                   converts a HUNG script into a bounded failure, and a local
-#                   verification round never has to guess a shorter bound of its
-#                   own. --max-wall-ms is checked
+#                   record it as exit 124 (0 disables, the default). The
+#                   --changed applies 900s automatically: no real script
+#                   approaches it, so it only converts a HUNG
+#                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -1850,14 +1848,14 @@ done
 # Plain --changed and a plain list of script paths both use the bounded
 # representative-suite scheduler; numeric --jobs retains the strict all-script
 # admission rule below. Naming scripts is how a local verification round asks
-# for exactly those subjects, so it gets the same bounded concurrency and the
-# same automatic per-script bound rather than a serial chain of separate runs.
+# for exactly those subjects, so it gets bounded concurrency rather than a
+# serial chain of separate runs.
 # The curated selections stay untouched: --lane composes CI shards whose serial
 # lane must stay strictly serial, --family is what the required Herdr lane runs,
 # and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
 if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
+  if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
     PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
   fi
   auto_admissible=0
