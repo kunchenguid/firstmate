@@ -240,6 +240,18 @@
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
 
+# Bash 5.2 defaults patsub_replacement ON, which gives `&` in the replacement
+# operand of ${parameter//pattern/replacement} the matched pattern's text. This
+# script assembles launch commands by substituting shell-quoted paths into
+# templates, and a granted root or brief path containing `&` (a project checked
+# out under `a&b`) would be rewritten into a corrupted path - the worker would
+# be granted or pointed at the wrong location while the launch reports success.
+# Stock macOS bash 3.2, which this script must keep running under, has no such
+# expansion: replacements are literal. Turning the option off everywhere pins
+# the literal semantics on every bash version, so the substitution below cannot
+# mean different things on different machines.
+shopt -u patsub_replacement 2>/dev/null || true
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -493,7 +505,7 @@ spawn_recorded_cursor_exemption() {  # <state-dir> <id>
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent remote_recorded_exemption sm_primary_head sync_out sync_rc
   local remote_exemption_note remote_launch_refusal remote_launch_qualifier
   local -a launch_args
   id=${POS[0]:-}
@@ -768,6 +780,16 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  # The grant is recorded the same way: from what the remote endpoint actually
+  # carries, not from what this side asked to deliver. A launch that reused an
+  # already-alive endpoint did not run under a newly requested grant, so
+  # recording the request would leave the parent's audit line and its pre-stop
+  # relaunch check claiming cursor authority the live worker never had. The
+  # endpoint reports its grant on the same route block; an endpoint carrying none
+  # reports none, and a value that fails the shared shape check is treated as
+  # none rather than recorded.
+  remote_recorded_exemption=$(printf '%s\n' "$out" | sed -n 's/^cursor_exemption=//p' | tail -1)
+  fm_control_cursor_exemption_valid "$remote_recorded_exemption" || remote_recorded_exemption=
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -778,7 +800,7 @@ spawn_remote_secondmate() {
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
-    [ -z "$CURSOR_EXEMPTION" ] || echo "cursor_exemption=$CURSOR_EXEMPTION"
+    [ -z "$remote_recorded_exemption" ] || echo "cursor_exemption=$remote_recorded_exemption"
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
@@ -815,7 +837,7 @@ spawn_remote_secondmate() {
     return 1
   fi
   remote_exemption_note=
-  [ -z "$CURSOR_EXEMPTION" ] || remote_exemption_note=" cursor_exemption=$CURSOR_EXEMPTION"
+  [ -z "$remote_recorded_exemption" ] || remote_exemption_note=" cursor_exemption=$remote_recorded_exemption"
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off$remote_exemption_note window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -1442,11 +1464,38 @@ pi_supports_tui_mode() {
 # A violation REFUSES loudly and fails the spawn rather than dropping the root: a
 # silently missing root would strand the worker in exactly the way this grant
 # exists to prevent, so the captain is told which path to repair.
+# Invariant 3: a granted FILE root has exactly one link to its inode. A symlink
+# reaches outward through a name the fleet already refuses; a HARD link reaches
+# outward through an inode while the lexical path stays inside the task's own
+# state tree, so invariants 1 and 2 cannot see it. Whoever could create such a
+# link inside state/ could already write there, but the granted codex worker is
+# the party that then writes THROUGH the link into whatever file shares the
+# inode, so the spawn declines to extend that reach: a second name for one inode
+# is never a shape firstmate itself creates, and a multiply linked status or
+# turn-ended record is corruption the captain should see at dispatch. Directory
+# roots are exempt because a directory cannot carry a second link on macOS or
+# Linux, and the container itself stays canonicalized exactly as before.
+# The count is read through fm_inherit_file_link_count (bin/fm-config-inherit-lib.sh),
+# the fleet's existing portable reader for this exact BSD/GNU stat split, rather
+# than a fifth private copy of it.
 codex_root_real() {  # <container> <path>; prints the canonical root, or fails
-  local container=$1 path=$2 parent base real container_real
+  local container=$1 path=$2 parent base real container_real links
   if [ "$path" != "$container" ] && [ -L "$path" ]; then
     echo "error: $path is a symlink; firstmate never resolves, creates, or grants a codex writable root through a link - repair or remove that record before spawning" >&2
     return 1
+  fi
+  if [ "$path" != "$container" ] && [ -f "$path" ]; then
+    links=$(fm_inherit_file_link_count "$path")
+    case "$links" in
+      ''|*[!0-9]*)
+        echo "error: $path is a candidate codex writable root, but its link count could not be read; refusing to grant a root whose inode sharing cannot be verified" >&2
+        return 1
+        ;;
+    esac
+    if [ "$links" -gt 1 ]; then
+      echo "error: $path has $links hard links; firstmate never grants a codex writable root whose inode is shared with another path - repair or remove that record before spawning" >&2
+      return 1
+    fi
   fi
   if [ -d "$path" ]; then
     real=$(cd "$path" 2>/dev/null && pwd -P) || real=$path
@@ -1490,23 +1539,45 @@ codex_root_real() {  # <container> <path>; prints the canonical root, or fails
 codex_precreate_root_file() {  # <container> <file>
   local container=$1 file=$2
   codex_root_real "$container" "$file" >/dev/null || return 1
-  [ -e "$file" ] && return 0
-  : >> "$file" 2>/dev/null || return 0
+  if [ -e "$file" ]; then
+    # The right TYPE is part of the contract: the worker appends to this path, so
+    # a directory (or any non-regular entry) sitting where the file belongs would
+    # pass the containment check, be granted as a root, and then fail every
+    # append and touch the worker owes. Refusing names the path to repair rather
+    # than reporting a successful spawn whose worker is stranded.
+    if [ ! -f "$file" ]; then
+      echo "error: $file exists but is not a regular file; the codex writable-root grant needs the per-task record file itself - repair or remove that entry before spawning" >&2
+      return 1
+    fi
+    return 0
+  fi
+  # A creation failure is never reported as success: the root would resolve to a
+  # path that does not exist, and whether codex tolerates or drops a nonexistent
+  # --add-dir root, the worker would be without the path its brief requires.
+  if ! : >> "$file" 2>/dev/null; then
+    echo "error: $file could not be created; refusing to grant a codex writable root the worker cannot actually write - inspect the state directory's permissions" >&2
+    return 1
+  fi
   fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null || true
 }
 
 # Create a directory the grant depends on, under a root the owner above has
 # already cleared. <dir> is the root that will be granted; <create> is the path
 # beneath it to make, so the layout stays owned by bin/fm-task-inbox-lib.sh rather
-# than being rebuilt here.
+# than being rebuilt here. A failure is loud for the same reason as the file
+# helper's: a granted inbox whose handled/ subdirectory could not be created is a
+# root the worker's acknowledgement move cannot complete in.
 codex_precreate_root_dir() {  # <container> <dir> <create>
   local container=$1 dir=$2 create=$3
   codex_root_real "$container" "$dir" >/dev/null || return 1
-  mkdir -p "$create" 2>/dev/null || true
+  if ! mkdir -p "$create" 2>/dev/null; then
+    echo "error: $create could not be created under the steering inbox $dir; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
 }
 
-codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
-  local kind=$1 worktree=$2 id=$3 wt_real gitdir status_file turnend_file
+codex_writable_roots() {  # <kind> <worktree> <project> <id>; prints one absolute root per line
+  local kind=$1 worktree=$2 project=$3 id=$4 wt_real gitdir project_gitdir status_file turnend_file
   local inbox_dir
   status_file="$STATE/$id.status"
   inbox_dir=$(fm_task_inbox_dir "$STATE" "$id")
@@ -1550,15 +1621,46 @@ codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per
   case "$gitdir/" in
     "$wt_real"/*) return 0 ;;
   esac
+  # The out-of-tree grant is pinned to the RECORDED PROJECT's own common
+  # directory rather than to whatever the worktree's `.git` file currently
+  # reports. The `.git` file of a linked worktree is a plain text file INSIDE
+  # the worktree, so a previous worker - which holds write access to exactly
+  # that worktree - can repoint it at another repository's worktree metadata,
+  # and `rev-parse` then happily resolves against the redirected metadata. An
+  # unpinned grant would hand the next worker write access to that other
+  # repository's refs, config, and hooks, which escapes the per-project sandbox
+  # boundary this whole grant exists to hold. A worktree whose reported common
+  # dir is not the project's own is tampered or drifted, so the spawn refuses
+  # and names both paths rather than granting either.
+  project_gitdir=$(git -C "$project" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: the codex git-metadata grant needs $project to be the git repository this worktree belongs to, but its own common dir could not be resolved - refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  [ -n "$project_gitdir" ] || {
+    echo "error: $project resolved an empty git common dir; refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  case "$project_gitdir" in
+    /*) ;;
+    *) project_gitdir=$(cd "$project" 2>/dev/null && pwd -P)/"$project_gitdir" ;;
+  esac
+  project_gitdir=$(cd "$project_gitdir" 2>/dev/null && pwd -P) || {
+    echo "error: the recorded project's git common dir $project_gitdir does not resolve; refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  if [ "$gitdir" != "$project_gitdir" ]; then
+    echo "error: the worktree $worktree reports git metadata at $gitdir, which is not the recorded project $project's own $project_gitdir - a redirected .git file would silently widen the grant to another repository, so repair the worktree's .git before spawning" >&2
+    return 1
+  fi
   printf '%s\n' "$gitdir"
 }
 
-codex_add_dir_flags() {  # <kind> <worktree> <id>; prints the shell-quoted --add-dir flags
-  local kind=$1 worktree=$2 id=$3 root out='' roots
+codex_add_dir_flags() {  # <kind> <worktree> <project> <id>; prints the shell-quoted --add-dir flags
+  local kind=$1 worktree=$2 project=$3 id=$4 root out='' roots
   # Command substitution, not a process substitution: a refused root must be able
   # to fail this function rather than composing a launch with the grant silently
   # short of what the brief needs.
-  roots=$(codex_writable_roots "$kind" "$worktree" "$id") || return 1
+  roots=$(codex_writable_roots "$kind" "$worktree" "$project" "$id") || return 1
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     out="$out--add-dir $(shell_quote "$root") "
@@ -1704,6 +1806,22 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    # Cursor installs a legacy alias named `agent` alongside cursor-agent, and that
+    # basename is far too generic to add to any adapter table by name. But a raw
+    # `agent ...` launch that resolves to a VERIFIED cursor executable is a real
+    # cursor launch, and without this canonicalization it records harness=agent,
+    # which the cursor unattended bar cannot see - exactly the parked-pane hazard
+    # that bar exists for. Resolving through the verified owner (structure or a
+    # bounded --help probe) holds such a launch to the cursor rule; an `agent`
+    # that does not verify stays an unverified adapter exactly as before.
+    if [ "$HARNESS" = agent ]; then
+      agent_word=$word
+      agent_candidate=$(command -v "$agent_word" 2>/dev/null || true)
+      if [ -n "$agent_candidate" ] && [ -x "$agent_candidate" ] \
+        && fm_cursor_verify_executable "$agent_candidate"; then
+        HARNESS=cursor-agent
+      fi
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -3475,7 +3593,7 @@ case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   codex)
-    CODEX_ADD_DIRS=$(codex_add_dir_flags "$KIND" "$WT" "$ID") || {
+    CODEX_ADD_DIRS=$(codex_add_dir_flags "$KIND" "$WT" "$PROJ_ABS" "$ID") || {
       echo "error: refusing to launch $ID on codex: its writable-root grant could not be composed safely (see the refusal above); repair the named path, because launching without it would strand the worker outside the paths its brief requires" >&2
       exit 1
     }

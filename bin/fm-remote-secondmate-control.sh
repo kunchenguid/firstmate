@@ -132,16 +132,24 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent exemption
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  exemption=$(fm_meta_get "$REMOTE_ENDPOINT_META" cursor_exemption)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  # The endpoint's own grant is reported for the same reason its carrier is:
+  # the parent must record the grant the RUNNING agent was launched under, and a
+  # launch request that reused an already-alive endpoint did not necessarily run
+  # under the grant this call carried. Without this line the parent cannot tell
+  # a fresh launch from a reuse, and its record would claim authority the live
+  # worker never had.
+  [ -z "$exemption" ] || printf 'cursor_exemption=%s\n' "$exemption"
 }
 
 cmd_route() {

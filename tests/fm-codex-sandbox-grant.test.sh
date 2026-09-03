@@ -73,7 +73,7 @@ SH
 
 # A home plus a REAL project and REAL linked worktree, so the git common dir this
 # suite reasons about is a genuine out-of-tree one rather than a fixture string.
-make_case() {  # <name> -> home|proj|wt|fakebin|launchlog|id
+make_case() {  # <name> [id] -> home|proj|wt|fakebin|launchlog|id
   local name=$1 case_dir home proj wt fakebin launchlog id
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
@@ -85,7 +85,7 @@ make_case() {  # <name> -> home|proj|wt|fakebin|launchlog|id
   printf '%s\n' "$$" > "$home/state/.lock"
   touch "$home/state/.last-watcher-beat"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  id="$name-t1"
+  id="${2:-$name-t1}"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -397,6 +397,126 @@ test_grant_never_follows_a_symlinked_state_record() {
     || fail "the refusal must name the symlink it declined: $out"
 
   pass "the grant refuses a symlinked state record or inbox: nothing is created through it and no root outside the task's own paths is ever emitted"
+}
+
+test_grant_refuses_a_hardlinked_state_record() {
+  local rec out status shared
+  rec=$(make_case hardlink-status); read_case "$rec"
+  # A previous worker's mistake: its own pre-created status file now shares an
+  # inode with a file under config/, which no grant may reach. Appending through
+  # the granted status path would rewrite the config file through the shared
+  # inode, and invariants 1 and 2 cannot see it because the lexical path never
+  # leaves state/.
+  shared="$HOME_DIR/config/shared-secret.txt"
+  printf 'firstmate-only content\n' > "$HOME_DIR/state/$CASE_ID.status"
+  ln "$HOME_DIR/state/$CASE_ID.status" "$shared" \
+    || fail "the fixture is wrong: the hard link could not be created on this filesystem"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  assert_grant_escaped_nothing "status record"
+  [ "$(cat "$shared")" = 'firstmate-only content' ] \
+    || fail "the shared inode was modified through the granted path: $(cat "$shared")"
+  expect_code 1 "$status" "a hard-linked status record must refuse the spawn"
+  printf '%s\n' "$out" | grep -q 'hard links' \
+    || fail "the refusal must name the hard link it declined: $out"
+  # The turn-ended marker beside it is an ordinary single-link file and must not
+  # turn the refusal into an abort of unrelated pre-creation: the refusal is the
+  # spawn's, and no launch may be composed at all.
+  [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+    || fail "a hard-linked record must refuse before any launch is composed"
+  pass "the grant refuses a hard-linked state record: the shared inode is not written and no root is emitted"
+}
+
+test_grant_refuses_a_redirect_worktree_git_file() {
+  local rec out status alien alien_wt alien_git alien_wt_gitdir
+  rec=$(make_case git-redirect); read_case "$rec"
+  # A linked worktree's `.git` is a plain text file inside the worktree, which a
+  # previous worker could rewrite to point at ANOTHER repository's worktree
+  # metadata. rev-parse still succeeds against the redirected metadata, so an
+  # unpinned grant would hand the next worker write access to the other
+  # repository's refs, config, and hooks.
+  alien="$TMP_ROOT/alien-repo"
+  alien_wt="$TMP_ROOT/alien-wt"
+  # The alien repository is a CLONE of the recorded project, so its tree is
+  # byte-identical: the redirected metadata still reports a CLEAN worktree and
+  # the spawn reaches the grant step, which is the only place the redirect is
+  # detectable. A differently-content repo would fail earlier as merely dirty.
+  git clone --quiet "$PROJ_DIR" "$alien"
+  git -C "$alien" worktree add --quiet "$alien_wt" -b alien-branch
+  alien_git=$(cd "$(git -C "$alien_wt" rev-parse --git-common-dir)" && pwd -P)
+  alien_wt_gitdir=$(git -C "$alien_wt" rev-parse --git-dir 2>/dev/null || true)
+  [ -n "$alien_wt_gitdir" ] || fail "the fixture is wrong: the alien worktree has no resolvable git dir"
+  case "$alien_wt_gitdir" in
+    /*) ;;
+    *) alien_wt_gitdir="$alien_wt/$alien_wt_gitdir" ;;
+  esac
+  alien_wt_gitdir=$(cd "$alien_wt_gitdir" && pwd -P)
+  printf 'gitdir: %s\n' "$alien_wt_gitdir" > "$WT_DIR/.git"
+  [ "$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir 2>/dev/null)" && pwd -P)" = "$alien_git" ] \
+    || fail "the fixture is wrong: the redirected .git must resolve into the alien repository"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+    || fail "a redirected .git must refuse before any launch is composed: $(granted_roots "$LAUNCH_LOG")"
+  grep -aF -- "$alien_git" "$LAUNCH_LOG" >/dev/null 2>&1 \
+    && fail "the alien repository's git directory was granted: $alien_git"
+  expect_code 1 "$status" "a worktree whose .git points at another repository must refuse the spawn"
+  printf '%s\n' "$out" | grep -q "is not the recorded project" \
+    || fail "the refusal must name the pin that fired: $out"
+  pass "the git-metadata grant is pinned to the recorded project: a redirected .git file refuses the spawn and grants no alien repository"
+}
+
+test_grant_refuses_a_wrong_typed_or_uncreatable_record() {
+  local rec out status
+  # 1. The status path occupied by a directory: containment passes, the type is
+  # wrong, and a granted root there fails every append the worker owes.
+  rec=$(make_case status-is-dir); read_case "$rec"
+  mkdir -p "$HOME_DIR/state/$CASE_ID.status"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+    || fail "a wrong-typed status record must refuse before any launch is composed"
+  expect_code 1 "$status" "a directory at the status path must refuse the spawn"
+  printf '%s\n' "$out" | grep -q 'not a regular file' \
+    || fail "the refusal must name the wrong type it found: $out"
+
+  # 2. The inbox path occupied by a regular file: the handled/ subdirectory the
+  # acknowledgement move needs cannot be created under it, which is a creation
+  # failure the spawn must report rather than silently skip.
+  rec=$(make_case inbox-is-file); read_case "$rec"
+  : > "$HOME_DIR/state/$CASE_ID.inbox"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+    || fail "an unusable inbox must refuse before any launch is composed"
+  expect_code 1 "$status" "a file at the inbox path must refuse the spawn"
+  printf '%s\n' "$out" | grep -q 'could not be created under the steering inbox' \
+    || fail "the refusal must name the creation failure and the path: $out"
+  pass "pre-creation refuses loudly: a wrong-typed or uncreatable record fails the spawn instead of stranding the worker"
+}
+
+test_grant_survives_an_ampersand_in_the_project_path() {
+  local rec out roots gitdir
+  # A project checked out under a path containing `&`: bash 5.2 defaults
+  # patsub_replacement ON, which would expand the `&` inside the substituted
+  # --add-dir text to the matched placeholder and corrupt every granted root.
+  # The launch must carry the literal path on every bash version.
+  rec=$(make_case "amp&b" "ampb-t1"); read_case "$rec"
+  case "$PROJ_DIR" in *'&'*) ;; *) fail "the fixture is wrong: the case path must contain an ampersand" ;; esac
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1) \
+    || fail "a codex ship spawn under an ampersand path failed: $out"
+  roots=$(granted_roots "$LAUNCH_LOG")
+  gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+  printf '%s\n' "$roots" | grep -qxF "$gitdir" \
+    || fail "the git common dir grant must survive the substitution byte-for-byte under an ampersand path; granted: $roots"
+  grep -qF '__CODEXADDDIRS__' "$LAUNCH_LOG" \
+    && fail "the placeholder leaked into the launch command under an ampersand path"
+  pass "a granted root containing an ampersand is substituted literally, on every bash version"
 }
 
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
@@ -725,6 +845,10 @@ test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
 test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline
 test_precreated_state_files_are_not_read_as_new_activity
 test_grant_never_follows_a_symlinked_state_record
+test_grant_refuses_a_hardlinked_state_record
+test_grant_refuses_a_redirect_worktree_git_file
+test_grant_refuses_a_wrong_typed_or_uncreatable_record
+test_grant_survives_an_ampersand_in_the_project_path
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched

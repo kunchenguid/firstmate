@@ -386,6 +386,66 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+# Cursor installs a legacy alias named `agent`, and a raw `agent ...` launch
+# records that basename as the harness. The basename is too generic for any
+# adapter table, so the recording resolves it through the verified cursor owner
+# instead: an `agent` that resolves into cursor's install tree is held to the
+# cursor unattended bar exactly like `cursor-agent`, while an unrelated
+# executable named agent stays an unverified adapter on the escape hatch.
+# The tree mirrors the real install shape (both names symlinked into
+# cursor-agent/versions/), so verification is structural and runs no probe.
+test_raw_agent_alias_resolves_to_the_cursor_bar() {
+  local rec id out status tree
+  id=profile-agent-alias-z16
+  rec=$(make_spawn_case profile-agent-alias claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  tree="$CASE_DIR/cursor-tree"
+  mkdir -p "$tree/share/cursor-agent/versions/v1" "$tree/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$tree/share/cursor-agent/versions/v1/cursor-agent"
+  chmod +x "$tree/share/cursor-agent/versions/v1/cursor-agent"
+  ln -s "$tree/share/cursor-agent/versions/v1/cursor-agent" "$FAKEBIN_DIR/agent"
+
+  # 1. An unattended ship spawn through the verified alias is refused by the
+  # cursor bar, not launched through the unverified-adapter escape hatch.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "agent --flag")
+  status=$?
+  expect_code 1 "$status" "a verified cursor alias must be refused for an unattended ship"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the raw agent alias must hit the cursor refusal, not the escape hatch"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused alias spawn must not compose a launch"
+
+  # 2. The same alias with a person in the pane launches, records the cursor
+  # family, and runs the operator's raw command unchanged.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "agent --flag" --mode direct-PR --yolo off --cursor-exemption attended)
+  status=$?
+  expect_code 0 "$status" "an attended cursor alias launch should proceed"
+  assert_contains "$out" "spawned $id harness=cursor-agent" \
+    "the recorded harness must show the alias resolved to the cursor family"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent default default
+  [ "$(cat "$LAUNCH_LOG")" = "agent --flag" ] \
+    || fail "the raw launch command itself must run unchanged: $(cat "$LAUNCH_LOG")"
+
+  # 3. An `agent` that does NOT resolve into cursor's tree is not cursor: the
+  # escape hatch still applies and the launch proceeds as an unverified adapter.
+  id=profile-agent-impostor-z17
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  # rm first: a plain write would follow the earlier symlink into the tree and
+  # leave the alias verified.
+  rm -f "$FAKEBIN_DIR/agent"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN_DIR/agent"
+  chmod +x "$FAKEBIN_DIR/agent"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "agent --unrelated")
+  status=$?
+  expect_code 0 "$status" "an unrelated agent executable must stay on the escape hatch"
+  assert_contains "$out" "spawned $id harness=agent" \
+    "an unverified agent must be recorded as the raw basename, not guessed into cursor"
+  pass "a raw agent alias is resolved through the verified cursor owner and held to the cursor bar"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1054,6 +1114,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_agent_alias_resolves_to_the_cursor_bar
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
