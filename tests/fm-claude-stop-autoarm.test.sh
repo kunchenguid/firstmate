@@ -290,6 +290,44 @@ fm_autoarm_transition_acquire() {
 SH
 }
 
+pause_terminal_epoch_publish() {
+  cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
+mv() {
+  local arg target='' count=0 rc
+  for arg in "$@"; do target=$arg; done
+  if [ "$target" = "$STATE/.claude-autoarm-epoch" ]; then
+    count=$(cat "$STATE/epoch-publish-count" 2>/dev/null || true)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$STATE/epoch-publish-count"
+    if [ "$count" -eq 2 ]; then
+      : > "$STATE/terminal-publish-waiting"
+      while [ ! -e "$STATE/terminal-publish-release" ]; do sleep 0.01; done
+    fi
+  fi
+  command mv "$@"
+  rc=$?
+  if [ "$target" = "$STATE/.claude-autoarm-epoch" ] && [ "$count" -eq 2 ]; then
+    cat "$STATE/.lock" > "$STATE/session-owner-at-terminal-publish"
+  fi
+  return "$rc"
+}
+
+fm_lock_acquire_wait() {
+  local lockdir=$1
+  if [ "${FM_TEST_SESSION_ACQUIRER:-0}" -eq 1 ] \
+    && [ "$lockdir" = "$STATE/.lock.acquire" ]; then
+    if fm_lock_try_acquire "$lockdir"; then
+      : > "$STATE/session-acquirer-won"
+      return 0
+    fi
+    : > "$STATE/session-acquirer-blocked"
+  fi
+  while ! fm_lock_try_acquire "$lockdir"; do sleep 0.01; done
+}
+SH
+}
+
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -548,6 +586,60 @@ test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit() {
   assert_absent "$dir/state/.claude-autoarm-failure-epochs" "former session daemon published a terminal failure after lock wait"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon elected a terminal notice after lock wait"
   pass "auto-arm: locked terminal commits revalidate daemon session authority"
+}
+
+test_terminal_publish_holds_session_acquisition_lease() {
+  local dir out owner successor hook acquirer status acquire_status i owner_at_publish
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-terminal-session-lease")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_terminal_epoch_publish "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-publish-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/terminal-publish-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "daemon bridge did not pause after terminal authority validation"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  FM_TEST_SESSION_ACQUIRER=1 FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/session-acquirer-rc"
+    sleep 60
+  ' &
+  acquirer=$!
+  i=0
+  while [ "$i" -lt 200 ] \
+    && [ ! -e "$dir/state/session-acquirer-blocked" ] \
+    && [ ! -e "$dir/state/session-acquirer-won" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$dir/state/session-acquirer-blocked" "successor session was not blocked by the terminal mutation lease"
+  assert_absent "$dir/state/session-acquirer-won" "successor session acquired the home during terminal mutation"
+  : > "$dir/state/terminal-publish-release"
+  wait "$hook"; status=$?
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/session-acquirer-rc" ]; do sleep 0.01; i=$((i + 1)); done
+  acquire_status=$(cat "$dir/state/session-acquirer-rc" 2>/dev/null || true)
+  successor=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  owner_at_publish=$(cat "$dir/state/session-owner-at-terminal-publish" 2>/dev/null || true)
+  kill "$acquirer" 2>/dev/null || true
+  wait "$acquirer" 2>/dev/null || true
+
+  expect_code 0 "$status" "the prior daemon must suppress output after its foreground owner exits"
+  expect_code 0 "$acquire_status" "the successor session did not acquire after terminal mutation released its lease"
+  [ "$owner_at_publish" = "$owner" ] || fail "session ownership transferred before terminal publication: expected $owner, got $owner_at_publish"
+  [ "$successor" != "$owner" ] || fail "successor session did not replace the dead foreground owner"
+  pass "auto-arm: terminal publication serializes against session ownership transfer"
 }
 
 test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate() {
@@ -2534,6 +2626,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
+test_terminal_publish_holds_session_acquisition_lease
 test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate
 test_claude_daemon_losing_owner_during_reset_lock_wait_cannot_reset
 test_claude_daemon_losing_session_owner_cannot_rearm

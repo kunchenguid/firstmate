@@ -2048,6 +2048,12 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   return "$publish_rc"
 }
 
+_fm_autoarm_terminal_locks_release() {  # <session-lease-or-empty> <owner-lock> <transition-lock>
+  fm_lock_release "$2"
+  fm_lock_release "$3"
+  [ -z "$1" ] || fm_lock_release "$1"
+}
+
 # Write a new outcome for a generation this process still owns, re-verified
 # under the micro-mutex so a superseded owner can never clobber a newer claim.
 # With a fourth argument, create that marker after the ledger rename in the same
@@ -2058,33 +2064,46 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
 # failure), and 1 unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-root]
   local state=$1 gen=$2 outcome=$3 marker=${4:-} session_root=${5:-}
-  local transition lock epoch pid identity tmp i marker_rc reset
+  local transition lock epoch session_lease='' pid identity tmp i marker_rc reset
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
+  if [ -n "$session_root" ]; then
+    session_lease="$state/.lock.acquire"
+    fm_lock_acquire_wait "$session_lease" || return 1
+    if ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
+      || ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+      fm_lock_release "$session_lease"
+      return 2
+    fi
+  fi
   i=0
   while :; do
-    fm_autoarm_transition_acquire "$state" || return 1
+    if ! fm_autoarm_transition_acquire "$state"; then
+      [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+      return 1
+    fi
     if fm_lock_try_acquire "$lock"; then
       break
     fi
     fm_lock_release "$transition"
-    [ "$i" -lt 20 ] || return 1
+    if [ "$i" -ge 20 ]; then
+      [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+      return 1
+    fi
     sleep 0.02
     i=$((i + 1))
   done
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
   if [ -n "$session_root" ] \
     && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
       || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
   identity=$FM_AUTOARM_IDENTITY
@@ -2097,32 +2116,27 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     || ! fm_autoarm_retire_legacy_failure "$state" \
     || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 1
   fi
   if [ -n "$marker" ]; then
     if [ -n "$session_root" ] \
       && ! fm_session_lock_owned_by_self "$state" "$session_root"; then
-      fm_lock_release "$lock"
-      fm_lock_release "$transition"
+      _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
       return 2
     fi
     reset=$(fm_autoarm_failure_reset_fence "$state") || {
-      fm_lock_release "$lock"
-      fm_lock_release "$transition"
+      _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
       return 2
     }
     fm_autoarm_failure_notice_claim "$state" "$marker" "$gen:$pid" "$reset"
     marker_rc=$?
     if [ "$marker_rc" -ne 0 ]; then
-      fm_lock_release "$lock"
-      fm_lock_release "$transition"
+      _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
       return 2
     fi
   fi
-  fm_lock_release "$lock"
-  fm_lock_release "$transition"
+  _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
   return 0
 }
 
@@ -2137,35 +2151,44 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
 }
 
 fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root]
-  local state=$1 gen=$2 session_root=${3:-} transition lock pid
+  local state=$1 gen=$2 session_root=${3:-} transition lock session_lease='' pid
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   pid=${BASHPID:-$$}
-  fm_autoarm_transition_acquire "$state" || return 1
+  if [ -n "$session_root" ]; then
+    session_lease="$state/.lock.acquire"
+    fm_lock_acquire_wait "$session_lease" || return 1
+    if ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
+      || ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+      fm_lock_release "$session_lease"
+      return 2
+    fi
+  fi
+  if ! fm_autoarm_transition_acquire "$state"; then
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+    return 1
+  fi
   if ! fm_lock_try_acquire "$lock"; then
     fm_lock_release "$transition"
+    [ -z "$session_lease" ] || fm_lock_release "$session_lease"
     return 2
   fi
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
   if [ -n "$session_root" ] \
     && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
       || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 2
   fi
   if ! fm_failure_episode_reset "$state" transition-held; then
-    fm_lock_release "$lock"
-    fm_lock_release "$transition"
+    _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
     return 1
   fi
-  fm_lock_release "$lock"
-  fm_lock_release "$transition"
+  _fm_autoarm_terminal_locks_release "$session_lease" "$lock" "$transition"
   return 0
 }
 
