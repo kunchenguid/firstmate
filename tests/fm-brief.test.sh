@@ -751,6 +751,38 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# config/brief-addendum.md: appended verbatim as a final "# Home rules" section
+# to ship and scout briefs only; absent or empty means no section at all.
+test_home_addendum_reaches_ship_and_scout_briefs_only() {
+  local home="$TMP_ROOT/addendum-home" brief
+  mkdir -p "$home/data" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" add-none alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold without addendum exited non-zero"
+  grep -q "# Home rules" "$home/data/add-none/brief.md" \
+    && fail "no addendum file must mean no Home rules section"
+  printf 'Log every finished task with the work-log script.\n' > "$home/config/brief-addendum.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" add-ship alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold with addendum exited non-zero"
+  brief="$home/data/add-ship/brief.md"
+  assert_grep "# Home rules" "$brief" "ship brief must carry the Home rules section"
+  assert_grep "work-log script" "$brief" "ship brief must carry the addendum text verbatim"
+  [ "$(tail -n 1 "$brief")" = "Log every finished task with the work-log script." ] \
+    || fail "addendum must be the last section of the ship brief"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" add-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold with addendum exited non-zero"
+  assert_grep "work-log script" "$home/data/add-scout/brief.md" "scout brief must carry the addendum text"
+  FM_SECONDMATE_CHARTER='Supervise alpha.' FM_HOME="$home" "$ROOT/bin/fm-brief.sh" add-sm --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold with addendum exited non-zero"
+  grep -q "work-log script" "$home/data/add-sm/brief.md" \
+    && fail "secondmate charter must not receive the addendum"
+  : > "$home/config/brief-addendum.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" add-empty alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold with empty addendum exited non-zero"
+  grep -q "# Home rules" "$home/data/add-empty/brief.md" \
+    && fail "an empty addendum must not add a Home rules section"
+  pass "fm-brief: config/brief-addendum.md reaches ship and scout briefs only"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -772,3 +804,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_home_addendum_reaches_ship_and_scout_briefs_only

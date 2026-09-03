@@ -57,6 +57,10 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# When config/brief-addendum.md exists in the active home, its contents are
+# appended verbatim to every ship and scout brief as a final "# Home rules"
+# section, so a home-local standing rule (a work-log step, a house style) reaches
+# every worker without editing this shared scaffold. Charters never get it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -172,6 +176,12 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+ADDENDUM="$FM_HOME/config/brief-addendum.md"
+append_home_rules() {
+  [ -f "$ADDENDUM" ] && [ -s "$ADDENDUM" ] || return 0
+  { printf '\n# Home rules\n'; cat "$ADDENDUM"; } >> "$BRIEF"
+}
 
 shell_quote() {
   printf "'"
@@ -367,6 +377,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+append_home_rules
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
@@ -487,4 +498,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+append_home_rules
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

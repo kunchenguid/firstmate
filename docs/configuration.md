@@ -226,6 +226,13 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Brief addendum (config/brief-addendum.md)
+
+`config/brief-addendum.md` is an optional local, gitignored Markdown file whose contents `bin/fm-brief.sh` appends verbatim to every ship and scout brief it scaffolds, as a final `# Home rules` section.
+Use it for a standing rule every worker in this home must follow that is not part of the shared scaffold, such as a work-log step or a house style.
+Secondmate charters never receive it, and an absent or empty file adds nothing.
+The file is per home and is not inherited by secondmate homes; a secondmate that needs the same rule keeps its own copy.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
