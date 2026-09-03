@@ -1477,7 +1477,7 @@ test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
   : > "$dir/state/.claude-autoarm-failure-notified"
   printf 'epoch=17 owner_pid=999 outcome=rewake updated_at=%s\n' \
     "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=%s\n' \
+  printf 'epoch=123456 owner_pid=777 outcome=failed baseline=17:999:rewake updated_at=%s\n' \
     "$(date +%s)" > "$dir/state/.claude-autoarm-failure-epoch"
   seed_claude_budget "$dir" 4 stale-main-epoch
 
@@ -1487,6 +1487,25 @@ test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
   assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the guard ignored the independent claim-failure epoch"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the independent claim failure did not enter the attended progression"
   pass "fm-turnend-guard --claude: independent claim failures override unrelated main-ledger success"
+}
+
+test_hook_claude_mode_ignores_failure_superseded_by_later_success() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-superseded-claim-failure")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=18 owner_pid=888 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  printf 'epoch=123456 owner_pid=777 outcome=failed baseline=17:999:arming updated_at=%s\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-failure-epoch"
+  seed_claude_budget "$dir" 4 failure:123456:777
+
+  out=$(run_hook_claude "$dir" true); status=$?
+
+  expect_code 0 "$status" "a later successful ledger transition must supersede an older claim failure"
+  [ -z "$out" ] || fail "superseded claim failure produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "superseded claim failure reached attended fail-open"
+  pass "fm-turnend-guard --claude: later success supersedes an older independent claim failure"
 }
 
 test_hook_claude_mode_integrated_monotonic_fail_open() {
@@ -1983,6 +2002,7 @@ test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_consumes_independent_claim_failure_epoch
+test_hook_claude_mode_ignores_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent

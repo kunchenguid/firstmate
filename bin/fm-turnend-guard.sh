@@ -238,7 +238,7 @@ fi
 budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
-  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_read "$STATE"; then
+  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_current "$STATE"; then
     current_epoch="failure:$FM_AUTOARM_FAILURE_EPOCH:$FM_AUTOARM_FAILURE_OWNER"
     outcome=$FM_AUTOARM_FAILURE_OUTCOME
   else
@@ -313,7 +313,7 @@ autoarm_owns_recovery() {
     return 0
   fi
   epoch_path="$STATE/.claude-autoarm-epoch"
-  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_read "$STATE"; then
+  if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_current "$STATE"; then
     outcome=$FM_AUTOARM_FAILURE_OUTCOME
     epoch_path=$FAILURE_EPOCH
   else
@@ -423,7 +423,7 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
-  fm_autoarm_failure_ledger_read "$STATE" && return 0
+  fm_autoarm_failure_ledger_current "$STATE" && return 0
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;

@@ -1311,11 +1311,12 @@ fm_autoarm_claim_signature() {  # <state-dir>
 }
 
 fm_autoarm_failure_ledger_read() {  # <state-dir>
-  local state=$1 failure
+  local state=$1 failure baseline rest baseline_gen baseline_owner baseline_outcome
   failure="$state/.claude-autoarm-failure-epoch"
   FM_AUTOARM_FAILURE_EPOCH=
   FM_AUTOARM_FAILURE_OWNER=
   FM_AUTOARM_FAILURE_OUTCOME=
+  FM_AUTOARM_FAILURE_BASELINE=
   FM_AUTOARM_FAILURE_EPOCH=$(_fm_autoarm_epoch_field "$failure" epoch) || return 1
   FM_AUTOARM_FAILURE_OWNER=$(_fm_autoarm_epoch_field "$failure" owner_pid) || return 1
   FM_AUTOARM_FAILURE_OUTCOME=$(_fm_autoarm_epoch_field "$failure" outcome) || return 1
@@ -1325,10 +1326,34 @@ fm_autoarm_failure_ledger_read() {  # <state-dir>
   case "$FM_AUTOARM_FAILURE_OWNER" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  baseline=$(_fm_autoarm_epoch_field "$failure" baseline 2>/dev/null || true)
+  if [ -z "$baseline" ]; then
+    FM_AUTOARM_FAILURE_BASELINE=legacy
+  elif [ "$baseline" = absent ]; then
+    FM_AUTOARM_FAILURE_BASELINE=$baseline
+  else
+    baseline_gen=${baseline%%:*}
+    rest=${baseline#*:}
+    [ "$rest" != "$baseline" ] || return 1
+    baseline_owner=${rest%%:*}
+    baseline_outcome=${rest#*:}
+    case "$baseline_gen" in ''|*[!0-9]*) return 1 ;; esac
+    case "$baseline_owner" in ''|*[!0-9]*) return 1 ;; esac
+    case "$baseline_outcome" in ''|*[!a-z-]*|*:* ) return 1 ;; esac
+    FM_AUTOARM_FAILURE_BASELINE=$baseline
+  fi
   case "$FM_AUTOARM_FAILURE_OUTCOME" in
     failed|failed-suppressed) return 0 ;;
   esac
   return 1
+}
+
+fm_autoarm_failure_ledger_current() {  # <state-dir>
+  local state=$1 current
+  fm_autoarm_failure_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_FAILURE_BASELINE" = legacy ] && return 0
+  current=$(fm_autoarm_claim_signature "$state")
+  [ "$current" = "$FM_AUTOARM_FAILURE_BASELINE" ]
 }
 
 fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
@@ -1372,8 +1397,8 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   [ "$current" = "$baseline" ] || return 2
   failure_epoch="$(date +%s)${pid}"
   tmp="$failure.tmp.$pid"
-  if ! printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-      "$failure_epoch" "$pid" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
+  if ! printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
+      "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$failure" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1

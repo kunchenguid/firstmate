@@ -192,6 +192,12 @@ failure_epoch_outcome() {
   sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-failure-epoch" 2>/dev/null || true
 }
 
+failure_epoch_field() {
+  local dir=$1 field=$2
+  sed -n "s/^.*[[:space:]]\{0,1\}$field=\([^[:space:]]*\).*$/\1/p" \
+    "$dir/state/.claude-autoarm-failure-epoch" 2>/dev/null || true
+}
+
 # Run the hook in the background under the fake harness, output captured to a
 # file. Sets RUN_AUTOARM_BG_PID (a direct child of the calling shell, so the
 # caller can `wait` on it for the hook's exit status).
@@ -212,6 +218,10 @@ run_autoarm_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
     | FM_HOME="$dir" FM_TEST_LOCK_OWNER="$lock_owner" /bin/bash -c '
         exec -a "$FM_HOME/fake-argv/claude" /bin/bash -c '"'"'
+          mkdir -p "$FM_HOME/proc/$$"
+          printf "%s\0" "$FM_HOME/fake-argv/claude" "$0" "$1" "$2" "$3" \
+            > "$FM_HOME/proc/$$/cmdline"
+          export FM_PROC_ROOT="$FM_HOME/proc"
           "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
           rc=$?
           exit "$rc"
@@ -545,6 +555,8 @@ test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
   assert_present "$dir/state/.claude-autoarm-failure-notified" "fresh prior terminal epoch suppressed the current failure marker"
   [ "$(epoch_field "$dir" epoch)" -eq "$prior_gen" ] || fail "current failure rewrote the prior main generation"
   [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "fresh prior terminal epoch still masks outcome=failed"
+  [ "$(failure_epoch_field "$dir" baseline)" = "$prior_gen:9999999:rewake" ] \
+    || fail "claim failure did not preserve the exact pre-attempt ledger snapshot"
   assert_absent "$dir/state/arm-ran" "fresh-epoch claim failure reached the arm"
   pass "auto-arm: prior terminal freshness cannot suppress a current claim failure"
 }

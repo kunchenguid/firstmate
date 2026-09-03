@@ -147,55 +147,105 @@ fm_session_resolve_dir() {  # <dir>
   CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
 }
 
-fm_claude_spawned_by_json() {  # <process-args>
-  local args=$1 padded rest
-  case "$args" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
-  padded=" $args "
-  case "$padded" in *" --spawned-by "*) ;; *) return 1 ;; esac
-  rest=${padded#*" --spawned-by "}
-  case " $rest" in *" --spawned-by "*) return 1 ;; esac
-  printf '%s\n' "$rest" | awk '
-    {
-      s = $0
-      start = match(s, /[^[:space:]]/)
-      if (start == 0 || substr(s, start, 1) != "{") exit 1
-      depth = 0
-      quoted = 0
-      escaped = 0
-      finish = 0
-      for (i = start; i <= length(s); i++) {
-        c = substr(s, i, 1)
-        if (quoted) {
-          if (escaped) escaped = 0
-          else if (c == "\\") escaped = 1
-          else if (c == "\"") quoted = 0
-        } else if (c == "\"") quoted = 1
-        else if (c == "{") depth++
-        else if (c == "}") {
-          depth--
-          if (depth == 0) { finish = i; break }
-          if (depth < 0) exit 1
-        }
-      }
-      tail = substr(s, finish + 1)
-      if (finish == 0 || quoted || (tail != "" && substr(tail, 1, 1) !~ /[[:space:]]/)) exit 1
-      print substr(s, start, finish - start + 1)
-    }
-  '
+fm_claude_spawned_by_json() {  # <process-pid>
+  local pid=$1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$pid" <<'PY'
+import ctypes
+import json
+import os
+import struct
+import sys
+
+
+class ObjectPairs(list):
+    pass
+
+
+def proc_argv(pid):
+    proc_root = os.environ.get("FM_PROC_ROOT")
+    if proc_root:
+        path = os.path.join(proc_root, str(pid), "cmdline")
+    elif sys.platform.startswith("linux"):
+        path = f"/proc/{pid}/cmdline"
+    else:
+        path = None
+    if path is not None:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        if not raw or not raw.endswith(b"\0"):
+            raise ValueError("cmdline")
+        return [part.decode("utf-8") for part in raw[:-1].split(b"\0")]
+    if sys.platform != "darwin":
+        raise ValueError("platform")
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    size = ctypes.c_size_t()
+    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        raise OSError(ctypes.get_errno(), "sysctl")
+    if size.value <= 4 or size.value > 8 * 1024 * 1024:
+        raise ValueError("procargs size")
+    buffer = ctypes.create_string_buffer(size.value)
+    if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        raise OSError(ctypes.get_errno(), "sysctl")
+    raw = buffer.raw[:size.value]
+    argc = struct.unpack_from("=i", raw)[0]
+    if argc <= 0 or argc > 65536:
+        raise ValueError("argc")
+    offset = raw.index(b"\0", 4) + 1
+    while offset < len(raw) and raw[offset] == 0:
+        offset += 1
+    argv = []
+    for _ in range(argc):
+        finish = raw.index(b"\0", offset)
+        argv.append(raw[offset:finish].decode("utf-8"))
+        offset = finish + 1
+    return argv
+
+
+try:
+    argv = proc_argv(int(sys.argv[1]))
+    if len(argv) < 4 or argv[1:3] != ["daemon", "run"]:
+        raise ValueError("daemon argv")
+    positions = [index for index, value in enumerate(argv) if value == "--spawned-by"]
+    if len(positions) != 1 or positions[0] + 1 >= len(argv):
+        raise ValueError("spawned-by argv")
+    pairs = json.loads(argv[positions[0] + 1], object_pairs_hook=ObjectPairs)
+    if not isinstance(pairs, ObjectPairs):
+        raise ValueError("spawned-by object")
+    keys = [key for key, _ in pairs]
+    if len(keys) != 3 or set(keys) != {"label", "cwd", "pid"}:
+        raise ValueError("spawned-by keys")
+    value = dict(pairs)
+    if value["label"] != "claude":
+        raise ValueError("spawned-by label")
+    if not isinstance(value["cwd"], str) or not value["cwd"]:
+        raise ValueError("spawned-by cwd")
+    if any(character in value["cwd"] for character in "\n\r\t"):
+        raise ValueError("spawned-by cwd")
+    if isinstance(value["pid"], bool) or not isinstance(value["pid"], int) or value["pid"] <= 0:
+        raise ValueError("spawned-by pid")
+    sys.stdout.write(json.dumps(value, separators=(",", ":")))
+except (Exception, KeyboardInterrupt):
+    raise SystemExit(1)
+PY
 }
 
-fm_claude_daemon_spawned_by_matches() {  # <process-args> <lock-pid> <root-real>
-  local args=$1 lock_pid=$2 root_real=$3 json spawned_pid spawned_cwd spawned_real key count
-  case " $args " in
-    *" daemon run "*"--spawned-by "*) ;;
-    *) return 1 ;;
-  esac
+fm_claude_daemon_spawned_by_matches() {  # <process-pid> <lock-pid> <root-real>
+  local process_pid=$1 lock_pid=$2 root_real=$3 json spawned_pid spawned_cwd spawned_real
   command -v jq >/dev/null 2>&1 || return 1
-  json=$(fm_claude_spawned_by_json "$args") || return 1
-  for key in label cwd pid; do
-    count=$(printf '%s\n' "$json" | grep -o "\"$key\"[[:space:]]*:" | wc -l | tr -d '[:space:]')
-    [ "$count" = 1 ] || return 1
-  done
+  json=$(fm_claude_spawned_by_json "$process_pid") || return 1
   printf '%s\n' "$json" | jq -e '
     type == "object"
     and (keys | sort) == ["cwd", "label", "pid"]
@@ -229,7 +279,7 @@ fm_claude_daemon_spawned_by_lock_owner() {  # <lock-pid> <root>
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     fm_harness_process_matches "$comm" "$args" || continue
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || continue
-    fm_claude_daemon_spawned_by_matches "$args" "$lock_pid" "$root_real" && return 0
+    fm_claude_daemon_spawned_by_matches "$pid" "$lock_pid" "$root_real" && return 0
   done <<EOF
 $pids
 EOF
