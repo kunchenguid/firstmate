@@ -508,7 +508,9 @@ fm_backlog_record_publish() {
 # backlog transitions above require. Keys and values are refused rather than
 # escaped: a key outside `[A-Za-z0-9._-]`, or a value carrying a line break,
 # would write a line the record's readers cannot attribute to the key it was
-# set under.
+# set under. The same key passed twice in one call is refused for the same
+# reason: the caller has stated no single value for it, and writing both would
+# reintroduce the duplicate line this helper exists to remove.
 #
 # Usage: fm_meta_set <meta> <state-root> <key> <value> [<key> <value>...]
 fm_meta_set() {
@@ -535,6 +537,12 @@ fm_meta_set() {
         return 1
         ;;
     esac
+    for ((i = 0; i < ${#mkeys[@]}; i++)); do
+      if [ "${mkeys[$i]}" = "$mkey" ]; then
+        FM_BACKLOG_TRANSITION_ERROR="task record key is set twice in one update: $mkey"
+        return 1
+      fi
+    done
     mkeys+=("$mkey")
     mvalues+=("$mvalue")
   done

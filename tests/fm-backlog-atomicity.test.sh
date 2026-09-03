@@ -2404,6 +2404,12 @@ test_meta_set_replaces_keys_and_refuses_unattributable_lines() {
       || { echo "a value carrying a line break was accepted" >&2; exit 1; }
     ! fm_meta_set "$meta" "$state" note "$(printf 'one\rtwo')" \
       || { echo "a value carrying a carriage return was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" decision_keys a decision_keys b \
+      || { echo "the same key twice in one update was accepted" >&2; exit 1; }
+    case "$FM_BACKLOG_TRANSITION_ERROR" in
+      *decision_keys*) ;;
+      *) echo "the repeated key refusal did not name the key" >&2; exit 1 ;;
+    esac
     [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before" ] \
       || { echo "a refused update changed the record" >&2; exit 1; }
     [ "$(find "$state" -name '.task-a.meta.set.*' | wc -l)" -eq 0 ] \

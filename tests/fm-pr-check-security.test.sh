@@ -2246,7 +2246,6 @@ test_recorded_pr_values_refuse_embedded_line_breaks() {
   local dir before
   dir=$(make_case pr-value-line-breaks)
   write_task_meta "$dir"
-  before=$(shasum -a 256 "$dir/home/state/task-a.meta" | awk '{print $1}')
   FM_TEST_GH_HEAD=$'0123456789abcdef0123456789abcdef01234567\nwindow=unexpected' \
     run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
     || fail "a valid check with a malformed remote head failed"
@@ -2254,13 +2253,16 @@ test_recorded_pr_values_refuse_embedded_line_breaks() {
     "a newline in the forge head injected a second record key"
   assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" \
     "a multiline head reached the record"
+  before=$(shasum -a 256 "$dir/home/state/task-a.meta" | awk '{print $1}')
+  [ -n "$before" ] || fail "could not fingerprint the record"
   if run_check_entry "$dir" task-a $'https://github.com/o/r/pull/3\nwindow=unexpected' \
     >/dev/null 2>/dev/null; then
     fail "a PR URL carrying a line break was accepted"
   fi
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" \
     "a newline in the PR URL injected a second record key"
-  [ -n "$before" ] || fail "could not fingerprint the record"
+  [ "$(shasum -a 256 "$dir/home/state/task-a.meta" | awk '{print $1}')" = "$before" ] \
+    || fail "a refused PR URL altered the record"
   pass "recorded PR values refuse an embedded line break at the writer"
 }
 
