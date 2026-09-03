@@ -129,8 +129,8 @@ fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
-This section supersedes every earlier instruction about constructing `--intent`.
-Use only the captain intent below as `--intent`; never include Firstmate specification or other mixed Task content.
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
+Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
 
 ## Captain intent authorized for --intent
 EOF

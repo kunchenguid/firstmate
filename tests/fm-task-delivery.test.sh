@@ -500,9 +500,12 @@ EOF
     "legacy no-mistakes spawn rejected explicitly marked captain words"
   assert_present "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not render a current launch contract"
-  assert_grep "supersedes every earlier instruction about constructing \`--intent\`" \
+  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
+  assert_grep "plus any later words the captain actually supplied" \
+    "$home/data/$id/launch-brief.md" \
+    "marked legacy launch contract excluded later captain clarifications"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the legacy dispatch boundary." \
     "marked legacy launch contract omitted captain words"
@@ -531,9 +534,12 @@ EOF
     "migrated launch contract omitted Captain's intent"
   assert_not_contains "$authorized" "Preserve the existing compatibility path." \
     "migrated launch contract included Firstmate spec in intent"
-  assert_grep "supersedes every earlier instruction about constructing \`--intent\`" \
+  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
+  assert_grep "plus any later words the captain actually supplied" \
+    "$home/data/$id/launch-brief.md" \
+    "migrated launch contract excluded later captain clarifications"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
