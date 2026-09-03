@@ -176,6 +176,30 @@ json.dump(plan, open(path, "w"), indent=2, sort_keys=True)
 PY
 }
 
+write_freeze_inputs() {  # <bench-dir>
+  local bench=$1
+  python3 - "$bench" <<'PY'
+import json, sys
+from pathlib import Path
+
+bench = Path(sys.argv[1])
+plan = json.loads((bench / "benchmark.json").read_text())
+for track in plan["tracks"].values():
+    for packet in track["packets"]:
+        packet_id = packet["id"]
+        packet_dir = bench / "packets" / packet_id
+        packet_dir.mkdir(parents=True, exist_ok=True)
+        (packet_dir / "packet.md").write_text(f"packet {packet_id}\n")
+        truth = bench / "ground-truth" / f"{packet_id}.md"
+        truth.parent.mkdir(parents=True, exist_ok=True)
+        truth.write_text(f"sealed truth {packet_id}\n")
+(bench / "scoring").mkdir(parents=True, exist_ok=True)
+(bench / "scoring" / "composite.py").write_text("def score(): return 1\n")
+(bench / "judge-prompts").mkdir(parents=True, exist_ok=True)
+(bench / "judge-prompts" / "common.md").write_text("common neutral judge prompt\n")
+PY
+}
+
 write_provenance() {  # <bench-dir> <packet> <mode>
   local bench=$1 packet=$2 mode=$3
   mkdir -p "$bench/provenance"
@@ -686,11 +710,7 @@ pass "neutralisation that changes the judged tree is refused"
 
 BENCH="$TMP_ROOT/freeze"
 write_plan "$BENCH"
-mkdir -p "$BENCH/packets/A1" "$BENCH/ground-truth" "$BENCH/scoring" "$BENCH/judge-prompts"
-printf 'packet text\n' > "$BENCH/packets/A1/packet.md"
-printf 'sealed truth\n' > "$BENCH/ground-truth/A1.md"
-printf 'score()\n' > "$BENCH/scoring/composite.py"
-printf 'judge prompt\n' > "$BENCH/judge-prompts/track-a.md"
+write_freeze_inputs "$BENCH"
 out=$(run_gate "$BENCH" freeze) || fail "freeze must succeed before labels exist: $out"
 out=$(run_gate "$BENCH" freeze-check) || fail "a fresh freeze must verify: $out"
 printf 'edited truth\n' > "$BENCH/ground-truth/A1.md"
@@ -698,6 +718,17 @@ out=$(run_gate "$BENCH" freeze-check) && status=0 || status=$?
 expect_code 1 "$status" "ground truth edited after the freeze is refused"
 assert_contains "$out" "changed after the freeze" "the freeze binds the sealed inputs"
 pass "the freeze binds packets, ground truth, scoring, prompts, tuples, seed, and failure policy"
+
+BENCH="$TMP_ROOT/freeze-missing-input"
+write_plan "$BENCH"
+write_freeze_inputs "$BENCH"
+rm "$BENCH/ground-truth/C6.md"
+out=$(run_gate "$BENCH" freeze) && status=0 || status=$?
+expect_code 1 "$status" "a freeze missing one planned private input is refused"
+assert_contains "$out" "ground-truth is missing planned packet inputs: C6" \
+  "the missing plan-derived ground truth is named"
+assert_absent "$BENCH/freeze.json" "an incomplete private input set writes no freeze"
+pass "every planned packet and ground-truth input must exist before freezing"
 
 BENCH="$TMP_ROOT/freeze-late"
 write_plan "$BENCH"
@@ -964,6 +995,29 @@ for private in objects tmp home session; do
     "the sibling's declared private $private is a probe target"
 done
 pass "all seven sibling-access probes detect a real leak when nothing confines the entrant"
+
+BENCH="$TMP_ROOT/iso-conditional-wrapper"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+CONDITIONAL_WRAPPER="$TMP_ROOT/conditional-wrapper.sh"
+cat > "$CONDITIONAL_WRAPPER" <<'EOF'
+#!/usr/bin/env bash
+printf 'PROBE DENIED conditional fixture\n'
+EOF
+chmod +x "$CONDITIONAL_WRAPPER"
+python3 - "$BENCH/isolation.json" "$CONDITIONAL_WRAPPER" <<'PY'
+import json, sys
+path, wrapper = sys.argv[1:]
+record = json.load(open(path))
+record["exec_wrapper"] = [wrapper]
+json.dump(record, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "a probe-specific wrapper cannot clear entrant confinement"
+assert_contains "$out" "isolation.exec_wrapper fail" "the shared isolation boundary rejects the wrapper"
+assert_contains "$out" "must use the executable bin/fm-bench-confine.sh" \
+  "only the launch-capable trusted wrapper may supply isolation evidence"
+pass "probe-only confinement cannot substitute for the entrant launch wrapper"
 
 # The process probe must still measure a shared process table when the image
 # ships no ps, which is the case for the container image the gate documents.
@@ -1249,13 +1303,13 @@ for name in sorted(plan["tracks"]):
     track = plan["tracks"][name]
     ids = [packet["id"] for packet in track["packets"]]
     for entrant in track["entrants"]:
-        work.extend((name, entrant["name"], pid) for pid in ids)
+        work.extend((name, "entrant", entrant["name"], pid) for pid in ids)
     if "baseline" in track:
-        work.extend((name, track["baseline"]["name"], pid) for pid in track["baseline_packets"])
+        work.extend((name, "baseline", track["baseline"]["name"], pid) for pid in track["baseline_packets"])
 
 root = bench / "archive"
 shutil.rmtree(root, ignore_errors=True)
-for track_name, candidate, packet in work:
+for track_name, role, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
     (src / ".ignored-by-evaluator").write_text("not scored\n")
     (src / "genuine").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
@@ -1330,20 +1384,23 @@ printf '%s\n' "$value"
     put("judging.json", '{"raw":[8,9],"order":["k7","r2"]}\n')
     put("timing.json", '{"operational_s":1200,"session_s":1100}\n')
     put("verdict.md", "label K7 -> candidate\n")
+    binding = {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
+               "neutral_tree": tree, "base_tree": base_tree,
+               "patch_hash": hashlib.sha256(slug.encode()).hexdigest()}
+    put("tree-binding.json", json.dumps(binding, indent=2, sort_keys=True) + "\n")
     files["candidate.bundle"] = hashlib.sha256((out / "candidate.bundle").read_bytes()).hexdigest()
     (out / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
+        "identity": {"track": track_name, "role": role, "candidate": candidate, "packet": packet},
         "groups": {
             "packet_and_ground_truth": ["packet.md", "ground-truth.md"],
             "candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"],
-            "tree_binding": ["capture.json"], "transcript": ["transcript.md"],
+            "tree_binding": ["tree-binding.json"], "transcript": ["transcript.md"],
             "capture_and_scoring": ["capture.json", "scoring.py"],
             "judging": ["judging.json"], "timing_cost_quota": ["timing.json"],
             "key_and_verdict": ["verdict.md"]},
         "files": files,
-        "tree_binding": {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
-                         "neutral_tree": tree, "base_tree": base_tree,
-                         "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
+        "tree_binding": binding,
         "evaluator_rerun": {"argv": ["scoring.py"], "scored_inputs": ["work.json"],
                              "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}},
                              "result_hash": hashlib.sha256((slug + "\n").encode()).hexdigest()},
@@ -1358,6 +1415,68 @@ write_archive "$BENCH" "$TMP_ROOT/srcrepo"
 out=$(run_gate "$BENCH" archive-verify) || fail "the complete archive must verify: $out"
 assert_contains "$out" "8 evidence groups" "every archive carries all eight evidence groups"
 pass "one content-addressed archive per scored output verifies against its stored bytes"
+
+copy_archive_fixture() {  # <source-bench> <target-bench>
+  local source=$1 target=$2
+  write_plan "$target"
+  python3 - "$source/archive" "$target/archive" <<'PY'
+import shutil, sys
+shutil.copytree(sys.argv[1], sys.argv[2])
+PY
+}
+
+IDENTITY_BENCH="$TMP_ROOT/archive-identity"
+copy_archive_fixture "$BENCH" "$IDENTITY_BENCH"
+python3 - "$IDENTITY_BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+samples = sorted(path for path in (Path(sys.argv[1]) / "archive").iterdir() if path.is_dir())
+first = json.loads((samples[0] / "manifest.json").read_text())
+second_path = samples[1] / "manifest.json"
+second = json.loads(second_path.read_text())
+second["identity"] = first["identity"]
+second_path.write_text(json.dumps(second, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$IDENTITY_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "duplicate archive identities cannot satisfy planned sample coverage"
+assert_contains "$out" "archive.identity_coverage fail" "coverage is checked from structured identities"
+assert_contains "$out" "duplicate" "the duplicated planned sample identity is named"
+assert_contains "$out" "missing" "the displaced planned sample identity is named"
+pass "archive coverage requires the exact unique planned sample set"
+
+ROOT_LINK_BENCH="$TMP_ROOT/archive-root-link"
+copy_archive_fixture "$BENCH" "$ROOT_LINK_BENCH"
+python3 - "$ROOT_LINK_BENCH" <<'PY'
+import sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+sample = sorted(path for path in (bench / "archive").iterdir() if path.is_dir())[0]
+outside = bench / "external-sample"
+sample.rename(outside)
+sample.symlink_to(outside, target_is_directory=True)
+PY
+out=$(run_gate "$ROOT_LINK_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "a symlinked archive sample root is refused"
+assert_contains "$out" "archive.storage fail" "archive storage validates roots without following links"
+assert_contains "$out" "sample roots are symlinks or special files" "the unsafe root type is named"
+pass "archive sample roots must be self-contained real directories"
+
+GROUP_BENCH="$TMP_ROOT/archive-group-roles"
+copy_archive_fixture "$BENCH" "$GROUP_BENCH"
+python3 - "$GROUP_BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+sample = sorted(path for path in (Path(sys.argv[1]) / "archive").iterdir() if path.is_dir())[0]
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["groups"] = {name: ["scoring.py"] for name in record["groups"]}
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$GROUP_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "one evaluator file cannot stand in for every archive evidence role"
+assert_contains "$out" "archive evidence groups are not role-specific" "group labels require their own artifacts"
+assert_contains "$out" "files reused across evidence roles" "cross-role file reuse is named"
+pass "archive evidence groups enforce distinct role-specific artifacts"
 
 out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
 expect_code 1 "$status" "cleanup before a restore drill is refused"
@@ -1436,7 +1555,11 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
   out=$(run_gate "$bench" archive-verify) && status=0 || status=$?
   expect_code 1 "$status" "$label archive path is refused"
-  assert_contains "$out" "escapes sample archive" "$label path is kept inside its own sample archive"
+  if [ "$kind" = symlink ]; then
+    assert_contains "$out" "symlinks or special files" "$label path is rejected by file type"
+  else
+    assert_contains "$out" "escapes sample archive" "$label path is kept inside its own sample archive"
+  fi
 }
 
 archive_escape_refused "an absolute" absolute
@@ -2331,6 +2454,8 @@ for name in sorted(plan["tracks"]):
                 blocker = True
             if win and mode == "thin":
                 score = 7.5
+            if win and mode == "nonfinite":
+                score = float("inf")
             write(name, packet, entrant["name"], "entrant", score, blocker=blocker)
         if win and mode == "void":
             write(name, ids[0], entrant["name"], "entrant", 0.0, status="void", suffix="-void")
@@ -2346,6 +2471,8 @@ for name in sorted(plan["tracks"]):
                 base = 9.5 if index == 0 else 7.5
             else:
                 base = 9.5 if mode == "veto" else 7.5
+            if mode == "baseline_nonfinite" and index == 0:
+                base = float("inf")
             if mode == "baseline_unreplaced_void" and index == 0:
                 write(name, packet, track["baseline"]["name"], "baseline", 0.0, status="void")
                 continue
@@ -2372,6 +2499,24 @@ assert_contains "$out" "standing route eligible" "a sweep with margin is eligibl
 assert_contains "$out" "subject to the captain's explicit word" "promotion still needs the captain"
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
+
+BENCH="$TMP_ROOT/promote-nonfinite"
+write_plan "$BENCH"
+write_results "$BENCH" nonfinite
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "an infinite entrant composite is refused"
+assert_contains "$out" "has no finite numeric composite" "the non-finite entrant score is named"
+assert_contains "$out" "no standing route: a composite is not finite" "infinity cannot become a sweeper"
+pass "non-finite entrant composites cannot promote"
+
+BENCH="$TMP_ROOT/promote-baseline-nonfinite"
+write_plan "$BENCH"
+write_results "$BENCH" baseline_nonfinite
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "an infinite baseline composite is refused"
+assert_contains "$out" "has no finite numeric composite" "the non-finite baseline score is named"
+assert_contains "$out" "no standing route: a composite is not finite" "infinity cannot enter veto arithmetic"
+pass "non-finite baseline composites cannot reach regression arithmetic"
 
 BENCH="$TMP_ROOT/promote-replaced-void"
 write_plan "$BENCH"
