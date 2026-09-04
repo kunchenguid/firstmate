@@ -421,7 +421,7 @@ The optional `home` field names the absolute Codex home (`CODEX_HOME`) a candida
 It is valid only for `harness: "codex"`, and any other harness carrying it is a `CREW_DISPATCH` configuration error.
 [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.
 A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
-Bootstrap and `fm-spawn.sh` both refuse a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
+Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
