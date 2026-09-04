@@ -94,7 +94,8 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
-Any other key, such as the arrows needed to move a selection inside a harness confirmation dialog, is not available through that path and must go through the backend's own `cmux send-key --surface <id> <key>`.
+Any other name, such as the arrows needed to move a selection inside a harness confirmation dialog, is forwarded verbatim to `cmux send-key`, so the limit is cmux's own key vocabulary rather than the `fm-send.sh` path.
+Keep sending through `fm-send.sh <window> --key <name>`, which resolves the workspace and surface from the task label first and so cannot land a key on a stale id.
 The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
 `read-screen` is plain text with no cursor primitive, so the shared classifier degrades a glyph row carrying trailing text to `unknown` rather than misreading a harness's own idle suggestion as unsent input.
 An unstructured bare prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
@@ -117,7 +118,7 @@ Real tests share the captain's running app rather than creating an isolated cmux
 ## Operating cmux alongside the backend
 
 The cmux CLI is far richer than this adapter uses, offering windows, splits, panes, and additional surface types.
-A pane created for the captain to look at is safe; a pane hosting work is invisible to `state/`, unsupervised, and unrecoverable, so work belongs only in a task spawned through `bin/fm-spawn.sh`.
+A pane created for the captain to look at is safe only in its own non-`fm-` workspace, because teardown closes a task's entire workspace and every surface in it; a pane hosting work is invisible to `state/`, unsupervised, and unrecoverable, so work belongs only in a task spawned through `bin/fm-spawn.sh`.
 A viewing workspace must not carry an `fm-` title and must stay in the same window as its tasks, because the label lookup below is window-scoped.
 
 cmux's routine Agent Hibernation kills idle background agent processes once the live-terminal count passes its configured limit.
@@ -128,6 +129,7 @@ Under critical memory pressure cmux may still hibernate a bounded batch of idle 
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
+- Agent Hibernation is a second manual Settings prerequisite that nothing preflights, so a fleet started with it enabled can lose workers parked on a captain decision.
 - Secondmate spawns are unsupported until a per-home lifecycle design is verified.
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.

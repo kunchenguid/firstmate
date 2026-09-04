@@ -30,7 +30,8 @@ Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it canno
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 
 Inspect within about 20 seconds, and inspect again after each confirmation, because clearing one gate can reveal the next.
-`../../../bin/fm-crew-state.sh` reporting `harness busy` is not proof the agent started: a worker parked on either dialog keeps reading busy indefinitely.
+`../../../bin/fm-crew-state.sh` reporting `harness busy` is not proof the agent started: `../../../bin/fm-spawn.sh` arms a busy record at launch, so a Claude task reads `harness busy (fm-spawn)` from the moment it is spawned, and a worker parked on either dialog keeps reading that indefinitely.
+Read the source token in the parenthesis rather than the word `busy`: only `harness busy (claude-hook)` is a real Claude turn.
 Prove the start by reading the pane for real tool calls before reporting the task as under way.
 
 ## Composer ghost
