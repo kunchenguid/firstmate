@@ -828,6 +828,28 @@ test_concurrent_drains_send_one_card_once() {
   pass "concurrent drains serialize one card delivery"
 }
 
+test_drain_recovers_after_delivery_before_queue_cleanup() {
+  local dir base card key out
+  dir=$(make_home delivered-before-cleanup)
+  report "$dir" "done [key=merged-t1]: merged t1 https://example.test/o/r/pull/3" \
+    landed merged-t1 "project=alpha" "url=https://example.test/o/r/pull/3" >/dev/null 2>&1 || true
+  card=$(only_card "$dir")
+  key=$(basename "$card" .card)
+  FM_CONFIG_OVERRIDE="$dir/home/config" bash -c \
+    '. "$1"; fm_telegram_mark_delivered "$2" "$3"' _ \
+    "$ROOT/bin/fm-telegram-lib.sh" "$dir/home/state" "$key" \
+    || fail "could not seed the accepted card's delivery receipt"
+
+  base=$(start_api "$dir")
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the recovery drain failed"
+  [ -z "$out" ] || fail "the recovery drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the recovery drain left the residual card queued"
+  [ ! -s "$dir/api.log" ] \
+    || fail "the recovery drain resent an already delivered card: $(cat "$dir/api.log")"
+  stop_api
+  pass "a recorded delivery is not resent after queue-cleanup interruption"
+}
+
 test_concurrent_publishers_queue_one_card_once() {
   local dir publisher pid
   dir=$(make_home concurrent-publish)
@@ -1002,6 +1024,7 @@ test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
 test_concurrent_publishers_queue_one_card_once
 test_concurrent_drains_send_one_card_once
+test_drain_recovers_after_delivery_before_queue_cleanup
 test_semantic_success_response_is_accepted
 test_non_loopback_api_override_is_refused
 test_malformed_success_response_is_rejected

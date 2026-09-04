@@ -548,6 +548,15 @@ fm_telegram_delivered() {  # <state> <key>
   grep -Fqx -- "$hash" "$ledger" 2>/dev/null
 }
 
+# True when the card identity encoded in a queue filename is in the ledger.
+fm_telegram_card_delivered() {  # <state> <card-identity>
+  local ledger
+  ledger="$(fm_telegram_outbox_dir "$1")/$FM_TELEGRAM_DELIVERED_BASENAME"
+  _fm_telegram_key_valid "$2" || return 1
+  [ -f "$ledger" ] && [ ! -L "$ledger" ] || return 1
+  grep -Fqx -- "$2" "$ledger" 2>/dev/null
+}
+
 # Record one delivered card and trim the ledger to its bound. The argument is
 # the card identity its file name carries, not the publisher's key.
 fm_telegram_mark_delivered() {  # <state> <card-identity>

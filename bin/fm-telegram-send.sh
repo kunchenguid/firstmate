@@ -299,6 +299,12 @@ action_check() {
   while IFS= read -r card; do
     [ -n "$oldest" ] || oldest=$card
     [ "$sent" -lt "$DRAIN_MAX" ] || break
+    # Telegram may have accepted this card before a previous sender crashed
+    # between recording its receipt and removing the queue file.
+    if fm_telegram_card_delivered "$STATE" "$(card_key_marker "$card")"; then
+      rm -f -- "$card"
+      continue
+    fi
     text=$(cat "$card" 2>/dev/null) || { rm -f -- "$card"; continue; }
     # The refusal that already ran when this card was built, run again against
     # the bytes about to leave the machine. A card that fails it here is
