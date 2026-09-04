@@ -651,11 +651,24 @@ timeout_membership_document() {
 }
 
 list_work() {
-  local format=${1-} started deadline inner_budget output rc remaining
+  local format=${1-} started deadline inner_budget output fallback rc
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   started=$(date +%s) || die "cannot start background-work collection deadline"
   deadline=$((started + COLLECTION_BUDGET))
-  inner_budget=$((COLLECTION_BUDGET - 1))
+  fallback=$(timeout_membership_document) \
+    || die "cannot encode timed-out background-work membership"
+  if [ "$format" != --json ]; then
+    fallback=$(printf '%s\n' "$fallback" | jq -r '
+      "ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION",
+      (.records[] | [.id, "-", .liveness.status, .progress.status, "-", "-", "-",
+        "Collection timed out"] | @tsv)') \
+      || die "cannot encode timed-out background-work table"
+  fi
+  inner_budget=$((deadline - $(date +%s) - 1))
+  if [ "$inner_budget" -le 0 ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
   if output=$(fm_run_timed "$inner_budget" "$0" _list "$format"); then
     printf '%s\n' "$output"
     return 0
@@ -663,18 +676,7 @@ list_work() {
     rc=$?
   fi
   [ "$rc" -eq 124 ] || return "$rc"
-  remaining=$((deadline - $(date +%s)))
-  [ "$remaining" -gt 0 ] || die "background-work collection budget exhausted"
-  output=$(fm_run_timed "$remaining" "$0" _timeout_membership) \
-    || die "cannot encode timed-out background-work membership"
-  if [ "$format" = --json ]; then
-    printf '%s\n' "$output"
-  else
-    printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
-    printf '%s\n' "$output" | jq -r '.records[] | [
-      .id, "-", .liveness.status, .progress.status, "-", "-", "-", "Collection timed out"
-    ] | @tsv'
-  fi
+  printf '%s\n' "$fallback"
 }
 
 retire_work() {
@@ -722,7 +724,6 @@ retire_work() {
 
 case "${1-}" in
   _list) shift; list_work_impl "${1-}" ;;
-  _timeout_membership) timeout_membership_document ;;
   register) shift; register_work "$@" ;;
   list) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; list_work "${1-}" ;;
   retire) shift; [ "$#" -eq 1 ] || { usage >&2; exit 2; }; retire_work "$1" ;;

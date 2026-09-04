@@ -258,7 +258,7 @@ SH
 test_many_hung_probes_share_one_disclosed_collection_budget() {
   local home progress result started elapsed i
   home=$(make_home collection-budget)
-  progress=$(make_progress_command collection-budget-progress 'sleep 10; printf "late\n"')
+  progress=$(make_progress_command collection-budget-progress 'trap "" TERM; sleep 10; printf "late\n"')
   start_sleeper
   i=1
   while [ "$i" -le 6 ]; do
