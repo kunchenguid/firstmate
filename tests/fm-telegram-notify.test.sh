@@ -354,7 +354,7 @@ test_a_credential_value_is_refused_loudly() {
   local dir out rc=0
   dir=$(make_home secret)
   printf '%s\n' "$dir/extra-credential" > "$dir/home/config/telegram-secret-files"
-  printf 'super-secret-api-key-value\n' > "$dir/extra-credential"
+  printf 'first-secret-api-key-value\nSECOND=second-secret-api-key-value\n' > "$dir/extra-credential"
   chmod 0600 "$dir/extra-credential"
 
   out=$(report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
@@ -369,9 +369,14 @@ test_a_credential_value_is_refused_loudly() {
   esac
 
   out=$(report "$dir" "failed [key=k2]: child t1 failed: x" failed k2 \
-    "project=alpha" "note=config said super-secret-api-key-value" 2>&1) || rc=$?
+    "project=alpha" "note=config said SECOND=second-secret-api-key-value" 2>&1) || rc=$?
   [ "$(card_count "$dir")" = 0 ] \
-    || fail "a card carrying a value from config/telegram-secret-files was queued"
+    || fail "a card carrying the second line of a credential file was queued"
+
+  out=$(report "$dir" "failed [key=k2-value]: child t1 failed: x" failed k2-value \
+    "project=alpha" "note=config said second-secret-api-key-value" 2>&1) || rc=$?
+  [ "$(card_count "$dir")" = 0 ] \
+    || fail "a card carrying only a KEY=value credential value was queued"
 
   # A refusal is about real values, not about anything that merely looks secret.
   report "$dir" "failed [key=k3]: child t1 failed: x" failed k3 \
@@ -435,6 +440,47 @@ test_pr_card_identity_tracks_the_canonical_pr() {
   grep -R -Fq "$second_url" "$dir/home/state/telegram-outbox" \
     || fail "the replacement PR card was lost"
   pass "exact PR retries deduplicate while replacement PRs remain distinct"
+}
+
+test_pr_registration_survives_card_digest_failure() {
+  local dir parent meta out rc=0 real_shasum
+  dir=$(make_home pr-digest-failure)
+  parent="$dir/parent"
+  meta="$dir/home/state/t1.meta"
+  real_shasum=$(command -v shasum)
+  mkdir -p "$parent/state"
+  printf 'mate\n' > "$dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$dir/home/.fm-secondmate-parent"
+  fm_write_meta "$meta" "window=firstmate:fm-t1" "endpoint_task_id=t1" \
+    "worktree=$dir/wt" "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  chmod 0600 "$meta"
+  cat > "$dir/fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -a ] && [ "$2" = 256 ]; then
+  exit 1
+fi
+exec "${FM_REAL_SHASUM:?}" "$@"
+SH
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/fakebin/shasum" "$dir/fakebin/gh"
+
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_REAL_SHASUM="$real_shasum" PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_CHECK" t1 https://github.com/owner/repo/pull/12 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "card digest failure changed PR registration status: $out"
+  [ "$out" = 'armed: state/t1.check.sh' ] \
+    || fail "card digest failure changed PR registration output: $out"
+  grep -Fxq 'pr=https://github.com/owner/repo/pull/12' "$meta" \
+    || fail "card digest failure lost the registered PR"
+  grep -Fq 'child t1 PR ready: https://github.com/owner/repo/pull/12' "$parent/state/mate.status" \
+    || fail "card digest failure skipped the parent ready line"
+  [ "$(card_count "$dir")" = 0 ] || fail "a failed card digest queued an unsafe card"
+  pass "card digest failures cannot alter PR registration or ready publication"
 }
 
 test_publishers_make_no_network_call() {
@@ -709,6 +755,7 @@ test_a_raw_status_line_cannot_become_a_card
 test_a_credential_value_is_refused_loudly
 test_internal_identifiers_do_not_reach_a_card
 test_pr_card_identity_tracks_the_canonical_pr
+test_pr_registration_survives_card_digest_failure
 test_publishers_make_no_network_call
 test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
 test_secondmate_failure_cards_track_incarnations

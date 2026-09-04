@@ -98,6 +98,9 @@ FM_TELEGRAM_CARD_BYTES_MAX=4000
 # A credential value shorter than this is not distinctive enough to test a card
 # against; collect.py uses the same floor for the same reason.
 FM_TELEGRAM_SECRET_MIN=8
+FM_TELEGRAM_SECRET_FILE_MAX=1048576
+FM_TELEGRAM_SECRET_LIST_MAX=65536
+FM_TELEGRAM_SECRET_FILES_MAX=100
 
 # Output globals, set by fm_telegram_config_load.
 # shellcheck disable=SC2034 # Read by sourcing callers.
@@ -191,25 +194,36 @@ fm_telegram_enabled() {  # <home>
 # credential set is a property of the operator's machine and never of this
 # shared template.
 fm_telegram_secret_values() {  # <home>
-  local home=$1 dir list file value
+  local home=$1 dir list file value candidate files='' bytes count=0
   dir=$(_fm_telegram_config_dir "$home")
   list="$dir/telegram-secret-files"
-  {
-    [ -z "$FM_TELEGRAM_TOKEN_FILE" ] || printf '%s\n' "$FM_TELEGRAM_TOKEN_FILE"
-    if [ -f "$list" ] && [ ! -L "$list" ]; then
-      cat "$list" 2>/dev/null || true
-    fi
-  } | while IFS= read -r file || [ -n "$file" ]; do
+  [ -z "$FM_TELEGRAM_TOKEN_FILE" ] || files=$FM_TELEGRAM_TOKEN_FILE
+  if [ -f "$list" ] && [ ! -L "$list" ]; then
+    bytes=$(LC_ALL=C wc -c < "$list" 2>/dev/null | tr -d '[:space:]') || return 2
+    [ "$bytes" -le "$FM_TELEGRAM_SECRET_LIST_MAX" ] || return 2
+    files="${files}${files:+$'\n'}$(cat "$list" 2>/dev/null)" || return 2
+  fi
+  while IFS= read -r file || [ -n "$file" ]; do
     case "$file" in
       ''|'#'*) continue ;;
     esac
+    count=$((count + 1))
+    [ "$count" -le "$FM_TELEGRAM_SECRET_FILES_MAX" ] || return 2
     [ "${file#\~/}" = "$file" ] || file="$HOME/${file#\~/}"
     [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || continue
-    value=$(head -1 "$file" 2>/dev/null) || continue
-    value=${value%$'\r'}
-    [ "${#value}" -ge "$FM_TELEGRAM_SECRET_MIN" ] || continue
-    printf '%s\n' "$value"
-  done | LC_ALL=C sort -u
+    bytes=$(LC_ALL=C wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || return 2
+    [ "$bytes" -le "$FM_TELEGRAM_SECRET_FILE_MAX" ] || return 2
+    while IFS= read -r value || [ -n "$value" ]; do
+      value=${value%$'\r'}
+      [ "${#value}" -lt "$FM_TELEGRAM_SECRET_MIN" ] || printf '%s\n' "$value"
+      case "$value" in
+        *=*)
+          candidate=${value#*=}
+          [ "${#candidate}" -lt "$FM_TELEGRAM_SECRET_MIN" ] || printf '%s\n' "$candidate"
+          ;;
+      esac
+    done < "$file"
+  done <<< "$files"
 }
 
 # Refuse <text> when it contains any of this home's credential values. This is
@@ -217,15 +231,14 @@ fm_telegram_secret_values() {  # <home>
 # cannot be defeated by an unusual token shape and cannot fire on prose that
 # merely looks credential-like. Returns 0 when the text is safe to send.
 fm_telegram_refuse_if_secret() {  # <home> <text>
-  local home=$1 text=$2 value
+  local home=$1 text=$2 value values
+  values=$(fm_telegram_secret_values "$home") || return 2
   while IFS= read -r value || [ -n "$value" ]; do
     [ -n "$value" ] || continue
     case "$text" in
       *"$value"*) return 1 ;;
     esac
-  done <<EOF
-$(fm_telegram_secret_values "$home")
-EOF
+  done <<< "$values"
   return 0
 }
 
@@ -445,7 +458,7 @@ _fm_telegram_actionable() {  # <message>
 # has not opted in; 3 when the card was refused for content; 1 on a local
 # failure to write it.
 fm_telegram_notify() {  # <home> <state> <class> <key> <name=value>...
-  local home=$1 state=$2 class=$3 key=$4 card path tmp rc=0
+  local home=$1 state=$2 class=$3 key=$4 card path tmp rc=0 secret_rc=0
   shift 4
   fm_telegram_config_load "$home" >/dev/null 2>&1 || return 0
   _fm_telegram_key_valid "$key" || { _fm_telegram_actionable "has an unusable key"; return 1; }
@@ -467,10 +480,12 @@ fm_telegram_notify() {  # <home> <state> <class> <key> <name=value>...
     _fm_telegram_actionable "for $class could not be bounded as valid UTF-8"
     return 3
   }
-  if ! fm_telegram_refuse_if_secret "$home" "$card"; then
-    _fm_telegram_actionable "for $class was refused: it would have carried a credential value"
-    return 3
-  fi
+  fm_telegram_refuse_if_secret "$home" "$card" || secret_rc=$?
+  case "$secret_rc" in
+    0) ;;
+    1) _fm_telegram_actionable "for $class was refused: it would have carried a credential value"; return 3 ;;
+    *) _fm_telegram_actionable "for $class was refused: configured credential files could not be checked completely"; return 3 ;;
+  esac
   mkdir -p "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || return 1
   chmod 0700 "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || true
   if fm_telegram_delivered "$state" "$key" || fm_telegram_queued "$state" "$key"; then

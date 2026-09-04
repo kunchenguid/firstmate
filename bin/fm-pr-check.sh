@@ -153,9 +153,13 @@ READY_RC=0
 PR_PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_PROJECT=${PR_PROJECT%/}
 PR_PROJECT=${PR_PROJECT##*/}
-PR_CARD_DIGEST=$(fm_telegram_event_digest "$PROVIDER|$HOST|$PROJECT_PATH|$NUMBER") || exit 1
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" \
-  pr-ready "pr-$ID-$PR_CARD_DIGEST" "project=$PR_PROJECT" "url=$URL" || READY_RC=$?
+PR_CARD_DIGEST=$(fm_telegram_event_digest "$PROVIDER|$HOST|$PROJECT_PATH|$NUMBER") || PR_CARD_DIGEST=''
+if [ -n "$PR_CARD_DIGEST" ]; then
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" \
+    pr-ready "pr-$ID-$PR_CARD_DIGEST" "project=$PR_PROJECT" "url=$URL" || READY_RC=$?
+else
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+fi
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
