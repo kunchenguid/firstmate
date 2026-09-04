@@ -448,6 +448,121 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   printf '%s' "$open"
 }
 
+# One-awk-process re-derivation of _fm_decision_fold_line, for a FULL fold of
+# an entire status file from byte 0. _fm_decision_fold_line's own per-line
+# bash loop forks several subshells per line (status_line_verb,
+# _fm_decision_key and its _fm_key_before_colon/_fm_key_at_note_head/
+# _fm_decision_slug_ok helpers, _fm_decision_key_transition_allowed,
+# status_line_note) plus an O(open-count) _fm_decision_drop rescan on every
+# open/close - cheap per call, but CPU-bound-shell-slow summed across a
+# few-hundred-KB status log (issue #2808). status_open_decisions and the
+# cursor-invalidated full-refold branch of status_open_decisions_incremental
+# below both call this instead of looping _fm_decision_fold_line themselves;
+# the steady-state incremental branch keeps the bash loop, where per-call
+# overhead already dwarfs the handful of newly appended lines.
+#
+# This function's rule MUST stay byte-identical to _fm_decision_fold_line
+# (verbs, both key positions, the drop rules, the reserved-key-prefix
+# namespace check, and the "default" one-open-per-task key) - it is a second
+# implementation of the one contract that function documents, not a second
+# owner of it. tests/fm-classify-decision-fold-awk-equivalence.test.sh drives
+# both engines over the same fixture logs, including a generated ~330KB one,
+# and asserts byte-identical output; re-run it after touching either engine.
+_fm_decision_fold_awk() {  # <status-file> <resolve-verb> <held-verb>
+  local f=$1 resolve=$2 held=$3
+  LC_ALL=C awk -v resolve="$resolve" -v held="$held" \
+    -v reserved="${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}" '
+    function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
+    function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+    function trim(s) { return ltrim(rtrim(s)) }
+    BEGIN {
+      seq = 0
+      n_reserved = split(reserved, rprefix, /[[:space:]]+/)
+    }
+    {
+      line = $0
+      blank = line
+      gsub(/[[:space:]]/, "", blank)
+      if (blank == "") next
+
+      colon = index(line, ":")
+      if (colon > 0) {
+        precolon = substr(line, 1, colon - 1)
+        postcolon = substr(line, colon + 1)
+        has_colon = 1
+      } else {
+        precolon = line
+        postcolon = ""
+        has_colon = 0
+      }
+
+      br = index(precolon, "[")
+      verb = trim(br > 0 ? substr(precolon, 1, br - 1) : precolon)
+
+      before_colon_matched = 0
+      kpos = index(precolon, "[key=")
+      if (kpos > 0) {
+        after = substr(precolon, kpos + 5)
+        bpos = index(after, "]")
+        if (bpos > 0) { before_colon_matched = 1; key = substr(after, 1, bpos - 1) }
+      }
+      note_head_matched = 0
+      if (!before_colon_matched) {
+        if (has_colon) {
+          rest = ltrim(postcolon)
+          if (substr(rest, 1, 5) == "[key=") {
+            after2 = substr(rest, 6)
+            bpos2 = index(after2, "]")
+            if (bpos2 > 0) { note_head_matched = 1; key = substr(after2, 1, bpos2 - 1) }
+          }
+        }
+        if (!note_head_matched) key = "default"
+      }
+      if (key !~ /^[A-Za-z0-9._-]+$/) next
+
+      if (has_colon) {
+        note = ltrim(postcolon)
+        if (note_head_matched) {
+          token = "[key=" key "]"
+          if (substr(note, 1, length(token)) == token) note = ltrim(substr(note, length(token) + 1))
+        }
+      } else {
+        note = line
+      }
+
+      allowed = 1
+      for (ri = 1; ri <= n_reserved; ri++) {
+        p = rprefix[ri]
+        if (p == "" || substr(key, 1, length(p)) != p) continue
+        allowed = (substr(note, 1, length(p)) == p && index(substr(note, length(p) + 1), ":") > 0) ? 1 : 0
+        break
+      }
+      if (!allowed) next
+
+      if (verb == "needs-decision" || verb == "blocked") {
+        seq++
+        openset[key] = verb "\t" note
+        seqof[key] = seq
+        isopen[key] = 1
+      } else if (verb == resolve || verb == held) {
+        delete openset[key]
+        delete seqof[key]
+        delete isopen[key]
+      }
+    }
+    END {
+      m = 0
+      for (k in isopen) { m++; klist[m] = k }
+      for (i = 2; i <= m; i++) {
+        kk = klist[i]; sv = seqof[kk]; j = i - 1
+        while (j >= 1 && seqof[klist[j]] > sv) { klist[j + 1] = klist[j]; j-- }
+        klist[j + 1] = kk
+      }
+      for (i = 1; i <= m; i++) printf "%s\t%s\n", klist[i], openset[klist[i]]
+    }
+  ' "$f"
+}
+
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
@@ -460,15 +575,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
+# The whole-file fold is always a fold from byte 0, so it always goes through
+# _fm_decision_fold_awk above rather than looping _fm_decision_fold_line itself.
 status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
+  local f=$1 resolve held
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-  done < "$f"
-  printf '%s' "$open"
+  _fm_decision_fold_awk "$f" "$resolve" "$held"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
@@ -799,9 +913,19 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-    while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-    done < "$chunk_file"
+    if [ "$offset" -eq 0 ]; then
+      # This chunk starts at byte 0, so it IS the full-file fold (a fresh
+      # cursor, or the invalidation above) - the CPU-bound-shell case issue
+      # #2808 reports. Route it through the one-pass awk fold instead of
+      # looping _fm_decision_fold_line; any prior $open is already empty here
+      # (set '' by the invalidation branch, or never populated on a first
+      # call), so there is nothing to fold onto.
+      open=$(_fm_decision_fold_awk "$chunk_file" "$resolve" "$held")
+    else
+      while IFS= read -r line || [ -n "$line" ]; do
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      done < "$chunk_file"
+    fi
     rm -f "$chunk_file"
     offset=$size
     cursor_dirty=1
