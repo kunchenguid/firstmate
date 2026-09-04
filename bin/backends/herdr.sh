@@ -1863,11 +1863,10 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
-# calls - never from process exit status, since a business-logic "not found"
-# response is a normal, expected outcome here, not a call failure (real herdr
-# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
-# the JSON keeps this function correct against either).
+# dead|no-agent|live|unknown from fail-safe read-only evidence. Parse Herdr's
+# structured responses rather than trusting process exit status, since a
+# business-logic "not found" response is a normal, expected outcome here
+# (real herdr 0.7.1 exits 1 for it; the canned-response test fakes exit 0).
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
@@ -1893,18 +1892,17 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              truth, corroborated exactly as the tmux classifier trusts its
 #              own foreground process group for the agent-free verdict.
 #   live     - `agent get` reports agent_status working (trusted outright, never
-#              probed), or reports idle/done/blocked while the pane still runs
-#              the agent process (the bare-shell corroboration did NOT fire). A
-#              still-registered idle or blocked agent is genuine, not a restored
-#              husk, so it is never a close-and-replace candidate.
+#              probed), or reports idle/done/blocked and the single bare-shell
+#              sample does not prove the pane agent-free. The latter is treated
+#              conservatively as live, so it is never a close-and-replace
+#              candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
-#              call, a non-working status whose pane could not be proven to be a
-#              lone idle bare shell (fail-safe: not proven agent-free), or a
-#              `pane get` success whose own echoed pane_id does not round-trip
-#              (guards against misreading a herdr response shape change as "the
-#              pane exists"). The caller must fail safe toward refusal here,
-#              never toward closing - this is the conservative backstop the husk
-#              check depends on.
+#              Herdr read, a literal unknown status without positive bare-shell
+#              proof, or a `pane get` success whose own echoed pane_id does not
+#              round-trip (guards against misreading a herdr response shape
+#              change as "the pane exists"). The caller must fail safe toward
+#              refusal here, never toward closing - this is the conservative
+#              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1958,8 +1956,9 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# a confirmed agent-less pane is `dead`, a positively working or conservatively
+# retained registered agent is `alive`, and an unexpected or failed read is
+# `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }

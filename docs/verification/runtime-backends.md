@@ -917,7 +917,8 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary.
+The output below was reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results; it predates the clean-exit stale-record corroboration added to the current guard.
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
@@ -933,8 +934,9 @@ ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The current guard also retains a literal `unknown` registration over a bare shell, requires the recovery-grade state to become `dead`, then starts a deterministic foreground process before exercising the live-agent lifecycle assertions.
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and no real harness is launched.
+Run the command to refresh the full record for the clean-exit behavior and after every Herdr upgrade rather than trusting the older output above.
 
 ### Away-mode transport
 
