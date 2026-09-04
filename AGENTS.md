@@ -105,7 +105,7 @@ state/               runtime records and signals; gitignored
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
-  <id>.nm-review-pane .nm-review-pane.log .last-nm-review-pane  the Herdr no-mistakes review pane's record (session, pane, last pointed run), the watcher's last-sweep warnings, and its cadence marker; bin/fm-nm-review-pane.sh owns the record and retires it at teardown
+  <id>.nm-review-pane  the Herdr no-mistakes review pane's record (session, pane, last pointed run, viewer); presentation only, never task or endpoint authority; bin/fm-nm-review-pane.sh owns it and retires it at teardown (docs/herdr-backend.md "No-mistakes review pane")
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
@@ -129,6 +129,7 @@ state/               runtime records and signals; gitignored
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, results staged for an owning home on another machine, accepted/rejected ledgers, and retirement receipts (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
+  .nm-review-pane.log .last-nm-review-pane  the watcher's detached Herdr review-pane sweep: its newest warnings, truncated per sweep, and its cadence marker (FM_NM_REVIEW_PANE_INTERVAL); bin/fm-watch.sh nm_review_pane_tick
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred startup stage that runs network checks and the inactive-outcome scan off the digest's blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .watcher-down      private generation-bound recovery state coupling watcher downtime, durable wake presentation, and post-handling acknowledgement; never touch
