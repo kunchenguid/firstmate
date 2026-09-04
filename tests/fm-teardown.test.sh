@@ -2212,10 +2212,12 @@ EOF
 }
 
 # One row of the real `no-mistakes runs` ledger: plain text, newest-first,
-# no run id, no quoting - "<status> <branch> <short-sha> <date> [<pr-url>]"
+# no run id, no quoting - "<status> <branch> <short-sha> <date> <time> [<pr-url>]"
 # (the same shape tests/fm-crew-state.test.sh's runs-list fixtures pin).
-ledger_row() {  # <status> <branch> <short-sha> <date>
-  printf '  %-10s %-24s %-8s  %s\n' "$1" "$2" "$3" "$4"
+ledger_row() {  # <status> <branch> <short-sha> <date> <time> [pr-url]
+  printf '  %-10s %-24s %-8s  %s %s' "$1" "$2" "$3" "$4" "$5"
+  [ -z "${6:-}" ] || printf '  %s' "$6"
+  printf '\n'
 }
 
 # Commit <n> pipeline fix rounds on top of the task branch in a separate

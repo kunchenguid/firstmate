@@ -170,14 +170,6 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     case "$pr" in ''|https://*) ;; *) return 0 ;; esac
     [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 0
     [ "$br" = "$branch" ] || continue
-    if [ -n "$expected_head" ]; then
-      case "$expected_head" in *[!A-Fa-f0-9]*|'') return 0 ;; esac
-      [ "${#expected_head}" -ge 7 ] && [ "${#expected_head}" -le 40 ] || return 0
-      case "$expected_head" in
-        "$sha"*) ;;
-        *) case "$sha" in "$expected_head"*) ;; *) return 0 ;; esac ;;
-      esac
-    fi
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:
       # the only admissible anchor, and only exact head equality proves the
@@ -186,6 +178,14 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
         printf '%s' "$pending_st"
       fi
       return 0
+    fi
+    if [ -n "$expected_head" ]; then
+      case "$expected_head" in *[!A-Fa-f0-9]*|'') return 0 ;; esac
+      [ "${#expected_head}" -ge 7 ] && [ "${#expected_head}" -le 40 ] || return 0
+      case "$expected_head" in
+        "$sha"*) ;;
+        *) case "$sha" in "$expected_head"*) ;; *) return 0 ;; esac ;;
+      esac
     fi
     if [ -n "$(fm_nm_resolve_commit "$wt" "$sha")" ]; then
       if fm_nm_head_matches_worktree "$wt" "$sha"; then
