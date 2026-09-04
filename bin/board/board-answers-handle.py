@@ -91,9 +91,9 @@ def route(config):
                         raise m.Invalid('unkeyed decision; firstmate must review')
                     target_home = b.homes[a['home_id']]
                     options = json.loads(d['options'])
-                    wording = next((o['label'] for o in options if o['value'] == a['choice']),a['choice'])
+                    wording = ' '.join(next((o['label'] for o in options if o['value'] == a['choice']),a['choice']).split())
                     note = ' '.join(a['note'].split())
-                    answer_text = f'{wording} (note: {note})'
+                    answer_text = f'{wording} (note: {note})' if note else wording
                     if a['choice'] == 'request-options':
                         answer_text = (f'Captain requested structured options for decision {a["decision_key"]}: '
                             f'register 2-4 distinct alternatives with `bin/fm-board.sh decision {a["home_id"]} '

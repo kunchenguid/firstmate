@@ -50,7 +50,8 @@
 # Queue: SQLite is authoritative. Ready answers route in one single-flight
 # handler directly, without JSONL on the main path. Only errors export to JSONL.
 # POST /internal/reload (Bearer auth, 127.0.0.1 only, same port) immediately
-# notifies SSE after decision/live CLI writes. /api/state uses rev as its ETag.
+# notifies SSE after decision/live CLI writes. /api/state uses rev as its ETag,
+# qualified by project so a filtered representation never reuses an unfiltered one.
 # Outbox: flock serializes exception export and routing across instances.
 # Atomic replace publishes one complete jsonl burst; answer_id scans recover
 # crash after publication but before exported_at. The non-destructive source
@@ -62,7 +63,9 @@
 # its unacknowledged exception packet wakes firstmate. Successful routes never
 # fire a source. CLI answered records consumption after firstmate handles errors.
 # The daemon maintains the registered runner; graceful SIGTERM stops its child
-# runner without retiring pending captures. No LLM, browser, or GitHub calls.
+# runner without retiring pending captures. Re-arming backs off to 60 s and
+# skips a source another live owner already runs, which answers_armed reports as
+# armed. No LLM, browser, or GitHub calls.
 
 import argparse
 import contextlib
@@ -160,7 +163,7 @@ def file_lock(path, blocking=True):
 
 
 def run(argv, home, timeout=10, input_data=None):
-    env = dict(os.environ, FM_HOME=str(home), FM_ROOT_OVERRIDE=str(ROOT))
+    env = dict(os.environ, FM_HOME=str(home), FM_ROOT_OVERRIDE=str(ROOT), FM_BOARD_PYTHON=sys.executable)
     # Isolate homes from inherited per-session overrides.
     for key in ('FM_STATE_OVERRIDE', 'FM_DATA_OVERRIDE', 'FM_PROJECTS_OVERRIDE'):
         env.pop(key, None)
@@ -242,6 +245,9 @@ class Board:
         self.client_lock = threading.Lock()
         self.runner = None
         self.armed = False
+        self.armed_elsewhere = False
+        self.arm_delay = 0
+        self.arm_next = 0.0
         self.source_id = 'board-answers-' + hashlib.sha256(str(self.home).encode()).hexdigest()[:16]
         self.migrate()
 
@@ -802,7 +808,8 @@ class Board:
         return {'backup':str(path)}
 
     def arm(self):
-        env = dict(os.environ, FM_HOME=str(self.home), FM_BOARD_CONFIG=str(self.config_path), FM_ROOT_OVERRIDE=str(ROOT))
+        env = dict(os.environ, FM_HOME=str(self.home), FM_BOARD_CONFIG=str(self.config_path),
+                   FM_ROOT_OVERRIDE=str(ROOT), FM_BOARD_PYTHON=sys.executable)
         for key in ('FM_STATE_OVERRIDE', 'FM_DATA_OVERRIDE', 'FM_PROJECTS_OVERRIDE'):
             env.pop(key, None)
         run([ROOT / 'bin/fm-procevent.sh', 'register', 'board-answers', self.source_id, '--',
@@ -814,6 +821,40 @@ class Board:
         self.armed = self.runner.poll() is None
         return {'answers_armed':self.armed}
 
+    def source_owner(self):
+        # Current registration and claim state, never a stale start message.
+        try:
+            listing = run([ROOT / 'bin/fm-procevent.sh', 'list'], self.home)
+        except (Invalid, OSError):
+            return 'uncertain'
+        for line in listing.splitlines():
+            fields = line.split()
+            if len(fields) >= 4 and fields[0] == self.source_id:
+                return fields[2]
+        return 'unregistered'
+
+    def armed_now(self):
+        if self.runner is not None and self.runner.poll() is None:
+            return True
+        return self.armed and self.armed_elsewhere
+
+    def maintain_arm(self):
+        # Re-arm after each handled fire, but never faster than the backoff, and
+        # never against a source another live owner already runs.
+        if self.runner is not None and self.runner.poll() is None:
+            self.armed, self.armed_elsewhere = True, False
+            self.arm_delay, self.arm_next = 0, 0.0
+            return
+        if time.monotonic() < self.arm_next:
+            return
+        self.arm_delay = min(self.arm_delay * 2 or 1, 60)
+        self.arm_next = time.monotonic() + self.arm_delay
+        if self.source_owner() == 'live':
+            self.armed, self.armed_elsewhere = True, True
+            return
+        self.armed_elsewhere = False
+        self.arm()
+
     def health(self):
         with self.connect() as c:
             db_ok = c.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
@@ -821,7 +862,7 @@ class Board:
             outbox = c.execute('SELECT count(*) FROM answers WHERE consumed_at IS NULL AND cancelled_at IS NULL AND error IS NULL').fetchone()[0]
         ages = {hid:self.age(runs.get(hid,{}).get('last_ok')) for hid in self.homes}
         errors = {hid:runs.get(hid,{}).get('last_error') for hid in self.homes}
-        armed = self.armed and self.runner is not None and self.runner.poll() is None
+        armed = self.armed_now()
         return dict(ok=db_ok and all(v is not None and v < 60 for v in ages.values()) and not any(errors.values()) and armed,
                     db_ok=db_ok, ingest_age_s=ages, ingest_error=errors,
                     last_snapshot_ms={hid:runs.get(hid,{}).get('last_snapshot_ms') for hid in self.homes},
@@ -895,8 +936,7 @@ class Board:
                     self.dirty.set()
                     last_tick = time.monotonic()
                 self.export_pending()
-                if self.runner is None or self.runner.poll() is not None:
-                    self.arm()
+                self.maintain_arm()
                 with self.connect() as c:
                     rev = int(c.execute("SELECT value FROM meta WHERE key='rev'").fetchone()[0])
                 if rev != last_rev:
@@ -1014,7 +1054,7 @@ def handler(board, internal=False):
                 elif parsed.path == '/api/state':
                     project = urllib.parse.parse_qs(parsed.query).get('project',[None])[0]
                     state = board.state_payload(project)
-                    etag = f'"{state["rev"]}"'
+                    etag = f'"{state["rev"]}.{project}"' if project else f'"{state["rev"]}"'
                     if self.headers.get('If-None-Match') == etag:
                         self.send_response(304)
                         self.send_header('ETag',etag)

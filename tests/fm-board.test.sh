@@ -10,8 +10,8 @@ export FM_BOARD_TEST_ROOT="$TMP_ROOT" FM_BOARD_TEST_CODE="$ROOT"
 PYTHON="${FM_BOARD_PYTHON:-python3}"
 "$PYTHON" - <<'PY'
 import contextlib,csv,io,json,os,pathlib,shutil,signal,socket,sqlite3,subprocess,sys,time,urllib.request,urllib.error
-root=pathlib.Path(os.environ['FM_BOARD_TEST_ROOT'])
-code=pathlib.Path(os.environ['FM_BOARD_TEST_CODE'])
+root=pathlib.Path(os.environ['FM_BOARD_TEST_ROOT']).resolve()
+code=pathlib.Path(os.environ['FM_BOARD_TEST_CODE']).resolve()
 fixture=root/'code'; (fixture/'bin').mkdir(parents=True)
 for path in (code/'bin').iterdir():
     if path.name not in ('board','fm-board.py','fm-board.sh','fm-procevent-board-answers.sh'):
@@ -56,7 +56,8 @@ for h in (home,second):
 script='''#!PYTHON
 import csv,json,os,pathlib,sys,time
 h=pathlib.Path(os.environ['FM_HOME']); name=pathlib.Path(sys.argv[0]).name
-assert h.resolve() in (pathlib.Path(os.environ['FM_BOARD_TEST_ROOT'])/'main',pathlib.Path(os.environ['FM_BOARD_TEST_ROOT'])/'second')
+fixture_root=pathlib.Path(os.environ['FM_BOARD_TEST_ROOT']).resolve()
+assert h.resolve() in (fixture_root/'main',fixture_root/'second')
 assert all(k not in os.environ for k in ('FM_STATE_OVERRIDE','FM_DATA_OVERRIDE','FM_PROJECTS_OVERRIDE'))
 with (h/'calls.jsonl').open('a') as f:f.write(json.dumps([name,sys.argv[1:]])+'\\n')
 if (h/'delay').exists():time.sleep(float((h/'delay').read_text()))
@@ -151,6 +152,12 @@ try:
     refused=subprocess.run([str(pe),'sweep-home'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     assert refused.returncode and b'fixture containment refused' in refused.stderr
     assert sentinel_state()==sentinel_before
+    handler=fixture/'bin/board/board-answers-handle.sh'
+    assert subprocess.run([str(handler),'--help'],env=env,stdout=subprocess.PIPE).returncode==0
+    old=fakebin/'oldpython';old.write_text('#!/bin/sh\nexit 1\n');old.chmod(0o755)
+    guarded=subprocess.run([str(handler),'route'],env=dict(env,FM_BOARD_PYTHON=str(old)),
+                           stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    assert guarded.returncode!=0 and b'3.14' in guarded.stderr,guarded
     passed('every subcommand validates arguments and supports --help')
     meta(home,'alpha','needs-decision [key=choose]: Which release?')
     meta(second,'beta')
@@ -191,6 +198,9 @@ try:
     status,health,_=request('/healthz');assert status==200 and health['answers_armed']
     assert set(('ok','ingest_age_s','last_snapshot_ms','sse_clients','db_ok','outbox_backlog','answers_armed'))<=health.keys()
     _,payload,h=request();assert request(extra={'If-None-Match':h['ETag']})[0]==304
+    _,_,ph=request('/api/state?project=CES');assert ph['ETag']!=h['ETag']
+    assert request('/api/state?project=CES',extra={'If-None-Match':h['ETag']})[0]==200
+    assert request('/api/state?project=CES',extra={'If-None-Match':ph['ETag']})[0]==304
     assert request(auth=False)[0]==403
     assert request('/api/state',extra={'Origin':'http://evil.test'})[0]==403
     assert request('/../config/board.json')[0]==404
@@ -277,12 +287,57 @@ try:
     wait(lambda:sql('select consumed_at from answers where answer_id=?',(hid,))[0]['consumed_at'])
     assert (home/'hold-input').read_text().startswith('budget\tcustom (note: Use the small budget)\t')
     passed('backlog hold routes through fm-decision-hold answers')
+    # An answer without a note delivers the option wording alone.
+    decision('nonote')
+    wait(lambda:any(d['task_id']=='nonote' for d in request()[1]['decisions']))
+    r=request('/answer',answer('nonote',choice='A',note=''))
+    assert r[0]==200,r
+    nid=r[1]['answers'][0]['answer_id'];accelerate([nid])
+    wait(lambda:sql('select consumed_at from answers where answer_id=?',(nid,))[0]['consumed_at'])
+    sent=list(map(json.loads,(home/'deliveries.jsonl').read_text().splitlines()))[-1]
+    assert sent==['nonote','--resolve-key','choose','Ship it'],sent
+    # A registered option may hold newlines or tabs; the hold intake needs one line.
+    command('decision','Main',held['task_id'],'budget','--project','CES','--title','Budget approval',
+            '--option','A: Approve\nwith\tconditions','--option','B: Reject')
+    fresh=next(d for d in request()[1]['decisions'] if d['task_id']==held['task_id'])
+    lines=len((home/'hold-input').read_text().splitlines())
+    r=request('/answer',answer(held['task_id'],key='budget',choice='A',note='',revision=fresh['revision']))
+    assert r[0]==200,r
+    tid_=r[1]['answers'][0]['answer_id'];accelerate([tid_])
+    wait(lambda:sql('select consumed_at from answers where answer_id=?',(tid_,))[0]['consumed_at'])
+    written=(home/'hold-input').read_text().splitlines()
+    assert len(written)==lines+1,written
+    assert written[-1]=='budget\tApprove with conditions\tCaptain dashboard',written[-1]
+    passed('empty notes add no suffix and hold answers stay one field-safe line')
     assert not sql("select * from events where kind='live'")
     command('live','Main','alpha','--url','javascript:bad','--env','production',ok=False)
     command('live','Main','alpha','--url','https://example.com','--env','production','--evidence','Verified response')
     assert sql("select * from events where kind='live'")[0]['verified_at']
     passed('daemon and runner subprocess environments reject inherited path overrides')
     stop()
+    # A dead runner must not re-arm every tick, and a live external owner is armed.
+    guard='''
+import importlib.util,os
+spec=importlib.util.spec_from_file_location('fm_board',os.environ['FM_BOARD_CHECK_MODULE'])
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+b=m.Board(os.environ['FM_BOARD_CONFIG'])
+calls=[]
+b.arm=lambda:calls.append(1)
+b.source_owner=lambda:'live'
+for _ in range(20):b.maintain_arm()
+assert not calls and b.armed_now(),'a live external owner is armed without churn'
+b.source_owner=lambda:'none'
+b.arm_next=0
+for _ in range(20):b.maintain_arm()
+assert len(calls)==1 and not b.armed_now(),calls
+for _ in range(15):
+ b.arm_next=0;b.maintain_arm()
+assert len(calls)==16 and b.arm_delay==60,(calls,b.arm_delay)
+'''
+    check=subprocess.run([sys.executable,'-c',guard],env=dict(env,FM_BOARD_CHECK_MODULE=str(fixture/'bin/fm-board.py')),
+                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
+    assert check.returncode==0,check.stderr.decode()
+    passed('re-arming backs off and reports a live external owner as armed')
     for _ in range(8):backup=json.loads(command('backup').stdout)['backup']
     assert len(list((home/'state/backups').glob('board-*.sqlite')))==7
     expected=rev()
