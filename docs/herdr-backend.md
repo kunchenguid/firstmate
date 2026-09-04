@@ -270,7 +270,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent with a well-formed active foreground process becomes `alive`, and an unexpected or contradictory read becomes `unreadable`.
-Herdr can retain Pi's last idle registration after Pi exits, so a complete live-process proof may override only that stale registration: the pane root's process subtree must be one unbranched chain ending in one childless sleeping foreground shell with no surviving sibling or descendant.
+Herdr can retain Pi's last idle registration after Pi exits, so a complete live-process proof may override a registration only when the pane root's process subtree is exactly root shell -> `treehouse` -> childless sleeping task shell, with no surviving sibling or descendant.
 Any malformed process response, extra branch, foreground job, unrecognized shell, or unreadable operating-system process row preserves the conservative refusal.
 Unlike tmux process-name inspection, positive Herdr liveness composes native registration with a nonempty foreground process shape and does not guess any worker runtime from a generic interpreter name.
 
