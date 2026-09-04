@@ -1459,7 +1459,11 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  # --untracked-files=all so git never collapses an untracked directory to a bare
+  # "?? .opencode/" line: the allowlist below names one exact spawn-written file, and
+  # a collapsed directory line could neither match it nor prove the directory holds
+  # nothing else. Expanding only ever adds lines, so it cannot hide real dirty work.
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1467,7 +1471,10 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  # Firstmate's own spawn-written turn-end scaffolding (bin/fm-spawn.sh) is never the
+  # crewmate's work, so it must not read as uncommitted changes when the info/exclude
+  # write did not take. Allowlist those exact paths only.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.opencode/plugins/fm-turn-end\.js$|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then

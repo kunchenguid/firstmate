@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) spawn-written turn-end artifacts, no info/exclude       -> ALLOW  (firstmate's own)
+#   (aa) untracked crew file beside a turn-end artifact         -> REFUSE (exact-path allowlist)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -225,6 +227,23 @@ wt_commit_file() {
   printf '%s\n' "$content" > "$case_dir/wt/$file"
   git -C "$case_dir/wt" add -- "$file"
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+# Recreate every per-harness turn-end artifact bin/fm-spawn.sh writes INTO the task
+# worktree, without the info/exclude entries that normally keep them out of git's
+# view. That is the real failure mode: fm-spawn's exclude_path returns silently when
+# info/exclude cannot be resolved, leaving teardown's dirty check as the only defense.
+# Pins the repo's ignore file too, so a machine-global ignore of .claude/ cannot mask
+# the case on a developer box while CI still exercises it. Args: case_dir
+write_turnend_artifacts() {
+  local case_dir=$1 wt
+  wt="$case_dir/wt"
+  git -C "$case_dir/project" config core.excludesFile /dev/null
+  mkdir -p "$wt/.claude" "$wt/.opencode/plugins"
+  printf '%s\n' '{"hooks":{"Stop":[]}}' > "$wt/.claude/settings.local.json"
+  printf '%s\n' 'export const FmTurnEnd = async () => ({})' > "$wt/.opencode/plugins/fm-turn-end.js"
+  printf '%s\n' 'token=fm.abcdefghijkl' > "$wt/.fm-grok-turnend"
+  printf '%s\n' 'token=fm.abcdefghijkl' > "$wt/.fm-kimi-turnend"
 }
 
 # Land <file>=<content> as a single commit on origin's default branch, simulating a
@@ -970,6 +989,63 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Firstmate's own spawn-written turn-end scaffolding is not the crewmate's work, so
+# the dirty check allowlists it. The allowlist is a hand-maintained copy of the
+# artifact list and drifted once: .opencode/plugins/fm-turn-end.js was missing, so an
+# opencode worktree whose info/exclude write did not take was refused as having
+# uncommitted changes. This pins every worktree-resident artifact at once so the next
+# harness added to fm-spawn cannot silently drift the same way.
+test_spawn_turnend_artifacts_are_not_dirty_work() {
+  local case_dir rc pr_head
+  case_dir=$(make_case turnend-artifacts)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  write_turnend_artifacts "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "turnend-artifacts: teardown should ignore firstmate's own spawn-written turn-end artifacts"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "turnend-artifacts: teardown refused over its own scaffolding: $(cat "$case_dir/stderr")"
+  pass "spawn-written turn-end artifacts (claude, opencode, grok, kimi) do not read as uncommitted work"
+}
+
+# The allowlist above names exact firstmate-owned paths; it must not wave through a
+# whole directory. A crewmate file sitting beside the opencode plugin is real
+# uncommitted work and still has to refuse, because treehouse return hard-resets.
+test_untracked_work_beside_turnend_artifacts_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case turnend-artifacts-plus-work)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  write_turnend_artifacts "$case_dir"
+  printf '%s\n' 'real work' > "$case_dir/wt/.opencode/notes.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "turnend-artifacts-plus-work: teardown should refuse untracked work sharing a directory with the plugin"
+  grep -q REFUSED "$case_dir/stderr" || fail "turnend-artifacts-plus-work: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "turnend-artifacts-plus-work: refusal did not cite uncommitted changes"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "turnend-artifacts-plus-work: teardown completed despite untracked work"
+  pass "untracked work beside a turn-end artifact still refuses (allowlist is per-path, not per-directory)"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -3231,6 +3307,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_spawn_turnend_artifacts_are_not_dirty_work
+test_untracked_work_beside_turnend_artifacts_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
