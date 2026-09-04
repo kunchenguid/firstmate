@@ -2188,11 +2188,17 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
-      clear_write_tracking "$key"
       paused_bound=1
+      # The busy-turn wedge timer is deliberately NOT reset on a hash change: a
+      # genuinely wedged worker (Pi's ticking elapsed-time footer, the original
+      # incident) renders a new hash every poll, so clearing the timer here
+      # would restart it forever and no busy-turn wedge could ever escalate.
+      # Only the non-busy-bound path clears the pending escalation bookkeeping.
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
+      else
+        rm -f "$ssf" "$ewf"
+        clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
