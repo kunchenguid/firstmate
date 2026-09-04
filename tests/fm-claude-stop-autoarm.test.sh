@@ -79,6 +79,24 @@ run_autoarm() {
   return "$rc"
 }
 
+# Run the hook as a child of the fake harness WITHOUT writing a session lock:
+# the shape of a crew/scout worktree, which never takes the helm of a home.
+run_autoarm_unlocked() {
+  local dir=$1 rc=0
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
+nonexistent_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 # Arm fixture variants, installed per test as <dir>/bin/fm-watch-arm.sh.
 write_arm_fixture() {
   local dir=$1 kind=$2
@@ -222,6 +240,8 @@ record_watcher_lock() {
 
 # --- scope and gates ----------------------------------------------------------
 
+# Negative control: a crew/scout task worktree never takes a session lock of
+# its own, so it runs here without one and must stay inert even when in-flight.
 test_inert_in_child_worktree() {
   local base dir out status
   base="$TMP_ROOT/crew-base"
@@ -229,11 +249,50 @@ test_inert_in_child_worktree() {
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  out=$(run_autoarm_unlocked "$dir" 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must stay inert in a child task worktree"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a child worktree"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a child worktree"
   pass "auto-arm: inert in a linked child worktree even when in-flight"
+}
+
+# A linked worktree whose state/.lock names a DEAD pid is a slot some earlier
+# home left behind, not a home with the helm taken: it must stay inert too.
+test_inert_in_linked_worktree_with_dead_lock() {
+  local base dir out status
+  base="$TMP_ROOT/dead-lock-base"
+  dir="$TMP_ROOT/dead-lock-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  : > "$dir/state/task.meta"
+  printf '%s\n' "$(nonexistent_pid)" > "$dir/state/.lock"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm_unlocked "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stay inert in a linked worktree whose lock pid is dead"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a linked worktree holding a dead lock"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a linked worktree holding a dead lock"
+  pass "auto-arm: inert in a linked worktree whose session lock names a dead pid"
+}
+
+# A treehouse-leased PRIMARY home is a genuine linked worktree (git-dir !=
+# git-common-dir) with no secondmate marker, its own state/, a live session
+# lock, and in-flight work. The hook must claim it exactly as a plain checkout.
+test_arms_in_linked_worktree_holding_own_live_lock() {
+  local base dir gd gcd out status
+  base="$TMP_ROOT/leased-primary-base"
+  dir="$TMP_ROOT/leased-primary-home"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  gd=$(git -C "$dir" rev-parse --git-dir)
+  gcd=$(git -C "$dir" rev-parse --git-common-dir)
+  [ "$gd" != "$gcd" ] || fail "leased-primary fixture must be a linked worktree, got equal git dirs: $gd"
+  [ ! -e "$dir/.fm-secondmate-home" ] || fail "leased-primary fixture must carry no secondmate marker"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable close in a leased primary home must rewake like a plain checkout"
+  [ -e "$dir/state/arm-ran" ] || fail "hook never armed in a linked worktree holding its own live session lock"
+  [ -f "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote no epoch in a linked worktree holding its own live session lock"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: claims a linked worktree that is its own home with the helm taken"
 }
 
 test_inert_without_session_lock() {
@@ -1150,6 +1209,8 @@ test_fm_lock_status_still_works_with_shared_lib() {
 }
 
 test_inert_in_child_worktree
+test_inert_in_linked_worktree_with_dead_lock
+test_arms_in_linked_worktree_holding_own_live_lock
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
