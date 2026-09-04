@@ -88,16 +88,7 @@ set -u
 JSON_TRANSPORT_DIR=
 cleanup_json_files() {
   [ -n "$JSON_TRANSPORT_DIR" ] || return 0
-  rm -f -- "$JSON_TRANSPORT_DIR/backlog.json" \
-    "$JSON_TRANSPORT_DIR/tasks.json" \
-    "$JSON_TRANSPORT_DIR/main-inventory.json" \
-    "$JSON_TRANSPORT_DIR/scout-reports.json" \
-    "$JSON_TRANSPORT_DIR/secondmate-registry.json" \
-    "$JSON_TRANSPORT_DIR/secondmate-union.json" \
-    "$JSON_TRANSPORT_DIR/secondmate-records.jsonl" \
-    "$JSON_TRANSPORT_DIR/secondmate-current.json" \
-    "$JSON_TRANSPORT_DIR/secondmate-landed.json"
-  rmdir -- "$JSON_TRANSPORT_DIR"
+  rm -rf -- "$JSON_TRANSPORT_DIR"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
