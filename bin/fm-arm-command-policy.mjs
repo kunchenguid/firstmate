@@ -903,11 +903,27 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
+function resolvedCommandPath(value, cwd) {
+  if (!value) return "";
+  return path.normalize(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+}
+
 export function isBlessedWatcherArmCommand(command, root, home) {
   if (!command || !root || !home) return false;
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
-  return !analysis.error && blessedProgram(analysis, context) && analysis.nodeInfos.at(-1)?.protectedKind === "arm";
+  if (analysis.error || !blessedProgram(analysis, context)) return false;
+  if (analysis.nodeInfos.at(-1)?.protectedKind !== "arm") return false;
+
+  let cwd = context.root;
+  for (const info of analysis.nodeInfos.slice(0, -1)) {
+    const kind = setupKind(info, context);
+    if (kind === "cd") {
+      cwd = resolvedCommandPath(info.position.words[1]?.value, cwd);
+      if (cwd !== context.root) return false;
+    }
+  }
+  return resolvedCommandPath(analysis.nodeInfos.at(-1)?.position.command?.value, cwd) === path.join(context.root, "bin/fm-watch-arm.sh");
 }
 
 function decision(command, root, home) {
