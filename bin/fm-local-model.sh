@@ -11,9 +11,11 @@
 #        fm-local-model.sh check <model>
 #        fm-local-model.sh brief-fits <model> <brief-path>
 #
-# Endpoint: $FM_LOCAL_MODEL_ENDPOINT, default http://127.0.0.1:1234. Its host
-#           must be a loopback address (127.0.0.0/8, ::1, localhost) or an empty
-#           authority; a remote host is refused (see "Local means loopback").
+# Endpoint: $FM_LOCAL_MODEL_ENDPOINT, default http://127.0.0.1:1234. It must
+#           use an explicit http:// or https:// scheme with a non-empty loopback
+#           authority (127.0.0.0/8, ::1, localhost); a remote or unreadable host
+#           is refused. An empty authority is accepted only for file:// catalog
+#           fixtures, which reach no host (see "Local means loopback").
 # Ceiling:  $FM_LOCAL_MODEL_MAX_CONTEXT, default 131072 tokens (see "Why a
 #           ceiling" below). A value of 0 or a non-integer is refused rather
 #           than silently treated as unbounded.

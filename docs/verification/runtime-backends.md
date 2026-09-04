@@ -1484,7 +1484,7 @@ Two concurrent clients against one local model starve each other.
 
 ### What a supervised run established, and what it did not
 
-One supervised scout task was launched through `bin/fm-spawn.sh`'s raw-launch escape hatch on the tmux backend against this endpoint.
+One supervised scout task exercised the `claude` CLI through an `fm-spawn.sh` launch on the tmux backend against this endpoint.
 
 Established:
 
