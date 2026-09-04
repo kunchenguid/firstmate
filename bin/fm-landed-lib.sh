@@ -25,6 +25,7 @@
 # task carrying the same bullet artifact; the boundary record removes that
 # ambiguity going forward.
 
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
   def landed_delivery:
     ((.pr_url // null) != null)

@@ -1557,7 +1557,7 @@ test_captain_approved_delivery_stays_in_landed() {
     --file "$backlog" >/dev/null || fail "could not create the legacy merge fixture"
   "$TASKS_AXI_BIN" hold legacy-approved --reason "legacy captain merge word" \
     --kind captain --file "$backlog" >/dev/null || fail "could not hold the legacy merge fixture"
-  "$TASKS_AXI_BIN" done legacy-approved \
+  "$TASKS_AXI_BIN" 'done' legacy-approved \
     --pr "https://github.com/kunchenguid/firstmate/pull/1368" --file "$backlog" >/dev/null \
     || fail "could not create the legacy completed merge shape"
   "$TASKS_AXI_BIN" add mate-approved-merge "Secondmate fix" --kind ship --repo firstmate \
@@ -1571,7 +1571,7 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer mate-approved-merge --release --decision-file "$mate/merge-answer.txt" >/dev/null \
     || fail "could not release the secondmate merge fixture"
-  "$TASKS_AXI_BIN" done mate-approved-merge \
+  "$TASKS_AXI_BIN" 'done' mate-approved-merge \
     --pr "https://github.com/kunchenguid/firstmate/pull/1361" \
     --file "$mate/data/backlog.md" >/dev/null || fail "could not complete the secondmate merge fixture"
   : > "$home/net.log"
