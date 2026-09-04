@@ -233,6 +233,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/workspace-steward/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
       "audience": "agent-runtime"
     },
