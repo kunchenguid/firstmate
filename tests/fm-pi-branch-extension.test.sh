@@ -669,9 +669,12 @@ console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 // captain-relevant persists a visible entry with no model turn. Store rows are
 // written before delivery and marked read only after it.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
+const r1 = await report.execute("call-1", { task: "branch-driver", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
 finishWakePrompt();
+// Reports below are made outside any wake prompt (as a real Pi turn cannot):
+// wait for the wake to settle so its task scope has been cleared.
+await offer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
@@ -947,7 +950,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   const result = await report.execute(
     `resource-result-${fleetOperations.length}`,
     {
-      task: "task-resource",
+      task: "branch-driver",
       verdict: directlyRequested ? "captain" : "routine",
       summary: "healthy resource report: CPU 12%, memory 41%",
       wake: "signal: healthy resource result",
@@ -1002,7 +1005,7 @@ if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
   throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
 }
 const sailboat = sentToMain[0];
-if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ task-resource:")) {
+if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ branch-driver:")) {
   throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
 }
 
@@ -1064,7 +1067,7 @@ if (processingRequests.length !== 2 || processingRequests[1].options.triggerTurn
   throw new Error(`the widened captain sequence set did not open one keyed turn at the run boundary: ${JSON.stringify(processingRequests)}`);
 }
 for (let seq = 2; seq <= 5; seq += 1) {
-  if (!processingRequests[1].message.content.includes(`[seq ${seq}] task-resource: healthy resource report: CPU 12%, memory 41%`)) {
+  if (!processingRequests[1].message.content.includes(`[seq ${seq}] branch-driver: healthy resource report: CPU 12%, memory 41%`)) {
     throw new Error(`the widened processing request lost seq ${seq}: ${processingRequests[1].message.content}`);
   }
 }
@@ -1216,12 +1219,16 @@ if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== 
 // open through its report, as the real AgentSession does for tool execution.
 let finishRoutinePrompt;
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishRoutinePrompt = resolve; });
-if (!dispatch("signal: routine wake").accepted) throw new Error("branch refused the routine wake");
+const routineOffer = dispatch("signal: routine wake");
+if (!routineOffer.accepted) throw new Error("branch refused the routine wake");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "routine branch prompt");
 const session = globalThis.__fmSessions[0];
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-await report.execute("routine", { task: "task-r", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+await report.execute("routine", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 finishRoutinePrompt();
+// The reports below are made outside any wake prompt: wait for the wake to
+// settle so its task scope has been cleared.
+await routineOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 const routineSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
 runOf();
@@ -1301,17 +1308,21 @@ const stale = await report.execute("captain-stale", { task: "task-e", verdict: "
 if (!stale.isError) throw new Error("a replaced branch session's report tool was accepted");
 let finishReplacementPrompt;
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishReplacementPrompt = resolve; });
-if (!dispatch("signal: after replacement").accepted) throw new Error("branch refused a wake after the replacement");
+const replacementOffer = dispatch("signal: after replacement");
+if (!replacementOffer.accepted) throw new Error("branch refused a wake after the replacement");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
 const beforePair = requests().length;
-const second = await report2.execute("captain-2", { task: "task-e", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
+const second = await report2.execute("captain-2", { task: "branch-driver", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
 if (second.isError) throw new Error(`second captain report failed: ${JSON.stringify(second)}`);
 finishReplacementPrompt();
+// The next report is made outside the wake prompt: wait for the wake to
+// settle so its task scope has been cleared.
+await replacementOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 const seqE = seq + 1;
 const seqF = seq + 2;
-if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] task-e:`)) {
+if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] branch-driver:`)) {
   throw new Error("the first newer captain outcome did not open its processing request");
 }
 const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
@@ -1327,7 +1338,7 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
 runOf();
 if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
-if (!latest.includes(`[seq ${seqE}] task-e:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
+if (!latest.includes(`[seq ${seqE}] branch-driver:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
   throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
 }
 const beforePairRepeat = requests().length;
@@ -1600,6 +1611,98 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "a co-present check row must not carry a heartbeat review into main: $out"
   pass "a heartbeat review survives a check row arriving before its drain"
+}
+
+# The report tool refuses a task the wake being handled never named: the
+# refused-ack loop's ghost reports were typed from memory about a task whose
+# records teardown had already removed, while the prompt was a stale row for
+# another pane. A signal or stale wake may report only the tasks its rows
+# resolve to, with fleet refused too; a heartbeat review is unscoped and
+# refuses nothing by task id. The wake's own task still goes through, and
+# nothing refused ever reaches the durable store.
+test_branch_report_refuses_a_task_the_wake_did_not_name() {
+  local repo home out status
+  repo="$TMP_ROOT/ghost-report-root"
+  home="$TMP_ROOT/ghost-report-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, settle, approvedProject, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, settle, approvedProject, defaultSessionCtx } = globalThis.__t;
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// A second live task the wake does not name, plus the memory of a task whose
+// records are already gone.
+writeFileSync(`${home}/state/other-task.meta`, `project=${approvedProject}\nwindow=default:wX:p1\n`);
+fire("session_start", {}, defaultSessionCtx);
+
+let finish;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+if (!dispatch("signal: task-local wake").accepted) throw new Error("branch refused the task-local wake");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "task-local branch prompt");
+const session = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const ghost = await report.execute("ghost", { task: "other-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
+if (!ghost.isError || !ghost.content[0].text.includes("names branch-driver, not other-task")) {
+  throw new Error(`a report for a live task the wake never named was not refused: ${JSON.stringify(ghost)}`);
+}
+const gone = await report.execute("gone", { task: "retired-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
+if (!gone.isError) throw new Error(`a report for a task with no record was not refused: ${JSON.stringify(gone)}`);
+const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
+if (!fleet.isError || !fleet.content[0].text.includes("never fleet")) {
+  throw new Error(`a fleet-wide report was not refused during a task-local wake: ${JSON.stringify(fleet)}`);
+}
+const named = await report.execute("named", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+if (named.isError) throw new Error(`the wake's own task was refused: ${JSON.stringify(named)}`);
+finish();
+await settle(() => !existsSync(`${home}/state/.branch-eligible-rows`), "task-local grant release");
+
+// A heartbeat review is not scoped by task: it may report any task id, a
+// task whose records are already gone, and fleet.
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+if (!dispatch("heartbeat", [], true, true).accepted) throw new Error("branch refused the heartbeat");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat branch prompt");
+const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
+const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const live = await heartbeatReport.execute("live", { task: "other-task", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+if (live.isError) throw new Error(`a heartbeat report for a live task was refused: ${JSON.stringify(live)}`);
+const goneInReview = await heartbeatReport.execute("gone-in-review", { task: "retired-task", verdict: "captain", summary: "PR merged and cleaned up" }, undefined, undefined, {});
+if (goneInReview.isError) throw new Error(`a heartbeat report for a task with no record was refused: ${JSON.stringify(goneInReview)}`);
+const fleetInReview = await heartbeatReport.execute("fleet-in-review", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
+if (fleetInReview.isError) throw new Error(`a fleet-wide report was refused during a heartbeat review: ${JSON.stringify(fleetInReview)}`);
+finish();
+
+const stored = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line).task);
+if (JSON.stringify(stored) !== JSON.stringify(["branch-driver", "other-task", "retired-task", "fleet"])) {
+  throw new Error(`refused reports reached the durable store: ${JSON.stringify(stored)}`);
+}
+
+// The classification owner names the tasks behind each eligible row: a
+// signal row by its status-log key, a stale row by the endpoint a task's
+// metadata records.
+const lib = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
+writeFileSync(`${home}/state/.wake-queue`, [
+  "1\t1\tsignal\tbranch-driver.status\tsignal: done",
+  "2\t2\tstale\tdefault:wX:p1\tstale: default:wX:p1 (idle 378s)",
+  "3\t3\tcheck\tmerge-poll\tcheck: merged",
+].join("\n") + "\n");
+const scope = lib.scopeForUnreadWake(`${home}/state`, false);
+if (JSON.stringify([...scope.eligibleTasks].sort()) !== JSON.stringify(["branch-driver", "other-task"])) {
+  throw new Error(`eligible rows resolved to the wrong tasks: ${JSON.stringify(scope)}`);
+}
+if (JSON.stringify(scope.eligibleSeqs) !== JSON.stringify(["1", "2"])) {
+  throw new Error(`the main-owned check row leaked into the branch claim: ${JSON.stringify(scope)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the report tool must refuse tasks the wake never named: $out"
+  pass "fm_branch_report refuses a task the wake did not name, fleet included, while a heartbeat is unscoped"
 }
 
 # The non-heartbeat half of the same recheck: a check-kind row that arrives
@@ -3889,6 +3992,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
+test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown

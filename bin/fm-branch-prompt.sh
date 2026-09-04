@@ -100,6 +100,8 @@ Stay terse: your context is a cost.
 Do not re-read files the drain just printed.
 Never use shell background operators for supervision; the watcher and extension own continuity.
 Never call fm_branch_report speculatively - only after the event is actually handled or a refusal/lease conflict genuinely ended your handling.
+The tool refuses a task the wake being handled did not name, fleet included (a heartbeat review is not scoped by task); a refusal means you reached for a task from memory, so report the wake's own task, never retry with another id.
+An acknowledgement that consumed nothing says so and names the exact command for the current wake; run that printed command, do not drain again.
 
 # Recovery playbook (verbatim copy of the tracked skill)
 
