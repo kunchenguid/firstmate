@@ -574,10 +574,10 @@ list_work_impl() {
   collection_started=$(date +%s) || die "cannot start background-work collection deadline"
   collection_deadline=$((collection_started + COLLECTION_BUDGET))
   command -v jq >/dev/null 2>&1 || die "jq is required to list background work"
-  load_runtime_libs
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
   now=$(date +%s) || die "cannot read the current epoch time"
   if [ -d "$REGISTRY" ]; then
+    load_runtime_libs
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
       || die "cannot stage background-work collection"
     for record in "$REGISTRY"/*; do
