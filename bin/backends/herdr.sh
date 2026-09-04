@@ -1863,38 +1863,54 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
-# calls - never from process exit status, since a business-logic "not found"
-# response is a normal, expected outcome here, not a call failure (real herdr
-# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
-# the JSON keeps this function correct against either).
+# dead|no-agent|live|unknown. The pane and agent reads are classified from
+# JSON bodies rather than process exit status, because a business-logic
+# "not found" response is a normal, expected outcome here, not a call
+# failure (real herdr 0.7.1 exits 1 for it; the canned-response test fakes
+# exit 0; parsing only the JSON keeps this function correct against either).
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
 #              reaped it - verified empirically: killing a pane's shell pid
 #              on a live server makes herdr immediately drop both the pane
 #              and its tab from `pane get`/`tab list`).
-#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
-#              get` responds with error code agent_not_found: nothing is
-#              registered in it - exactly what a herdr session-layout restore
-#              produces (verified empirically: `session stop` + fresh `herdr
-#              server` restart leaves the pane alive, agent_status "unknown",
-#              agent get -> agent_not_found - docs/herdr-backend.md "ID
-#              stability across a server restart"), and what a future
-#              `resume_agents_on_restore = false` restore would produce too
-#              (a plain shell, never an agent).
-#   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#   no-agent - the pane structurally exists (`pane get` succeeds) and either
+#              `agent get` responds with error code agent_not_found, or idle
+#              or done occupancy is process-proven to be a leftover on a lone
+#              idle shell (see below). agent_not_found is what a herdr
+#              session-layout restore produces (verified empirically:
+#              `session stop` + fresh `herdr server` restart leaves the pane
+#              alive, agent_status "unknown", agent get -> agent_not_found -
+#              docs/herdr-backend.md "ID stability across a server restart"),
+#              and what a future `resume_agents_on_restore = false` restore
+#              would produce too (a plain shell, never an agent).
+#   live     - `agent get` succeeds with working or blocked occupancy, or
+#              with idle or done occupancy that the idle-shell proof cannot
+#              confirm. A working or blocked agent, and an idle agent whose
+#              process is not a proven lone idle shell, is still a genuine
+#              registered agent, not a restored husk, so it is never a
+#              close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
+#
+# Stale occupancy: Herdr can retain idle or done lifecycle occupancy on a
+# pane whose process is already a lone idle shell. That occupancy is not a
+# live agent for recovery, relaunch, husk replace, or liveness. When agent
+# get reports idle or done (never working or blocked) and
+# fm_backend_herdr_pane_idle_shell_pid holds, this classifier returns
+# no-agent. When the confirmed record includes agent_session.source, agent,
+# and state_change_seq, it releases only that exact revision through
+# `pane release-agent --source <source> --agent <agent> --seq <seq>`.
+# Missing source or sequence still classifies no-agent for recovery. Send and
+# inject keep using raw `agent get` via fm_backend_herdr_busy_state and stay
+# fail-closed. FM_HERDR_STALE_SHELL_RELEASE=0 restores the registry-only
+# classifier.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status source agent seq
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -1911,7 +1927,38 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|blocked) printf 'live' ;;
+    idle|done)
+      if [ "${FM_HERDR_STALE_SHELL_RELEASE:-1}" != 0 ] \
+        && fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null
+      then
+        out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+        code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+        if [ -n "$code" ]; then
+          [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+          return 0
+        fi
+        status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+        case "$status" in
+          idle|done)
+            source=$(printf '%s' "$out" | jq -r '(.result.agent.agent_session.source // empty) | select(type == "string")' 2>/dev/null)
+            agent=$(printf '%s' "$out" | jq -r '(.result.agent.agent // empty) | select(type == "string")' 2>/dev/null)
+            seq=$(printf '%s' "$out" | jq -r '(.result.agent.state_change_seq // empty) | select(type == "number" and floor == . and . >= 0)' 2>/dev/null)
+            case "$seq" in ''|*[!0-9]*) seq= ;; esac
+            if [ -n "$source" ] && [ -n "$agent" ] && [ -n "$seq" ]; then
+              fm_backend_herdr_cli "$session" pane release-agent \
+                --source "$source" --agent "$agent" --seq "$seq" "$pane_id" >/dev/null 2>&1 \
+                || { printf 'unknown'; return 0; }
+            fi
+            printf 'no-agent'
+            ;;
+          working|blocked) printf 'live' ;;
+          *) printf 'unknown' ;;
+        esac
+      else
+        printf 'live'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1998,7 +2045,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_state dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2011,11 +2058,19 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
-      if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+      [ -n "$dup_pane" ] || {
         echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
         return 1
-      fi
-      dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
+      }
+      dup_state=$(fm_backend_herdr_pane_agent_state "$session" "$dup_pane")
+      case "$dup_state" in
+        dead|no-agent) ;;
+        *)
+          echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+          return 1
+          ;;
+      esac
+      dup_tab_ids="${dup_tab_ids}${dup}"$'\t'"${dup_state}"$'\n'
     done <<EOF
 $dup_tabs
 EOF
@@ -2029,8 +2084,15 @@ EOF
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
-    while IFS= read -r dup; do
+    while IFS=$'\t' read -r dup dup_state; do
       [ -n "$dup" ] || continue
+      if [ "$dup_state" = no-agent ]; then
+        dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+        if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+          echo "error: herdr tab '$label' changed before stale-husk closure in workspace $wsid (session $session)" >&2
+          return 1
+        fi
+      fi
       fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
     done <<EOF
 $dup_tab_ids

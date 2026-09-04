@@ -119,8 +119,9 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 # $PANE_ID/$TARGET (this suite's primary task, which the rest of the file
 # still depends on) so neither scenario disturbs it.
 
-# 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
-#    `pane report-agent`) must still refuse exactly as before.
+# 1. A genuinely LIVE duplicate (working occupancy, via herdr's own
+#    `pane report-agent`) must still refuse. Idle occupancy on a proven idle
+#    shell is a husk and is covered next.
 LIVE_DUP_LABEL="fm-smoke-livedup"
 LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
@@ -129,15 +130,36 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
-herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
+herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state working --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
-  fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
+  fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent"
 fi
 herdr pane get "$LIVE_DUP_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   || fail "REGRESSION: the live-duplicate scenario's pane should have survived the refused create_task call untouched"
 pass "real herdr: create_task refuses a same-labeled tab whose pane hosts a genuinely live registered agent (unchanged behavior)"
 fm_backend_herdr_kill "$SESSION:$LIVE_DUP_PANE_ID"
+
+# 1b. Idle occupancy on a proven idle shell is a replaceable husk.
+STALE_DUP_LABEL="fm-smoke-staledup"
+STALE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$STALE_DUP_LABEL" /tmp) || fail "could not create the stale-occupancy scenario's tab"
+read -r STALE_DUP_TAB_ID STALE_DUP_PANE_ID <<EOF
+$STALE_DUP_IDS
+EOF
+if [ -z "$STALE_DUP_TAB_ID" ] || [ -z "$STALE_DUP_PANE_ID" ]; then
+  fail "stale-occupancy scenario tab creation did not return ids"
+fi
+herdr pane report-agent "$STALE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-stale-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register idle occupancy on the stale-occupancy scenario's pane"
+REPLACED_STALE_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$STALE_DUP_LABEL" /tmp) \
+  || fail "REGRESSION: create_task should close-and-replace idle occupancy on a proven idle shell"
+read -r NEW_STALE_TAB_ID NEW_STALE_PANE_ID <<EOF
+$REPLACED_STALE_IDS
+EOF
+[ -n "$NEW_STALE_TAB_ID" ] && [ -n "$NEW_STALE_PANE_ID" ] || fail "stale-occupancy close-and-replace did not return new ids"
+[ "$NEW_STALE_PANE_ID" != "$STALE_DUP_PANE_ID" ] || fail "stale-occupancy close-and-replace returned the SAME pane id"
+pass "real herdr: create_task replaces idle occupancy on a proven idle shell"
+fm_backend_herdr_kill "$SESSION:$NEW_STALE_PANE_ID"
 
 # 2. A husk (no registered agent at all - the restored-plain-shell shape)
 #    must be CLOSED AND REPLACED instead of refused.
