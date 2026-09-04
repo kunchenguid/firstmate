@@ -5,7 +5,7 @@
 # repos with no PR CI where the usual "checks green" fm-pr-check.sh trigger
 # never fires.
 #
-# Matrix:
+# Matrix (GitHub, via gh-axi):
 #   (a) a verified merge records pr= and pr_head=
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
@@ -68,6 +68,12 @@
 #   (av) a base branch with no queue rule says nothing about a merge queue
 #   (aw) a refusal built on the gh-axi view says the merge queue could not be
 #       observed, and judges that view's state like the queue-aware one
+#
+# Matrix (Gitea/Forgejo, via tea): mirrors (a), (b), (c), (g), (h) above, plus
+#   (z) merge is refused when no tea login matches the record's host
+#   (aa) merge is refused before tea when tea itself is missing from PATH
+# A Gitea/Forgejo task never records pr_head=, because tea has no head-commit
+# field in any output format (see docs/forge-merge-watch.md).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -351,6 +357,32 @@ glab_merge_line() {
   grep -F ' mr merge ' "$1" || true
 }
 
+# Fake tea: "login list" reports whatever logins the case fixture file holds
+# (so a test can freely control ambiguous, missing, or matching logins without
+# teaching the fake tool any host-matching logic of its own), and "pulls
+# merge" records its invocation and exits 0 unless told to fail. Args:
+# case_dir login host
+add_tea_mocks() {
+  local case_dir=$1 login=${2:-forge.example} host=${3:-forge.example}
+  printf '%s\n' "$login,https://$host,$host,someuser,false" > "$case_dir/tea-logins.csv"
+  cat > "$case_dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls merge")
+    [ "${FM_TEST_TEA_MERGE_FAIL:-0}" = 0 ] || { echo "error: tea pulls merge failed" >&2; exit 1; }
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tea"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -364,6 +396,8 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_TEA_LOG="$case_dir/tea.log" \
+  FM_TEST_TEA_LOGINS_FILE="$case_dir/tea-logins.csv" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -1423,6 +1457,65 @@ test_bundled_repo_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses a bundled short-option repo override and forwards other short flags"
 }
 
+test_github_rebase_short_flag_not_rejected_as_repo_override() {
+  local case_dir rc
+  case_dir=$(make_case github-rebase-short-flag)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 -- -r \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-rebase-short-flag: fm-pr-merge refused gh's legitimate -r/--rebase short flag"
+
+  assert_no_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "github-rebase-short-flag: -r was misread as a repository override on GitHub"
+  # -r is itself an explicit merge method (--rebase), so the default --squash
+  # must not also be added: gh rejects a command carrying both.
+  grep -qxF 'pr merge 31 --repo example/repo -r' "$case_dir/gh-axi.log" \
+    || fail "github-rebase-short-flag: -r was not forwarded alone, without a conflicting default --squash"
+  pass "fm-pr-merge does not reject GitHub's -r/--rebase short flag as a repository override, and does not pair it with a conflicting default --squash"
+}
+
+test_gitea_lowercase_short_flags_still_refuse_before_recording() {
+  local case_dir rc
+
+  case_dir=$(make_case gitea-short-repo-override)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://forge.example/right/repo/pulls/6 -- -r wrong/repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-short-repo-override: fm-pr-merge should refuse tea's -r short repo override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "gitea-short-repo-override: refusal did not explain the -r override"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-short-repo-override: tea pulls merge was invoked despite the -r override"
+
+  case_dir=$(make_case gitea-short-login-override)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://forge.example/right/repo/pulls/7 -- -l wrong \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-short-login-override: fm-pr-merge should refuse tea's -l short login override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "gitea-short-login-override: refusal did not explain the -l override"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-short-login-override: tea pulls merge was invoked despite the -l override"
+  pass "fm-pr-merge still refuses tea's lowercase -r/-l short repo/login overrides on Gitea/Forgejo"
+}
+
 test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
@@ -2082,6 +2175,213 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_gitea_records_pr_and_merges() {
+  local case_dir
+  case_dir=$(make_case gitea-records-and-merges)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitea-records-and-merges: fm-pr-merge should succeed: $(cat "$case_dir/stderr")"
+
+  assert_grep 'pr=https://forge.example/example/repo/pulls/9' "$case_dir/state/task-x1.meta" \
+    "gitea-records-and-merges: pr= was not recorded"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "gitea-records-and-merges: a Gitea/Forgejo task should never record pr_head="
+  grep -qxF 'pulls merge 9 --repo example/repo --login forge.example --style squash' "$case_dir/tea.log" \
+    || fail "gitea-records-and-merges: tea pulls merge was not invoked with number, --repo, --login, and default --style squash"
+  pass "fm-pr-merge records pr= (never pr_head=) before invoking tea pulls merge"
+}
+
+test_gitea_merge_failure_propagates_after_recording() {
+  local case_dir rc
+  case_dir=$(make_case gitea-merge-fails)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  set +e
+  FM_TEST_TEA_MERGE_FAIL=1 run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/13 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-merge-fails: fm-pr-merge should propagate the tea merge failure"
+  assert_grep 'pr=https://forge.example/example/repo/pulls/13' "$case_dir/state/task-x1.meta" \
+    "gitea-merge-fails: pr= should already be recorded even though the merge itself failed"
+  pass "fm-pr-merge propagates a real tea merge failure without silently succeeding"
+}
+
+test_gitea_extra_style_args_forwarded() {
+  local case_dir
+  case_dir=$(make_case gitea-extra-style)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/15 -- --style rebase \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitea-extra-style: fm-pr-merge failed"
+
+  grep -qxF 'pulls merge 15 --repo example/repo --login forge.example --style rebase' "$case_dir/tea.log" \
+    || fail "gitea-extra-style: caller --style rebase was not forwarded without an extra default --style squash"
+  pass "fm-pr-merge does not add default --style squash when the caller passes an explicit tea style"
+}
+
+test_gitea_repo_login_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case gitea-repo-login-override)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://forge.example/right/repo/pulls/5 -- --login wrong \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-repo-login-override: fm-pr-merge should refuse a login override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "gitea-repo-login-override: refusal did not explain the override"
+  assert_no_grep 'pr=https://forge.example/right/repo/pulls/5' "$case_dir/state/task-x1.meta" \
+    "gitea-repo-login-override: PR URL was recorded before rejecting the login override"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-repo-login-override: tea pulls merge was invoked despite the login override"
+  pass "fm-pr-merge refuses tea repo/login override args before recording state"
+}
+
+# tea's --remote/-R discovers the login from a configured remote, which is
+# just as much a repository override as --repo/--login: the short -R form is
+# already covered by test_bundled_repo_override_args_refuse_before_recording,
+# so this exercises the long --remote form that reject_repo_overrides must
+# also reject.
+test_gitea_remote_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case gitea-remote-override)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://forge.example/right/repo/pulls/5 -- --remote other \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-remote-override: fm-pr-merge should refuse a remote override"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "gitea-remote-override: refusal did not explain the override"
+  assert_no_grep 'pr=https://forge.example/right/repo/pulls/5' "$case_dir/state/task-x1.meta" \
+    "gitea-remote-override: PR URL was recorded before rejecting the remote override"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-remote-override: tea pulls merge was invoked despite the remote override"
+  pass "fm-pr-merge refuses tea --remote override args before recording state"
+}
+
+test_gitea_requires_tea_on_path() {
+  local case_dir rc
+  case_dir=$(make_case gitea-requires-tea)
+  mkdir -p "$case_dir/wt"
+
+  # A restricted, curated PATH (never the ambient ${PATH}) proves this refusal
+  # holds regardless of whether the current host happens to have a real tea
+  # installed elsewhere on PATH.
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    "$PR_MERGE" task-x1 https://forge.example/example/repo/pulls/8 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-requires-tea: fm-pr-merge should refuse with tea absent"
+  assert_grep 'requires tea on PATH' "$case_dir/stderr" \
+    "gitea-requires-tea: refusal did not report the missing tea CLI"
+  pass "fm-pr-merge refuses to merge a Gitea/Forgejo pull request with tea absent from PATH"
+}
+
+test_gitea_ambiguous_login_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case gitea-ambiguous-login)
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  printf '%s\n%s\n' \
+    'forge.example,https://forge.example,forge.example,one,false' \
+    'forge-alias,https://forge.example,forge.example,two,false' \
+    > "$case_dir/tea-logins.csv"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/8 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-ambiguous-login: fm-pr-merge should refuse with an ambiguous login"
+  assert_grep 'could not resolve exactly one tea login' "$case_dir/stderr" \
+    "gitea-ambiguous-login: refusal did not report the ambiguous login"
+  assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+    "gitea-ambiguous-login: tea pulls merge was invoked despite the ambiguous login"
+  pass "fm-pr-merge refuses to guess between ambiguous tea logins"
+}
+
+# A login configured with the https default port names the same endpoint
+# as the portless validated record, so it must match and carry the merge.
+# A validated PR URL is always https (bin/fm-pr-lib.sh's gitea pattern
+# requires the literal "https://" prefix), so https:443 is the only scheme
+# for which default-port normalization can ever produce a match.
+test_gitea_default_port_login_matches() {
+  local case_dir
+  case_dir=$(make_case "gitea-default-port-https")
+  mkdir -p "$case_dir/wt"
+  add_tea_mocks "$case_dir"
+  printf '%s\n' 'forge.example,https://forge.example:443,forge.example,someuser,false' \
+    > "$case_dir/tea-logins.csv"
+  : > "$case_dir/tea.log"
+
+  run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitea-default-port-https: fm-pr-merge should match a default-port login: $(cat "$case_dir/stderr")"
+
+  assert_grep 'pr=https://forge.example/example/repo/pulls/9' "$case_dir/state/task-x1.meta" \
+    "gitea-default-port-https: pr= was not recorded"
+  grep -qxF 'pulls merge 9 --repo example/repo --login forge.example --style squash' "$case_dir/tea.log" \
+    || fail "gitea-default-port-https: tea pulls merge was not invoked through the default-port login"
+  pass "fm-pr-merge matches a tea login configured with the https default port"
+}
+
+# A validated PR URL is always https, so a login for the identical host on
+# http names a different endpoint and must never stand in for it, even
+# though the bare hostnames are byte-identical, and even when the login's own
+# default port (:80) is stripped before the comparison: port normalization
+# must never rescue a scheme mismatch.
+test_gitea_login_scheme_mismatch_refuses() {
+  local case_dir rc login_url
+  for login_url in http://forge.example http://forge.example:80; do
+    case_dir=$(make_case gitea-scheme-mismatch)
+    mkdir -p "$case_dir/wt"
+    add_tea_mocks "$case_dir"
+    printf '%s\n' "forge.example,$login_url,forge.example,someuser,false" \
+      > "$case_dir/tea-logins.csv"
+    : > "$case_dir/tea.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://forge.example/example/repo/pulls/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "gitea-scheme-mismatch ($login_url): fm-pr-merge should refuse an http login for an https record"
+    assert_grep 'could not resolve exactly one tea login' "$case_dir/stderr" \
+      "gitea-scheme-mismatch ($login_url): refusal did not report the unresolved login"
+    assert_no_grep 'pulls merge' "$case_dir/tea.log" \
+      "gitea-scheme-mismatch ($login_url): tea pulls merge was invoked despite the scheme mismatch"
+  done
+  pass "fm-pr-merge refuses an http tea login as a stand-in for an https record's identical host"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2116,6 +2416,8 @@ test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_bundled_repo_override_args_refuse_before_recording
+test_github_rebase_short_flag_not_rejected_as_repo_override
+test_gitea_lowercase_short_flags_still_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
@@ -2143,3 +2445,12 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_gitea_records_pr_and_merges
+test_gitea_merge_failure_propagates_after_recording
+test_gitea_extra_style_args_forwarded
+test_gitea_repo_login_override_args_refuse_before_recording
+test_gitea_remote_override_args_refuse_before_recording
+test_gitea_requires_tea_on_path
+test_gitea_ambiguous_login_refuses_before_merge
+test_gitea_default_port_login_matches
+test_gitea_login_scheme_mismatch_refuses

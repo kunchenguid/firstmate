@@ -174,11 +174,58 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # Plain tea, reproducing the real CLI's contract established against a live
+  # instance: "login list -o csv" and "pulls list ... -o csv" print a header
+  # row plus data rows on stdout, and a non-zero exit on any failure. The data
+  # rows themselves come from fixture files so a test can freely control which
+  # logins and which pull request rows tea reports, including multiple or zero
+  # host matches, without teaching the fake tool any host-matching logic of its
+  # own: that matching is the behavior under test, owned by the real scripts.
+  # "pulls list" is page-aware even though the fixture is single-page: the
+  # poll under test paginates with no row or page budget (by design, so a
+  # merge past a full page is never missed), so a fixture row that never
+  # matches the recorded index would otherwise be re-served on every page
+  # forever, hanging the walk. Real tea's closed list is finite, so only page
+  # 1 carries the fixture rows; page 2 onward returns the header-only "empty"
+  # page that ends the walk, exactly like the dedicated pagination tests below
+  # simulate for their own multi-page fixtures.
+  cat > "$fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    [ "${FM_TEST_TEA_LOGIN_FAIL:-0}" = 0 ] || exit 1
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls list")
+    [ "${FM_TEST_TEA_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_TEA_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_TEA_SLEEP"
+    page=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --page) page=$2 ;;
+      esac
+      shift
+    done
+    printf 'index,state\n'
+    [ "$page" != 1 ] || cat "${FM_TEST_TEA_PULLS_FILE:?}"
+    ;;
+  "pulls merge")
+    exit "${FM_TEST_TEA_MERGE_RC:-0}"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/tea"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/tea.log"
   : > "$dir/guard.log"
+  printf '%s\n' 'forge.example,https://forge.example,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  printf '%s\n' '7,closed' > "$dir/tea-pulls.csv"
   printf '%s\n' "$dir"
 }
 
@@ -207,6 +254,8 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" \
+    FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -217,6 +266,8 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" \
+    FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -310,6 +361,28 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://github.com/o/r/pulls/1'
+  'https://gitlab.com/o/r/pulls/1'
+  'https://forge.example/single/pulls/1'
+  'https://forge.example/g/p/pulls/0'
+  'https://forge.example/g/p/pulls/01'
+  'https://FORGE.example/g/p/pulls/1'
+  'https://forge.example:443/g/p/pulls/1'
+  'https://user@forge.example/g/p/pulls/1'
+  'https://forge.example/g/p/pulls/1/'
+  'https://forge.example/-owner/p/pulls/1'
+  'https://forge.example/owner-/p/pulls/1'
+  'https://forge.example/owner--name/p/pulls/1'
+  'https://forge.example/o/./pulls/1'
+  'https://forge.example/o/../pulls/1'
+  'https://forge.example/o/r/pulls/1?q=x'
+  'https://forge.example/o/r/pulls/1#f'
+  'https://forge.example/o/r/pull/1'
+  'https://forge.example//p/pulls/1'
+  'https://forge.example/o//pulls/1'
+  'https://forge.example/o/r/x/pulls/1'
+  'http://forge.example/o/r/pulls/1'
+  '//forge.example/o/r/pulls/1'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -380,6 +453,22 @@ EOF
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
   [ "$FM_PR_PATH" = a/b ] || fail "parser returned wrong GitHub project path"
+  while IFS='|' read -r url host owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gitea/Forgejo pull request URL"
+    [ "$FM_PR_PROVIDER" = gitea ] || fail "parser did not tag a pulls URL as gitea"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gitea/Forgejo pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gitea/Forgejo host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong Gitea/Forgejo project path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Gitea/Forgejo owner"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Gitea/Forgejo repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gitea/Forgejo pull request number"
+  done <<'EOF'
+https://forge.example/a/b/pulls/1|forge.example|a|b|1
+https://forge.example/my-org/repo/pulls/42|forge.example|my-org|repo|42
+https://forge.example/Owner/repo-name_with.parts/pulls/123456|forge.example|Owner|repo-name_with.parts|123456
+https://code.internal/team/ci-runner/pulls/7|code.internal|team|ci-runner|7
+EOF
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
   done
@@ -678,6 +767,8 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" \
+    FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1277,7 +1368,7 @@ SH
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
-# docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
+# docs/forge-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab entry bindir name
   dir=$(make_case gitlab-merge-watch)
@@ -1388,6 +1479,479 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+# Unlike GitLab, a Gitea/Forgejo pull request has full merge parity with
+# GitHub: its owner/repository path is fixed, like GitHub's, even though its
+# host is self-hosted and arbitrary, like GitLab's. tea also addresses a
+# self-hosted instance through a configured login rather than through the
+# URL, so login resolution (by matching the record's host against tea's own
+# configured logins) is exercised here too, for both the poll and the merge.
+test_gitea_merge_watch() {
+  local dir state out rc url value notea entry bindir name
+  dir=$(make_case gitea-merge-watch)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/7
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 7 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gitea/Forgejo poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gitea
+$url
+forge.example
+group/project
+7" ] || fail "published Gitea/Forgejo sidecar bytes were not exact"
+
+  # Only an exact merged state, on the exact recorded index, wakes firstmate.
+  for value in closed '' not-a-state MERGED merged-but-not; do
+    printf '7,%s\n' "$value" > "$dir/tea-pulls.csv"
+    out=$(run_poll "$dir")
+    [ -z "$out" ] || fail "Gitea/Forgejo poll emitted for a non-merged state"
+  done
+  # A merged row under a different index must not match the recorded one.
+  printf '99,merged\n' > "$dir/tea-pulls.csv"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted for a merged row at the wrong index"
+  printf '7,merged\n' > "$dir/tea-pulls.csv"
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll did not emit exactly one merged line"
+  out=$(FM_TEST_TEA_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted after a tea failure"
+
+  # tea is addressed by owner/repository and login, never by the pull request
+  # URL, which tea has no way to resolve directly (no per-index field
+  # selector; see docs/forge-merge-watch.md).
+  grep -qF -- "pulls list --repo group/project --login forge.example --state closed" "$dir/tea.log" \
+    || fail "Gitea/Forgejo poll did not address tea by repository, login, and closed state"
+  ! grep -qF -- "$url" "$dir/tea.log" \
+    || fail "Gitea/Forgejo poll passed a pull request URL to tea"
+
+  # An absent CLI must produce no wake rather than a false merge.
+  notea="$dir/notea"
+  mkdir -p "$notea"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = tea ] && continue
+      [ -e "$notea/$name" ] || ln -s "$entry" "$notea/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$notea" command -v tea >/dev/null 2>&1 \
+    || fail "the tea-free search path still resolved tea"
+  out=$(FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
+    PATH="$notea" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted with tea absent from PATH"
+
+  # No login configured for this host: the poll never guesses.
+  printf '%s\n' 'other.example,https://other.example,other.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted with no login matching its host"
+  # Two logins matching the same host: the poll never guesses which to use.
+  printf '%s\n%s\n' \
+    'forge.example,https://forge.example,forge.example,one,false' \
+    'forge-alias,https://forge.example,forge.example,two,false' \
+    > "$dir/tea-logins.csv"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted with an ambiguous login match"
+  # A login's Name is an arbitrary alias; only its URL host is trusted, and a
+  # differently-cased host on the login side still matches.
+  printf '%s\n' 'my-alias,https://FORGE.example,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll did not match a login by host regardless of name or case"
+  printf '%s\n' 'forge.example,https://forge.example,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" elsewhere.example group/project 7 \
+    > "$state/task-a.pr-poll"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" forge.example group/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted for a sidecar whose project was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" forge.example group/project 7 \
+    > "$state/task-a.pr-poll"
+
+  # Arming is where a missing CLI can still be reported, so it refuses there.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notea" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea/Forgejo watch succeeded with tea absent"
+  case "$out" in
+    *"requires tea on PATH"*) ;;
+    *) fail "arming a Gitea/Forgejo watch with tea absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Gitea/Forgejo arming left a poll armed"
+
+  # Unlike GitLab, the merge path has full parity: it merges a Gitea/Forgejo
+  # pull request, addressing tea by owner/repository, resolved login, and a
+  # default squash style.
+  write_task_meta "$dir" task-c
+  : > "$dir/tea.log"
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1 \
+    || fail "merge wrapper refused a well-formed Gitea/Forgejo pull request URL"
+  grep -qxF 'pulls merge 7 --repo group/project --login forge.example --style squash' "$dir/tea.log" \
+    || fail "merge wrapper did not invoke tea pulls merge with repository, login, and default style"
+  grep -qxF "pr=$url" "$dir/home/state/task-c.meta" \
+    || fail "Gitea/Forgejo merge wrapper did not record pr= before merging"
+
+  # Ambiguous or missing login is a reported blocker at merge time, not a
+  # silent guess.
+  write_task_meta "$dir" task-d
+  printf '%s\n%s\n' \
+    'forge.example,https://forge.example,forge.example,one,false' \
+    'forge-alias,https://forge.example,forge.example,two,false' \
+    > "$dir/tea-logins.csv"
+  set +e
+  out=$(run_merge_entry "$dir" task-d "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merge wrapper succeeded with an ambiguous tea login"
+  case "$out" in
+    *"could not resolve exactly one tea login"*) ;;
+    *) fail "merge wrapper did not report the ambiguous tea login" ;;
+  esac
+  printf '%s\n' 'forge.example,https://forge.example,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+
+  pass "Gitea/Forgejo pull requests are watched and merged on any instance, resolving tea logins by host"
+}
+
+# A validated Gitea/Forgejo PR URL never carries a port (the host class in
+# bin/fm-pr-lib.sh excludes ":"), so it always names the default-port
+# endpoint. A tea login configured for a non-default port on the same
+# hostname must therefore never be treated as a match: doing so would send
+# polling or merging to a different forge endpoint than the URL identifies.
+test_gitea_login_port_mismatch() {
+  local dir state url rc out
+  dir=$(make_case gitea-login-port-mismatch)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/7
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 7 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  printf '7,merged\n' > "$dir/tea-pulls.csv"
+  printf '%s\n' 'forge.example,https://forge.example:3000,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea/Forgejo poll emitted using a login on a different port than the validated URL"
+
+  write_task_meta "$dir" task-e
+  set +e
+  out=$(run_merge_entry "$dir" task-e "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merge wrapper succeeded using a login on a different port than the validated URL"
+  case "$out" in
+    *"could not resolve exactly one tea login"*) ;;
+    *) fail "merge wrapper did not report the port-mismatched tea login as unresolved" ;;
+  esac
+
+  printf '%s\n' 'forge.example,https://forge.example,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  pass "Gitea/Forgejo login matching does not let a differently-ported login stand in for the validated host"
+}
+
+# The other side of the same normalization: a login configured with the
+# https default port names the same endpoint as the portless validated
+# record, so it must match, and the poll must reach the recorded merge
+# through it. A validated Gitea/Forgejo PR URL is always https (the URL
+# pattern requires the literal "https://" prefix), so https:443 is the only
+# scheme for which default-port normalization can ever produce a match.
+test_gitea_default_port_login_matches() {
+  local dir state url out
+  dir=$(make_case "gitea-default-port-https")
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/7
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 7 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  printf '7,merged\n' > "$dir/tea-pulls.csv"
+  printf '%s\n' 'forge.example,https://forge.example:443,forge.example,someuser,false' \
+    > "$dir/tea-logins.csv"
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll did not match a login configured with the https default port"
+  pass "Gitea/Forgejo poll matches a login configured with the https default port"
+}
+
+# A validated Gitea/Forgejo PR URL is always https (the URL pattern requires
+# the literal "https://" prefix), so a login for the identical host on http
+# names a different endpoint and must never stand in for it, even though the
+# bare hostnames are byte-identical, and even when the login's own default
+# port (:80) is stripped before the comparison: port normalization must
+# never rescue a scheme mismatch.
+test_gitea_login_scheme_mismatch() {
+  local dir state url rc out login_url
+  for login_url in http://forge.example http://forge.example:80; do
+    dir=$(make_case gitea-login-scheme-mismatch)
+    state="$dir/home/state"
+    url=https://forge.example/group/project/pulls/7
+
+    write_poll_meta "$state" task-a "$url"
+    fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 7 "$POLL" \
+      || fail "could not prepare a Gitea/Forgejo poll"
+    fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+    printf '7,merged\n' > "$dir/tea-pulls.csv"
+    printf '%s\n' "forge.example,$login_url,forge.example,someuser,false" \
+      > "$dir/tea-logins.csv"
+    out=$(run_poll "$dir")
+    [ -z "$out" ] || fail "Gitea/Forgejo poll ($login_url) emitted using an http login for an https validated record"
+
+    write_task_meta "$dir" task-e
+    set +e
+    out=$(run_merge_entry "$dir" task-e "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "merge wrapper ($login_url) succeeded using an http login for an https validated record"
+    case "$out" in
+      *"could not resolve exactly one tea login"*) ;;
+      *) fail "merge wrapper ($login_url) did not report the scheme-mismatched tea login as unresolved" ;;
+    esac
+  done
+  pass "Gitea/Forgejo login matching does not let an http login stand in for an https validated host"
+}
+
+# tea's closed-pull-request list is read one page at a time. A single page can
+# miss an old merge once enough newer pull requests have since closed, so the
+# poll must keep turning pages until it either finds the recorded index or
+# reaches a page with zero data rows.
+test_gitea_poll_paginates_closed_list() {
+  local dir state url out
+  dir=$(make_case gitea-poll-pagination)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/1500
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 1500 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  # A page-aware fake: page 1 returns 1000 rows that never match the recorded
+  # index, exactly filling one bounded page; the target only appears on page
+  # 2, which is short and therefore the last page.
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls list")
+    page=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --page) page=$2 ;;
+      esac
+      shift
+    done
+    printf 'index,state\n'
+    if [ "$page" = 1 ]; then
+      seq 1 1000 | awk '{print $1",closed"}'
+    elif [ "$page" = 2 ]; then
+      printf '1500,merged\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll did not walk past the first closed-list page to find an older merge"
+  grep -qF -- '--page 2' "$dir/tea.log" || fail "Gitea/Forgejo poll never requested a second closed-list page"
+  pass "Gitea/Forgejo poll paginates the closed pull request list instead of missing old merges past one page"
+}
+
+# A self-hosted Gitea/Forgejo server is free to clamp its own page size below
+# the --limit 1000 the poll requests. The walk must not read a page shorter
+# than 1000 rows as the end of the list: that would give up after page one
+# even though the server still has more pages to give.
+test_gitea_poll_paginates_past_server_clamped_page_size() {
+  local dir state url out
+  dir=$(make_case gitea-poll-clamped-page)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/5
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 5 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  # A page-aware fake whose server clamps every page to 20 rows regardless of
+  # the requested --limit 1000: page 1 is full at the clamped size, holds
+  # newer unrelated closed pull requests, and never matches, so it must not
+  # be mistaken for a short/last page; the target only appears on page 2.
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls list")
+    page=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --page) page=$2 ;;
+      esac
+      shift
+    done
+    printf 'index,state\n'
+    if [ "$page" = 1 ]; then
+      seq 100 119 | awk '{print $1",closed"}'
+    elif [ "$page" = 2 ]; then
+      printf '5,merged\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+
+  out=$(run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll gave up on a server-clamped short page instead of turning it"
+  grep -qF -- '--page 2' "$dir/tea.log" || fail "Gitea/Forgejo poll never requested a second page past a clamped-size first page"
+  pass "Gitea/Forgejo poll keeps paginating past a page shorter than the requested limit"
+}
+
+# tea's CSV output always includes the header row, even on a page past the
+# end of the closed-pull-request list, so raw output is never actually empty
+# there. If the walk judged a page's end by raw text rather than data rows,
+# a target that never appears would leave it requesting page after page
+# forever instead of recognizing the header-only page as the end of the list.
+test_gitea_poll_stops_on_header_only_last_page() {
+  local dir state url out rc
+  dir=$(make_case gitea-poll-header-only-last-page)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/999999
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 999999 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  # A page-aware fake whose closed list holds exactly one full page, none of
+  # which matches the recorded index; every page past that returns only the
+  # header row, exactly as the real tea CLI does past the end of the list.
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls list")
+    page=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --page) page=$2 ;;
+      esac
+      shift
+    done
+    printf 'index,state\n'
+    if [ "$page" = 1 ]; then
+      seq 1 1000 | awk '{print $1",closed"}'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+
+  set +e
+  out=$(timeout 10 env FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" \
+    FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$dir/home/state/task-a.check.sh")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Gitea/Forgejo poll did not stop once the closed list was exhausted (rc=$rc, likely hung)"
+  [ -z "$out" ] || fail "Gitea/Forgejo poll reported a merge that never happened"
+  grep -qF -- '--page 3' "$dir/tea.log" && fail "Gitea/Forgejo poll kept requesting pages past the header-only end of the list"
+  pass "Gitea/Forgejo poll stops once a closed-list page returns only its header, instead of looping forever"
+}
+
+# The walk must not give up after any fixed number of rows or pages: a
+# recorded pull request stays valid to watch however many newer pull
+# requests have since closed, so a row/page budget would silently strand
+# the watcher armed forever for a merge that fell past it.
+test_gitea_poll_paginates_past_row_budget() {
+  local dir state url out
+  dir=$(make_case gitea-poll-row-budget)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/900000000
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" forge.example group/project 900000000 "$POLL" \
+    || fail "could not prepare a Gitea/Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea/Forgejo poll"
+
+  # A page-aware fake whose closed list holds 51 full pages of 1000
+  # non-matching rows (51,000 rows total, past any 50,000-row budget), with
+  # the target only appearing on page 52.
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list")
+    printf 'Name,URL,SSHHost,User,Default\n'
+    cat "${FM_TEST_TEA_LOGINS_FILE:?}"
+    ;;
+  "pulls list")
+    page=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --page) page=$2 ;;
+      esac
+      shift
+    done
+    printf 'index,state\n'
+    if [ "$page" -le 51 ]; then
+      seq 1 1000 | awk '{print $1",closed"}'
+    elif [ "$page" = 52 ]; then
+      printf '900000000,merged\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+
+  out=$(timeout 10 env FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" \
+    FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$dir/home/state/task-a.check.sh")
+  [ "$out" = merged ] || fail "Gitea/Forgejo poll gave up past a 50,000-row budget instead of finding the older merge"
+  grep -qF -- '--page 52' "$dir/tea.log" || fail "Gitea/Forgejo poll never requested the page past a 50,000-row budget"
+  pass "Gitea/Forgejo poll keeps paginating past any fixed row budget instead of hiding old merges"
 }
 
 seed_canonical_poll() {
@@ -2121,8 +2685,36 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_gitea_merged_poll_retires() {
+  local dir state url rc
+  dir=$(make_case gitea-merged-retirement)
+  state="$dir/home/state"
+  url=https://forge.example/group/project/pulls/17
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  printf '17,merged\n' > "$dir/tea-pulls.csv"
+  set +e
+  FM_TEST_TEA_LOGINS_FILE="$dir/tea-logins.csv" FM_TEST_TEA_PULLS_FILE="$dir/tea-pulls.csv" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Gitea/Forgejo merged retirement watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "Gitea/Forgejo merged wake was missing" ;; esac
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Gitea/Forgejo retirement removed canonical metadata"
+  pass "GitHub, GitLab, and Gitea/Forgejo exact merged results share one retirement path"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
+test_gitea_merge_watch
+test_gitea_login_port_mismatch
+test_gitea_default_port_login_matches
+test_gitea_login_scheme_mismatch
+test_gitea_poll_paginates_closed_list
+test_gitea_poll_paginates_past_server_clamped_page_size
+test_gitea_poll_stops_on_header_only_last_page
+test_gitea_poll_paginates_past_row_budget
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
@@ -2135,6 +2727,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_gitea_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

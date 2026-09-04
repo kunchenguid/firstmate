@@ -4,13 +4,14 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub and on
+# Gitea/Forgejo, and an arbitrarily nested group/subgroup/project namespace on
+# GitLab. A GitLab project can sit at any depth, so no owner/repository pair
+# can address one and the sidecar carries the whole path instead. GitLab and
+# Gitea/Forgejo both run mostly on self-hosted instances, so the host is part
+# of that identity rather than a constant for either. Every consumer
+# re-derives the identity from the stored URL and refuses any record whose
+# parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -156,17 +157,44 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# Gitea/Forgejo also runs mostly on self-hosted instances, like GitLab, so the
+# host is part of the identity rather than a constant. github.com and
+# gitlab.com are refused for the same reason github.com is refused for
+# GitLab: a URL on either real host is never a Gitea/Forgejo instance, and
+# accepting the shape here would arm a watch that can never succeed.
+fm_pr_gitea_host_valid() {
+  local host=${1-} label
+  local LC_ALL=C
+  local -a labels
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] || return 1
+  [ "$host" != gitlab.com ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, GitLab gets its own host and namespace rules rather than a
+# loosened GitHub rule, and Gitea/Forgejo gets GitLab's arbitrary self-hosted
+# host rule paired with GitHub's fixed owner/repository shape. Forgejo is a
+# protocol-compatible fork of Gitea, so one provider tag, "gitea", covers both.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and gitea because
+# bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab URL leaves
+# them empty: no owner/repository pair can address an arbitrary-depth GitLab
+# namespace, so bin/fm-pr-merge.sh refuses a GitLab URL rather than merging
+# anything.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -195,16 +223,43 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
-  [[ "$raw" =~ $pattern ]] || return 1
-  host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
-  FM_PR_URL=$raw
-  FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    if fm_pr_gitlab_host_valid "$host" && fm_pr_gitlab_path_valid "$path"; then
+      FM_PR_PROVIDER=gitlab
+      FM_PR_URL=$raw
+      FM_PR_HOST=$host
+      FM_PR_PATH=$path
+      FM_PR_NUMBER=${BASH_REMATCH[3]}
+      return 0
+    fi
+  fi
+  # Gitea/Forgejo serves a fixed owner/repository path, like GitHub, but on an
+  # arbitrary self-hosted host, like GitLab. Note "pulls" (plural), which is
+  # what distinguishes this shape from GitHub's singular "pull" and GitLab's
+  # "-/merge_requests" segment.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    owner=${BASH_REMATCH[2]}
+    repo=${BASH_REMATCH[3]}
+    number=${BASH_REMATCH[4]}
+    if fm_pr_gitea_host_valid "$host" && [[ "$owner" != *--* ]] \
+      && [ "$repo" != . ] && [ "$repo" != .. ]; then
+      FM_PR_PROVIDER=gitea
+      FM_PR_URL=$raw
+      FM_PR_HOST=$host
+      FM_PR_PATH="$owner/$repo"
+      # shellcheck disable=SC2034
+      FM_PR_OWNER=$owner
+      # shellcheck disable=SC2034
+      FM_PR_REPO=$repo
+      FM_PR_NUMBER=$number
+      return 0
+    fi
+  fi
+  return 1
 }
 
 fm_pr_head_valid() {
