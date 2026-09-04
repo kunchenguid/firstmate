@@ -24,8 +24,9 @@
 # a failed/timed-out/malformed progress command, an unreadable process identity,
 # a missing working directory, or an observation race reads unknown. A missing
 # process, zombie, or identity mismatch reads dead and remains listed until
-# retire, so quiet death cannot look like absence or health. List probes at most
-# 32 records concurrently under one 3-second collection budget. Every record is
+# retire, so quiet death cannot look like absence or health. Registration admits
+# at most 32 records, and list probes them concurrently under one 3-second
+# collection budget measured from list entry. Every record is
 # still emitted; work not completed within the budget reads unknown, and the
 # collection metadata discloses incomplete or capped probing. Three seconds keeps
 # this below the five-second fleet snapshot collection budget while allowing the
@@ -50,6 +51,7 @@ DEFAULT_PROGRESS_TIMEOUT=${FM_BACKGROUND_WORK_PROGRESS_TIMEOUT:-2}
 COLLECTION_BUDGET=${FM_BACKGROUND_WORK_COLLECTION_BUDGET:-3}
 COLLECTION_MAX_PROBES=${FM_BACKGROUND_WORK_COLLECTION_MAX_PROBES:-32}
 COLLECTION_PROBE_TIMEOUT=${FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT:-2}
+MAX_RECORDS=${FM_BACKGROUND_WORK_MAX_RECORDS:-32}
 MAX_PROGRESS_BYTES=512
 RUNTIME_LIBS_LOADED=0
 
@@ -107,6 +109,7 @@ positive_integer() {
 positive_integer "$COLLECTION_BUDGET" || die "FM_BACKGROUND_WORK_COLLECTION_BUDGET must be a positive integer"
 positive_integer "$COLLECTION_MAX_PROBES" || die "FM_BACKGROUND_WORK_COLLECTION_MAX_PROBES must be a positive integer"
 positive_integer "$COLLECTION_PROBE_TIMEOUT" || die "FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT must be a positive integer"
+positive_integer "$MAX_RECORDS" || die "FM_BACKGROUND_WORK_MAX_RECORDS must be a positive integer"
 [ "$COLLECTION_PROBE_TIMEOUT" -lt "$COLLECTION_BUDGET" ] \
   || die "FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT must be less than the collection budget"
 
@@ -158,7 +161,7 @@ resolve_executable() { # <command> <cwd>
 register_work() {
   local id=${1-} description='' task='' pid='' started_at='' expected_finish_at=''
   local cwd stale_after=$DEFAULT_STALE_AFTER progress_timeout=$DEFAULT_PROGRESS_TIMEOUT
-  local current_identity resolved stage record tmp arg zombie_rc
+  local current_identity resolved stage record tmp arg zombie_rc registered=0 existing
   local -a progress=()
   shift || true
   valid_id "$id" || die "invalid background-work id: $id"
@@ -212,6 +215,14 @@ register_work() {
   if [ -e "$record" ] || [ -L "$record" ]; then
     fm_lock_release "$REGISTRY/.registry.lock"
     die "background work is already registered: $id"
+  fi
+  for existing in "$REGISTRY"/*; do
+    [ -d "$existing" ] && [ ! -L "$existing" ] || continue
+    registered=$((registered + 1))
+  done
+  if [ "$registered" -ge "$MAX_RECORDS" ]; then
+    fm_lock_release "$REGISTRY/.registry.lock"
+    die "background-work registry is full (maximum $MAX_RECORDS records)"
   fi
   stage=$(umask 077; mktemp -d "$REGISTRY/.register.$id.XXXXXX") || {
     fm_lock_release "$REGISTRY/.registry.lock"
@@ -500,8 +511,8 @@ record_json() { # <record-directory> <now-epoch> <now-iso> [budget-only]
         timeout_seconds:$timeout_seconds}}'
 }
 
-collect_records() { # <output-directory> <now-epoch> <now-iso>
-  local output=$1 now=$2 generated=$3 record id tmp count=0 worker watchdog monitor_was_on=0
+collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-seconds>
+  local output=$1 now=$2 generated=$3 remaining=$4 record id tmp count=0 worker watchdog monitor_was_on=0
   local -a workers=()
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
@@ -517,7 +528,7 @@ collect_records() { # <output-directory> <now-epoch> <now-iso>
     workers+=("$!")
   done
   (
-    sleep "$COLLECTION_BUDGET"
+    sleep "$remaining"
     for worker in "${workers[@]+"${workers[@]}"}"; do
       kill -TERM -- "-$worker" 2>/dev/null || true
     done
@@ -537,15 +548,18 @@ collect_records() { # <output-directory> <now-epoch> <now-iso>
 
 list_work() {
   local format=${1-} generated now records_tmp record document stage id total=0 attempted=0 completed=0 truncated=false
+  local collection_started collection_deadline remaining
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
+  collection_started=$(date +%s) || die "cannot start background-work collection deadline"
+  collection_deadline=$((collection_started + COLLECTION_BUDGET))
   command -v jq >/dev/null 2>&1 || die "jq is required to list background work"
+  load_runtime_libs
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
   now=$(date +%s) || die "cannot read the current epoch time"
   records_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-background-work-list.XXXXXX") \
     || die "cannot stage background-work output"
   : > "$records_tmp"
   if [ -d "$REGISTRY" ]; then
-    load_runtime_libs
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
       || { rm -f -- "$records_tmp"; die "cannot stage background-work collection"; }
     for record in "$REGISTRY"/*; do
@@ -556,7 +570,10 @@ list_work() {
       record_json "$record" "$now" "$generated" budget-only > "$stage/$id.json" \
         || { rm -rf -- "$stage"; rm -f -- "$records_tmp"; die "cannot encode background-work record: $id"; }
     done
-    collect_records "$stage" "$now" "$generated"
+    remaining=$((collection_deadline - $(date +%s)))
+    if [ "$remaining" -gt 0 ]; then
+      collect_records "$stage" "$now" "$generated" "$remaining"
+    fi
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       id=${record##*/}
@@ -567,7 +584,9 @@ list_work() {
     rm -rf -- "$stage"
   fi
   [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] || truncated=true
-  document=$(jq -s --arg generated "$generated" --arg home "$FM_HOME" \
+  remaining=$((collection_deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || remaining=1
+  document=$(fm_run_timed "$remaining" jq -s --arg generated "$generated" --arg home "$FM_HOME" \
     --argjson budget "$COLLECTION_BUDGET" --argjson total "$total" \
     --argjson attempted "$attempted" --argjson completed "$completed" --argjson truncated "$truncated" \
     '{schema:"fm-background-work-list.v1", generated:$generated, fm_home:$home,

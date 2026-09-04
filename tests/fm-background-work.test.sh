@@ -277,15 +277,38 @@ test_many_hung_probes_share_one_disclosed_collection_budget() {
       and .collection.budget_seconds == 2
       and .collection.total_records == 6
       and .collection.probes_attempted == 4
-      and .collection.probes_completed == 4
+      and .collection.probes_completed <= 4
       and .collection.truncated == true
       and all(.records[]; .progress.status == "unknown"
         and (.progress.reason == "timeout" or .progress.reason == "collection-budget"))
       and all(.records[] | select(.progress.reason == "collection-budget");
         .liveness.status == "unknown")
-      and ([.records[] | select(.progress.reason == "collection-budget")] | length) == 2
+      and ([.records[] | select(.progress.reason == "collection-budget")] | length) >= 2
   ' >/dev/null || fail "budgeted collection hid records, health, or truncation: $result"
   pass "many hung probes remain visible and unknown under one disclosed collection budget"
+}
+
+test_registration_bound_keeps_whole_collection_finite() {
+  local home progress i result
+  home=$(make_home registry-bound)
+  progress=$(make_progress_command registry-bound-progress 'printf "ready\n"')
+  start_sleeper
+  i=1
+  while [ "$i" -le 3 ]; do
+    FM_BACKGROUND_WORK_MAX_RECORDS=3 register_fixture \
+      "$home" "bounded-$i" "$STARTED_PID" "$progress" ''
+    i=$((i + 1))
+  done
+  if FM_BACKGROUND_WORK_MAX_RECORDS=3 register_fixture \
+    "$home" bounded-4 "$STARTED_PID" "$progress" '' 2>/dev/null; then
+    fail "registration exceeded the finite registry bound"
+  fi
+  result=$(FM_BACKGROUND_WORK_MAX_RECORDS=3 list_json "$home") \
+    || fail "could not list a full bounded registry"
+  printf '%s\n' "$result" | jq -e '
+    .collection.total_records == 3 and (.records | length) == 3
+  ' >/dev/null || fail "a full bounded registry did not preserve every row"
+  pass "registration bounds whole-collection enumeration without hiding registered work"
 }
 
 test_live_adopted_process_reads_alive_and_progressing
@@ -297,3 +320,4 @@ test_unregistered_process_is_not_listed
 test_retire_removes_visibility_without_signalling_process
 test_unknown_process_state_is_never_adopted_or_reported_alive
 test_many_hung_probes_share_one_disclosed_collection_budget
+test_registration_bound_keeps_whole_collection_finite
