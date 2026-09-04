@@ -1347,7 +1347,8 @@ test_child_status_wrong_home_is_not_copied() {
   local home state sm_home corr rec hook_log
   home=$(setup_parent child-wrong-home)
   state="$home/state"
-  sm_home=$(bind_local_mate "$home" mate)
+  sm_home="$TMP_ROOT/team,west-home-$RANDOM"
+  mkdir -p "$sm_home/state"
   hook_log="$TMP_ROOT/child-wrong-home.log"
   : > "$hook_log"
   # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
@@ -1372,8 +1373,10 @@ test_child_status_wrong_home_is_not_copied() {
     || fail "resolved_epoch must stay empty for a child-file sighting"
   grep -Fq pending-reply-missed "$state/mate.status" \
     || fail "a child-file miss should still escalate"
-  grep -Fq "token seen in $sm_home/state/child.status:" "$state/mate.status" \
-    || fail "missed payload must name the readable child-file path"$'\n'"$(cat "$state/mate.status")"
+  grep -Fq "token seen in $sm_home/state/child.status:1;" "$state/mate.status" \
+    || fail "missed payload must preserve the complete readable child-file path"$'\n'"$(cat "$state/mate.status")"
+  [ "$(fm_pending_reply_get "$rec" wrong_home_first_sighting)" = "$sm_home/state/child.status:1" ] \
+    || fail "first wrong-home sighting must preserve commas in its path"
   if grep -Fq "corr=$corr" "$state/mate.status"; then
     fail "a child status file must not be restatement-copied onto the parent channel"
   fi
@@ -1409,6 +1412,10 @@ test_mechanical_helper_writes_parent_channel() {
   if fm_pending_reply_try_resolve "$state" "$empty_corr"; then
     fail "an empty helper report must not resolve an expectation"
   fi
+  rc=0
+  FM_HOME= FM_ROOT_OVERRIDE="$sm_home" \
+    "$REPORT" "done" "$empty_corr" "must require FM_HOME" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "helper must not treat FM_ROOT_OVERRIDE as a mate home"
   rc=0
   FM_HOME="$home" "$REPORT" "done" "$corr" "from a main home" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "helper must refuse a main home that has no parent channel"

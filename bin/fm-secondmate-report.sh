@@ -23,6 +23,7 @@
 #   fm-secondmate-report.sh --doc done abcdef0123456789 data/x/report.md "see report"
 set -eu
 
+CALLER_FM_HOME=${FM_HOME:-}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
@@ -65,7 +66,7 @@ case "$CORR" in
     ;;
 esac
 
-HOME_DIR="${FM_HOME:-${FM_ROOT_OVERRIDE:-}}"
+HOME_DIR=$CALLER_FM_HOME
 case "$HOME_DIR" in
   '')
     echo "error: FM_HOME is required so the helper can resolve the parent channel" >&2
