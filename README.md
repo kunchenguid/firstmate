@@ -84,13 +84,29 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
-Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+Then launch a supported harness; AGENTS.md takes over from there:
 
 **Claude Code**
 
 ```sh
 claude
 ```
+
+**Codex**
+
+```sh
+codex -s danger-full-access
+```
+
+Codex primary sessions require `danger-full-access` because the normal sandbox places model-generated shell commands in an isolated PID namespace.
+That boundary prevents Firstmate's session-lock ancestry check from seeing the long-lived Codex process, so startup otherwise fails with this opaque message:
+
+```text
+error: cannot locate harness process in ancestry
+```
+
+Sandbox mode is separate from approval policy.
+To keep request-time approval prompts while disabling the sandbox, launch with `codex -s danger-full-access -a on-request`.
 
 **Grok**
 
