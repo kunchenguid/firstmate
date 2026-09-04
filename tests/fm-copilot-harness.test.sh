@@ -62,6 +62,10 @@ test_process_shapes_are_anchored() {
   [ "$out" = copilot ] || fail "node-bundled copilot script detected as '$out'"
 
   out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/runner.js --allow-all' "$HARNESS")
+  [ "$out" = unknown ] || fail "a node script under a copilot-named directory detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
   [ "$out" = unknown ] || fail "an unrelated later copilot argument detected as '$out'"
   pass "Copilot process detection accepts native, path, MainThread, and node-bundle shapes while rejecting later-argument decoys"
@@ -69,7 +73,7 @@ test_process_shapes_are_anchored() {
 
 test_real_process_identity_accepts_copilot_shapes_and_rejects_decoy() {
   command -v node >/dev/null 2>&1 || { pass "node not installed, skipping"; return; }
-  local dir native_pid path_pid bundle_pid decoy_pid comm args out
+  local dir native_pid path_pid bundle_pid path_decoy_pid decoy_pid comm args out
   dir="$TMP_ROOT/real-copilot-shapes"
   mkdir -p "$dir/bin"
   cat > "$dir/bin/copilot" <<'JS'
@@ -78,9 +82,14 @@ JS
   cat > "$dir/runner.js" <<'JS'
 setTimeout(() => {}, 30000);
 JS
+  mkdir -p "$dir/copilot/bin"
+  cat > "$dir/copilot/bin/runner.js" <<'JS'
+setTimeout(() => {}, 30000);
+JS
   bash -c 'exec -a copilot sleep 30' & native_pid=$!
   bash -c 'exec -a /opt/copilot/bin/copilot sleep 30' & path_pid=$!
   node "$dir/bin/copilot" --allow-all & bundle_pid=$!
+  node "$dir/copilot/bin/runner.js" --allow-all & path_decoy_pid=$!
   node "$dir/runner.js" copilot & decoy_pid=$!
 
   comm=$(LC_ALL=C ps -p "$native_pid" -o comm= 2>/dev/null || true)
@@ -100,14 +109,20 @@ JS
   out=$(bash -c '. "$1"; fm_tmux_harness_process_name "$2" "$3"' -- "$TMUX_LIB" "$comm" "$args") || fail "tmux harness identity did not recognize the node-bundled copilot"
   [ "$out" = copilot ] || fail "tmux harness identity detected the node-bundled copilot as '$out'"
 
+  comm=$(LC_ALL=C ps -p "$path_decoy_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$path_decoy_pid" -o args= 2>/dev/null || true)
+  if bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args" >/dev/null 2>&1; then
+    fail "a node script under a copilot-named directory was treated as copilot"
+  fi
+
   comm=$(LC_ALL=C ps -p "$decoy_pid" -o comm= 2>/dev/null || true)
   args=$(LC_ALL=C ps -p "$decoy_pid" -o args= 2>/dev/null || true)
   if bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args" >/dev/null 2>&1; then
     fail "a later-argument decoy real node process was treated as copilot"
   fi
 
-  kill "$native_pid" "$path_pid" "$bundle_pid" "$decoy_pid" 2>/dev/null || true
-  wait "$native_pid" "$path_pid" "$bundle_pid" "$decoy_pid" 2>/dev/null || true
+  kill "$native_pid" "$path_pid" "$bundle_pid" "$path_decoy_pid" "$decoy_pid" 2>/dev/null || true
+  wait "$native_pid" "$path_pid" "$bundle_pid" "$path_decoy_pid" "$decoy_pid" 2>/dev/null || true
   pass "real processes identify native, path, and node-bundled Copilot shapes while rejecting decoys"
 }
 
