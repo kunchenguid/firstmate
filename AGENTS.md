@@ -146,11 +146,11 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 
 ## 3. Session start (run once at every session start)
 
-Run `bin/fm-session-start.sh 1` followed by `bin/fm-session-start.sh 2` at session start.
+Run `bin/fm-session-start.sh 1` (or `bin/fm-session-start-1.sh`), followed by `bin/fm-session-start.sh 2` (`bin/fm-session-start-2.sh`), followed by `bin/fm-session-start.sh 3` (`bin/fm-session-start-3.sh`) at session start across sequential turns.
 Its header is the single owner of composed commands, ordering, and digest contents.
 `bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
 Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
-Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
+Run-tier harness surfaces run Stage 1 for you at session open while the rest only nudge it, so confirm Stage 1 is present in this session and proceed deterministically to Stage 2 and Stage 3; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
