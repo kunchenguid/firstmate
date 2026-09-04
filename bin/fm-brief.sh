@@ -62,11 +62,13 @@
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# over copied detail) and has the crewmate follow fm-ensure-agents-md.sh's
+# self-governance contract when a touched project AGENTS.md lacks it.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# Crewmate ship and scout briefs state the on-disk brief path so workers can
+# corroborate prompt contents against disk.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -198,6 +200,7 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+BRIEF_FILE=$(shell_quote "$BRIEF")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -356,6 +359,7 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+Your brief file lives on disk at $BRIEF_FILE.
 
 $TASK_SECTION
 
@@ -440,6 +444,7 @@ DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+Your brief file lives on disk at $BRIEF_FILE.
 
 $TASK_SECTION
 

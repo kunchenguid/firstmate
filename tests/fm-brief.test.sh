@@ -839,6 +839,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
+  assert_no_grep "Your brief file lives on disk at" "$brief" \
+    "secondmate charter must not declare a crew brief path"
   assert_no_grep "## Captain's intent" "$brief" \
     "secondmate charter must not grow ship/scout Task subsections"
   assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
@@ -869,6 +871,25 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
+
+test_brief_path_stated_in_scaffolds() {
+  local home brief_ship brief_scout
+  home="$TMP_ROOT/brief-path-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-bp sample --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief_ship="$home/data/ship-bp/brief.md"
+  assert_grep "Your brief file lives on disk at '$home/data/ship-bp/brief.md'." "$brief_ship" \
+    "ship brief missing on-disk brief path declaration"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-bp sample --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief_scout="$home/data/scout-bp/brief.md"
+  assert_grep "Your brief file lives on disk at '$home/data/scout-bp/brief.md'." "$brief_scout" \
+    "scout brief missing on-disk brief path declaration"
+  pass "fm-brief.sh: ship and scout scaffolds declare the on-disk brief path"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -891,3 +912,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_brief_path_stated_in_scaffolds

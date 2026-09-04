@@ -46,6 +46,37 @@ make_case() {
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
+make_local_only_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project mirror pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mirror="$case_dir/mirror.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git clone --quiet --bare "$project" "$mirror"
+  git --git-dir="$mirror" remote remove origin
+  git --git-dir="$mirror" worktree add --quiet --detach "$pool" "$initial"
+
+  # Advance the primary checkout's default branch without pushing (no remote exists).
+  printf 'local-only advanced main\n' > "$project/advanced-local.txt"
+  git -C "$project" add advanced-local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-main
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH <<EOF
 $1
@@ -678,6 +709,29 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_linked_spawning_home_rejects_primary_before_refresh
+test_local_only_project_without_remote_refreshes_from_primary() {
+  local rec id out status current branch_head
+  id='pool-local-only-r12'
+  rec=$(make_local_only_case local-only-base "$id")
+  read_case_record "$rec"
+
+  current=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  if git -C "$POOL_DIR" cat-file -e "$current^{commit}" 2>/dev/null; then
+    fail "fixture did not isolate the pooled worktree from the primary checkout's new commit"
+  fi
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a stale pooled worktree on a local-only project with no remote"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "spawn left the pooled worktree on stale history for local-only project"
+  [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove primary main advanced past the pool base"
+  assert_grep 'local-only advanced main' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed worktree omitted the advanced local content"
+  pass "a stale pooled worktree on a local-only project without remote refreshes to primary default branch"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -695,5 +749,6 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_local_only_project_without_remote_refreshes_from_primary
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
