@@ -140,9 +140,9 @@
 #      identify a rerun; a terminal row supplies newer truth when its observable
 #      status, head, or PR differs, or when the state came from the coarse
 #      fallback. Nothing else does, and with no ordering evidence the failure
-#      stands, so a real failure is never hidden. A terminal reading also
-#      publishes the PR its OWN run opened (`pr=`), or none when it opened none,
-#      so a consumer never lends it an older PR.
+#      stands, so a real failure is never hidden. Independently of outcome, a
+#      terminal reading publishes a PR only when the current-run evidence still
+#      attributes that reading; otherwise it publishes none.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -240,6 +240,14 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
+emit_run() {  # <state> <detail> [pr]
+  local detail=$2
+  case "$1" in
+    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+  esac
+  emit "$1" run-step "$detail"
+}
+
 # --- meta resolution --------------------------------------------------------
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
@@ -296,6 +304,31 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+snapshot_ordered_log() {
+  local before_mtime before_size before_ident line after_mtime after_size after_ident
+  ORDERED_LOG_LINE=
+  ORDERED_LOG_MTIME=
+  [ -f "$LOG" ] || return 1
+  before_mtime=$(_fm_status_file_mtime "$LOG") || return 1
+  before_size=$(_fm_status_file_size "$LOG") || return 1
+  before_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
+  line=$(last_status_line "$LOG" || true)
+  after_mtime=$(_fm_status_file_mtime "$LOG") || return 1
+  after_size=$(_fm_status_file_size "$LOG") || return 1
+  after_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
+  before_size=${before_size//[[:space:]]/}
+  after_size=${after_size//[[:space:]]/}
+  case "$before_mtime:$after_mtime:$before_size:$after_size" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  [ "$before_mtime" = "$after_mtime" ] \
+    && [ "$before_size" = "$after_size" ] \
+    && [ "$before_ident" = "$after_ident" ] \
+    || return 1
+  ORDERED_LOG_LINE=$line
+  ORDERED_LOG_MTIME=$before_mtime
+}
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -1205,9 +1238,6 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
-  RUN_HEAD=""
-  RUN_ID=""
-  ATTRIBUTED_TERMINAL_STATUS="$COARSE_STATUS"
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -1250,8 +1280,14 @@ if [ "$HAVE_RUN" = 1 ]; then
     RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
     case "$outcome" in
-      failed|cancelled) ATTRIBUTED_TERMINAL_STATUS=$outcome ;;
-      *) ATTRIBUTED_TERMINAL_STATUS=$status ;;
+      passed|checks-passed) ATTRIBUTED_LEDGER_STATUS=completed ;;
+      failed|cancelled) ATTRIBUTED_LEDGER_STATUS=$outcome ;;
+      *)
+        case "$status" in
+          ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
+          *) ATTRIBUTED_LEDGER_STATUS=$status ;;
+        esac
+        ;;
     esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E "$FM_NM_AWAITING_AGENT_RE" | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -1348,6 +1384,37 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  TERMINAL_PR=""
+  case "$RUN_STATE" in
+    done|failed)
+      runs_list_once
+      NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+      NEWEST_STATUS=${NEWEST_ROW%%|*}
+      NEWEST_REST=${NEWEST_ROW#*|}
+      NEWEST_SHA=${NEWEST_REST%%|*}
+      NEWEST_REST=${NEWEST_REST#*|}
+      NEWEST_EPOCH=${NEWEST_REST%%|*}
+      NEWEST_PR=${NEWEST_REST#*|}
+      NEWEST_ROW_AGREES=0
+      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+      if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
+        && [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ] \
+        && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
+        && [ "$NEWEST_PR" = "$RUN_PR" ]; then
+        case "$RUN_HEAD" in
+          "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_ROW_AGREES=1 ;;
+        esac
+      fi
+      if [ "$RUN_SOURCE" = coarse ]; then
+        case "$LEDGER_STATUS" in
+          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+        esac
+      elif [ "$NEWEST_ROW_AGREES" = 1 ]; then
+        TERMINAL_PR=$RUN_PR
+      fi
+      ;;
+  esac
+
   # A terminal failed/cancelled run describes a finished RUN, not the crew. The
   # head rule binds a run to this worktree's code identity, so it cannot tell
   # this branch's CURRENT run from whatever run last sat on this head - and a
@@ -1372,54 +1439,34 @@ if [ "$HAVE_RUN" = 1 ]; then
   # supersession flagging below. With no ordering evidence the failure stands,
   # so a real failure is never hidden by a line that might predate it.
   if [ "$RUN_STATE" = failed ]; then
-    runs_list_once
-    NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
-    NEWEST_STATUS=${NEWEST_ROW%%|*}
-    NEWEST_REST=${NEWEST_ROW#*|}
-    NEWEST_SHA=${NEWEST_REST%%|*}
-    NEWEST_REST=${NEWEST_REST#*|}
-    NEWEST_EPOCH=${NEWEST_REST%%|*}
-    NEWEST_PR=${NEWEST_REST#*|}
-    NEWEST_ROW_AGREES=0
-    if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
-      && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && [ "$NEWEST_STATUS" = "$ATTRIBUTED_TERMINAL_STATUS" ] \
-      && [ "$NEWEST_PR" = "$RUN_PR" ]; then
-      case "$RUN_HEAD" in
-        "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_ROW_AGREES=1 ;;
-      esac
-    fi
-    LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
     case "$LEDGER_STATUS" in
       running)
         emit working run-step "run superseded by a newer run on this branch (earlier $RUN_DETAIL)"
         ;;
       completed)
         SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
-        [ -z "$NEWEST_PR" ] || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}pr=$NEWEST_PR"
-        emit "done" run-step "$SUPERSEDED_DETAIL"
+        TERMINAL_PR=$NEWEST_PR
+        emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
         ;;
       failed|cancelled)
         if [ "$NEWEST_ROW_AGREES" != 1 ]; then
           LEDGER_DETAIL="run $LEDGER_STATUS"
           [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
-          [ -z "$NEWEST_PR" ] || LEDGER_DETAIL="$LEDGER_DETAIL${SEP}pr=$NEWEST_PR"
-          emit failed run-step "$LEDGER_DETAIL"
+          TERMINAL_PR=$NEWEST_PR
+          emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
         fi
         ;;
     esac
     # map_log_state owns the verb->state mapping, including the configurable
-    # paused verb; _fm_status_file_mtime is fm-classify-lib.sh's portable read of
-    # the same status file this reader already sources that library for.
-    if [ -n "$NEWEST_EPOCH" ] && [ -n "$LOG_VERB" ] && [ -f "$LOG" ]; then
-      LOG_MTIME=$(_fm_status_file_mtime "$LOG")
-      case "$LOG_MTIME" in ''|*[!0-9]*) LOG_MTIME= ;; esac
-      if [ -n "$LOG_MTIME" ] && [ "$LOG_MTIME" -gt "$NEWEST_EPOCH" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
+    # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
+    # readers to keep the line and its ordering evidence consistent.
+    if [ -n "$NEWEST_EPOCH" ] && snapshot_ordered_log; then
+      if [ "$ORDERED_LOG_MTIME" -gt "$NEWEST_EPOCH" ]; then
+        LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
         case "$LOG_STATE" in
           paused|done)
             emit "$LOG_STATE" status-log \
-              "$(status_line_note "$LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
+              "$(status_line_note "$ORDERED_LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
             ;;
         esac
       fi
@@ -1482,13 +1529,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
-  # A terminal reading publishes the pull request its OWN run opened, so a
-  # consumer building a terminal-outcome record takes the PR from the same
-  # source as the state instead of an older recorded one.
-  case "$RUN_STATE" in
-    done|failed) [ -z "$RUN_PR" ] || RUN_DETAIL="$RUN_DETAIL${SEP}pr=$RUN_PR" ;;
-  esac
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

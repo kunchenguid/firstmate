@@ -97,6 +97,10 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
+        if [ -n "${FM_FAKE_STATUS_APPEND_FILE:-}" ] && [ ! -e "${FM_FAKE_STATUS_APPEND_MARKER:-}" ]; then
+          : > "$FM_FAKE_STATUS_APPEND_MARKER"
+          printf '%s\n' "$FM_FAKE_STATUS_APPEND_LINE" >> "$FM_FAKE_STATUS_APPEND_FILE"
+        fi
         if [ "${1:-}" = --run ]; then
           run_id=${2:-}
           run_output="${FM_FAKE_AXI_STATUS_RUN:-}"
@@ -392,6 +396,9 @@ reset_fakes() {
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
+  FM_FAKE_STATUS_APPEND_FILE=""
+  FM_FAKE_STATUS_APPEND_MARKER=""
+  FM_FAKE_STATUS_APPEND_LINE=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOW_GONE FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
@@ -404,6 +411,7 @@ reset_fakes() {
   export FM_FAKE_GERRIT_STATUS FM_FAKE_GERRIT_CHANGE FM_FAKE_GERRIT_URL_JSON
   export FM_FAKE_GERRIT_READ_FAIL FM_FAKE_GERRIT_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
+  export FM_FAKE_STATUS_APPEND_FILE FM_FAKE_STATUS_APPEND_MARKER FM_FAKE_STATUS_APPEND_LINE
 }
 
 seed_retired_pr_receipt() {  # <state> <id> <url>
@@ -3793,14 +3801,14 @@ test_failed_run_with_no_later_run_still_surfaces() {
 # record apart from the failed run deliberately, and the two negative cases pin
 # the opposite direction so a real failure is never hidden.
 
-run_cancelled() {  # <branch>
+run_cancelled() {  # <branch> [pr]
   cat <<EOF
 run:
   id: "01RUN"
   branch: $1
   status: completed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
+  pr: "${2:-}"
   findings: none
 outcome: cancelled
 EOF
@@ -3834,7 +3842,7 @@ test_later_active_run_supersedes_failed_reading() {
   short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s1.meta" "window=fm:fm-feat-s1" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s1)"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s1 https://github.com/o/r/pull/1)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/feat-s1 f0f0f0f0  2026-08-27 13:53
   failed     fm/feat-s1 ${short}  2026-08-27 12:09
@@ -3843,6 +3851,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-s1)
   assert_contains "$out" "state: working" "a live run on this branch outranks the failed reading"
   assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
+  assert_not_contains "$out" "pull/1" "the stale failed run's pull request must not surface"
   assert_contains "$out" "superseded" "the detail names the supersession"
   pass "a later active run supersedes a stale failed reading"
 }
@@ -3957,6 +3966,74 @@ EOF
   assert_contains "$out" "pr=https://github.com/o/r/pull/2" "the coarse terminal row publishes its own pull request"
   assert_not_contains "$out" "pull/1" "the foreign branch's pull request must not surface"
   pass "a foreign status answer cannot hide the coarse terminal pull request"
+}
+
+test_stale_passed_run_publishes_no_pr_for_active_rerun() {
+  reset_fakes
+  local d short; d=$(new_case stale-passed-active-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2f
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2f.meta" "window=fm:fm-feat-s2f" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s2f)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s2f ${short}  2026-08-27 15:20"
+  local out; out=$(run_crew_state "$d" feat-s2f)
+  assert_contains "$out" "state: done" "successful-state precedence remains unchanged"
+  assert_not_contains "$out" "pr=" "a stale passed reading publishes no pull request for an active rerun"
+  assert_not_contains "$out" "pull/1" "the stale passed run's pull request must not surface"
+  pass "a stale passed run publishes no pull request for an active rerun"
+}
+
+test_cancelled_run_publishes_no_pr_for_active_rerun() {
+  reset_fakes
+  local d short; d=$(new_case stale-cancelled-active-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2g
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2g.meta" "window=fm:fm-feat-s2g" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s2g https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s2g ${short}  2026-08-27 15:20"
+  local out; out=$(run_crew_state "$d" feat-s2g)
+  assert_contains "$out" "state: working" "the active rerun supersedes the cancelled reading"
+  assert_not_contains "$out" "pr=" "a stale cancelled reading publishes no pull request for an active rerun"
+  assert_not_contains "$out" "pull/1" "the stale cancelled run's pull request must not surface"
+  pass "a stale cancelled run publishes no pull request for an active rerun"
+}
+
+test_status_append_during_ordering_snapshot_keeps_failure() {
+  reset_fakes
+  local d short reader out; d=$(new_case status-ordering-snapshot-race)
+  make_repo_on_branch "$d/wt" fm/feat-s2h
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2h.meta" "window=fm:fm-feat-s2h" "worktree=$d/wt" "kind=ship"
+  printf 'done: old completion\n' > "$d/state/feat-s2h.status"
+  backdate_status_minutes_ago "$d/state/feat-s2h.status" 120
+  reader="$d/status-size-reader"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+set -u
+size=$(wc -c < "$1")
+if [ ! -e "$FM_STATUS_MUTATE_MARKER" ]; then
+  : > "$FM_STATUS_MUTATE_MARKER"
+  printf '%s\n' "$FM_STATUS_MUTATE_LINE" >> "$1"
+fi
+printf '%s\n' "$size"
+SH
+  chmod +x "$reader"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2h)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_STATUS_APPEND_FILE="$d/state/feat-s2h.status"
+  FM_FAKE_STATUS_APPEND_MARKER="$d/query-append.marker"
+  FM_FAKE_STATUS_APPEND_LINE='working: resumed during pipeline query'
+  out=$(FM_STATUS_SIZE_READER="$reader" \
+    FM_STATUS_MUTATE_MARKER="$d/snapshot-append.marker" \
+    FM_STATUS_MUTATE_LINE='paused: appended during snapshot' \
+    run_crew_state "$d" feat-s2h)
+  assert_contains "$out" "state: failed" "a changing status snapshot cannot override the failure"
+  assert_not_contains "$out" "state: done" "the old done line cannot borrow the new file mtime"
+  assert_not_contains "$out" "state: paused" "a partial snapshot cannot override the failure"
+  pass "a status append during snapshot leaves the failure authoritative"
 }
 
 # The original title case: the crew declared a bounded external wait AFTER the
@@ -4095,11 +4172,13 @@ test_failed_run_detail_carries_no_pr_it_never_opened() {
 # terminal-outcome record can take its PR from the same source as its state.
 test_terminal_run_detail_carries_its_own_pr() {
   reset_fakes
-  local d; d=$(new_case terminal-run-pr)
+  local d short; d=$(new_case terminal-run-pr)
   make_repo_on_branch "$d/wt" fm/feat-s10
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s10.meta" "window=fm:fm-feat-s10" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s10)"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-s10 ${short}  2026-08-27 15:20  https://github.com/o/r/pull/1"
   local out; out=$(run_crew_state "$d" feat-s10)
   assert_contains "$out" "state: done" "a passed run reports done"
   assert_contains "$out" "pr=https://github.com/o/r/pull/1" "the run publishes the pull request it opened"
@@ -6540,6 +6619,9 @@ test_unbindable_later_run_reports_unknown_not_failed
 test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
 test_foreign_status_never_hides_coarse_terminal_pr
+test_stale_passed_run_publishes_no_pr_for_active_rerun
+test_cancelled_run_publishes_no_pr_for_active_rerun
+test_status_append_during_ordering_snapshot_keeps_failure
 test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
