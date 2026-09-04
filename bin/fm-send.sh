@@ -156,8 +156,9 @@
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
 # the fold actually drops it; a bare answered: note is not a reserved-key
 # transition and is never written for those keys. If this send cannot produce
-# a note the guard will accept, it refuses before sending and names the key
-# rather than exiting 0 on a silent no-op. After a delivered close it also
+# a note the guard will accept, or the structural key would be lost to the
+# status-line cap, it refuses before sending and names the cause rather than
+# exiting 0 on a silent no-op. After a delivered close it also
 # re-folds and fails loudly if the named key is still open. On the inbox plane
 # the close happens at ENQUEUE time, because enqueue is durable delivery to
 # the task's record; the worker reading the answer late is covered by the
