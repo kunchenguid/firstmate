@@ -435,6 +435,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+CREW_AUTOCOMPACT_PCT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -1659,6 +1660,25 @@ case "$HARNESS" in
       echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
       exit 1
     }
+    ;;
+  claude)
+    # config/crew-autocompact-pct is a crewmate/scout-only knob (AGENTS.md
+    # section 2, docs/configuration.md "Crew auto-compaction threshold"): a
+    # secondmate is a firstmate peer and keeps the default threshold, so this
+    # validation and the later env-prefix injection are both scoped off for
+    # kind=secondmate. Validated here, before any endpoint or worktree is
+    # created, so a malformed value stops the spawn instead of launching with
+    # it silently dropped or passed through unchecked.
+    if [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-autocompact-pct" ]; then
+      CREW_AUTOCOMPACT_PCT=$(tr -d '[:space:]' < "$CONFIG/crew-autocompact-pct" 2>/dev/null || true)
+      case "$CREW_AUTOCOMPACT_PCT" in
+        [1-9]|[1-9][0-9]) ;;
+        *)
+          echo "error: config/crew-autocompact-pct holds '$CREW_AUTOCOMPACT_PCT'; it must be a bare integer percentage from 1 to 99" >&2
+          exit 1
+          ;;
+      esac
+    fi
     ;;
 esac
 
@@ -3738,6 +3758,14 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# config/crew-autocompact-pct (validated above, scoped off kind=secondmate) sets
+# Claude's real CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env var so this home can pick its
+# own crewmate/scout auto-compaction threshold without imposing it on firstmate's
+# own session or on any other home. Per-launch env prefix, same pattern as
+# CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION above.
+if [ "$HARNESS" = claude ] && [ -n "$CREW_AUTOCOMPACT_PCT" ]; then
+  LAUNCH="CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$CREW_AUTOCOMPACT_PCT $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
