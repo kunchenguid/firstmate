@@ -19,6 +19,8 @@
 # Ceiling:  $FM_LOCAL_MODEL_MAX_CONTEXT, default 131072 tokens (see "Why a
 #           ceiling" below). A value of 0 or a non-integer is refused rather
 #           than silently treated as unbounded.
+# Timeout:  $FM_LOCAL_MODEL_TIMEOUT, default 10 seconds. It must be a positive
+#           integer so curl's zero value can never disable the endpoint bound.
 # Baseline: $FM_LOCAL_MODEL_HARNESS_BASELINE, default 60000 tokens - what the
 #           harness itself occupies before any task content (see "The baseline
 #           is the real boundary").
@@ -90,6 +92,19 @@ ceiling() {
   esac
   [ "$c" -gt 0 ] || { echo "error: FM_LOCAL_MODEL_MAX_CONTEXT must be greater than zero" >&2; exit 2; }
   printf '%s\n' "$c"
+}
+
+# Print the endpoint deadline, refusing values that curl would interpret as an
+# unbounded or malformed timeout. Validate this before dispatch so every public
+# command reports a bad local-runtime configuration as such, rather than
+# recasting it as an unreachable endpoint or a blocked worker.
+timeout_seconds() {
+  local t=${FM_LOCAL_MODEL_TIMEOUT:-10}
+  case "$t" in
+    ''|*[!0-9]*) echo "error: FM_LOCAL_MODEL_TIMEOUT must be a positive integer (got '$t')" >&2; return 2 ;;
+  esac
+  [ "$t" -gt 0 ] || { echo "error: FM_LOCAL_MODEL_TIMEOUT must be greater than zero" >&2; return 2; }
+  printf '%s\n' "$t"
 }
 
 # True when the argument is a dotted-quad address in 127.0.0.0/8. Every octet
@@ -192,7 +207,7 @@ EOF
 catalog() {
   command -v curl >/dev/null 2>&1 || { echo "error: curl is required to reach the local model endpoint" >&2; exit 3; }
   local body
-  body=$(curl -fsS -m "${FM_LOCAL_MODEL_TIMEOUT:-10}" "$ENDPOINT/api/v0/models" 2>/dev/null) || exit 3
+  body=$(curl -fsS -m "$TIMEOUT" "$ENDPOINT/api/v0/models" 2>/dev/null) || exit 3
   [ -n "$body" ] || exit 3
   printf '%s' "$body"
 }
@@ -411,6 +426,7 @@ CMD=$1; shift
 # print its own wake line, and a misconfigured endpoint must not be reported to
 # the operator as a server that stopped answering.
 require_loopback_endpoint
+TIMEOUT=$(timeout_seconds) || exit $?
 case "$CMD" in
   probe)          [ "$#" -eq 0 ] || die_usage; cmd_probe ;;
   list)           [ "$#" -eq 0 ] || die_usage; cmd_list ;;

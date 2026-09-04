@@ -338,6 +338,27 @@ test_bad_ceiling_is_refused() {
   pass "a malformed ceiling is refused, and an absent one falls back to a real bound"
 }
 
+# curl treats a zero max-time as no timeout at all. The endpoint owner must
+# refuse that configuration before the request path so a stalled LM Studio
+# server cannot make preflight or watcher polling wait indefinitely.
+test_bad_timeout_is_refused() {
+  local url status v out
+  url=$(endpoint timeout loaded 65536)
+  for v in 0 abc -1 1.5 ' '; do
+    out=$(FM_LOCAL_MODEL_ENDPOINT="$url" FM_LOCAL_MODEL_TIMEOUT="$v" \
+      "$LOCAL_MODEL" probe 2>&1)
+    status=$?
+    [ "$status" -eq 2 ] || fail "timeout '$v' must be refused with exit 2, got $status"
+    case "$out" in *FM_LOCAL_MODEL_TIMEOUT*) : ;; *) fail "timeout '$v' refusal did not name its setting: $out" ;; esac
+  done
+
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" FM_LOCAL_MODEL_TIMEOUT='' \
+    "$LOCAL_MODEL" probe) || fail "an empty timeout must fall back to the bounded default"
+  case "$out" in ok:*) : ;; *) fail "an empty timeout did not reach the healthy endpoint: $out" ;; esac
+
+  pass "a zero or malformed endpoint timeout is refused, and an absent one remains bounded"
+}
+
 # The endpoint becomes the worker's ANTHROPIC_BASE_URL, so it decides where the
 # brief, every file the worker reads, and its whole tool transcript are sent. A
 # remote host would make "local model" a name for shipping the repository off
@@ -428,4 +449,5 @@ test_oversized_brief_is_refused
 test_no_headroom_is_refused_with_the_fix
 test_wrong_shaped_catalog_is_not_reported_as_eviction
 test_bad_ceiling_is_refused
+test_bad_timeout_is_refused
 test_remote_endpoint_is_refused
