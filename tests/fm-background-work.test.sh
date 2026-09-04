@@ -407,6 +407,21 @@ test_malformed_directory_id_cannot_break_unknown_output() {
   pass "malformed directory ids remain valid unknown JSON rows"
 }
 
+test_dash_prefixed_ids_remain_machine_readable() {
+  local home progress result
+  home=$(make_home dash-prefixed-id)
+  progress=$(make_progress_command dash-prefixed-id-progress 'printf "ready\n"')
+  start_sleeper
+  register_fixture "$home" -x "$STARTED_PID" "$progress" ''
+  register_fixture "$home" --version "$STARTED_PID" "$progress" ''
+  result=$(list_json "$home") || fail "dash-prefixed IDs made list fail"
+  printf '%s\n' "$result" | jq -e '
+    .schema == "fm-background-work-list.v1"
+      and (.records | map(.id) | sort) == ["--version", "-x"]
+  ' >/dev/null || fail "dash-prefixed IDs were parsed as jq options: $result"
+  pass "dash-prefixed IDs remain positional machine-readable data"
+}
+
 test_blocked_record_with_hanging_probe_remains_visible() {
   local home progress fallback result started elapsed
   home=$(make_home blocked-capture)
@@ -450,4 +465,5 @@ test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
 test_registry_lock_contention_does_not_block_reads
 test_malformed_directory_id_cannot_break_unknown_output
+test_dash_prefixed_ids_remain_machine_readable
 test_blocked_record_with_hanging_probe_remains_visible

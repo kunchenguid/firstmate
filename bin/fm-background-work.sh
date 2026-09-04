@@ -647,7 +647,7 @@ timeout_membership_document() {
        expected_finish_at:null,liveness:{status:"unknown",reason:"collection-timeout"},
        progress:{status:"unknown",reason:"collection-timeout",value:null,
          observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}))}' \
-    "${ids[@]+"${ids[@]}"}"
+    -- "${ids[@]+"${ids[@]}"}"
 }
 
 list_work() {
