@@ -171,24 +171,30 @@ cmd_arm() {
 }
 
 cmd_retire() {
-  local artifact=${1-} id state pending inflight
+  local artifact=${1-} id state reg registration pending inflight
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || exit 1
   if [ -e "$STATE" ] && state=$(fm_procevent_state_root_resolve "$STATE"); then
     STATE=$state
+    reg=$(fm_procevent_registry_dir "$STATE")
+    registration="$reg/$id.source"
     pending=$(pending_reply_path "$id")
     inflight=$(inflight_reply_path "$id")
-    if [ -e "$pending" ] || [ -L "$pending" ]; then
-      pending_reply_is_private "$pending" \
-        || die "retired source left an unsafe pending reply path: $id"
-      rm -f -- "$pending" || die "cannot remove retired source reply: $id"
+    fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+    if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      if [ -e "$pending" ] || [ -L "$pending" ]; then
+        pending_reply_is_private "$pending" \
+          || die "retired source left an unsafe pending reply path: $id"
+        rm -f -- "$pending" || die "cannot remove retired source reply: $id"
+      fi
+      if [ -e "$inflight" ] || [ -L "$inflight" ]; then
+        pending_reply_is_private "$inflight" \
+          || die "retired source left an unsafe in-flight reply path: $id"
+        rm -f -- "$inflight" || die "cannot remove retired in-flight reply: $id"
+      fi
     fi
-    if [ -e "$inflight" ] || [ -L "$inflight" ]; then
-      pending_reply_is_private "$inflight" \
-        || die "retired source left an unsafe in-flight reply path: $id"
-      rm -f -- "$inflight" || die "cannot remove retired in-flight reply: $id"
-    fi
+    fm_procevent_source_lock_release "$id"
   fi
 }
 
@@ -248,6 +254,8 @@ cmd_reply() {
   [ -s "$input" ] || die "reply text must not be empty"
   perl -0777 -ne 'exit(index($_, "\0") >= 0 ? 1 : 0)' "$input" \
     || die "reply text cannot contain NUL bytes"
+  perl -0777 -ne 's/\n+\z//; exit(length($_) > 0 ? 0 : 1)' "$input" \
+    || die "reply text must not become empty after trailing newlines are removed"
 
   STATE=$(fm_procevent_state_root_resolve "$STATE") \
     || die "process-event state root is not a private directory"

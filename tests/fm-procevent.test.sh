@@ -1423,8 +1423,15 @@ cp "$ROOT/bin/fm-procevent-lavish.sh" "$ROOT/bin/fm-procevent-lib.sh" \
   "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$REPLY_RUNTIME/bin/"
 cat > "$REPLY_RUNTIME/bin/fm-procevent.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$RESTART_LOG"
-[ "${1-}" = restart ] || exit 97
+case "${1-}" in
+  restart) printf '%s\n' "$*" >> "$RESTART_LOG" ;;
+  retire)
+    rm -f -- "$FM_HOME/state/procevent/$2.source"
+    printf 'ready\n' > "$RETIRE_READY"
+    while [ ! -e "$RETIRE_RELEASE" ]; do sleep 0.02; done
+    ;;
+  *) exit 97 ;;
+esac
 SH
 chmod +x "$REPLY_RUNTIME/bin/fm-procevent.sh"
 cat > "$REPLY_BIN/lavish-axi" <<'SH'
@@ -1451,6 +1458,17 @@ reply_id=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+
+newline_reply_status=0
+newline_reply_out=$(printf '\n\n' | FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  RESTART_LOG="$RESTART_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" \
+  reply "$REPLY_ART" 2>&1) || newline_reply_status=$?
+[ "$newline_reply_status" -ne 0 ] || fail "newline-only reply input was accepted"
+assert_contains "$newline_reply_out" "must not become empty" \
+  "newline-only reply rejection explains the normalized empty value"
+assert_absent "$REPLY_HOME/state/procevent/$reply_id.pending-reply" \
+  "newline-only reply input poisoned pending reply state"
+assert_absent "$RESTART_LOG" "newline-only reply input restarted the listener"
 
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" "First change applied." >/dev/null
@@ -1568,6 +1586,24 @@ assert_absent "$inflight_reply" "reply remained in flight after the delivery gra
 assert_absent "$pending_reply" "committed reply returned to pending after the grace window"
 kill -TERM "$reply_poll_pid"
 wait "$reply_poll_pid" 2>/dev/null || true
+
+RETIRE_READY="$TMP_ROOT/reply-retire-ready"
+RETIRE_RELEASE="$TMP_ROOT/reply-retire-release"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  RESTART_LOG="$RESTART_LOG" RETIRE_READY="$RETIRE_READY" RETIRE_RELEASE="$RETIRE_RELEASE" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" retire "$REPLY_ART" >/dev/null &
+reply_retire_pid=$!
+wait_for "$RETIRE_READY" || fail "retire fixture did not reach its released-lock boundary"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Reply staged after re-arm." >/dev/null
+: > "$RETIRE_RELEASE"
+wait "$reply_retire_pid" || fail "racing retire command failed"
+assert_contains "$(cat "$pending_reply")" "Reply staged after re-arm." \
+  "old retirement deleted the replacement registration's reply"
 pass "Lavish host replies survive crashes and early restarts with at-least-once delivery"
 
 # The generic control hook restarts the exact registered generation immediately

@@ -797,6 +797,8 @@ EOF
         esac
         "${ARGV[@]}" &
         registered_pid=$!
+        [ -z "$registered_signal" ] \
+          || kill -"$registered_signal" "$registered_pid" 2>/dev/null || true
         wait "$registered_pid"
         registered_rc=$?
         if [ -n "$registered_signal" ]; then
