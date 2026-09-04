@@ -220,6 +220,297 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_election_skips_daemon_infrastructure() {
+  local dir fakebin got
+  dir="$TMP_ROOT/daemon-election"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  90:comm=) printf '%s\n' claude ;;
+  90:args=) printf '%s\n' claude ;;
+  90:ppid=) printf '%s\n' 1 ;;
+  100:comm=) printf '%s\n' claude ;;
+  100:args=) printf '%s\n' 'claude daemon run --port 1234' ;;
+  100:ppid=) printf '%s\n' 90 ;;
+  110:comm=) printf '%s\n' claude ;;
+  110:args=) printf '%s\n' 'claude --bg-pty-host' ;;
+  110:ppid=) printf '%s\n' 100 ;;
+  120:comm=) printf '%s\n' claude ;;
+  120:args=) printf '%s\n' 'claude --bg-spare' ;;
+  120:ppid=) printf '%s\n' 110 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 120 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "election failed to find a real session below the daemon chain"
+  [ "$got" = 90 ] || fail "election picked '$got', expected the topmost real session pid 90"
+  pass "session-lock: election skips daemon-infrastructure pids and returns the topmost real session"
+}
+
+test_election_fails_when_only_daemon_infrastructure_matches() {
+  local dir fakebin
+  dir="$TMP_ROOT/daemon-only"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  100:comm=) printf '%s\n' claude ;;
+  100:args=) printf '%s\n' 'claude daemon run' ;;
+  100:ppid=) printf '%s\n' 1 ;;
+  110:comm=) printf '%s\n' claude ;;
+  110:args=) printf '%s\n' 'claude --bg-pty-host' ;;
+  110:ppid=) printf '%s\n' 100 ;;
+  120:comm=) printf '%s\n' claude ;;
+  120:args=) printf '%s\n' 'claude --bg-spare' ;;
+  120:ppid=) printf '%s\n' 110 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 120 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+    fail "election elected a pid from a run that is entirely daemon infrastructure"
+  fi
+  pass "session-lock: election fails when only daemon infrastructure matches"
+}
+
+test_daemon_pid_is_never_a_live_holder() {
+  local dir fakebin
+  dir="$TMP_ROOT/daemon-liveness"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  90:comm=) printf '%s\n' claude ;;
+  90:args=) printf '%s\n' claude ;;
+  90:ppid=) printf '%s\n' 1 ;;
+  100:comm=) printf '%s\n' claude ;;
+  100:args=) printf '%s\n' 'claude daemon run' ;;
+  100:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 90 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 100'; then
+    fail "a live claude daemon run pid was accepted as a live session holder"
+  fi
+  lib_eval "$fakebin" 'fm_harness_pid_alive 90' \
+    || fail "a live real session pid was rejected as a live holder"
+  pass "session-lock: a live daemon pid is never a live session holder"
+}
+
+test_free_text_daemon_phrases_do_not_mark_a_real_session() {
+  local dir fakebin got
+  dir="$TMP_ROOT/daemon-free-text"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  80:comm=) printf '%s\n' claude ;;
+  80:args=) printf '%s\n' 'claude daemon run' ;;
+  80:ppid=) printf '%s\n' 1 ;;
+  90:comm=) printf '%s\n' claude ;;
+  90:args=) printf '%s\n' 'claude --model opus -cFIRSTMATE_OP: v1 launch-brief: restart claude daemon run and its --bg-pty-host / --bg-spare workers' ;;
+  90:ppid=) printf '%s\n' 80 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 90 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # The daemon markers appear only inside the session's prompt free text, so
+  # pid 90 is a real session: it must win the election and count as live,
+  # while the daemon above it still must not.
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a real session with daemon phrases in its prompt text lost the election entirely"
+  [ "$got" = 90 ] || fail "election picked '$got', expected the real session pid 90"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 90' \
+    || fail "a live session with daemon phrases in its prompt text was rejected as a live holder"
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 80'; then
+    fail "the daemon above the free-text session was accepted as a live holder"
+  fi
+  pass "session-lock: daemon phrases in prompt free text never mark a real session as infrastructure"
+}
+
+test_node_wrapped_daemon_is_infrastructure() {
+  local dir fakebin got
+  dir="$TMP_ROOT/daemon-node-wrapped"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  60:comm=) printf '%s\n' node ;;
+  60:args=) printf '%s\n' 'node /opt/node_modules/@anthropic-ai/claude-code/cli.js daemon run' ;;
+  60:ppid=) printf '%s\n' 1 ;;
+  70:comm=) printf '%s\n' node ;;
+  70:args=) printf '%s\n' 'node /opt/node_modules/@anthropic-ai/claude-code/cli.js --resume' ;;
+  70:ppid=) printf '%s\n' 60 ;;
+  75:comm=) printf '%s\n' node ;;
+  75:args=) printf '%s\n' 'node /opt/node_modules/@anthropic-ai/claude-code/cli.js -cFIRSTMATE_OP: v1 launch-brief: restart claude daemon run workers' ;;
+  75:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 70 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # An npm-installed Claude Code runs interpreter-wrapped, so the daemon
+  # markers sit after the interpreter and script-path preamble; free text in a
+  # wrapped session's argv still never matches.
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "election found no real session below the node-wrapped daemon"
+  [ "$got" = 70 ] || fail "election picked '$got', expected the wrapped session pid 70"
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 60'; then
+    fail "a live node-wrapped daemon was accepted as a live session holder"
+  fi
+  lib_eval "$fakebin" 'fm_harness_pid_alive 70' \
+    || fail "a live node-wrapped session was rejected as a live holder"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 75' \
+    || fail "a live node-wrapped session with daemon phrases in its prompt was rejected"
+  pass "session-lock: an interpreter-wrapped daemon is infrastructure, wrapped sessions stay real"
+}
+
+test_membership_walks_through_daemon_parented_chain() {
+  local dir fakebin
+  dir="$TMP_ROOT/daemon-membership"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  90:comm=) printf '%s\n' claude ;;
+  90:args=) printf '%s\n' claude ;;
+  90:ppid=) printf '%s\n' 1 ;;
+  100:comm=) printf '%s\n' claude ;;
+  100:args=) printf '%s\n' 'claude daemon run' ;;
+  100:ppid=) printf '%s\n' 90 ;;
+  110:comm=) printf '%s\n' claude ;;
+  110:args=) printf '%s\n' 'claude --bg-pty-host' ;;
+  110:ppid=) printf '%s\n' 100 ;;
+  120:comm=) printf '%s\n' claude ;;
+  120:args=) printf '%s\n' 'claude --bg-spare' ;;
+  120:ppid=) printf '%s\n' 110 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 120 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # A hook under the daemon worker chain must still match an inner session pid
+  # recorded in the lock, walking through the daemon-infrastructure pids.
+  printf '100\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "membership did not walk through the daemon chain to match the lock pid"
+  printf '90\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "membership did not match the topmost real session pid"
+  pass "session-lock: membership still walks through a daemon-parented chain"
+}
+
+test_non_claude_harnesses_are_untouched() {
+  local dir fakebin got name
+  for name in codex pi; do
+    dir="$TMP_ROOT/nonclaude-$name"
+    fakebin=$(fm_fakebin "$dir")
+    mkdir -p "$dir/state"
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  500:comm=) printf '%s\n' $name ;;
+  500:args=) printf '%s\n' '$name daemon run --bg-spare' ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash hook.sh' ;;
+  *:ppid=) printf '%s\n' 500 ;;
+esac
+SH
+    chmod +x "$fakebin/ps"
+    # The argv deliberately leads with the daemon tokens: only Claude processes
+    # may ever classify as daemon infrastructure.
+    got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$name: the harness was not found in the ancestry"
+    [ "$got" = 500 ] || fail "$name: election resolved '$got', expected 500"
+    lib_eval "$fakebin" 'fm_harness_pid_alive 500' \
+      || fail "$name: a live harness pid was rejected as a live holder"
+  done
+  pass "session-lock: non-Claude harnesses are untouched by the daemon logic"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +651,13 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_election_skips_daemon_infrastructure
+test_election_fails_when_only_daemon_infrastructure_matches
+test_daemon_pid_is_never_a_live_holder
+test_free_text_daemon_phrases_do_not_mark_a_real_session
+test_node_wrapped_daemon_is_infrastructure
+test_membership_walks_through_daemon_parented_chain
+test_non_claude_harnesses_are_untouched
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
