@@ -5,10 +5,12 @@
 # secondmate homes all sit at a detached HEAD on the default branch, while the
 # PRIMARY checkout (FM_ROOT) is a normal checkout on a real branch. The "tangle"
 # is a crewmate branching/committing in the primary instead of its own worktree,
-# stranding the primary on a feature branch. Two guards cover it:
+# stranding the primary on a feature branch. Three guards cover it:
 #   GUARD 1 (prevention) - the brief asserts isolation before its branch step, and
 #            fm-spawn refuses to launch unless the resolved worktree is isolated.
-#   GUARD 2 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
+#   GUARD 2 (continuous) - fm-spawn puts a task-frozen Git guard first on each new
+#            worker's PATH, so a later Git process cannot target primary.
+#   GUARD 3 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
 #            a feature branch, and stay silent on the default branch or detached.
 # These cases pin: the shared lib's branch classification, the fm-guard banner,
 # the fm-bootstrap problem line, the brief assertion ordering, and the fm-spawn
@@ -125,7 +127,7 @@ test_bootstrap_line() {
 # The generated ship brief must carry the isolation assertion AHEAD of the
 # `git checkout -b` step, so the crewmate verifies its worktree before branching.
 test_brief_assertion_precedes_branch() {
-  local home brief iso br
+  local home brief iso continuous br
   home="$TMP_ROOT/brief-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode no-mistakes >/dev/null 2>&1
@@ -140,12 +142,16 @@ test_brief_assertion_precedes_branch() {
   assert_no_grep "they are identical in the primary checkout" "$brief" \
     "brief must not claim the primary checkout has identical git dirs"
   iso=$(grep -n 'launched in primary checkout, not an isolated worktree' "$brief" | head -1 | cut -d: -f1)
+  continuous=$(grep -n 'git fm-isolation-check' "$brief" | head -1 | cut -d: -f1)
   br=$(grep -n 'git checkout -b fm/' "$brief" | head -1 | cut -d: -f1)
-  if [ -z "$iso" ] || [ -z "$br" ]; then
-    fail "brief missing assertion ($iso) or branch step ($br)"
+  if [ -z "$iso" ] || [ -z "$continuous" ] || [ -z "$br" ]; then
+    fail "brief missing start assertion ($iso), continuous assertion ($continuous), or branch step ($br)"
   fi
-  [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the branch step (line $br)"
-  pass "fm-brief: ship brief asserts worktree isolation before the branch step"
+  [ "$iso" -lt "$continuous" ] \
+    || fail "start isolation assertion (line $iso) must precede the continuous assertion (line $continuous)"
+  [ "$continuous" -lt "$br" ] \
+    || fail "continuous isolation assertion (line $continuous) must precede the branch step (line $br)"
+  pass "fm-brief: ship brief asserts start and continuous isolation before the branch step"
 }
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------

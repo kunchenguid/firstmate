@@ -142,6 +142,11 @@
 #   configured host for a remote home. Skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every ship/scout spawn also freezes bin/fm-worker-git-guard.sh under the
+#   task temp root and places that copy first on the worker's PATH before launch.
+#   The guard refuses any PATH-resolved Git invocation whose effective cwd,
+#   -C target, work tree, or git dir resolves into the primary checkout.
+#   Existing running workers are untouched, and secondmates remain unwrapped.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2629,6 +2634,86 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
+# Freeze a per-task Git guard before every ship/scout worker launches. The copy
+# is first on that worker's PATH for its whole process tree, so a later test or
+# tool that resolves Git from the project's primary checkout is refused before
+# it can switch the shared checkout's branch. The adjacent config binds the copy
+# to this exact task root, primary checkout, and real Git executable. Nothing is
+# installed into the project or the harness's global configuration, and a
+# secondmate remains unwrapped because its own home is intentionally primary.
+# bin/fm-worker-git-guard.sh owns the invocation-time decision and fails closed
+# when these spawn-validated bindings cannot be re-established.
+WORKER_GIT_GUARD_DIR=
+if [ "$KIND" != secondmate ]; then
+  WORKER_GIT_GUARD_SOURCE="$FM_ROOT/bin/fm-worker-git-guard.sh"
+  [ -f "$WORKER_GIT_GUARD_SOURCE" ] || {
+    echo "error: worker Git isolation guard is missing: $WORKER_GIT_GUARD_SOURCE" >&2
+    exit 1
+  }
+  WORKER_GIT_REAL=$(type -P git 2>/dev/null) || {
+    echo "error: worker Git isolation guard could not resolve the real Git executable" >&2
+    exit 1
+  }
+  case "$WORKER_GIT_REAL" in
+    /*) ;;
+    *)
+      WORKER_GIT_REAL_DIR=$(CDPATH='' cd -- "$(dirname -- "$WORKER_GIT_REAL")" 2>/dev/null && pwd -P) || {
+        echo "error: worker Git isolation guard could not resolve Git at $WORKER_GIT_REAL" >&2
+        exit 1
+      }
+      WORKER_GIT_REAL="$WORKER_GIT_REAL_DIR/$(basename -- "$WORKER_GIT_REAL")"
+      ;;
+  esac
+  WORKER_GIT_WORKTREE=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || {
+    echo "error: worker Git isolation guard could not resolve task worktree $WT" >&2
+    exit 1
+  }
+  WORKER_GIT_PRIMARY=$(CDPATH='' cd -- "$PROJ_ABS" 2>/dev/null && pwd -P) || {
+    echo "error: worker Git isolation guard could not resolve primary checkout $PROJ_ABS" >&2
+    exit 1
+  }
+  WORKER_GIT_TASK_DIR=$("$WORKER_GIT_REAL" -C "$WORKER_GIT_WORKTREE" rev-parse --absolute-git-dir 2>/dev/null) || {
+    echo "error: worker Git isolation guard could not resolve the task git dir" >&2
+    exit 1
+  }
+  WORKER_GIT_PRIMARY_DIR=$("$WORKER_GIT_REAL" -C "$WORKER_GIT_PRIMARY" rev-parse --absolute-git-dir 2>/dev/null) || {
+    echo "error: worker Git isolation guard could not resolve the primary git dir" >&2
+    exit 1
+  }
+  WORKER_GIT_TASK_DIR=$(CDPATH='' cd -- "$WORKER_GIT_TASK_DIR" 2>/dev/null && pwd -P) || {
+    echo "error: worker Git isolation guard task git dir is unavailable" >&2
+    exit 1
+  }
+  WORKER_GIT_PRIMARY_DIR=$(CDPATH='' cd -- "$WORKER_GIT_PRIMARY_DIR" 2>/dev/null && pwd -P) || {
+    echo "error: worker Git isolation guard primary git dir is unavailable" >&2
+    exit 1
+  }
+  [ "$WORKER_GIT_WORKTREE" != "$WORKER_GIT_PRIMARY" ] \
+    && [ "$WORKER_GIT_TASK_DIR" != "$WORKER_GIT_PRIMARY_DIR" ] || {
+      echo "error: worker Git isolation guard refused a task root that is not isolated from the primary checkout" >&2
+      exit 1
+    }
+  WORKER_GIT_GUARD_DIR=$(mktemp -d "$TASK_TMP/git-guard.XXXXXXXXXXXX") || {
+    echo "error: worker Git isolation guard could not allocate its private PATH directory" >&2
+    exit 1
+  }
+  chmod 0700 "$WORKER_GIT_GUARD_DIR"
+  cp "$WORKER_GIT_GUARD_SOURCE" "$WORKER_GIT_GUARD_DIR/git"
+  chmod 0700 "$WORKER_GIT_GUARD_DIR/git"
+  WORKER_GIT_CONFIG_TMP="$WORKER_GIT_GUARD_DIR/.git.conf.${BASHPID:-$$}"
+  old_umask=$(umask)
+  umask 077
+  {
+    printf 'worktree=%s\n' "$WORKER_GIT_WORKTREE"
+    printf 'primary=%s\n' "$WORKER_GIT_PRIMARY"
+    printf 'real_git=%s\n' "$WORKER_GIT_REAL"
+    printf 'task_git_dir=%s\n' "$WORKER_GIT_TASK_DIR"
+    printf 'primary_git_dir=%s\n' "$WORKER_GIT_PRIMARY_DIR"
+  } > "$WORKER_GIT_CONFIG_TMP"
+  umask "$old_umask"
+  mv "$WORKER_GIT_CONFIG_TMP" "$WORKER_GIT_GUARD_DIR/git.conf"
+fi
+
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
@@ -3231,6 +3316,13 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# A ship/scout gets the frozen Git guard first on PATH before the harness starts.
+# Existing workers are untouched because this export reaches only this launch.
+# The pane-level export is the same cross-backend inheritance boundary GOTMPDIR
+# already uses, so harness tools and test subprocesses inherit one binding.
+if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\""
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

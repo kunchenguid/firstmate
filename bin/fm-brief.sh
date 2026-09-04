@@ -47,7 +47,8 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship and scout briefs assert the launch-installed Git isolation guard before work begins.
+# Ship briefs keep the filesystem path assertion before their branch step too.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -350,6 +351,16 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+IFS= read -r -d '' GIT_ISOLATION_SECTION <<'EOF' || true
+## Continuous Git isolation
+The worker launch places a task-frozen Git guard first on `PATH` for this process tree, so Git remains bound after setup rather than relying only on the initial directory check.
+Run `git fm-isolation-check` now; it must report the assigned worktree and its distinct primary checkout before any task work begins.
+If that assertion is unavailable or refuses the binding, append `blocked: worker Git isolation guard is not active` to the status file and stop.
+Do not replace `PATH` or invoke Git by an absolute binary path, because either would bypass the task guard.
+Run any test that creates, deletes, or switches its own Git refs only against a disposable fixture repository, never against the task worktree or primary checkout.
+EOF
+GIT_ISOLATION_SECTION=${GIT_ISOLATION_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -360,6 +371,9 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+
+$GIT_ISOLATION_SECTION
+
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -439,6 +453,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
+$GIT_ISOLATION_SECTION
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
