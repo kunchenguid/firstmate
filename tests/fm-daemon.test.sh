@@ -1453,6 +1453,65 @@ test_is_wake_reason_distinguishes_status_stdout() {
   pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
 }
 
+# The idle sleep the daemon runs after a NON-wake watcher line (the singleton
+# collision above) must be governed by the documented FM_HOUSEKEEPING_TICK knob,
+# not an unprefixed one. This drives the real daemon binary through that branch:
+# a stub watcher exits rc=0 on a non-wake status line, and a sleep recorder on
+# PATH captures every requested duration. With FM_HOUSEKEEPING_TICK=3 the idle
+# sleep must be 3, never the 15s default a missed prefix would fall back to.
+test_idle_loop_sleep_honors_fm_housekeeping_tick() {
+  local dir state fakebin tmpbin sleeps log daemon_pid f i
+  dir=$(make_supercase daemon-idle-tick)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  tmpbin="$dir/bin"
+  mkdir -p "$tmpbin"
+  # Mirror the real bin so the daemon resolves its own libs, then shadow only the
+  # watcher with a stub that reproduces the singleton-collision non-wake exit.
+  for f in "$ROOT/bin"/*; do ln -s "$f" "$tmpbin/$(basename "$f")"; done
+  rm -f "$tmpbin/fm-watch.sh"
+  cat > "$tmpbin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+echo "watcher: already running"
+exit 0
+SH
+  chmod +x "$tmpbin/fm-watch.sh"
+  # Record every sleep duration the daemon requests. Invoke the real sleep by an
+  # absolute path so the recorder cannot re-enter itself off PATH.
+  sleeps="$dir/sleeps.log"; : > "$sleeps"
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$sleeps"
+/bin/sleep 0.02
+SH
+  chmod +x "$fakebin/sleep"
+  make_fake_crew_state "$fakebin" >/dev/null
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_HOUSEKEEPING_TICK=3 \
+    bash "$tmpbin/fm-supervise-daemon.sh" >"$dir/daemon.out" 2>&1 &
+  daemon_pid=$!
+
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qx 3 "$sleeps" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  log="$state/.supervise-daemon.log"
+  assert_contains "$(cat "$log" 2>/dev/null)" "non-wake stdout, idling" \
+    "daemon never reached the non-wake idle branch under test"
+  grep -qx 3 "$sleeps" \
+    || fail "idle-loop sleep ignored FM_HOUSEKEEPING_TICK=3; recorded durations: $(sort -u "$sleeps" 2>/dev/null | tr '\n' ' ')"
+  grep -qx 15 "$sleeps" \
+    && fail "idle-loop sleep fell back to the 15s default instead of FM_HOUSEKEEPING_TICK"
+  pass "idle-loop non-wake sleep honors FM_HOUSEKEEPING_TICK"
+}
+
 test_terminal_stale_escalate_leaves_no_marker() {
   local dir state win key
   dir=$(make_supercase stale-terminal-nomarker)
@@ -2656,6 +2715,7 @@ test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
+test_idle_loop_sleep_honors_fm_housekeeping_tick
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
