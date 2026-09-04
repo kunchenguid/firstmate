@@ -99,7 +99,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
+  printf '%s\n' 'no-mistakes version v1.60.2 (fake) 2026-08-29T21:49:09Z'
   exit 0
 fi
 exit 0
@@ -1492,7 +1492,7 @@ EOF
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
+  printf '%s\n' 'no-mistakes version v1.60.2 (fake) 2026-08-29T21:49:09Z'
   exit 0
 fi
 if [ "${1:-} ${2:-}" = 'axi status' ]; then
