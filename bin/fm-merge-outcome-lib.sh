@@ -14,7 +14,8 @@
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
-# No new state file and no new transport are involved.
+# Outcome publication adds no new state file or transport; after publication it
+# delegates exact-front queue promotion to bin/fm-merge-front.sh's contract.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
 # the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
@@ -31,6 +32,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-merge-front-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-merge-front-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -79,6 +82,10 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fm_lock_acquire_wait "$lock" || return 1
   if fm_pr_poll_merge_already_notified "$state" "$id" \
     "$provider" "$host" "$path" "$number"; then
+    if ! fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL"; then
+      fm_lock_release "$lock"
+      return 1
+    fi
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_MERGE_OUTCOME_ALREADY_RECORDED=true
     fm_lock_release "$lock"
@@ -91,6 +98,9 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \
       "check: merge landed: $id $FM_PR_URL" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

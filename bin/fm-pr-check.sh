@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# A successful registration also delegates project-queue enrollment to the
+# contract owned by bin/fm-merge-front.sh's header.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -19,6 +21,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-merge-front-lib.sh
+. "$SCRIPT_DIR/fm-merge-front-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -132,6 +136,14 @@ META_LOCK_HELD=0
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
+  exit 1
+}
+PROJECT_KEY=$(fm_merge_front_project_key_from_meta "$STATE" "$ID") || {
+  echo "error: task project cannot be resolved for the merge-front queue" >&2
+  exit 1
+}
+fm_merge_front_enqueue "$STATE" "$PROJECT_KEY" "$ID" "$URL" >/dev/null || {
+  echo "error: PR poll is armed but the merge-front queue could not be updated" >&2
   exit 1
 }
 # In a secondmate home the registration itself is a captain-facing fact:
