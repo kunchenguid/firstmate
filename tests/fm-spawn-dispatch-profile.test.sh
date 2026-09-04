@@ -409,7 +409,7 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
   # 1. An unattended ship spawn through the verified alias is refused by the
   # cursor bar, not launched through the unverified-adapter escape hatch.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "agent --flag")
+    "$id" "$PROJ_DIR" "env FM_CURSOR_ALIAS_TEST=1 agent --flag")
   status=$?
   expect_code 1 "$status" "a verified cursor alias must be refused for an unattended ship"
   assert_contains "$out" "refused for an unattended ship launch" \
@@ -419,13 +419,13 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
   # 2. The same alias with a person in the pane launches, records the cursor
   # family, and runs the operator's raw command unchanged.
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "agent --flag" --mode direct-PR --yolo off --cursor-exemption attended)
+    "$id" "$PROJ_DIR" "env FM_CURSOR_ALIAS_TEST=1 agent --flag" --mode direct-PR --yolo off --cursor-exemption attended)
   status=$?
   expect_code 0 "$status" "an attended cursor alias launch should proceed"
   assert_contains "$out" "spawned $id harness=cursor-agent" \
     "the recorded harness must show the alias resolved to the cursor family"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent default default
-  [ "$(cat "$LAUNCH_LOG")" = "agent --flag" ] \
+  [ "$(cat "$LAUNCH_LOG")" = "env FM_CURSOR_ALIAS_TEST=1 agent --flag" ] \
     || fail "the raw launch command itself must run unchanged: $(cat "$LAUNCH_LOG")"
 
   # 3. An `agent` that does NOT resolve into cursor's tree is not cursor: the

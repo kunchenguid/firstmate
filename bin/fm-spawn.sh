@@ -1832,13 +1832,38 @@ launch_template() {
   esac
 }
 
+raw_launch_executable() {
+  local line=$1 word env=0 env_option_arg=0
+  for word in $line; do
+    if [ "$env_option_arg" -eq 1 ]; then
+      env_option_arg=0
+      continue
+    fi
+    if [ "$env" -eq 0 ]; then
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        env) env=1; continue ;;
+        *) printf '%s\n' "$word"; return 0 ;;
+      esac
+    fi
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      --) env=2; continue ;;
+      -u|--unset|-C|--chdir|-S|--split-string) env_option_arg=1; continue ;;
+      -u?*|--unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
+      -*) continue ;;
+      *) printf '%s\n' "$word"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    raw_executable=$(raw_launch_executable "$LAUNCH" || true)
+    [ -z "$raw_executable" ] || HARNESS=$(basename "$raw_executable")
     # Cursor installs a legacy alias named `agent` alongside cursor-agent, and that
     # basename is far too generic to add to any adapter table by name. But a raw
     # `agent ...` launch that resolves to a VERIFIED cursor executable is a real
@@ -1848,7 +1873,7 @@ case "$ARG3" in
     # bounded --help probe) holds such a launch to the cursor rule; an `agent`
     # that does not verify stays an unverified adapter exactly as before.
     if [ "$HARNESS" = agent ]; then
-      agent_word=$word
+      agent_word=$raw_executable
       agent_candidate=$(command -v "$agent_word" 2>/dev/null || true)
       if [ -n "$agent_candidate" ] && [ -x "$agent_candidate" ] \
         && fm_cursor_verify_executable "$agent_candidate"; then
