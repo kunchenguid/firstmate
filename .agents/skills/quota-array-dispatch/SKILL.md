@@ -50,12 +50,12 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
-For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
+For each candidate, preserve explicit `harness`, `model`, `effort`, `provider`, and optional `home`; `harness-adapters` owns identity, and model/provider never infer harness.
 
 ### Candidates that name a Codex home
 
 A codex candidate may carry `home`, the absolute Codex home it runs against, which is how one fleet dispatches across two logged-in Codex accounts (`docs/configuration.md` owns that schema).
-`quota-axi` reads exactly one Codex home per invocation, so measure such a candidate with `CODEX_HOME=<home> quota-axi` as its own default-TOON snapshot.
+`quota-axi` reads exactly one Codex home per invocation, so measure such a candidate with `CODEX_HOME=<candidate.home> quota-axi` as its own default-TOON snapshot.
 That is the one sanctioned extra snapshot: take it once per DISTINCT home per intake and reuse it for every candidate naming that home, exactly as the shared intake snapshot is reused for everything else.
 A candidate with no `home` keeps using the shared intake snapshot.
 The account row from that home's `quota-axi --full` is the evidence that the home resolves to the account you intended, and is the one use of `--full` this skill sanctions: it establishes identity, never the economics `spendPriority` already computed.
@@ -140,3 +140,4 @@ Report duplicate concrete profiles as a configuration error.
 Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.
+After selecting, pass the winning candidate's concrete `harness`, `model`, and `effort` as `--harness`, `--model`, and `--effort`, and pass its `home` as `--codex-home` when present.
