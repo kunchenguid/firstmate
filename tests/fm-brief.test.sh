@@ -846,10 +846,46 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_structural_zero_stop_rule_present() {
+  local home brief
+  home="$TMP_ROOT/structural-zero-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-szero-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-szero-ship/brief.md"
+  assert_grep "A zero at a named stage is a stop condition, not a data point to replicate" "$brief" \
+    "ship brief Rules section missing the structural-zero stop rule"
+  assert_grep "cause is structural and no further draw can change it" "$brief" \
+    "ship brief structural-zero rule missing the structural-cause conclusion"
+  assert_grep "at least as much loaded volume as the classes that" "$brief" \
+    "ship brief structural-zero rule missing the loaded-volume precondition"
+  assert_grep "does not apply here" "$brief" \
+    "ship brief structural-zero rule missing the n=1-caution carve-out"
+  assert_grep "the unrun draws are a saving," "$brief" \
+    "ship brief structural-zero rule missing the complete-outcome framing"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-szero-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$home/data/brief-szero-scout/brief.md"
+  assert_grep "A zero at a named stage is a stop condition, not a data point to replicate" "$brief" \
+    "scout brief Rules section missing the structural-zero stop rule"
+  assert_grep "cause is structural and no further draw can change it" "$brief" \
+    "scout brief structural-zero rule missing the structural-cause conclusion"
+  assert_grep "at least as much loaded volume as the classes that" "$brief" \
+    "scout brief structural-zero rule missing the loaded-volume precondition"
+  assert_grep "does not apply here" "$brief" \
+    "scout brief structural-zero rule missing the n=1-caution carve-out"
+  assert_grep "the unrun draws are a saving," "$brief" \
+    "scout brief structural-zero rule missing the complete-outcome framing"
+  pass "fm-brief.sh: structural-zero stop rule lands in generated ship and scout briefs"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_structural_zero_stop_rule_present
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
