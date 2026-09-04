@@ -202,11 +202,18 @@ status_is_paused_or_captain_held() {  # <status-line>
 # Deliberately does NOT match a standalone declared pause with no preceding
 # terminal line - a bare paused log must still return 1, since that shape means
 # something else entirely (a worker paused mid-task, never having reported
-# done). Consumers: bin/fm-watch.sh's terminal_then_paused wraps this today;
-# bin/fm-inactive-reconcile.sh's child_terminal_ledger_line, bin/fm-crew-state.sh's
-# log_reports_ci_ready, and fm-inactive-reconcile.sh's captain-presentation
-# backstop are each meant to share it too, but that rewiring is deliberately
-# deferred to a follow-up change and does not happen here.
+# done). On success, also prints the found done/failed line to stdout so a
+# caller that needs its content (its note, for instance) does not have to
+# re-derive it; a caller that wants only the boolean must redirect that output
+# (bin/fm-watch.sh's terminal_then_paused does). Consumers: bin/fm-watch.sh's
+# terminal_then_paused wraps this for wedge-detection, and bin/fm-crew-state.sh's
+# log_reports_ci_ready wraps it to keep the ci-ready verdict from silently
+# regressing for the same done-then-paused shape. bin/fm-inactive-reconcile.sh's
+# child_terminal_ledger_line implements the same trailing-pause tolerance
+# independently rather than sharing this function, because it also has to
+# recognize a BARE terminal line (no trailing pause at all) and report the
+# line's predecessor - two things this narrower predicate does not do; keeping
+# it separate there is a deliberate choice, not deferred work.
 status_terminal_then_paused() {  # <lines> <last>
   local lines=$1 last=$2 n budget i idx line
   status_is_paused "$last" || return 1
@@ -220,7 +227,7 @@ status_terminal_then_paused() {  # <lines> <last>
     idx=$(( n - i + 1 ))
     line=$(printf '%s\n' "$lines" | sed -n "${idx}p")
     case "$(status_line_verb "$line")" in
-      done|failed) return 0 ;;
+      done|failed) printf '%s\n' "$line"; return 0 ;;
     esac
     status_is_paused "$line" || return 1
     i=$((i + 1))

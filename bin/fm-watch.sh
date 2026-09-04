@@ -946,24 +946,7 @@ clear_pause_tracking() {  # <window-key>
 # keeps its existing run-step precedence (crew_absorb_class="working" still
 # wins there).
 terminal_then_paused() {  # <lines> <last>
-  local lines=$1 last=$2 n budget i idx line
-  status_is_paused "$last" || return 1
-  n=$(printf '%s\n' "$lines" | grep -c .)
-  [ "$n" -ge 2 ] || return 1
-  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
-  case "$budget" in ''|*[!0-9]*|0) budget=20 ;; esac
-  [ "$n" -lt "$budget" ] && budget=$n
-  i=2
-  while [ "$i" -le "$budget" ]; do
-    idx=$(( n - i + 1 ))
-    line=$(printf '%s\n' "$lines" | sed -n "${idx}p")
-    case "$(status_line_verb "$line")" in
-      done|failed) return 0 ;;
-    esac
-    status_is_paused "$line" || return 1
-    i=$((i + 1))
-  done
-  return 1
+  status_terminal_then_paused "$1" "$2" >/dev/null
 }
 
 # 0 if no record under <task>'s steering inbox (delivered or already
