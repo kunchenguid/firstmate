@@ -2641,6 +2641,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # The legacy /tmp/fm-<task-id> root can collide across homes, so the guard header and generated brief disclose that cleanup lifetime gap.
 # bin/fm-worker-git-guard.sh owns the invocation-time decision and fails closed when these spawn-validated bindings cannot be re-established.
 WORKER_GIT_GUARD_DIR=
+WORKER_GIT_GUARD_READY=
 if [ "$KIND" != secondmate ]; then
   WORKER_GIT_GUARD_SOURCE="$FM_ROOT/bin/fm-worker-git-guard.sh"
   [ -f "$WORKER_GIT_GUARD_SOURCE" ] || {
@@ -2709,6 +2710,7 @@ if [ "$KIND" != secondmate ]; then
   } > "$WORKER_GIT_CONFIG_TMP"
   umask "$old_umask"
   mv "$WORKER_GIT_CONFIG_TMP" "$WORKER_GIT_GUARD_DIR/git.conf"
+  WORKER_GIT_GUARD_READY="$WORKER_GIT_GUARD_DIR/.path-verified"
 fi
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -3316,8 +3318,18 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # A ship/scout gets the frozen Git guard first on PATH before the harness starts.
 # Existing workers are untouched because this export reaches only this launch.
 # The pane-level export is the same cross-backend inheritance boundary GOTMPDIR already uses, so descendants that preserve PATH inherit one binding.
+# The worker shell publishes proof only after resolving and executing that exact frozen guard, so a dropped export cannot silently launch an unguarded worker.
 if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
-  spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\""
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\"; if [ \"\$(command -v git 2>/dev/null)\" = $(shell_quote "$WORKER_GIT_GUARD_DIR/git") ] && git fm-isolation-check >/dev/null; then : > $(shell_quote "$WORKER_GIT_GUARD_READY"); else printf '%s\\n' 'error: worker Git isolation guard is not active on PATH; refusing launch' >&2; false; fi"
+  WORKER_GIT_VERIFY_ATTEMPT=0
+  while [ ! -f "$WORKER_GIT_GUARD_READY" ] && [ "$WORKER_GIT_VERIFY_ATTEMPT" -lt 20 ]; do
+    sleep 0.1
+    WORKER_GIT_VERIFY_ATTEMPT=$((WORKER_GIT_VERIFY_ATTEMPT + 1))
+  done
+  [ -f "$WORKER_GIT_GUARD_READY" ] || {
+    echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command" >&2
+    exit 1
+  }
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped

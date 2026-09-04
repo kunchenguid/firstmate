@@ -148,6 +148,7 @@ test_missing_binding_fails_closed() {
 
 test_spawn_freezes_and_exports_guard() {
   local id tasktmp guard_path guard_dir case_dir home primary worktree fakebin launch_log out rc path_line launch_line
+  local dropped_id dropped_tasktmp dropped_home dropped_primary dropped_worktree dropped_log
   id="worker-git-spawn-$$"
   tasktmp="/tmp/fm-$id"
   FM_TEST_CLEANUP_DIRS+=("$tasktmp")
@@ -179,7 +180,16 @@ case "${1:-}" in
         *) break ;;
       esac
     done
-    [ "$#" -gt 0 ] && printf '%s\n' "$1" >> "${FM_FAKE_LAUNCH_LOG:-/dev/null}"
+    if [ "$#" -gt 0 ]; then
+      printf '%s\n' "$1" >> "${FM_FAKE_LAUNCH_LOG:-/dev/null}"
+      case "$1" in
+        *"git fm-isolation-check"*)
+          if [ "${FM_FAKE_DROP_GIT_GUARD_EXPORT:-0}" != 1 ]; then
+            (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$1") || exit $?
+          fi
+          ;;
+      esac
+    fi
     exit 0
     ;;
 esac
@@ -213,7 +223,30 @@ SH
   if $REAL_GIT -C "$primary" show-ref --verify --quiet refs/heads/spawn-stray; then
     fail "the spawn-produced guard allowed a stray branch in primary"
   fi
-  pass "fm-spawn: every new ship/scout process tree receives a frozen Git guard before launch"
+
+  dropped_id="worker-git-dropped-export-$$"
+  dropped_tasktmp="/tmp/fm-$dropped_id"
+  FM_TEST_CLEANUP_DIRS+=("$dropped_tasktmp")
+  rm -rf "$dropped_tasktmp"
+  dropped_home="$case_dir/dropped-home"
+  dropped_primary="$case_dir/dropped-project"
+  dropped_worktree="$case_dir/dropped-worktree"
+  dropped_log="$case_dir/dropped-launch.log"
+  fm_test_spawn_home "$dropped_home" codex
+  fm_test_spawn_brief "$dropped_home" "$dropped_id"
+  fm_git_worktree "$dropped_primary" "$dropped_worktree" guard-dropped-base
+  : > "$dropped_log"
+  out=$(FM_FAKE_DROP_GIT_GUARD_EXPORT=1 FM_FAKE_LAUNCH_LOG="$dropped_log" \
+    fm_test_run_spawn "$dropped_home" "$dropped_worktree" "$fakebin" \
+    "$dropped_id" "$dropped_primary" --harness codex --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 1 "$rc" "spawn must refuse when the worker shell does not activate its Git guard"
+  assert_contains "$out" "worker Git isolation guard could not be verified first on PATH" \
+    "the dropped guard export did not report its launch refusal"
+  if grep -q 'encode launch-brief' "$dropped_log"; then
+    fail "spawn appended the worker launch after its Git guard activation was unverified"
+  fi
+  pass "fm-spawn: every new ship/scout process tree verifies its frozen Git guard before launch"
 }
 
 test_setup_assertion_and_worktree_git_succeed
