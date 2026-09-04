@@ -1301,10 +1301,10 @@ test_same_basename_self_home_corr_resolves_on_tick() {
   [ ! -s "$hook_log" ] || fail "a restated same-basename reply must not trigger recovery"
   [ "$(fm_pending_reply_get "$rec" wrong_home_hits)" = 1 ] \
     || fail "the stranded file should still count as one wrong-home sighting"
-  case "$(fm_pending_reply_get "$rec" wrong_home_sightings)" in
-    "$sm_home/state/mate.status:"*) : ;;
-    *) fail "wrong_home_sightings must name the readable mate-home path and line" ;;
-  esac
+  [ "$(fm_pending_reply_sighting_display \
+    "$(fm_pending_reply_get "$rec" wrong_home_first_sighting)")" = \
+    "$sm_home/state/mate.status:1" ] \
+    || fail "first wrong-home sighting must display the readable mate-home path and line"
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "same-basename self-home corr= is restated onto the parent channel and resolves"
 }
@@ -1344,7 +1344,7 @@ test_same_basename_reply_resolves_after_recovery_failure() {
 }
 
 test_child_status_wrong_home_is_not_copied() {
-  local home state sm_home corr rec hook_log
+  local home state sm_home corr rec hook_log status_file expected_display stored_first
   home=$(setup_parent child-wrong-home)
   state="$home/state"
   sm_home="$TMP_ROOT/team,west-home-$RANDOM"
@@ -1361,7 +1361,8 @@ test_child_status_wrong_home_is_not_copied() {
   corr=$(fm_pending_reply_create "$home" "$state" mate "status of the audit")
   fm_pending_reply_mark_delivered "$state" "$corr"
   rec=$(fm_pending_reply_path "$state" "$corr")
-  printf 'done [corr=%s]: leaked into a child file\n' "$corr" > "$sm_home/state/child.status"
+  status_file="$sm_home/state/"$'child\nphase=resolved\nteam,west.status'
+  printf 'done [corr=%s]: leaked into a child file\n' "$corr" > "$status_file"
 
   fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home"
   fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
@@ -1373,10 +1374,15 @@ test_child_status_wrong_home_is_not_copied() {
     || fail "resolved_epoch must stay empty for a child-file sighting"
   grep -Fq pending-reply-missed "$state/mate.status" \
     || fail "a child-file miss should still escalate"
-  grep -Fq "token seen in $sm_home/state/child.status:1;" "$state/mate.status" \
+  printf -v expected_display '%q' "$status_file"
+  expected_display="$expected_display:1"
+  grep -Fq "token seen in $expected_display;" "$state/mate.status" \
     || fail "missed payload must preserve the complete readable child-file path"$'\n'"$(cat "$state/mate.status")"
-  [ "$(fm_pending_reply_get "$rec" wrong_home_first_sighting)" = "$sm_home/state/child.status:1" ] \
-    || fail "first wrong-home sighting must preserve commas in its path"
+  stored_first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
+  [ "$(fm_pending_reply_sighting_display "$stored_first")" = "$expected_display" ] \
+    || fail "encoded wrong-home sighting must reversibly preserve the crafted path"
+  [ "$(grep -c '^phase=' "$rec")" = 1 ] \
+    || fail "crafted filename must not inject a phase field into the pending record"
   if grep -Fq "corr=$corr" "$state/mate.status"; then
     fail "a child status file must not be restatement-copied onto the parent channel"
   fi
@@ -1454,7 +1460,7 @@ EOF
 }
 
 test_local_parent_replies_is_wrong_home_evidence() {
-  local home state sm_home corr rec hits sightings
+  local home state sm_home corr rec hits first
   home=$(setup_parent local-parent-replies)
   state="$home/state"
   sm_home=$(bind_local_mate "$home" mate)
@@ -1469,11 +1475,10 @@ test_local_parent_replies_is_wrong_home_evidence() {
     || fail "wrong-home detect should scan a local parent-replies alias"
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
   [ "$hits" = 1 ] || fail "local parent-replies.status should count once, got $hits"
-  sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
-  case "$sightings" in
-    "$sm_home/state/parent-replies.status:"*) : ;;
-    *) fail "local parent-replies sighting must retain its readable path" ;;
-  esac
+  first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
+  [ "$(fm_pending_reply_sighting_display "$first")" = \
+    "$sm_home/state/parent-replies.status:1" ] \
+    || fail "local parent-replies sighting must retain its readable path"
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
     || fail "local wrong-home evidence must not acknowledge the reply"
   pass "local parent-replies.status remains wrong-home evidence"

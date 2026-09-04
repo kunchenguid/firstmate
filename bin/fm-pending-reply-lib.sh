@@ -55,8 +55,8 @@
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
-#   wrong_home_first_sighting= readable path:line identity of the first sighting
-#   wrong_home_sightings=   comma-separated path:line identities of those sightings
+#   wrong_home_first_sighting= encoded path:line identity of the first sighting
+#   wrong_home_sightings=   comma-separated encoded path:line identities
 #   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
 #
@@ -178,6 +178,33 @@ fm_pending_reply_get() {  # <record-path> <key>
   local rec=$1 key=$2
   [ -f "$rec" ] || return 0
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_pending_reply_sighting_encode() {  # <path> <line-number>
+  local path=$1 line_no=$2 encoded
+  case "$line_no" in ''|*[!0-9]*) return 1 ;; esac
+  encoded=$(printf '%s' "$path" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  [ -n "$encoded" ] || return 1
+  printf 'hex:%s:%s' "$encoded" "$line_no"
+}
+
+fm_pending_reply_sighting_display() {  # <encoded-sighting>
+  local sighting=$1 body encoded line_no path='' pair byte escaped
+  case "$sighting" in hex:*:*) ;; *) return 1 ;; esac
+  body=${sighting#hex:}
+  line_no=${body##*:}
+  encoded=${body%:*}
+  case "$line_no" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$encoded" ] && [ $(( ${#encoded} % 2 )) -eq 0 ] || return 1
+  while [ -n "$encoded" ]; do
+    pair=${encoded:0:2}
+    case "$pair" in *[!0-9a-fA-F]*) return 1 ;; esac
+    printf -v byte '%b' "\\x$pair"
+    path=$path$byte
+    encoded=${encoded:2}
+  done
+  printf -v escaped '%q' "$path"
+  printf '%s:%s' "$escaped" "$line_no"
 }
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
@@ -1128,7 +1155,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now payload parent_status line kind first
+  local rec phase completed now payload parent_status line kind first display
   local delivered task_id meta sm_home remote_host
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -1174,8 +1201,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
   if [ "$kind" = missed ]; then
     first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
-    if [ -n "$first" ]; then
-      payload="$payload token seen in $first; parent channel has no corr="
+    if display=$(fm_pending_reply_sighting_display "$first"); then
+      payload="$payload token seen in $display; parent channel has no corr="
     fi
   fi
   [ -n "$parent_status" ] || return 1
@@ -1229,8 +1256,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
     while IFS= read -r line || [ -n "$line" ]; do
       line_no=$((line_no + 1))
       fm_pending_reply_line_resolves "$line" "$corr" || continue
-      sighting_id=$(printf '%s:%s' "$status_file" "$line_no")
-      [ -n "$sighting_id" ] || continue
+      sighting_id=$(fm_pending_reply_sighting_encode "$status_file" "$line_no") || continue
       [ -n "$first" ] || first=$sighting_id
       case ",$sightings," in
         *",$sighting_id,"*) continue ;;
