@@ -9,8 +9,13 @@
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# ... - needs attention" warning rather than a quiet drift. The sole cleanliness
+# exception is exactly one untracked root `CAPTAINS-LOG.md`, and it only relaxes
+# ordinary fast-forward eligibility for a clone already on its default branch -
+# detached-HEAD re-attachment still demands a fully clean tree. Git keeps the
+# untracked file visible and retains its overwrite protection; when that protection
+# blocks the fast-forward (origin publishes a tracked CAPTAINS-LOG.md) the clone is
+# reported STUCK, not skipped. Nothing is ever forced, stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # A candidate under projects/ must be the root of its own work tree: git discovery
@@ -44,6 +49,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
+# The one repo-root path a Captain may keep untracked without blocking fleet sync.
+CAPTAINS_LOG=CAPTAINS-LOG.md
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # Bounded recovery for an orphaned .git/packed-refs.lock. A git ref rewrite
@@ -135,11 +142,27 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+# These two matchers read git's human-facing error text, which gettext localizes
+# under the operator's LANG/LC_ALL. Every git call whose output they inspect is
+# therefore pinned to LC_ALL=C at the call site, the same way bin/fm-wake-lib.sh
+# pins ps for lstart; without that pin a non-English fleet silently loses the
+# recovery and the STUCK escalation these drive.
+
 # True when git stderr shows the packed-refs.lock "File exists" race. The lock
 # path can appear anywhere in the message (git prefixes it with the failed ref op,
 # e.g. "could not delete reference ...:"). Other "File exists" errors must not match.
 is_packed_refs_lock_error() {
   printf '%s\n' "$1" | grep -Eq "Unable to create ['\"].*packed-refs\\.lock['\"]: File exists"
+}
+
+# True when git refused the merge because it would overwrite the untracked
+# CAPTAINS-LOG.md that the cleanliness exception admitted - i.e. origin now tracks
+# the file. Unlike a transient skip this state persists until a human resolves it,
+# so callers escalate it to a loud, quantified STUCK. Git lists each blocked path
+# on its own indented line, matched literally so a similarly named path cannot.
+is_captains_log_overwrite_refusal() {
+  printf '%s\n' "$1" | grep -q 'untracked working tree files would be overwritten' \
+    && printf '%s\n' "$1" | sed 's/^[[:space:]]*//' | grep -Fxq -- "$CAPTAINS_LOG"
 }
 
 # Absolute path to $PROJ's packed-refs.lock, or empty when it cannot be resolved.
@@ -169,7 +192,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  FETCH_OUTPUT=$(LC_ALL=C git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -179,7 +202,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    FETCH_OUTPUT=$(LC_ALL=C git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -203,7 +226,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      FETCH_OUTPUT=$(LC_ALL=C git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -357,8 +380,14 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  status_porcelain=$(git -C "$PROJ" status --porcelain 2>/dev/null || true)
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$status_porcelain" ] || dirty=yes
+  # The Captain's log exception, kept separate from $dirty so it only ever relaxes
+  # the on-default fast-forward gate below - never detached-HEAD recovery, which
+  # mutates the working tree and so still requires a fully clean one.
+  lone_captains_log=no
+  [ "$status_porcelain" != "?? $CAPTAINS_LOG" ] || lone_captains_log=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -384,7 +413,7 @@ sync_project() {
       report_stuck "$(stuck_state)"
       return 0
     fi
-  elif [ "$dirty" = yes ]; then
+  elif [ "$dirty" = yes ] && [ "$lone_captains_log" = no ]; then
     # On the default branch but with uncommitted changes we must not disturb.
     report_stuck "$(stuck_state)"
     return 0
@@ -420,7 +449,11 @@ sync_project() {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
-  if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+  if ! merge_output=$(LC_ALL=C git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+    if [ "$lone_captains_log" = yes ] && is_captains_log_overwrite_refusal "$merge_output"; then
+      report_stuck "branch $DEFAULT with untracked $CAPTAINS_LOG blocking fast-forward"
+      return 0
+    fi
     reason="fast-forward failed"
     if [ -n "$merge_output" ]; then
       reason="$reason: $(first_line "$merge_output")"
