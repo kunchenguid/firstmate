@@ -55,6 +55,7 @@ probe_suite_reaches_owner() {
   for pointer in $FM_TEST_ENV_FLEET_POINTERS; do
     polluted+=("$pointer=$sentinel/$pointer")
   done
+  # shellcheck disable=SC2016 # the suite must record its own PID at run time.
   fm_run_timed 2 env "${polluted[@]}" \
     TMPDIR="$private_tmp" \
     FM_TEST_ENV_PROBE_MARKER="$marker" \
@@ -74,7 +75,7 @@ probe_suite_reaches_owner() {
 # --- OWNER ------------------------------------------------------------------
 
 test_owner_clears_every_pointer_it_publishes() {
-  local exported= name out
+  local exported='' name out
   # Build the polluted environment from the owner's OWN list, so a pointer added
   # there is covered here without editing this test.
   # shellcheck source=bin/fm-test-env-lib.sh
@@ -85,6 +86,7 @@ test_owner_clears_every_pointer_it_publishes() {
   [ -n "$exported" ] || fail "the owner publishes no pointers to clear"
 
   # shellcheck disable=SC2086
+  # shellcheck disable=SC2016 # the child must expand the owner's pointer names at run time.
   out=$(env $exported bash -c '
     . "$1"
     fm_test_env_isolate || { echo "ISOLATE-FAILED"; exit 1; }
@@ -267,6 +269,7 @@ test_probe_accepts_each_real_route() {
   make_probe_root "$probe_root"
 
   probe="$probe_root/tests/direct.test.sh"
+  # shellcheck disable=SC2016 # the decoy must resolve its own source path at run time.
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
     '. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"' \
     'fm_test_env_isolate || exit 2' > "$probe"
@@ -274,12 +277,14 @@ test_probe_accepts_each_real_route() {
     || fail "the probe rejected the direct route to the owner"
 
   probe="$probe_root/tests/vialib.test.sh"
+  # shellcheck disable=SC2016 # the decoy must resolve its own source path at run time.
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
     '. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"' > "$probe"
   probe_suite_reaches_owner "$probe_root" "$probe" \
     || fail "the probe rejected the tests/lib.sh route"
 
   probe="$probe_root/tests/viahelper.test.sh"
+  # shellcheck disable=SC2016 # the decoy must resolve its own source path at run time.
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
     '. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"' > "$probe"
   probe_suite_reaches_owner "$probe_root" "$probe" \
