@@ -936,6 +936,28 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+### No-mistakes review pane primitives
+
+The review pane (`bin/fm-nm-review-pane.sh`) rests on four primitives measured 2026-09-03 on Herdr 0.8.2, protocol 20, Linux, in an isolated `fm-lab-` session created through `bin/fm-herdr-lab.sh`, against the installed `no-mistakes`:
+
+```sh
+bin/fm-herdr-lab.sh run <session> pane split <worker-pane> --direction right --cwd <worktree> --no-focus
+bin/fm-herdr-lab.sh run <session> pane run <pane> "no-mistakes attach --run <finished-run-id>"
+bin/fm-herdr-lab.sh run <session> pane process-info --pane <pane>
+bin/fm-herdr-lab.sh run <session> pane send-keys <pane> q
+```
+
+Observed output, trimmed to the fields the script reads:
+
+```text
+{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t2","workspace_id":"w1"},"type":"pane_info"}}
+{"shell_pid":310746,"foreground_process_group_id":311020,"fg":[{"pid":311020,"name":"no-mistakes","argv":["no-mistakes","attach","--run","01M1N34KQRJG1Z3PFWDHTNBPTH"]}]}
+{"shell_pid":310746,"foreground_process_group_id":310746,"fg":[{"pid":310746,"name":"zsh","argv":["/usr/bin/zsh"]}]}
+```
+
+The viewer on a finished run stayed attached until `q`, a plain `no-mistakes attach` with no active run exited immediately with status 0, and a `while ...; do ...; done` string passed as one `pane run` argument executed as a single command line whose `sleep` became the foreground process until `ctrl+c` returned the shell.
+`tests/fm-nm-review-pane.test.sh` pins the script's logic against a fake that models exactly these shapes; rerun the lab commands above after a Herdr or no-mistakes upgrade before trusting this record.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:

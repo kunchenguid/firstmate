@@ -198,6 +198,15 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## No-mistakes review pane (config/nm-review-pane)
+
+On the Herdr backend, every no-mistakes ship task gets one live review pane split to the right of its worker pane, in the task worktree, showing `no-mistakes attach --run <id>` for the branch's current run.
+The pane is created once after the spawn, shows a waiting line until the first run exists, and is re-pointed at each new run of that branch instead of opening another pane; supervision keeps it current on a bounded cadence and task cleanup closes it.
+The optional local, gitignored `config/nm-review-pane` file turns this off for a home when it contains `off`; an absent file, an empty file, and `on` all keep the default, and any other value warns and keeps the default because a visual convenience must never fail a spawn or a poll.
+The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+`FM_NM_REVIEW_PANE_INTERVAL` (seconds, default `20`) sets the watcher's sweep cadence, and `FM_NM_REVIEW_PANE_NM_TIMEOUT` (seconds, default `20`) bounds each status read.
+`bin/fm-nm-review-pane.sh`'s header owns the eligibility rule, the private `state/<id>.nm-review-pane` record, the re-point mechanics, the empirical `no-mistakes attach` exit behavior the design rests on, and the cleanup contract; [`herdr-backend.md`](herdr-backend.md#no-mistakes-review-pane) owns the operator-facing behavior and safety limits.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true`, pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI, and pins `commands.test` to `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` so the gate's test baseline runs through the repository's own runner instead of a hand-chained walk of `bash tests/*.test.sh`.

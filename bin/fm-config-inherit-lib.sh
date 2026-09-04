@@ -12,7 +12,9 @@
 # preference - an absent primary file and an absent destination file both mean
 # the same unconfigured default, so the generic absence mirror below converges
 # a secondmate without deciding the release-dependent floor; explicit "on" and
-# "off" preferences propagate as files. Primary
+# "off" preferences propagate as files. Primary config/nm-review-pane carries
+# the Herdr no-mistakes review-pane opt-out the same way (bin/fm-nm-review-pane.sh
+# owns its values). Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # The primary passes its frozen home-session decision into a newly launched
@@ -63,7 +65,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces nm-review-pane startup-memory-budget trace-context}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where

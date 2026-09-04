@@ -3341,6 +3341,21 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
 
+# A herdr no-mistakes ship task gets its live review pane now, so the pane
+# exists (showing its waiting loop) before the worker's first run.
+# bin/fm-nm-review-pane.sh owns the pane, its record, and the home opt-out;
+# it is presentation only, so a failure here warns and never fails the spawn
+# (the watcher retries it on its own cadence).
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" = herdr ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  SPAWN_REVIEW_PANE_RC=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-nm-review-pane.sh" "$ID" || SPAWN_REVIEW_PANE_RC=$?
+  case "$SPAWN_REVIEW_PANE_RC" in
+    0|3) ;;
+    *) echo "warning: the no-mistakes review pane for $ID could not be prepared; supervision retries it" >&2 ;;
+  esac
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

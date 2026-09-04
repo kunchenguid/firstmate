@@ -172,6 +172,23 @@ Operational compromises:
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 
+## No-mistakes review pane
+
+Every no-mistakes ship task on Herdr gets one live review pane, split to the right of the worker's own pane in the same tab, with the task worktree as its working directory.
+The pane runs `no-mistakes attach --run <id>` for the branch's current run, so the captain sees each pipeline run live without splitting a pane by hand.
+It is created once, right after a successful spawn, and shows a small waiting line until the branch's first run exists.
+Supervision re-reads the branch's current run on a bounded cadence and re-points the same pane at each new run id instead of opening another pane: a still-attached viewer is detached with `q`, the waiting loop is interrupted with `ctrl+c`, and the next viewer is started with Herdr's run primitive.
+Keys are sent only after `pane process-info` proves what is in the foreground; an unreadable process table leaves the pane alone rather than typing into an unknown program.
+A call that finds the pane already pointed at the current run does nothing beyond the status read.
+A pane the captain closed by hand is recreated once; an ambiguous presence read refuses and keeps the record.
+The home opts out with `off` in local gitignored `config/nm-review-pane`, which is inherited into secondmate homes; [`configuration.md`](configuration.md#no-mistakes-review-pane-confignm-review-pane) owns the accepted values and cadence knobs.
+
+Two facts about the viewer shape the design, both measured against the installed `no-mistakes` in an isolated lab session and recorded in the script header: `no-mistakes attach` with no active run exits immediately, so an idle pane runs a waiting loop rather than a single attach, and `no-mistakes attach --run <id>` on a finished run stays attached until `q`, so re-pointing must detach it explicitly.
+
+Cleanup closes the review pane before the task pane, under the same named-session presentation lock and through the same focus-safe close ordinary task-pane cleanup uses, and removes the pane's record only after Herdr confirms the pane gone.
+A pane that cannot be closed keeps its record with a warning that names the `bin/fm-nm-review-pane.sh <id> --close` rerun; cleanup never fights for it and never blocks on it.
+The review pane is presentation only: its record never grants task, endpoint, or ownership authority, and no other recovery path reads it.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
@@ -342,6 +359,7 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-nm-review-pane.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
