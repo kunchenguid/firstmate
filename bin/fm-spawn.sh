@@ -1896,11 +1896,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       exit 1
     }
     {
-      cat "$SOURCE_BRIEF"
       if ! fm_brief_ponytail_contract_present "$SOURCE_BRIEF"; then
-        printf '\n'
         fm_ponytail_contract_block
+        printf '\n\n# Original brief\n'
       fi
+      cat "$SOURCE_BRIEF"
       if [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi

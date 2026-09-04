@@ -170,13 +170,28 @@ EOF
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
-test_spawn_reports_when_ponytail_contract_cannot_be_published() {
-  local rec home proj fakebin out status id
+test_spawn_publishes_or_reports_the_ponytail_contract() {
+  local rec home proj fakebin out status id first_contract
   rec=$(make_home ponytail-contract-refusal)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  id=delivery-ponytail-refusal-b4
+  id=delivery-ponytail-custom-b4
+  write_brief "$home" "$id" direct-PR
+  cat >> "$home/data/$id/brief.md" <<'EOF'
+
+# Development discipline
+Keep the project's existing local conventions.
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "Ponytail full guarantee cannot be established" \
+    "a custom legacy development section made the canonical overlay reject itself"
+  first_contract=$(awk '$0 == "# Development discipline" { emit=1; next } emit && /^# / { exit } emit' \
+    "$home/data/$id/launch-brief.md")
+  assert_contains "$first_contract" "Development contract: ponytail=full" \
+    "the canonical Ponytail overlay was not the authoritative first development section"
+
+  id=delivery-ponytail-refusal-b5
   write_brief "$home" "$id" direct-PR
   mkdir -p "$home/data/$id/launch-brief.md"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
@@ -188,7 +203,7 @@ EOF
     "spawn did not identify why the Ponytail contract could not be published"
   assert_absent "$home/state/$id.meta" \
     "Ponytail contract refusal still published task metadata"
-  pass "fm-spawn: a missing Ponytail guarantee fails before launch with a clear diagnostic"
+  pass "fm-spawn: the canonical Ponytail contract is published or launch fails clearly"
 }
 
 test_unsupported_no_mistakes_delivery_is_refused() {
@@ -853,7 +868,7 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
-test_spawn_reports_when_ponytail_contract_cannot_be_published
+test_spawn_publishes_or_reports_the_ponytail_contract
 test_unsupported_no_mistakes_delivery_is_refused
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
