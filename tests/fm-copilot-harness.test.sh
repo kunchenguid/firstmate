@@ -311,7 +311,7 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
 
   mkdir -p "$dir/config"
   : > "$dir/config/x-mode.env"
-  printf '%s' '{"notification_type":"shell_completed","command":"cd . && [ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh"}' > "$dir/in.json"
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh"}' > "$dir/in.json"
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
   message=$(printf '%s' "$out" | jq -r '.additionalContext')
@@ -329,6 +329,16 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     ./bin/fm-copilot-hook.sh notification < "$dir/sibling.json")
   [ -z "$out" ] || fail "a sibling-root watcher completion must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"export FM_HOME=/tmp/other; exec ./bin/fm-watch-arm.sh"}' > "$dir/home-rebind.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/home-rebind.json")
+  [ -z "$out" ] || fail "an FM_HOME-rebound watcher completion must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"export FM_STATE_OVERRIDE=/tmp/other; exec ./bin/fm-watch-arm.sh"}' > "$dir/state-rebind.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/state-rebind.json")
+  [ -z "$out" ] || fail "an FM_STATE_OVERRIDE-rebound watcher completion must stay inert, got: $out"
 
   printf '%s' '{"notification_type":"shell_completed","command":"sleep 1; printf done > background-result"}' > "$dir/other.json"
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
