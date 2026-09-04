@@ -51,7 +51,9 @@ test_mismatched_head_fails_with_both_shas() {
     "mismatched-head failure did not name the attestation head SHA"
   assert_contains "$output" "$NEW_SHA" \
     "mismatched-head failure did not name the actual PR head SHA"
-  pass "shared action rejects a mismatched head_sha and names both SHAs"
+  assert_contains "$output" "Re-run 'git push no-mistakes' so the PR body attestation binds to the current head." \
+    "mismatched-head failure did not explain how to refresh the stale attestation"
+  pass "shared action rejects a mismatched head_sha, names both SHAs, and gives the repair command"
 }
 
 test_missing_head_fails() {
