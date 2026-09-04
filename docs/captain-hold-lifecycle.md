@@ -83,8 +83,9 @@ Three accepted limits remain deliberate:
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
-Recently Landed excludes a record that closed while still held for the captain (surviving `hold-kind: captain` on a Done row), so answered questions do not masquerade as shipped work; a work item released before completion keeps no hold annotations and lands normally.
-The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
+`bin/fm-landed-lib.sh` owns the shared Recently Landed predicate: recorded completion provenance is authoritative when present, while its named legacy fallback handles rows written before provenance existed.
+This lets captain-approved deliveries land regardless of surviving `hold-kind: captain` metadata while recorded non-deliveries remain excluded.
+The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp and completion-provenance marker.
 
 ## Record divergence
 
@@ -128,5 +129,5 @@ One case in that family needs no beads install and always runs: a stubbed tasks-
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
-Projection regressions live in `tests/fm-fleet-snapshot-view.test.sh` (the total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping) and `tests/fm-bearings-snapshot.test.sh` (default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, and the landed exclusion by surviving captain-hold annotations).
+Projection regressions live in `tests/fm-fleet-snapshot-view.test.sh` (the total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping) and `tests/fm-bearings-snapshot.test.sh` (default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, and provenance-based Recently Landed selection with its legacy fallback).
 The exact commands and their summarized outputs are recorded in the shipping PR's evidence; run the four suites above plus `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, and `bin/fm-lint.sh` to refresh this record.
