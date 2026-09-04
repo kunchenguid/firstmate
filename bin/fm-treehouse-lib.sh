@@ -6,9 +6,9 @@
 # A non-primary Firstmate home gets a root under its own ignored config tree so
 # identical project remotes cannot make its workers land in another home's pool.
 #
-# fm_treehouse_root_option_for_home <code-root> <active-home>
-#   Echoes an empty string for the primary home or an argument fragment beginning
-#   with ` --root ` for a structurally identified secondmate home.
+# fm_treehouse_root_for_home <code-root> <active-home>
+#   Echoes an empty string for the primary home or the root path for a
+#   structurally identified secondmate home.
 #
 # A local secondmate is identified as a linked git worktree whose common dir is
 # the code root's common dir and whose physical top level is the active home.
@@ -23,7 +23,7 @@ fm_treehouse_real_dir() {
   CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P
 }
 
-fm_treehouse_root_option_for_home() {
+fm_treehouse_root_for_home() {
   local code_root=$1 active_home=$2 code_real home_real home_top home_top_real
   local code_common home_common home_git pool_root
 
@@ -49,5 +49,5 @@ fm_treehouse_root_option_for_home() {
   fi
 
   pool_root="$home_real/config"
-  printf ' --root %q' "$pool_root"
+  printf '%s' "$pool_root"
 }
