@@ -11,12 +11,14 @@ set -u
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 export FM_TEST_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh"
+TEST_LAVISH_STATE="$TMP_ROOT/lavish-state"
+(umask 077; mkdir -p "$TEST_LAVISH_STATE")
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  mkdir -p "$home/state" "$home/data"
+  (umask 077; mkdir -p "$home/state" "$home/data")
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
@@ -45,6 +47,7 @@ run_board() {  # <home> <args...>
   shift
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    LAVISH_AXI_STATE_DIR="$TEST_LAVISH_STATE" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" "$@"
 }
@@ -322,6 +325,7 @@ SH
 
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$runtime" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    LAVISH_AXI_STATE_DIR="$TEST_LAVISH_STATE" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     FM_BEARINGS_BOARD_TEMPLATE="$ROOT/.agents/skills/bearings/assets/board-template.html" \
     REAL_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh" \
