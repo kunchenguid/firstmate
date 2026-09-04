@@ -311,6 +311,46 @@ test_registration_bound_keeps_whole_collection_finite() {
   pass "registration bounds whole-collection enumeration without hiding registered work"
 }
 
+test_concurrent_retire_cannot_hide_captured_registry() {
+  local home progress fakebin real_jq result_file marker list_pid result i
+  home=$(make_home retire-race)
+  progress=$(make_progress_command retire-race-progress 'printf "ready\n"')
+  start_sleeper
+  register_fixture "$home" keep "$STARTED_PID" "$progress" ''
+  register_fixture "$home" retiring "$STARTED_PID" "$progress" ''
+  fakebin="$home/fakebin"
+  marker="$home/assembly-started"
+  result_file="$home/list.json"
+  real_jq=$(command -v jq)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+if [ "${1-}" = -s ]; then
+  : > "$ASSEMBLY_MARKER"
+  sleep 1
+fi
+exec "$REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  PATH="$fakebin:$PATH" REAL_JQ="$real_jq" ASSEMBLY_MARKER="$marker" \
+    FM_HOME="$home" "$COMMAND" list --json > "$result_file" &
+  list_pid=$!
+  i=0
+  while [ ! -f "$marker" ] && [ "$i" -lt 50 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$marker" ] || fail "list did not reach final assembly"
+  FM_HOME="$home" "$COMMAND" retire retiring >/dev/null \
+    || fail "concurrent retirement failed after registry capture"
+  wait "$list_pid" || fail "concurrent retirement made list fail"
+  result=$(cat "$result_file")
+  printf '%s\n' "$result" | jq -e '
+    (.records | map(.id) | sort) == ["keep", "retiring"]
+  ' >/dev/null || fail "concurrent retirement hid captured or unrelated work: $result"
+  pass "list retains one stable registry snapshot across concurrent retirement"
+}
+
 test_live_adopted_process_reads_alive_and_progressing
 test_dead_process_remains_listed_as_dead
 test_unchanged_progress_becomes_stalled_while_process_stays_alive
@@ -321,3 +361,4 @@ test_retire_removes_visibility_without_signalling_process
 test_unknown_process_state_is_never_adopted_or_reported_alive
 test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
+test_concurrent_retire_cannot_hide_captured_registry

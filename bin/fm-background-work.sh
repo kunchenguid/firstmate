@@ -521,10 +521,10 @@ record_json() { # <record-directory> <now-epoch> <now-iso> [budget-only]
 collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-seconds>
   local output=$1 now=$2 generated=$3 remaining=$4 record id tmp count=0 worker watchdog monitor_was_on=0
   local -a workers=()
+  shift 4
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
-  for record in "$REGISTRY"/*; do
-    [ -d "$record" ] && [ ! -L "$record" ] || continue
+  for record in "$@"; do
     count=$((count + 1))
     [ "$count" -le "$COLLECTION_MAX_PROBES" ] || continue
     id=${record##*/}
@@ -554,9 +554,9 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
 }
 
 list_work() {
-  local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false source
+  local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false
   local collection_started collection_deadline remaining
-  local -a record_files=()
+  local -a records=() ids=() record_files=()
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   collection_started=$(date +%s) || die "cannot start background-work collection deadline"
   collection_deadline=$((collection_started + COLLECTION_BUDGET))
@@ -567,24 +567,30 @@ list_work() {
   if [ -d "$REGISTRY" ]; then
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
       || die "cannot stage background-work collection"
+    fm_lock_acquire_wait "$REGISTRY/.registry.lock"
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       total=$((total + 1))
       [ "$attempted" -ge "$COLLECTION_MAX_PROBES" ] || attempted=$((attempted + 1))
+      id=${record##*/}
+      if ! cp "$record/fallback.json" "$stage/$id.json"; then
+        fm_lock_release "$REGISTRY/.registry.lock"
+        rm -rf -- "$stage"
+        die "cannot capture background-work fallback: $id"
+      fi
+      records+=("$record")
+      ids+=("$id")
     done
+    fm_lock_release "$REGISTRY/.registry.lock"
     remaining=$((collection_deadline - $(date +%s) - 1))
     if [ "$remaining" -gt 0 ]; then
-      collect_records "$stage" "$now" "$generated" "$remaining"
+      collect_records "$stage" "$now" "$generated" "$remaining" "${records[@]+"${records[@]}"}"
     fi
-    for record in "$REGISTRY"/*; do
-      [ -d "$record" ] && [ ! -L "$record" ] || continue
-      id=${record##*/}
-      source="$record/fallback.json"
+    for id in "${ids[@]+"${ids[@]}"}"; do
       if [ -f "$stage/$id.complete" ]; then
         completed=$((completed + 1))
-        source="$stage/$id.json"
       fi
-      record_files+=("$source")
+      record_files+=("$stage/$id.json")
     done
   fi
   [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] || truncated=true
