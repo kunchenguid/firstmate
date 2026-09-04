@@ -914,16 +914,16 @@ export function isBlessedWatcherArmCommand(command, root, home) {
   const analysis = analyzeProgram(command, context);
   if (analysis.error || !blessedProgram(analysis, context)) return false;
   if (analysis.nodeInfos.at(-1)?.protectedKind !== "arm") return false;
+  if (analysis.nodeInfos.at(-1)?.position.wrappers.length !== 1 || analysis.nodeInfos.at(-1)?.position.wrappers[0] !== "exec") return false;
 
-  let cwd = context.root;
-  for (const info of analysis.nodeInfos.slice(0, -1)) {
-    const kind = setupKind(info, context);
-    if (kind === "cd") {
-      cwd = resolvedCommandPath(info.position.words[1]?.value, cwd);
-      if (cwd !== context.root) return false;
-    }
+  const setup = analysis.nodeInfos.slice(0, -1).map((info) => setupKind(info, context));
+  if (setup.some((kind) => kind !== "source" && kind !== "test-source")) return false;
+  for (let i = 0; i < setup.length; i += 1) {
+    if (setup[i] !== "test-source") continue;
+    if (setup[i + 1] !== "source" || analysis.program.separators[i] !== "&&") return false;
+    i += 1;
   }
-  return resolvedCommandPath(analysis.nodeInfos.at(-1)?.position.command?.value, cwd) === path.join(context.root, "bin/fm-watch-arm.sh");
+  return resolvedCommandPath(analysis.nodeInfos.at(-1)?.position.command?.value, context.root) === path.join(context.root, "bin/fm-watch-arm.sh");
 }
 
 function decision(command, root, home) {

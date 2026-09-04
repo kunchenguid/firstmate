@@ -167,7 +167,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 - Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
 - `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.
   This is the same verified quirk recorded in [`arm-pretool-check.md`](arm-pretool-check.md), and the tracked Claude hook therefore passes `--claude`.
-- `--copilot` suppresses stdout completely for the same reason Copilot command hooks do in [`arm-pretool-check.md`](arm-pretool-check.md): exit 2 denies the tool call and surfaces stderr.
+- `--copilot` returns Copilot's native `{"permissionDecision":"deny","permissionDecisionReason":"[subagent-dispatch] ..."}` object on stdout and exits 0.
 - Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with exit 0 and no output.
 
 The deny message names the real dispatch path.
@@ -356,7 +356,7 @@ Result: the Workflow tool call was NOT blocked by a hook. It launched and ran to
 ### Empty-stdout requirement
 
 A Claude deny is honored only when the hook's stdout is empty.
-`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on every `--claude` and `--copilot` deny and that default mode still emits the Grok object on stdout.
+`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on every `--claude` deny, that `--copilot` returns Copilot's native stdout deny object and exit 0, and that default mode still emits the Grok object on stdout.
 The live consequence is confirmed by the shipped-guard result above: Claude honored the deny and reported the reason text.
 
 ## Automated validation

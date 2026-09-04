@@ -227,8 +227,16 @@ assert_policy() {
   pass "direct policy $id: $expected"
 }
 
+assert_watcher_arm_policy() {
+  local id=$1 expected=$2 command=$3 output
+  output=$(node "$POLICY" watcher-arm --root "$ROOT" --home "$ROOT" --command "$command") \
+    || fail "$id watcher-arm policy invocation failed"
+  [ "$output" = "$expected" ] || fail "$id watcher-arm policy expected $expected, got: $output"
+  pass "watcher-arm policy $id: $expected"
+}
+
 test_direct_policy_contract() {
-  local heredoc_data heredoc_watcher
+  local heredoc_data heredoc_watcher sibling_root
   assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
@@ -250,6 +258,13 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  sibling_root=$(dirname "$ROOT")/policy-sibling-root
+  mkdir -p "$sibling_root/config"
+  : > "$sibling_root/config/x-mode.env"
+  assert_watcher_arm_policy direct-current-root watch-arm '[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-sibling-root other 'cd ../policy-sibling-root && [ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-fm-home-rebind other 'export FM_HOME=/tmp/other; exec ./bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-state-override-rebind other 'export FM_STATE_OVERRIDE=/tmp/other; exec ./bin/fm-watch-arm.sh'
 }
 
 # --- CLI parsing -------------------------------------------------------------

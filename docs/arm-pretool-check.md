@@ -28,7 +28,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
-- `--copilot` to preserve Copilot's stderr-only deny requirement.
+- `--copilot` to return Copilot's native `permissionDecision` deny object on stdout with exit 0.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
@@ -101,6 +101,8 @@ Approved setup nodes are:
 - `source <x-mode path>` or `. <x-mode path>`.
 - `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
 
+For Copilot `shell_completed` watcher-notification provenance, the stricter `watcher-arm` classifier accepts only the optional x-mode source pair in the current verified root followed by `exec` of that same root's `bin/fm-watch-arm.sh`. Any `cd`, `export`, inline assignment, alternate absolute path, bundled command, pipeline, backgrounding, or detached form is rejected.
+
 The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
 An absolute x-mode path outside the active home is not an approved setup node.
 
@@ -151,9 +153,9 @@ Prose may improve without changing adapter behavior.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
-- `--copilot` suppresses stdout completely because Copilot command hooks deny on exit 2 and surface stderr.
+- `--copilot` returns Copilot's native `{"permissionDecision":"deny","permissionDecisionReason":"[code] reason"}` object on stdout and exits 0.
 - Codex blocks on exit 2 and displays stderr.
-- GitHub Copilot CLI denies a `preToolUse` command on exit 2 and displays the hook reason.
+- GitHub Copilot CLI reads that returned stdout object rather than the exit status.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
 
@@ -161,7 +163,7 @@ Prose may improve without changing adapter behavior.
 
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
-| GitHub Copilot CLI | `.toolArgs.command` | `.github/hooks/fm-primary.json` forwards the native payload with `--copilot`; command-hook exit 2 denies the call while stdout remains empty. |
+| GitHub Copilot CLI | `.toolArgs.command` | `.github/hooks/fm-primary.json` forwards the native payload with `--copilot`; the checker returns Copilot's native `permissionDecision=deny` object on stdout and exits 0. |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
