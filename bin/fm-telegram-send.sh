@@ -18,8 +18,9 @@
 # all otherwise, which is the watcher's state-check contract, so the drain needs
 # no schedule of its own. `arm` writes state/telegram-outbox.check.sh and binds
 # its bytes with fm-check-register.sh; `disarm` removes the shim, its trust
-# binding, and the error record. An unconfigured home is a hard no-op: exit 0,
-# no output, nothing written.
+# binding, and the error record. When Telegram is unconfigured, every automatic
+# path is a hard no-op: exit 0, no output, nothing written. The deliberate arm
+# command instead refuses when its required configuration is unavailable.
 #
 # SENDS ONLY. The Telegram Bot API's getUpdates is never called, here or
 # anywhere else in this repository. The bot has no inbound path at all, so a
@@ -31,7 +32,7 @@
 # notifications"):
 #   network down or Telegram unreachable   cards stay queued, next cycle retries
 #   token rejected or chat refused         one rate-limited wake, not one per cycle
-#   token or configuration absent          hard no-op, exit 0, silent
+#   token or configuration absent          automatic paths exit 0 silently
 #   this check not armed                   cards queue and drain when it is
 # A held decision, a registered PR, a failure, and a merge are all already
 # durable in the backlog and in state before any card exists, so a card that
@@ -130,12 +131,84 @@ clear_error() {
 }
 
 telegram_response_ok() {  # <body-file>
-  local response
-  response=$(LC_ALL=C tr -d '[:space:]' < "$1" 2>/dev/null) || return 1
-  case "$response" in
-    '{"ok":true}'|'{"ok":true,'*) return 0 ;;
-  esac
-  return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e 'type == "object" and .ok == true' "$1" >/dev/null 2>&1
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle)
+raise SystemExit(0 if isinstance(value, dict) and value.get("ok") is True else 1)
+PY
+    return
+  fi
+  LC_ALL=C awk '
+    function ws() { while (substr(s, p, 1) ~ /[ \t\r\n]/) p++ }
+    function string(    c, esc, hex, out) {
+      if (substr(s, p++, 1) != "\"") return "\001"
+      while (p <= n) {
+        c = substr(s, p++, 1)
+        if (c == "\"") return out
+        if (c ~ /[[:cntrl:]]/) return "\001"
+        if (c != "\\") { out = out c; continue }
+        esc = substr(s, p++, 1)
+        if (esc == "u") {
+          hex = substr(s, p, 4)
+          if (hex !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return "\001"
+          p += 4
+          out = out "?"
+        } else if (esc ~ /^["\\\/bfnrt]$/) out = out "?"
+        else return "\001"
+      }
+      return "\001"
+    }
+    function value(depth,    c, token) {
+      ws(); c = substr(s, p, 1)
+      if (c == "\"") { if (string() == "\001") return 0; kind = "other"; return 1 }
+      if (c == "{") { if (!object(depth)) return 0; kind = "other"; return 1 }
+      if (c == "[") { if (!array(depth)) return 0; kind = "other"; return 1 }
+      token = substr(s, p)
+      if (token ~ /^true/) { p += 4; kind = "true"; return 1 }
+      if (token ~ /^false/) { p += 5; kind = "false"; return 1 }
+      if (token ~ /^null/) { p += 4; kind = "other"; return 1 }
+      if (match(token, /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+        p += RLENGTH; kind = "other"; return 1
+      }
+      return 0
+    }
+    function array(depth,    c) {
+      p++; ws(); if (substr(s, p, 1) == "]") { p++; return 1 }
+      while (1) {
+        if (!value(depth + 1)) return 0
+        ws(); c = substr(s, p++, 1)
+        if (c == "]") return 1
+        if (c != ",") return 0
+      }
+    }
+    function object(depth,    c, key, member_kind) {
+      p++; ws(); if (substr(s, p, 1) == "}") { p++; return 1 }
+      while (1) {
+        ws(); key = string(); if (key == "\001") return 0
+        ws(); if (substr(s, p++, 1) != ":") return 0
+        if (!value(depth + 1)) return 0
+        member_kind = kind
+        if (depth == 0 && key == "ok") root_ok = (member_kind == "true")
+        ws(); c = substr(s, p++, 1)
+        if (c == "}") return 1
+        if (c != ",") return 0
+      }
+    }
+    { s = s $0 "\n" }
+    END {
+      n = length(s); p = 1; root_ok = 0
+      ws(); valid = (substr(s, p, 1) == "{" && object(0)); ws()
+      exit !(valid && p > n && root_ok)
+    }
+  ' "$1" >/dev/null 2>&1
 }
 
 # Queued cards, oldest first. A name that is not a card this script wrote is
@@ -291,9 +364,11 @@ arm_rollback() {
 }
 
 action_arm() {
-  local home want device tmp
+  local home want device tmp config_dir
   if ! fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1; then
-    printf 'fm-telegram-send: this home is not configured for Telegram notifications; see docs/configuration.md\n' >&2
+    config_dir=$(_fm_telegram_config_dir "$FM_HOME")
+    printf 'fm-telegram-send: arm requires a numeric chat id in %s/telegram-chat-id and a mode-0600 bot token at the path in %s/telegram-token-path (default %s/.mist-telegram-token)\n' \
+      "$config_dir" "$config_dir" "$HOME" >&2
     return 1
   fi
   mkdir -p "$STATE" || return 1

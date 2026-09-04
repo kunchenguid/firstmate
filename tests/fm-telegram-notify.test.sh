@@ -2,7 +2,7 @@
 # Outward Telegram notifications: the properties that make the feature safe to
 # add to a home that is already landing work.
 #
-#   (a) An unconfigured home is byte-identical to one without the feature.
+#   (a) Automatic paths in an unconfigured home are unchanged and silent.
 #   (b) Publishers make NO network call, so a Telegram outage cannot block a
 #       PR registration, a merge record, or the cleanup gate that refuses to
 #       remove a child while its outcome is undelivered.
@@ -96,6 +96,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload, code = b'{"ok":false,"description":"chat not found"}', 200
         elif mode == "spaced":
             payload, code = b'{"ok": true}', 200
+        elif mode == "reordered":
+            payload, code = b'{"result":{},"ok":true}', 200
+        elif mode == "malformed":
+            payload, code = b'{"ok":true,', 200
         else:
             payload, code = b'{"ok":true,"result":{"message_id":1}}', 200
         self.send_response(code)
@@ -205,12 +209,12 @@ test_unconfigured_home_is_inert() {
   out=$(run_send "$dir" '' arm 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "arming succeeded in a home with no Telegram configuration"
   case "$out" in
-    *"not configured"*) ;;
-    *) fail "arming an unconfigured home did not say why: $out" ;;
+    *"$dir/home/config/telegram-chat-id"*"$dir/home/config/telegram-token-path"*) ;;
+    *) fail "arming an unconfigured home did not name its required configuration: $out" ;;
   esac
   [ ! -e "$dir/home/state/telegram-outbox.check.sh" ] \
     || fail "a refused arm still left a check shim behind"
-  pass "a home with no Telegram configuration behaves exactly as one without the feature"
+  pass "unconfigured automatic paths are inert and deliberate arm names its requirements"
 }
 
 test_an_unusable_token_file_is_inert() {
@@ -295,6 +299,34 @@ https://example.test/o/r/pull/7" ] || fail "unexpected landed card: $out"
   render decision "title=x" "worktree=/tmp/wt" >/dev/null 2>&1 \
     && fail "a card accepted a field outside its own set"
   pass "the four card classes render from their own required fields and refuse anything else"
+}
+
+test_multibyte_fields_remain_valid_utf8_when_truncated() {
+  local title out file i
+  title=
+  i=0
+  while [ "$i" -lt 299 ]; do
+    title="${title}a"
+    i=$((i + 1))
+  done
+  title="${title}é"
+  out=$(render decision "title=$title") || fail "the multibyte card would not render"
+  file="$TMP_ROOT/multibyte-card"
+  printf '%s' "$out" > "$file"
+  python3 - "$file" <<'PY' >/dev/null 2>&1 \
+    || fail "field truncation produced invalid UTF-8"
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+PY
+  case "$out" in
+    *é) ;;
+    *) fail "field truncation split or discarded the boundary character" ;;
+  esac
+  [ "$(LC_ALL=C wc -c < "$file" | tr -d '[:space:]')" -le 4000 ] \
+    || fail "the rendered card exceeded its byte ceiling"
+  pass "field and card bounds preserve UTF-8 character boundaries"
 }
 
 test_a_raw_status_line_cannot_become_a_card() {
@@ -561,20 +593,37 @@ test_drain_sends_and_never_listens() {
   pass "a drain sends each card once, asks Telegram for nothing, and never repeats an outcome"
 }
 
-test_whitespace_in_success_response_is_accepted() {
+test_semantic_success_response_is_accepted() {
   local dir base out
   dir=$(make_home spaced-response)
   report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
     "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
   base=$(start_api "$dir")
-  printf 'spaced\n' > "$dir/api.mode"
-  out=$(run_send "$dir" "$base" check 2>&1) || fail "the spaced success drain failed"
-  [ -z "$out" ] || fail "a spaced success response emitted a configuration wake: $out"
-  [ "$(card_count "$dir")" = 0 ] || fail "a spaced success response left the card queued"
+  printf 'reordered\n' > "$dir/api.mode"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the reordered success drain failed"
+  [ -z "$out" ] || fail "a reordered success response emitted a configuration wake: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "a reordered success response left the card queued"
   [ ! -e "$dir/home/state/telegram-send.error" ] \
-    || fail "a spaced success response recorded a false configuration error"
+    || fail "a reordered success response recorded a false configuration error"
   stop_api
-  pass "Telegram success responses are accepted independent of whitespace"
+  pass "Telegram success is read semantically independent of field order"
+}
+
+test_malformed_success_response_is_rejected() {
+  local dir base out
+  dir=$(make_home malformed-response)
+  report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  base=$(start_api "$dir")
+  printf 'malformed\n' > "$dir/api.mode"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the malformed-response drain failed"
+  case "$out" in
+    *"was refused by Telegram"*) ;;
+    *) fail "a malformed response was not reported as rejected: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "a malformed response discarded the queued card"
+  stop_api
+  pass "malformed Telegram responses cannot acknowledge queued cards"
 }
 
 test_outage_retries_silently_and_a_rejection_reports_once() {
@@ -655,6 +704,7 @@ test_absent_token_is_inert
 test_an_unusable_token_file_is_inert
 test_card_is_built_from_typed_fields
 test_all_four_classes_render
+test_multibyte_fields_remain_valid_utf8_when_truncated
 test_a_raw_status_line_cannot_become_a_card
 test_a_credential_value_is_refused_loudly
 test_internal_identifiers_do_not_reach_a_card
@@ -664,7 +714,8 @@ test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
 test_secondmate_failure_cards_track_incarnations
 test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
-test_whitespace_in_success_response_is_accepted
+test_semantic_success_response_is_accepted
+test_malformed_success_response_is_rejected
 test_outage_retries_silently_and_a_rejection_reports_once
 test_arm_and_disarm
 

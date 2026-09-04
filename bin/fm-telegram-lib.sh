@@ -16,12 +16,11 @@
 # called anywhere in this repository, so a card cannot carry an instruction
 # back and nothing that arrives at the bot can reach Firstmate.
 #
-# INERT BY DEFAULT, the way the relay is (bin/fm-x-poll.sh): a home with no
-# configuration behaves byte-identically to one that never heard of the
-# feature. There is no feature flag to get wrong - configuration presence IS
-# the enablement, and its absence is silent, never a warning or a degraded
-# mode. Configuration is two local, gitignored items and one file outside the
-# home:
+# INERT BY DEFAULT, the way the relay is (bin/fm-x-poll.sh): no automatic path
+# changes behavior in a home without configuration. There is no feature flag
+# to get wrong - configuration presence IS the enablement. Publishers and the
+# drain remain silent and cleanup is unchanged. The deliberate arm command
+# refuses when these required inputs are unavailable:
 #   config/telegram-chat-id     the numeric destination chat, required
 #   config/telegram-token-path  optional path to the bot token file, default
 #                               $HOME/.mist-telegram-token
@@ -94,6 +93,8 @@ FM_TELEGRAM_DELIVERED_KEEP=200
 # inside Telegram's own 4096-character message ceiling.
 FM_TELEGRAM_FIELD_MAX=300
 FM_TELEGRAM_CARD_MAX=1000
+FM_TELEGRAM_FIELD_BYTES_MAX=1200
+FM_TELEGRAM_CARD_BYTES_MAX=4000
 # A credential value shorter than this is not distinctive enough to test a card
 # against; collect.py uses the same floor for the same reason.
 FM_TELEGRAM_SECRET_MIN=8
@@ -139,8 +140,7 @@ _fm_telegram_chat_id_valid() {  # <id>
 # Resolve this home's Telegram configuration into FM_TELEGRAM_CHAT_ID and
 # FM_TELEGRAM_TOKEN_FILE. Returns 0 only when the home is fully configured and
 # the token file is present and usable; every other case returns 1 in silence,
-# which is what keeps an unconfigured home byte-identical to one that never
-# heard of this feature.
+# which keeps every automatic caller unchanged in an unconfigured home.
 fm_telegram_config_load() {  # <home>
   local home=$1 chat token
   FM_TELEGRAM_CHAT_ID=
@@ -253,6 +253,26 @@ fm_telegram_looks_like_status_line() {  # <text>
 # muse. A URL survives, because a PR link is the single most useful thing a
 # phone card carries and its own repository name is already the operator's
 # recorded choice.
+fm_telegram_utf8_truncate() {  # <character-limit> <byte-limit>
+  local character_limit=$1 byte_limit=$2 locale_name='' value='' bytes candidate character count=0
+  for candidate in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8 UTF-8; do
+    if LC_ALL="$candidate" locale charmap 2>/dev/null | grep -Eiq '^UTF-?8$'; then
+      locale_name=$candidate
+      break
+    fi
+  done
+  [ -n "$locale_name" ] || return 1
+  while [ "$count" -lt "$character_limit" ] \
+    && IFS= LC_ALL="$locale_name" read -r -n 1 character; do
+    [ -n "$character" ] || character=$'\n'
+    value+=$character
+    count=$((count + 1))
+  done
+  bytes=$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d '[:space:]') || return 1
+  [ "$bytes" -le "$byte_limit" ] || return 1
+  printf '%s' "$value"
+}
+
 fm_telegram_scrub() {  # <text>
   printf '%s' "$1" \
     | LC_ALL=C tr '\t\r\n' '   ' \
@@ -263,7 +283,7 @@ fm_telegram_scrub() {  # <text>
       -e 's#(^|[^[:alnum:]_.-])(claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse)([^[:alnum:]_.-]|$)#\1\3#g' \
       -e 's/[[:space:]]+/ /g' \
       -e 's/^ //' -e 's/ $//' \
-    | cut -c "1-$FM_TELEGRAM_FIELD_MAX"
+    | fm_telegram_utf8_truncate "$FM_TELEGRAM_FIELD_MAX" "$FM_TELEGRAM_FIELD_BYTES_MAX"
 }
 
 # --- card templates ---------------------------------------------------------
@@ -442,7 +462,11 @@ fm_telegram_notify() {  # <home> <state> <class> <key> <name=value>...
       return 3
       ;;
   esac
-  card=$(printf '%s' "$card" | cut -c "1-$FM_TELEGRAM_CARD_MAX")
+  card=$(printf '%s' "$card" \
+    | fm_telegram_utf8_truncate "$FM_TELEGRAM_CARD_MAX" "$FM_TELEGRAM_CARD_BYTES_MAX") || {
+    _fm_telegram_actionable "for $class could not be bounded as valid UTF-8"
+    return 3
+  }
   if ! fm_telegram_refuse_if_secret "$home" "$card"; then
     _fm_telegram_actionable "for $class was refused: it would have carried a credential value"
     return 3

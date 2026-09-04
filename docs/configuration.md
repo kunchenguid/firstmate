@@ -617,7 +617,9 @@ This is outward only.
 The bot sends and never listens: the Bot API's `getUpdates` is never called, so nothing arriving at the bot can reach firstmate, answer a decision, or start, stop, or approve anything.
 Notes are still captured at the terminal exactly as before ([voice-relay.md](voice-relay.md)).
 
-Like Relay, it ships inert: configuration presence is the enablement, there is no feature flag to get wrong, and a home that has not opted in behaves byte-identically to one that never heard of the feature - no warning, no error, no degraded mode.
+Like Relay, it ships inert: configuration presence is the enablement, there is no feature flag to get wrong, and no automatic path changes behavior in a home that has not opted in.
+Publishers and the drain remain silent and cleanup is unchanged when Telegram is unconfigured.
+The deliberate `arm` operator command instead refuses when its required configuration is unavailable, because reporting that notifications are armed when they cannot send would be unsafe rather than inert.
 
 To turn it on:
 
@@ -651,7 +653,7 @@ A held decision, a registered PR, a failure, and a merge are all durable in the 
 | --- | --- |
 | Network down or Telegram unreachable | Cards stay queued in order, the drain retries next cycle, nothing blocks |
 | Token revoked, or the chat refuses the bot | One rate-limited wake naming the rejection, not one per poll; the cards survive |
-| Token file or chat id absent | Hard no-op: exit 0, no output, nothing written |
+| Token file or chat id absent | Automatic paths are a hard no-op: exit 0, no output, nothing written; deliberate `arm` refuses and names the required files |
 | The drain is not armed | Cards queue and are delivered when it is armed |
 | An hour with nothing delivered | One wake reporting the silence, so a stalled channel cannot masquerade as a quiet one |
 
