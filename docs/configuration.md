@@ -389,7 +389,7 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 `config/crew-autocompact-pct` is an optional local, gitignored file holding a single bare integer percentage from 1 to 99.
 It sets Claude's real `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` environment variable as a per-launch prefix on `fm-spawn.sh`'s claude launch template, the same pattern the template already uses for `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`.
 It affects only claude crewmate and scout launches; a claude secondmate keeps Claude's default auto-compaction threshold because a secondmate is a firstmate peer, not an ordinary crewmate, and every non-claude harness ignores the file entirely.
-Absent means no override: the launch command is unchanged from before this knob existed, and firstmate's own primary session is never affected regardless of this file's contents.
+Absent means no override: the launch carries no auto-compaction prefix and Claude's own default threshold applies, and firstmate's own primary session is never affected regardless of this file's contents.
 A present value outside 1-99, or one that is not a bare integer, refuses the spawn with an actionable error naming the file and the accepted range rather than launching with the value silently dropped or passed through unvalidated.
 This home's own `config/crew-autocompact-pct` governs its own crewmates and scouts exactly like `config/crew-harness` and `config/crew-dispatch.json`, so it is part of the declared inherited local-material set in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) and converges into every secondmate home the same way, including the config-reread nudge to an already-running secondmate when the value changes.
 
