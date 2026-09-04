@@ -7,8 +7,9 @@
 # for this project", never "how does this task ship". A task's delivery mode and
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
-# The consumers are bin/fm-home-seed.sh (refuse local-only seeding and run
-# no-mistakes init) and bin/fm-spawn.sh's advisory registry-deviation notice.
+# The consumers are bin/fm-fleet-sync.sh (exclude local-only clones from
+# remote-gone branch pruning), bin/fm-home-seed.sh (refuse local-only seeding and
+# run no-mistakes init), and bin/fm-spawn.sh's advisory registry-deviation notice.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -23,8 +24,8 @@
 #                          classifies each task's surface at intake (the
 #                          project-management skill owns that classification).
 #                          Mechanical output maps it to its most rigorous leg,
-#                          no-mistakes, so seeding and init treat such a project
-#                          as the remote-backed pipeline project it is.
+#                          no-mistakes, so pruning, seeding, and init treat such a
+#                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
 #   in-scope work itself (AGENTS.md section 7).
 #

@@ -18,8 +18,10 @@
 # repository (the firstmate checkout) and be synced under that directory's label.
 # Anything else is reported as "skipped: not a clone root" naming the repository
 # that would have been touched.
-# Pruning never deletes the checked-out branch or a branch that still has a
-# worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# Registered local-only projects still refresh when they have an origin, but skip
+# remote-gone branch pruning because their landing proof is local rather than remote.
+# For other projects, pruning never deletes the checked-out branch or a branch that
+# still has a worktree; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -338,7 +340,11 @@ sync_project() {
     return 0
   fi
 
-  prune_gone_branches || true
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  mode=${mode_line%% *}
+  if [ "$mode" != "local-only" ]; then
+    prune_gone_branches || true
+  fi
 
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"

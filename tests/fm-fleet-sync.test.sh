@@ -10,8 +10,8 @@
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
 # The pre-existing fast-forward, already-current, and no-origin paths must be
-# unchanged, local-only projects with origins must refresh, and bootstrap must
-# relay the new outcomes as FLEET_SYNC lines.
+# unchanged, local-only projects with origins must refresh without remote-gone
+# branch pruning, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
 # It also pins the clone-root guard: a plain directory under projects/ resolves,
 # through git's upward repository discovery, to the ENCLOSING repository - in a
@@ -416,6 +416,44 @@ test_local_only_with_origin_fast_forwards() {
   pass "local-only clone with an origin is fast-forwarded"
 }
 
+test_local_only_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-local-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "local-only work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-local-work [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-local-work: synced" "local-only default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "local-only remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "local-only remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "local-only remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "local-only default branch did not fast-forward"
+  pass "local-only refresh preserves remote-gone unmerged work"
+}
+
+test_remote_backed_prunes_gone_branch() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-remote-work)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-remote-work: pruned feature" "remote-backed gone branch is pruned"
+  if git -C "$clone" show-ref --verify --quiet refs/heads/feature; then
+    fail "remote-backed gone branch was retained"
+  fi
+  pass "remote-backed refresh still prunes gone branches"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -710,6 +748,8 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_with_origin_fast_forwards
+test_local_only_preserves_gone_unmerged_branch
+test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
