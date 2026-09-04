@@ -555,6 +555,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
   fi
+  if [ "$CODEX_HOME_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --codex-home is not supported for remote secondmate route '$id'; omit the flag or select a local secondmate route" >&2
+    return 2
+  fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
@@ -1197,6 +1203,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_CODEX_HOME=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1236,6 +1243,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_CODEX_HOME=$(fm_meta_get "$RELAUNCH_META" codex_home)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1272,6 +1280,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$CODEX_HOME_SET" -eq 0 ] \
+    && [ "$ARG3" = codex ] \
+    && [ "$RELAUNCH_PRIOR_HARNESS" = codex ]; then
+    CODEX_HOME_ARG=$RELAUNCH_PRIOR_CODEX_HOME
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo)
