@@ -1106,10 +1106,12 @@ crew_dispatch_validate() {
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse"] | index($h);
     def effort_ok($h; $e):
+      # codex accepts max as of codex-cli 0.149.1, verified live 2026-08-25
+      # through model_reasoning_effort="max" in codex exec and the active config.
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "codex" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))

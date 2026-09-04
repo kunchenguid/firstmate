@@ -12,7 +12,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
-| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
+| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`, verified on codex-cli 0.149.1 (2026-08-25). The installed schema contains `model_reasoning_effort`, and `max` is accepted: a live `codex exec --skip-git-repo-check -m gpt-5.6-luna -c 'model_reasoning_effort="max"'` probe completed and answered, and the captain's active `~/.codex/config.toml` sets `plan_mode_reasoning_effort` and `default_subagent_reasoning_effort` to `max`. The earlier 0.142.1 catalog advertised only low/medium/high/xhigh, so that ceiling was version-scoped. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"

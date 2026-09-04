@@ -77,7 +77,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fm-test-timing-portable-parallel-1
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-1.json
@@ -114,7 +114,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fm-test-timing-portable-parallel-2
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
@@ -179,7 +179,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fm-test-timing-portable-serial-${{ matrix.shard }}
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
@@ -299,7 +299,7 @@ jobs:
           }
       - name: Upload Herdr timing and diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fm-test-timing-herdr
           path: |
@@ -341,7 +341,7 @@ jobs:
             "${inputs[@]}"
       - name: Upload aggregate timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fm-test-timing-aggregate
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
