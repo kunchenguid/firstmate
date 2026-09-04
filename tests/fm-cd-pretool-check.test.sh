@@ -27,7 +27,8 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+     "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -164,7 +165,7 @@ run_matrix_entry() {
       ;;
     copilot)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"bash",toolArgs:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | "$CHECK" --copilot >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     grok)
@@ -188,10 +189,18 @@ run_matrix_entry() {
     return
   fi
 
+  if [ "$entry" = copilot ]; then
+    [ "$rc" -eq 0 ] || fail "$id via $entry must deny through Copilot's native stdout object, got exit $rc"
+    [ ! -s "$err_file" ] || fail "$id via $entry deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[persistent-cd\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via copilot deny must carry Copilot's native decision object on stdout: $(cat "$out_file")"
+    return
+  fi
+
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[persistent-cd\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry the persistent-cd reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ] || [ "$entry" = copilot ]; then
+  if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \

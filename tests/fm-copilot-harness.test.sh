@@ -108,22 +108,19 @@ SH
 #!/usr/bin/env bash
 cat > "$FM_TEST_PAYLOAD"
 [ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
-printf '%s\n' 'arm denied' >&2
-exit 2
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"arm denied"}'
 SH
   cat > "$dir/bin/fm-cd-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 cat > "$FM_TEST_PAYLOAD"
 [ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
-printf '%s\n' 'cd denied' >&2
-exit 2
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"cd denied"}'
 SH
   cat > "$dir/bin/fm-subagent-pretool-check.sh" <<'SH'
 #!/usr/bin/env bash
 cat > "$FM_TEST_PAYLOAD"
 [ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
-printf '%s\n' 'subagent denied' >&2
-exit 2
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"subagent denied"}'
 SH
   chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-turnend-guard.sh" \
     "$dir/bin/fm-arm-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh" \
@@ -238,27 +235,35 @@ test_copilot_native_policies_bypass_compatibility_stand_down() {
 
   printf '%s' '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' > "$dir/arm.json"
   out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
-    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-arm < "$dir/arm.json" 2>&1)
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-arm < "$dir/arm.json" 2> "$dir/arm.err")
   rc=$?
-  [ "$rc" -eq 2 ] || fail "Copilot pretool-arm should preserve deny exit 2, got $rc: $out"
-  [ -z "${out##*arm denied*}" ] || fail "Copilot pretool-arm lost the underlying deny reason: $out"
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-arm should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/arm.err" ] || fail "Copilot pretool-arm wrote stderr: $(cat "$dir/arm.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "arm denied"' >/dev/null \
+    || fail "Copilot pretool-arm lost the native deny payload: $out"
   [ "$(cat "$payload")" = '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' ] || fail "Copilot pretool-arm did not forward the payload"
   args=$(cat "$dir/args.txt")
   [ "$args" = --copilot ] || fail "Copilot pretool-arm did not use the native invocation mode: $args"
 
   printf '%s' '{"toolArgs":{"command":"cd projects/demo"}}' > "$dir/cd.json"
   out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
-    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-cd < "$dir/cd.json" 2>&1)
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-cd < "$dir/cd.json" 2> "$dir/cd.err")
   rc=$?
-  [ "$rc" -eq 2 ] || fail "Copilot pretool-cd should preserve deny exit 2, got $rc: $out"
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-cd should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/cd.err" ] || fail "Copilot pretool-cd wrote stderr: $(cat "$dir/cd.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "cd denied"' >/dev/null \
+    || fail "Copilot pretool-cd lost the native deny payload: $out"
   args=$(cat "$dir/args.txt")
   [ "$args" = --copilot ] || fail "Copilot pretool-cd did not use the native invocation mode: $args"
 
   printf '%s' '{"toolName":"task"}' > "$dir/subagent.json"
   out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
-    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-subagent < "$dir/subagent.json" 2>&1)
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-subagent < "$dir/subagent.json" 2> "$dir/subagent.err")
   rc=$?
-  [ "$rc" -eq 2 ] || fail "Copilot pretool-subagent should preserve deny exit 2, got $rc: $out"
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-subagent should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/subagent.err" ] || fail "Copilot pretool-subagent wrote stderr: $(cat "$dir/subagent.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "subagent denied"' >/dev/null \
+    || fail "Copilot pretool-subagent lost the native deny payload: $out"
   args=$(cat "$dir/args.txt")
   [ "$args" = --copilot ] || fail "Copilot pretool-subagent did not use the native invocation mode: $args"
 
