@@ -100,6 +100,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+The watcher's own waits must respect the beacon: every blocking wait inside a cycle (today the Herdr native event wait in `bin/fm-watch.sh`) is bounded by the poll budget on every enforced side, so a legitimately-blocked watcher still beats while the poll loop remains the delivery backstop.
+A wait that outlives the grace makes a healthy watcher read dead, which the away daemon then cannot restart past the singleton lock (2026-08-21 quiet-fleet incident; budget bounds live in `docs/herdr-backend.md` "Push events and polling fallback").
 
 ## Regression coverage
 
@@ -108,6 +110,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-backend-herdr.test.sh` runs the real `bin/fm-watch.sh` loop against a saturating fake herdr event stream under a shrunken grace window and proves the beacon keeps advancing across bounded event waits while a second watcher invocation refuses cleanly against the fresh-beat singleton (the 2026-08-21 quiet-fleet crash-loop regressions).
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

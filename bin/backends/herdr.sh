@@ -3139,7 +3139,7 @@ fm_backend_herdr_list_live() {  # <session>
 # --- native event push: pane.agent_status_changed subscriber -----------------
 #
 # The push half of the immediate blocked-state escalation (AGENTS.md section 8,
-# docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
+# docs/herdr-backend.md "Push events and polling fallback").
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event
 # stream and returns the instant a subscribed pane transitions to `blocked`, so
@@ -3274,8 +3274,18 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
 # fresh `blocked` edge, then prints the normalized record and returns 0.
-# Returns 1 on a clean timeout (the reader ran the full budget, no fresh
-# actionable edge - the caller has effectively already slept and just continues)
+# Every enforced side of the wait is bounded to the budget (reader lifetime,
+# subscription ack, and stream drain): the reader enforces the deadline on
+# every stream iteration and bounds every stdout write, and this side bounds
+# the ack and drain with `read -t` and stops the reader when the budget
+# expires - a saturated or backlogged event stream can never make the call
+# outlive its poll budget, because an unbounded wait here starves the
+# watcher's liveness beacon (2026-08-21 quiet-fleet crash-loop,
+# negotiation-os mate home). The level reconcile runs inside the budget
+# window but is bounded only by its per-window `herdr agent get` CLI reads,
+# which carry no deadline of their own.
+# Returns 1 on a clean timeout (the budget elapsed with no fresh actionable
+# edge - the caller has effectively already slept and just continues)
 # and 2 when the event path is unusable (not capable, socket unresolved, reader
 # failed to run/subscribe - the caller sleeps the budget itself, the fail-closed
 # backstop). See the header block above for the full contract.
@@ -3319,6 +3329,21 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
+
+  # Overall budget for this whole wait, measured from the reader spawn: the
+  # reader enforces the same deadline internally (every iteration and every
+  # stdout write), the subscription-ack and drain reads below use it as their
+  # `read -t` bound, and the reader is stopped the moment it expires - the
+  # enforced sides of the wait (reader lifetime, ack, drain) can never outlive
+  # the caller's poll cadence. The level reconcile between them consumes the
+  # budget but its per-window `herdr agent get` reads carry no deadline of
+  # their own. Unbounded waits here starve the watcher's liveness beacon
+  # (2026-08-21 quiet-fleet crash-loop: a saturated or backlogged event stream
+  # kept the drain alive past the 300s heartbeat grace while the watcher sat
+  # healthy-but-frozen in this call).
+  local wait_started wait_budget drain_remaining
+  wait_started=$(date +%s)
+  wait_budget=$(( timeout + 2 ))
   "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
   reader_pid=$!
   if ! exec 9< "$fifo"; then
@@ -3327,7 +3352,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
-  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
+  if ! IFS= read -r -t "$wait_budget" -u 9 line || [ "$line" != "@subscribed" ]; then
     rc=2
   fi
 
@@ -3352,14 +3377,20 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     done
   fi
 
-  # Drain stream edges until a fresh blocked edge or the timeout. The reader is
-  # a subprocess of this call (NOT a second watcher), and is killed the instant
-  # a blocked edge is found.
+  # Drain stream edges until a fresh blocked edge or the overall budget. The
+  # reader is a subprocess of this call (NOT a second watcher), and is stopped
+  # unconditionally below the moment the drain ends - by a blocked edge, the
+  # reader's own deadline exit, or the budget expiring under a stream that
+  # saturates the drain (the poll loop stays the fail-closed backstop for any
+  # edges left undelivered).
   # Split each raw projected line (pane_id\tworkspace_id\tagent_status\tagent)
   # with `cut`, NOT `IFS=$'\t' read`: a tab is IFS-whitespace, so `read` would
   # collapse an empty middle field (e.g. an absent workspace_id) and shift the
   # status into the wrong column. `cut` preserves empty fields.
-  while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
+  while [ "$rc" -eq 1 ]; do
+    drain_remaining=$(( wait_budget - ( $(date +%s) - wait_started ) ))
+    [ "$drain_remaining" -gt 0 ] || break
+    IFS= read -r -t "$drain_remaining" line <&9 || break
     [ -n "$line" ] || continue
     pane_id=$(printf '%s' "$line" | cut -f1)
     ws=$(printf '%s' "$line" | cut -f2)
@@ -3373,12 +3404,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       break
     fi
   done
-  if [ "$rc" -eq 0 ]; then
-    kill "$reader_pid" 2>/dev/null || true
-  fi
-  if [ "$rc" -eq 2 ]; then
-    kill "$reader_pid" 2>/dev/null || true
-  fi
+  kill "$reader_pid" 2>/dev/null || true
   # No actionable edge: distinguish a clean full-budget wait (reader exit 0 ->
   # return 1, caller already waited) from a reader error (connect/subscribe
   # failure, exit non-zero -> return 2, caller sleeps and counts toward the

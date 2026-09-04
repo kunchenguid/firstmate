@@ -4473,6 +4473,287 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# make_streaming_fake_reader: a fake reader that emulates the real
+# herdr-eventwait.py stream phase under a saturated stream: it writes projected
+# event lines continuously (never sleeping, exactly a backlog replay or a
+# fast-flapping agent) for FM_FAKE_STREAM_SECS seconds or until its stdout
+# write blocks, whichever comes first. Combined with a slow consumer on the
+# caller side, this reproduces the 2026-08-21 quiet-fleet incident shape
+# without a real herdr server: the drain must still end within the budget.
+make_streaming_fake_reader() {  # <dir> -> echoes reader path
+  local dir=$1 path="$1/streaming-reader.sh"
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
+  : > "$FM_FAKE_READER_READY_FILE"
+fi
+printf '%s\n' "${FM_FAKE_READER_ACK:-@subscribed}"
+end=$(( $(date +%s) + ${FM_FAKE_STREAM_SECS:-30} ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  printf 'wG:pQ\t\tworking\tclaude\n'
+done
+exit 0
+SH
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+test_wait_transition_saturated_stream_stays_within_budget() {
+  local dir state agent temp fb reader started elapsed rc
+  dir="$TMP_ROOT/wt-saturated"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_streaming_fake_reader "$dir")
+  # Budget 2s; the stream would run 30s if unbounded. A slow consumer drains at
+  # ~20 lines/s while the reader writes thousands/s, so the FIFO stays full -
+  # exactly the shape that made the old unbounded drain block for hours.
+  started=$(date +%s)
+  rc=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_STREAM_SECS=30 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ >/dev/null 2>&1; echo $?' "$ROOT" "$state")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 8 ] || fail "wait_transition must not outlive its budget under a saturated stream: took ${elapsed}s for a 2s budget"
+  [ "$rc" = 1 ] || [ "$rc" = 2 ] || fail "saturated-stream wait must end as a clean timeout (1) or fallback (2), got $rc"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a saturated-stream wait must still remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: a saturated event stream stays within its wait budget (quiet-fleet crash-loop regression)"
+}
+
+test_wait_transition_always_stops_reader() {
+  local dir state agent temp fb reader lines marker rc leaked
+  dir="$TMP_ROOT/wt-stop-reader"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  # A reader that would stream forever (never hits its own deadline within the
+  # test's patience): the caller MUST stop it itself once the budget expires.
+  reader=$(make_streaming_fake_reader "$dir")
+  leaked=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_STREAM_SECS=300 \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ >/dev/null 2>&1
+      caller_rc=$?
+      # budget (1s) + 2s slack + margin for the caller to stop its reader
+      sleep 4
+      n=$(pgrep -f "$2/streaming-reader.sh" | wc -l | tr -d " ")
+      printf "%s %s" "$caller_rc" "$n"
+    ' "$ROOT" "$state" "$dir")
+  rc=${leaked%% *}; n=${leaked#* }
+  [ "$n" = 0 ] || fail "wait_transition leaked its reader process after the budget expired ($n leaked)"
+  [ "$rc" = 1 ] || [ "$rc" = 2 ] || fail "wait_transition against a never-ending stream must end as clean timeout (1) or fallback (2), got $rc"
+  pass "fm_backend_herdr_wait_transition: stops its reader when the budget expires, never leaking it"
+}
+
+# --- watcher-level quiet-fleet regressions (2026-08-21 incident) ------------
+#
+# The mechanism-level tests above bound fm_backend_herdr_wait_transition in
+# isolation. The two tests below drive the REAL bin/fm-watch.sh loop (run as a
+# script, never sourced) against the same fake herdr CLI plus a saturating
+# streaming fake reader, with a shrunken grace window: (a) the watcher's
+# state/.last-watcher-beat must keep advancing across saturated event-wait
+# cycles while the watcher stays alive - the pre-fix unbounded drain wedged the
+# whole watcher inside its first saturated wait and the beat went stale past the
+# grace - and (b) a second bin/fm-watch.sh invocation, exactly what the away
+# daemon's restart child execs, must refuse cleanly against that healthy
+# singleton (exit 0, the non-wake "already running" line), never the rc=1
+# stale-heartbeat refusal that crash-looped the daemon on quiet fleets.
+
+# Portable mtime in epoch seconds (macOS and GNU stat differ; bin/fm-watch.sh
+# documents the same trap and why no fallback form is safe).
+if [ "$(uname)" = Darwin ]; then
+  herdr_test_stat_mtime() { stat -f %m "$1" 2>/dev/null; }
+else
+  herdr_test_stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
+
+watcher_process_alive() {  # <pid>: live and not an unreaped zombie
+  local stat
+  kill -0 "$1" 2>/dev/null || return 1
+  stat=$(ps -p "$1" -o stat= 2>/dev/null || true)
+  case "$stat" in Z*) return 1 ;; esac
+  return 0
+}
+
+mark_pr_check_migration_done() {  # <state>: skip the watcher startup migration scan
+  local state=$1
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+}
+
+wait_for_watcher_beat() {  # <state> <timeout-secs>
+  local beat="$1/.last-watcher-beat" deadline=$(( $(date +%s) + $2 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ -e "$beat" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+wait_for_beat_advance() {  # <beat-file> <from-mtime> <timeout-secs>
+  local beat=$1 from=$2 deadline=$(( $(date +%s) + $3 )) m
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    m=$(herdr_test_stat_mtime "$beat")
+    [ "$m" -gt "$from" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+FM_HERDR_WATCHER_PIDS=()
+FM_HERDR_WATCHER_LAST_PID=
+
+# quiet_fleet_watcher_setup <dir>: scratch state holding one busy herdr ship
+# window (a working agent keeps the watcher inside its poll loop instead of
+# exiting on a stale wake), the fake herdr CLI, and the saturating streaming
+# fake reader. Leaves the watcher env in FM_HERDR_WATCHER_ENV and the fakebin
+# dir in FM_HERDR_WATCHER_FAKEBIN for the launcher and the second-invocation
+# runner below.
+quiet_fleet_watcher_setup() {  # <dir>
+  local dir=$1 state="$1/state" agent="$1/agents" reader
+  mkdir -p "$state" "$agent"
+  FM_HERDR_WATCHER_FAKEBIN=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" working
+  reader=$(make_streaming_fake_reader "$dir")
+  printf 'window=sess:wG:pQ\nbackend=herdr\nkind=ship\nharness=claude\n' > "$state/quietfleet.meta"
+  mark_pr_check_migration_done "$state"
+  FM_HERDR_WATCHER_ENV=(
+    "FM_HOME=$dir"
+    "FM_STATE_OVERRIDE=$state"
+    "FM_POLL=1"
+    "FM_WATCHER_STALE_GRACE=10"
+    "FM_HEARTBEAT=999999"
+    "FM_HEARTBEAT_MAX=999999"
+    "FM_CHECK_INTERVAL=999999"
+    "FM_SIGNAL_GRACE=1"
+    "FM_EVENT_CAP_FAIL_MAX=999999"
+    "FM_BACKEND_HERDR_EVENTS_FORCE=1"
+    "FM_BACKEND_HERDR_EVENT_READER=$reader"
+    "FM_FAKE_STREAM_SECS=600"
+    "FM_FAKE_SESSION_NAME=sess"
+    "FM_FAKE_SOCKET=$dir/fake.sock"
+    "FM_FAKE_AGENT_DIR=$agent"
+    "FM_HERDR_LOG=$dir/herdr.log"
+  )
+}
+
+# launch_quiet_fleet_watcher <dir> <stdout-file> <stderr-file>: backgrounds the
+# REAL bin/fm-watch.sh as a direct child, then learns its pid from the lock the
+# watcher itself takes ($state/.watch.lock/pid - the same pid a second
+# invocation's "already running" line names). Exposed in
+# FM_HERDR_WATCHER_LAST_PID and tracked for the suite's kill-on-exit cleanup
+# below.
+launch_quiet_fleet_watcher() {  # <dir> <stdout-file> <stderr-file>
+  local state="$1/state" pid deadline=$(( $(date +%s) + 20 ))
+  quiet_fleet_watcher_setup "$1"
+  PATH="$FM_HERDR_WATCHER_FAKEBIN:$PATH" \
+    env "${FM_HERDR_WATCHER_ENV[@]}" "$ROOT/bin/fm-watch.sh" > "$2" 2> "$3" &
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$pid" ] && break
+    sleep 0.2
+  done
+  [ -n "$pid" ] \
+    || fail "watcher never took its lock (out: $(tail -5 "$2" 2>/dev/null); err: $(tail -5 "$3" 2>/dev/null))"
+  FM_HERDR_WATCHER_PIDS+=("$pid")
+  FM_HERDR_WATCHER_LAST_PID=$pid
+}
+
+# run_quiet_fleet_watcher_once: one foreground bin/fm-watch.sh invocation with
+# the same quiet-fleet env - the shape the away daemon's restart child execs
+# against an already-running singleton.
+run_quiet_fleet_watcher_once() {
+  PATH="$FM_HERDR_WATCHER_FAKEBIN:$PATH" \
+    env "${FM_HERDR_WATCHER_ENV[@]}" "$ROOT/bin/fm-watch.sh"
+}
+
+stop_quiet_fleet_watcher() {  # <pid>: kill the test's watcher child reliably
+  local pid=$1 deadline=$(( $(date +%s) + 5 ))
+  kill "$pid" 2>/dev/null || true
+  # A watcher blocked in a read defers its TERM trap until the read returns,
+  # so bound the grace before force-killing; the wait then always reaps.
+  while watcher_process_alive "$pid" && [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 0.2
+  done
+  if watcher_process_alive "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+fm_herdr_watcher_cleanup() {
+  local pid
+  for pid in "${FM_HERDR_WATCHER_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    stop_quiet_fleet_watcher "$pid"
+  done
+  fm_test_cleanup
+}
+trap fm_herdr_watcher_cleanup EXIT
+trap 'fm_herdr_watcher_cleanup; exit 130' INT
+trap 'fm_herdr_watcher_cleanup; exit 143' TERM
+
+test_watcher_beats_through_saturated_event_waits() {
+  local dir state out err wpid beat m1 m2 m3 a3
+  dir="$TMP_ROOT/watcher-saturated-beat"; state="$dir/state"
+  out="$dir/watch.out"; err="$dir/watch.err"
+  beat="$state/.last-watcher-beat"
+  launch_quiet_fleet_watcher "$dir" "$out" "$err"
+  wpid=$FM_HERDR_WATCHER_LAST_PID
+  wait_for_watcher_beat "$state" 15 \
+    || fail "watcher never touched its beat (out: $(tail -5 "$out" 2>/dev/null); err: $(tail -5 "$err" 2>/dev/null))"
+  m1=$(herdr_test_stat_mtime "$beat")
+  # Every advance below crosses a full saturated event-wait cycle: the wait
+  # runs its whole budget under the saturating stream (several FM_POLL=1
+  # budgets per cycle once the fail-closed fallback sleep is counted) before
+  # the watcher loops and touches the beat again.
+  wait_for_beat_advance "$beat" "$m1" 10 \
+    || fail "beat never advanced past mtime ${m1} within the grace: the watcher wedged inside its saturated event wait, the pre-fix quiet-fleet crash-loop shape (err: $(tail -5 "$err" 2>/dev/null))"
+  watcher_process_alive "$wpid" \
+    || fail "watcher died inside saturated event waits (err: $(tail -5 "$err" 2>/dev/null))"
+  m2=$(herdr_test_stat_mtime "$beat")
+  wait_for_beat_advance "$beat" "$m2" 10 \
+    || fail "beat advanced once then froze at mtime ${m2}: the watcher wedged inside a later saturated event wait (err: $(tail -5 "$err" 2>/dev/null))"
+  watcher_process_alive "$wpid" \
+    || fail "watcher died across later saturated event waits (err: $(tail -5 "$err" 2>/dev/null))"
+  m3=$(herdr_test_stat_mtime "$beat")
+  a3=$(( $(date +%s) - m3 ))
+  [ "$a3" -lt 10 ] || fail "beat went stale across saturated event waits (age ${a3}s against the 10s grace): the away daemon would judge this healthy watcher dead"
+  stop_quiet_fleet_watcher "$wpid"
+  pass "bin/fm-watch.sh keeps touching state/.last-watcher-beat across saturated herdr event waits (quiet-fleet crash-loop regression)"
+}
+
+test_second_watcher_invocation_refuses_cleanly_on_fresh_beat() {
+  local dir state out err wpid second second_rc m1 m2 a2
+  dir="$TMP_ROOT/watcher-restart-refuse"; state="$dir/state"
+  out="$dir/watch.out"; err="$dir/watch.err"
+  launch_quiet_fleet_watcher "$dir" "$out" "$err"
+  wpid=$FM_HERDR_WATCHER_LAST_PID
+  wait_for_watcher_beat "$state" 15 \
+    || fail "singleton watcher never touched its beat (err: $(tail -5 "$err" 2>/dev/null))"
+  m1=$(herdr_test_stat_mtime "$state/.last-watcher-beat")
+  # Exactly what the away daemon's restart child execs: a second full
+  # bin/fm-watch.sh invocation against the live singleton while its beat is
+  # fresh.
+  second=$(run_quiet_fleet_watcher_once 2>&1); second_rc=$?
+  [ "$second_rc" = 0 ] \
+    || fail "second watcher invocation must exit 0 against a healthy fresh-beat singleton, got rc=$second_rc: $second"
+  assert_contains "$second" "watcher: already running pid $wpid" \
+    "second watcher invocation must print the non-wake idle line naming the singleton pid"
+  assert_not_contains "$second" "heartbeat is stale" \
+    "second watcher invocation hit the rc=1 stale-heartbeat refusal that crash-looped the away daemon"
+  # The singleton must keep beating after the refused restart attempt.
+  wait_for_beat_advance "$state/.last-watcher-beat" "$m1" 8 \
+    || fail "singleton stopped beating after the refused restart (mtime stuck at ${m1}): the wedged-watcher shape the daemon crash-looped on"
+  watcher_process_alive "$wpid" \
+    || fail "singleton watcher died after the refused restart (err: $(tail -5 "$err" 2>/dev/null))"
+  m2=$(herdr_test_stat_mtime "$state/.last-watcher-beat")
+  a2=$(( $(date +%s) - m2 ))
+  [ "$a2" -lt 10 ] || fail "singleton beat went stale after the refused restart (age ${a2}s against the 10s grace)"
+  stop_quiet_fleet_watcher "$wpid"
+  pass "a second bin/fm-watch.sh invocation refuses cleanly against a fresh-beat singleton (daemon restart crash-loop regression)"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4658,3 +4939,7 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_wait_transition_saturated_stream_stays_within_budget
+test_wait_transition_always_stops_reader
+test_watcher_beats_through_saturated_event_waits
+test_second_watcher_invocation_refuses_cleanly_on_fresh_beat

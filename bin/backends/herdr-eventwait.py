@@ -35,7 +35,11 @@ Exit status:
 A non-zero exit tells the bash caller to fall back to plain polling for this
 cycle (the permanent fail-closed backstop), never to go silent.
 """
+import errno
+import io
 import json
+import os
+import select
 import socket
 import sys
 import time
@@ -43,6 +47,49 @@ import time
 CONNECT_TIMEOUT = 5.0
 ACK_TIMEOUT = 5.0
 RECV_CHUNK = 65536
+# Per-write select wait when the stdout pipe is full. Small so the overall
+# deadline stays responsive while a slow consumer (the bash caller's
+# line-by-line drain) frees pipe space.
+WRITE_POLL = 0.25
+
+
+def _emit_bounded(data, deadline):
+    """Write ALL of data to stdout, honoring an absolute monotonic deadline.
+
+    stdout is set non-blocking when it is a real pipe, so a full pipe raises
+    BlockingIOError instead of parking the process inside the kernel write
+    syscall - the failure mode the 2026-08-21 quiet-fleet incident exposed: a
+    subscribed backlog replay can fill the pipe faster than the bash caller
+    drains it, and a blocking write then outlives the wait budget
+    indefinitely, starving the watcher's liveness beacon. A stdout without a
+    real file descriptor (tests capturing into StringIO) falls back to a
+    single plain write, which cannot block. Returns True when everything was
+    written, False when the budget expired first (the caller ends its wait;
+    unwritten lines are a safe drop because the poll loop is the permanent
+    backstop).
+    """
+    try:
+        fd = sys.stdout.fileno()
+    except (AttributeError, ValueError, OSError, io.UnsupportedOperation):
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        return True
+    while data:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        _, writable, _ = select.select([], [fd], [], min(remaining, WRITE_POLL))
+        if not writable:
+            continue
+        try:
+            written = os.write(fd, data)
+        except BlockingIOError:
+            continue
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+        data = data[written:]
+    return True
 
 
 def _read_line(sock, buf, deadline):
@@ -121,11 +168,23 @@ def main(argv):
     if result.get("type") != "subscription_started":
         return 3
 
-    sys.stdout.write("@subscribed\n")
-    sys.stdout.flush()
+    # Bounded stdout writes for the whole streaming phase (see _emit_bounded):
+    # a blocking write on a full pipe could otherwise outlive the deadline.
+    try:
+        os.set_blocking(sys.stdout.fileno(), False)
+    except OSError:
+        pass
+    if not _emit_bounded(b"@subscribed\n", deadline):
+        return 0
 
-    # Stream projected events until the deadline or the server closes.
+    # Stream projected events until the deadline or the server closes. The
+    # deadline is re-checked on EVERY iteration and every stdout write is
+    # budget-bounded, so a stream that stays saturated (a pending-backlog
+    # replay, a fast-flapping agent) can never make this loop outlive the
+    # wait budget - the watcher's heartbeat depends on the wait returning.
     while True:
+        if time.monotonic() >= deadline:
+            return 0
         line, buf, outcome = _read_line(sock, buf, deadline)
         if line is None:
             return 0 if outcome == "timeout" else 4
@@ -142,8 +201,8 @@ def main(argv):
             _clean(data.get("agent_status") or ""),
             _clean(data.get("agent") or ""),
         )
-        sys.stdout.write("\t".join(fields) + "\n")
-        sys.stdout.flush()
+        if not _emit_bounded(("\t".join(fields) + "\n").encode("utf-8"), deadline):
+            return 0
 
 
 if __name__ == "__main__":

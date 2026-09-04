@@ -285,8 +285,12 @@ The watcher maps the pane back to the task and skips secondmate endpoints, decla
 The push path only shortens latency.
 Polling runs every cycle and remains the permanent fallback when protocol 16, the event schema, Python, connection, subscription, or repeated reader execution is unavailable.
 There is still one watcher process; the event reader is a bounded child of that watcher.
+Every enforced side of the wait - reader lifetime, subscription ack, and stream drain - is bounded by the caller's poll budget: the reader re-checks its deadline on each stream iteration and bounds every stdout write (a saturated backlog replay can otherwise park the process inside a blocking pipe write), and the bash side bounds its ack and drain reads with `read -t` and stops its reader the moment the budget expires under a stream that outruns it.
+The mid-wait level reconcile consumes the budget but is bounded only by its per-window `herdr agent get` CLI reads, which carry no deadline of their own.
+Edges dropped at the deadline are safe: the poll loop is the permanent backstop.
+An unbounded wait here starved the watcher's liveness beacon and crash-looped the away daemon's restarts on quiet fleets (2026-08-21 incident, negotiation-os mate home).
 
-`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-backend-herdr-eventwait.test.py` (including the saturated-stream budget regression), `tests/fm-backend-herdr.test.sh` (including the watcher-level saturated-wait beat and restart-refuse regressions), `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, budget bounds, watcher-level beat continuity, and polling fallback.
 
 ## Away-mode supervisor support
 
