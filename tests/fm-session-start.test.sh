@@ -19,6 +19,8 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - the live-artifact re-arm listing: absent when none are registered, listing
+#     every one with any failed watch, and read-only when the lock was refused
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1347,6 +1349,102 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- live artifacts: the session-local watches to re-arm ---------------------
+
+test_live_artifacts_absent_when_none_registered() {
+  local rec root home fakebin out
+  rec=$(new_world artifacts-none)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Live artifacts" "a home with no published artifacts grew an artifact subsection"
+
+  pass "the live-artifact subsection never appears in a home that has published none"
+}
+
+test_live_artifacts_listed_for_rearm() {
+  local rec root home fakebin out
+  rec=$(new_world artifacts-rearm)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-artifact.sh" register \
+    https://claude.ai/public/artifacts/fleet-standing --title "Fleet Standing" >/dev/null \
+    || fail "seeding a live artifact failed"
+  FM_HOME="$home" "$ROOT/bin/fm-artifact.sh" rearm \
+    https://claude.ai/public/artifacts/fleet-standing failed "watch refused by host" >/dev/null \
+    || fail "seeding a failed re-arm failed"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Live artifacts (data/artifacts.md)" "the live-artifact subsection is missing"
+  assert_contains "$out" "https://claude.ai/public/artifacts/fleet-standing" "the live artifact was not listed for re-arm"
+  assert_contains "$out" "Re-arm one on EACH artifact" "the digest did not ask for the watches to be re-armed"
+  assert_contains "$out" "fm-artifact.sh rearm <url> ok" "the digest did not name the command that records the outcome"
+  assert_contains "$out" "watch refused by host" "a watch that could not be restored was not surfaced in the digest"
+
+  pass "a session start lists every live artifact for re-arm and surfaces a watch that stayed broken"
+}
+
+test_live_artifacts_read_only_session_records_nothing() {
+  local rec root home fakebin holder_pid out
+  rec=$(new_world artifacts-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-artifact.sh" register \
+    https://claude.ai/public/artifacts/fleet-standing --title "Fleet Standing" >/dev/null \
+    || fail "seeding a live artifact failed"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "Live artifacts (data/artifacts.md)" "a read-only session hid the live artifacts entirely"
+  assert_contains "$out" "must not re-arm these" "a read-only session was not told to leave the re-arm alone"
+  assert_not_contains "$out" "Re-arm one on EACH artifact" "a read-only session was told to re-arm and record"
+
+  pass "a lock-refused session sees the live artifacts but is told the locked session owns re-arming them"
+}
+
+test_live_artifacts_unreadable_registry_is_loud() {
+  local rec root home fakebin out
+  rec=$(new_world artifacts-unreadable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-artifact.sh" register \
+    https://claude.ai/public/artifacts/fleet-standing --title "Fleet Standing" >/dev/null \
+    || fail "seeding a live artifact failed"
+  # A registry that exists but cannot be read must never be reported as a home
+  # with no artifacts: that is the silent loss this section exists to prevent.
+  chmod 000 "$home/data/artifacts.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  chmod 644 "$home/data/artifacts.md"
+
+  assert_contains "$out" "Live artifacts (data/artifacts.md)" "an unreadable registry silently vanished from the digest"
+  assert_contains "$out" "COULD NOT BE READ" "an unreadable registry was not reported as unreadable"
+  assert_contains "$out" "may be reaching nobody" "the digest did not say what an unread registry costs"
+
+  pass "a registry that exists but cannot be read is reported loudly, never as an empty section"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2587,6 +2685,10 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_live_artifacts_absent_when_none_registered
+test_live_artifacts_listed_for_rearm
+test_live_artifacts_read_only_session_records_nothing
+test_live_artifacts_unreadable_registry_is_loud
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

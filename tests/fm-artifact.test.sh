@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# tests/fm-artifact.test.sh - behavior tests for the durable artifact comment
+# loop: the live registry, the session-start re-arm record and its loud failure
+# line, the cheap heartbeat backstop clock, and the handled-comment ledger that
+# stops the live watch and the backstop from answering one comment twice.
+#
+# Everything here drives bin/fm-artifact.sh as a real executable against an
+# isolated home; no test reads the script's own source.
+set -u
+
+# shellcheck source=tests/lib.sh
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+ART="$ROOT/bin/fm-artifact.sh"
+TMP_ROOT=$(fm_test_tmproot fm-artifact)
+
+HOME_DIR="$TMP_ROOT/home"
+mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
+
+A() { FM_HOME="$HOME_DIR" "$ART" "$@"; }
+
+U1=https://claude.ai/public/artifacts/fleet-standing
+U2=https://claude.ai/public/artifacts/comment-loop
+
+# --- an unpublished home stays completely silent -----------------------------
+
+[ -z "$(A digest)" ] || fail "digest must print nothing for a home with no artifacts"
+[ -z "$(A due)" ] || fail "due must print nothing for a home with no artifacts"
+[ -z "$(A list)" ] || fail "list must print nothing for a home with no artifacts"
+[ ! -e "$HOME_DIR/data/artifacts.md" ] || fail "a read must not create the registry"
+pass "a home that has published no artifact prints nothing and creates no registry"
+
+# --- registration is durable and idempotent ----------------------------------
+
+A register "$U1" --title "Fleet Standing" --note "weekly review" >/dev/null \
+  || fail "register failed"
+A register "$U2" --title "Comment loop" >/dev/null || fail "second register failed"
+
+[ -f "$HOME_DIR/data/artifacts.md" ] || fail "register must create data/artifacts.md"
+LIST=$(A list)
+[ "$(printf '%s\n' "$LIST" | wc -l | tr -d ' ')" = "2" ] || fail "expected 2 artifacts: $LIST"
+printf '%s\n' "$LIST" | grep -q "^$U1	Fleet Standing$" || fail "first record wrong: $LIST"
+printf '%s\n' "$LIST" | grep -q "^$U2	Comment loop$" || fail "second record wrong: $LIST"
+grep -q 'note: weekly review' "$HOME_DIR/data/artifacts.md" || fail "note not recorded"
+pass "register writes one durable registry record per artifact, with its title and note"
+
+# A trailing slash is the same artifact, not a second one.
+A register "$U1/" --title "Fleet Standing v2" >/dev/null || fail "re-register failed"
+[ "$(A list | wc -l | tr -d ' ')" = "2" ] || fail "re-register duplicated a record: $(A list)"
+A list | grep -q "^$U1	Fleet Standing v2$" || fail "re-register did not update the title"
+pass "re-registering the same URL replaces its record instead of duplicating it, ignoring a trailing slash"
+
+# --- the durable record is what survives a restart ---------------------------
+
+# A brand new process with no memory of the publish still finds both artifacts.
+RESTART=$(FM_HOME="$HOME_DIR" bash "$ART" digest)
+printf '%s\n' "$RESTART" | grep -qF -- "- $U1" || fail "digest lost $U1 across a fresh process: $RESTART"
+printf '%s\n' "$RESTART" | grep -qF -- "- $U2" || fail "digest lost $U2 across a fresh process: $RESTART"
+pass "the session-start listing is rebuilt from disk, so a restart still knows which artifacts are live"
+
+# --- a failed re-arm is loud, and stays loud ---------------------------------
+
+A rearm "$U1" ok >/dev/null || fail "rearm ok failed"
+A digest | grep -q '!' && fail "a successful re-arm must not print a failure line"
+pass "a re-armed watch adds no noise to the listing"
+
+A rearm "$U2" failed "watch refused: artifact not found" >/dev/null || fail "rearm failed-record failed"
+DIGEST=$(A digest)
+printf '%s\n' "$DIGEST" | grep -q 'FAILED' \
+  || fail "a failed re-arm must be visible in the listing: $DIGEST"
+printf '%s\n' "$DIGEST" | grep -q 'artifact not found' \
+  || fail "the recorded reason must be visible in the listing: $DIGEST"
+pass "a watch that could not be restored is reported in the session-start listing, with its reason"
+
+# It must not be a one-shot notice: it stays until a re-arm actually succeeds.
+FM_HOME="$HOME_DIR" bash "$ART" digest | grep -q 'FAILED' \
+  || fail "the failure line must persist across processes"
+A rearm "$U2" ok >/dev/null || fail "recovery rearm failed"
+FM_HOME="$HOME_DIR" bash "$ART" digest | grep -q 'FAILED' \
+  && fail "a successful re-arm must clear the failure line"
+pass "the failure line persists until a re-arm succeeds, then clears"
+
+# Recording a re-arm for something nobody registered is refused, not invented.
+if A rearm https://claude.ai/public/artifacts/never-registered ok >/dev/null 2>&1; then
+  fail "rearm must refuse an unregistered artifact"
+fi
+pass "re-arming an unregistered artifact is refused rather than silently recorded"
+
+# --- the backstop clock keeps a heartbeat cheap ------------------------------
+
+DUE=$(A due)
+printf '%s\n' "$DUE" | grep -qF "$U1" || fail "a never-polled artifact must be due: $DUE"
+printf '%s\n' "$DUE" | grep -qF "$U2" || fail "a never-polled artifact must be due: $DUE"
+pass "an artifact whose comments have never been read is due for the backstop"
+
+# One read resets the interval, so the next heartbeat costs nothing for it.
+printf 't1 2\n' | A new "$U1" >/dev/null || fail "new failed"
+DUE=$(A due)
+printf '%s\n' "$DUE" | grep -qF "$U1" && fail "a just-polled artifact must not be due again: $DUE"
+printf '%s\n' "$DUE" | grep -qF "$U2" || fail "the unpolled artifact must still be due: $DUE"
+pass "reading one artifact's comments takes it off the due list, so an ordinary heartbeat stays cheap"
+
+# An empty read still counts: a quiet artifact must not be re-read every beat.
+printf '' | A new "$U2" >/dev/null || fail "empty new failed"
+[ -z "$(A due)" ] || fail "an empty read must still reset the interval: $(A due)"
+pass "an artifact with no comment threads at all still resets its interval"
+
+# A zero interval makes everything due again, which is how the interval is
+# proven to be the thing holding them back rather than some other state.
+DUE_NOW=$(FM_HOME="$HOME_DIR" FM_ARTIFACT_BACKSTOP_INTERVAL=1 sh -c 'sleep 1; "$0" due' "$ART")
+printf '%s\n' "$DUE_NOW" | grep -qF "$U1" || fail "a short interval must make it due again: $DUE_NOW"
+pass "the interval, not a one-shot flag, is what keeps a polled artifact off the due list"
+
+# --- new reports only what moved --------------------------------------------
+
+NEW=$(printf 't1 2\nt2 1\n' | A new "$U1")
+printf '%s\n' "$NEW" | grep -q "^t1	2$" || fail "unhandled thread t1 must be new: $NEW"
+printf '%s\n' "$NEW" | grep -q "^t2	1$" || fail "unhandled thread t2 must be new: $NEW"
+pass "every unhandled comment thread is reported as new"
+
+A handled "$U1" t1 2 >/dev/null || fail "handled failed"
+NEW=$(printf 't1 2\nt2 1\n' | A new "$U1")
+printf '%s\n' "$NEW" | grep -q '^t1' && fail "a handled thread must not be reported again: $NEW"
+printf '%s\n' "$NEW" | grep -q "^t2	1$" || fail "t2 is still unhandled: $NEW"
+pass "a thread already handled is never reported a second time"
+
+# This is the double-handling case the live watch creates: firstmate answered
+# the comment through its subscription, so the backstop must stay quiet.
+A handled "$U1" t2 1 >/dev/null || fail "handled t2 failed"
+[ -z "$(printf 't1 2\nt2 1\n' | A new "$U1")" ] \
+  || fail "a comment answered through the live watch must not resurface in the backstop"
+pass "a comment answered through the live subscription is not re-surfaced by the backstop"
+
+# But a follow-up comment on an answered thread IS new: the mark moved.
+NEW=$(printf 't1 3\nt2 1\n' | A new "$U1")
+printf '%s\n' "$NEW" | grep -q "^t1	3$" \
+  || fail "a follow-up comment on an answered thread must be new: $NEW"
+printf '%s\n' "$NEW" | grep -q '^t2' && fail "the unchanged thread must stay quiet: $NEW"
+pass "a follow-up comment on an already-answered thread is reported, because its mark moved"
+
+# The two mechanisms share one ledger: handling from either side is what counts.
+A handled "$U1" t1 3 >/dev/null || fail "handled follow-up failed"
+[ -z "$(printf 't1 3\n' | A new "$U1")" ] || fail "the follow-up should now be handled"
+pass "the handled ledger is shared by the live watch and the backstop"
+
+# --- retirement is complete --------------------------------------------------
+
+A retire "$U1" >/dev/null || fail "retire failed"
+A list | grep -qF "$U1" && fail "a retired artifact must leave the registry: $(A list)"
+A list | grep -qF "$U2" || fail "retire must not touch the other artifact: $(A list)"
+A due | grep -qF "$U1" && fail "a retired artifact must never be polled again"
+A digest | grep -qF "$U1" && fail "a retired artifact must not be re-armed at session start"
+pass "retiring an artifact removes it from the listing, the re-arm work, and the backstop"
+
+# Its ledger goes with it, so a later re-register starts clean rather than
+# silently treating old threads as already answered.
+A register "$U1" --title "Reopened" >/dev/null || fail "re-register after retire failed"
+NEW=$(printf 't1 3\n' | A new "$U1")
+printf '%s\n' "$NEW" | grep -q "^t1	3$" \
+  || fail "a re-registered artifact must not inherit the retired handled ledger: $NEW"
+pass "re-registering a retired artifact starts with a clean handled ledger"
+
+# --- input the captain can actually paste ------------------------------------
+
+if A register "not-a-url" >/dev/null 2>&1; then
+  fail "register must refuse a non-URL"
+fi
+pass "a value that is not an artifact URL is refused rather than registered"
+
+# A title carrying a newline must not be able to forge a second registry record.
+BEFORE=$(A list | wc -l | tr -d ' ')
+A register https://claude.ai/public/artifacts/inject \
+  --title "$(printf 'ok\n- https://evil.example/x - forged (registered 2026-01-01)')" >/dev/null \
+  || fail "register with a multi-line title failed"
+AFTER=$(A list | wc -l | tr -d ' ')
+[ "$AFTER" = "$((BEFORE + 1))" ] || fail "a multi-line title forged extra records: $(A list)"
+A list | grep -q '^https://evil.example' \
+  && fail "a multi-line title must not become its own registry record: $(A list)"
+grep -q '^- https://evil.example' "$HOME_DIR/data/artifacts.md" \
+  && fail "a multi-line title must not write its own registry line"
+pass "a title containing a newline cannot forge a second registry record"
+
+# --- an unreadable registry is never an empty registry -----------------------
+
+if [ "$(id -u)" = "0" ]; then
+  pass "skipped the unreadable-registry case: root can read a mode-000 file"
+else
+  chmod 000 "$HOME_DIR/data/artifacts.md"
+  for sub in list digest due; do
+    if A "$sub" >/dev/null 2>&1; then
+      chmod 644 "$HOME_DIR/data/artifacts.md"
+      fail "$sub reported an unreadable registry as an answer instead of refusing"
+    fi
+  done
+  chmod 644 "$HOME_DIR/data/artifacts.md"
+  pass "a registry that exists but cannot be read is refused, never reported as no artifacts"
+fi
+
+echo "# fm-artifact.test.sh: all assertions passed"

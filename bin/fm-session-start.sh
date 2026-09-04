@@ -45,7 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       the live-artifact watches to re-arm (bin/fm-artifact.sh):
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -874,6 +875,41 @@ if fm_pf_relay_active "$FM_HOME" \
     printf 'Reconcile terminal results with %s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
+  fi
+fi
+
+# Artifacts the captain still comments on. An artifact watch is SESSION-LOCAL:
+# it dies with the session that armed it, so after a restart nothing is
+# subscribed and a comment the captain leaves reaches nobody. That is why the
+# live set is read from disk here rather than from conversation memory, and why
+# this listing asks for the watches to be re-armed rather than merely reporting
+# them. bin/fm-artifact.sh owns the registry and prints nothing at all for a
+# home that has published none, so the subsection never appears until it can.
+# A registry that cannot be read is NOT the same as a home with no artifacts, and
+# reporting it as one is exactly the silent loss this section exists to prevent.
+ARTIFACT_DIGEST=$("$SCRIPT_DIR/fm-artifact.sh" digest 2>/dev/null)
+ARTIFACT_RC=$?
+if [ "$ARTIFACT_RC" -ne 0 ]; then
+  if [ -e "$DATA/artifacts.md" ]; then
+    subsection "Live artifacts (data/artifacts.md)"
+    printf 'COULD NOT BE READ - bin/fm-artifact.sh digest exited %s.\n' "$ARTIFACT_RC"
+    printf 'This home HAS a live-artifact registry, so watches may be owed and comments on\n'
+    printf 'those artifacts may be reaching nobody. Read it with %s/bin/fm-artifact.sh list\n' "$FM_ROOT"
+    printf 'before treating this section as empty.\n'
+  fi
+elif [ -n "$ARTIFACT_DIGEST" ]; then
+  subsection "Live artifacts (data/artifacts.md)"
+  printf '%s\n' "$ARTIFACT_DIGEST"
+  if [ "$READ_ONLY" -eq 1 ]; then
+    printf '\nThis session did not acquire the fleet lock, so it must not re-arm these\n'
+    printf 'watches or record an outcome. The session holding the lock owns that.\n'
+  else
+    printf '\nA watch on an artifact does not survive a restart. Re-arm one on EACH artifact\n'
+    printf 'above now, then record what happened so a watch that could not be restored is\n'
+    printf 'still visible next time: %s/bin/fm-artifact.sh rearm <url> ok,\n' "$FM_ROOT"
+    printf 'or rearm <url> failed "<reason>".\n'
+    printf 'A "!" line above is a watch that failed to restore and has stayed broken since.\n'
+    printf 'Load artifact-comment-loop for the re-arm and comment-backstop procedure.\n'
   fi
 fi
 
