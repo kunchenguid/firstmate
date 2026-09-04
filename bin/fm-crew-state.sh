@@ -302,11 +302,14 @@ log_reports_ci_ready() {
 # position is what says which steps ran after which.
 #
 # A row belongs to that table when it sits INSIDE it: after the `steps[N]{...}:`
-# header and indented deeper than it, up to the first line that dedents back to
-# the header's own level. Every other table `axi status` renders is therefore
-# excluded structurally, whatever its rows happen to contain - the findings
-# table, whose first column is a finding id that can read `pr` exactly like a
-# step name, and the separate
+# header and indented deeper than it, up to the first non-blank line that
+# dedents back to the header's own level or shallower. A blank line does not
+# close the section, and a deeper line carrying no leading `<field>,` is skipped
+# rather than emitted, so neither blank spacing nor a wrapped non-row line can
+# end the table early or be read as a step. Every other table `axi status`
+# renders is therefore excluded structurally, whatever its rows happen to
+# contain - the findings table, whose first column is a finding id that can
+# read `pr` exactly like a step name, and the separate
 # active_steps{step,status,active_for,last_activity,agent_pid,round} table an
 # ACTIVE run also renders. Nothing is lost by rejecting the latter, because the
 # same output's steps table still carries that step as `ci,running,0,0`.

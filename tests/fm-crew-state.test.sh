@@ -397,7 +397,7 @@ run:
 EOF
 }
 
-# The same ci-monitoring run as run_ci_monitoring above, rendered the way
+# The same ci-monitoring scenario as run_ci_monitoring above, rendered the way
 # `axi status` actually renders a run while a step is UNDERWAY: the
 # steps[N]{step,status,findings,duration_ms} table carrying the running step as
 # `ci,running,0,0`, followed by the second
@@ -407,9 +407,10 @@ EOF
 # (eb4e379, built 2026-08-29), sampled on three different running steps - three
 # distinct step names, not three runs. The durations observed across those
 # samples span both second scale (7s, 18s, 19s) and minute scale (2m34s, 3m41s,
-# both on a running test step), so the `1m40s` below is a duration string that
-# version actually renders rather than a plausible-looking one invented to fill
-# the column; only the step name and the durations differ here.
+# both on a running test step), so the `1m40s` below is written in a duration
+# form that version actually renders rather than a plausible-looking one
+# invented to fill the column; the step name and the exact durations are the
+# only things that differ from those captures.
 run_ci_monitoring_with_active_steps() {  # <branch>
   cat <<EOF
 run:
