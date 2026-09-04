@@ -362,17 +362,78 @@ fm_telegram_utf8_truncate() {  # <character-limit> <byte-limit>
   printf '%s' "$value"
 }
 
+_fm_telegram_token_core() {  # <token>
+  local value=$1 first last
+  while [ -n "$value" ]; do
+    first=${value:0:1}
+    case "$first" in [[:alnum:]_./-]) break ;; esac
+    value=${value:1}
+  done
+  while [ -n "$value" ]; do
+    last=${value: -1}
+    case "$last" in [[:alnum:]_./-]) break ;; esac
+    value=${value%?}
+  done
+  printf '%s' "$value"
+}
+
+_fm_telegram_internal_name() {  # <name>
+  case "$1" in
+    child|task|fingerprint|key|mode|yolo|harness|backend|window|worktree|branch|report|pane|session) return 0 ;;
+  esac
+  return 1
+}
+
+_fm_telegram_internal_value() {  # <value>
+  case "$1" in
+    fm/*|claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse) return 0 ;;
+  esac
+  return 1
+}
+
+_fm_telegram_scrub_token() {  # <token>
+  local token=$1 name='' separator='' value core
+  core=$(_fm_telegram_token_core "$token")
+  if [[ "$core" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  case "$token" in
+    *=*) name=${token%%=*}; separator='='; value=${token#*=} ;;
+    *:*) name=${token%%:*}; separator=':'; value=${token#*:} ;;
+    *) value=$token ;;
+  esac
+  if [ -n "$separator" ]; then
+    name=$(_fm_telegram_token_core "$name")
+    core=$(_fm_telegram_token_core "$value")
+    if [[ "$core" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+      printf '%s' "$token"
+      return 0
+    fi
+    _fm_telegram_internal_name "$name" && return 0
+    case "$core" in /*) printf '%s%s' "$name" "$separator"; return 0 ;; esac
+    if _fm_telegram_internal_value "$core"; then
+      printf '%s%s' "$name" "$separator"
+    else
+      printf '%s' "$token"
+    fi
+    return 0
+  fi
+  case "$core" in /*) return 0 ;; esac
+  _fm_telegram_internal_value "$core" && return 0
+  printf '%s' "$token"
+}
+
 fm_telegram_scrub() {  # <text>
-  printf '%s' "$1" \
-    | LC_ALL=C tr '\t\r\n' '   ' \
-    | LC_ALL=C sed -E \
-      -e 's#(^|[[:space:]])(child|task|fingerprint|key|mode|yolo|harness|backend|window|worktree|branch|report|pane|session)=[^[:space:]]*#\1#g' \
-      -e 's#\(/[^)]*\)##g' \
-      -e 's#(^|[[:space:]([{,;])(/[^[:space:])\]},;]*)#\1#g' \
-      -e 's#(^|[^[:alnum:]_./:-])fm/[A-Za-z0-9._/-]+#\1#g' \
-      -e 's#(^|[^[:alnum:]_./-])(claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse)([^[:alnum:]_./-]|$)#\1\3#g' \
-      -e 's/[[:space:]]+/ /g' \
-      -e 's/^ //' -e 's/ $//' \
+  local folded token scrubbed output=''
+  local -a tokens=()
+  folded=$(printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ')
+  read -r -a tokens <<< "$folded"
+  for token in "${tokens[@]}"; do
+    scrubbed=$(_fm_telegram_scrub_token "$token")
+    [ -z "$scrubbed" ] || output="${output}${output:+ }$scrubbed"
+  done
+  printf '%s' "$output" \
     | fm_telegram_utf8_truncate "$FM_TELEGRAM_FIELD_MAX" "$FM_TELEGRAM_FIELD_BYTES_MAX"
 }
 

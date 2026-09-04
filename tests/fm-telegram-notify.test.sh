@@ -544,23 +544,25 @@ test_unreadable_configured_secret_file_refuses_queue_and_send() {
 }
 
 test_internal_identifiers_do_not_reach_a_card() {
-  local dir card out
-  dir=$(make_home scrub)
-  report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
-    "project=alpha" \
-    "note=build failed (/home/captain/wt/alpha) on branch fm/task-x under claude; details https://github.com/codex/repo/issues/1 with harness=claude mode=no-mistakes key=child-outcome-t1 branch=fm/task-x" \
-    >/dev/null 2>&1 || true
-  card=$(only_card "$dir")
-  grep -Fq '/home/captain' "$card" && fail "a card carried an absolute worktree path"
-  grep -Fq 'harness=' "$card" && fail "a card carried a harness name"
-  grep -Fq 'mode=' "$card" && fail "a card carried a delivery mode"
-  grep -Fq 'key=' "$card" && fail "a card carried a decision key"
-  grep -Fq 'branch=' "$card" && fail "a card carried a branch name"
-  grep -Fq 'fm/task-x' "$card" && fail "a card carried a bare branch ref"
-  grep -Fq 'claude' "$card" && fail "a card carried a bare harness name"
-  grep -Fq 'build failed on branch' "$card" || fail "scrubbing removed the readable part of the note"
-  grep -Fq 'https://github.com/codex/repo/issues/1' "$card" \
-    || fail "scrubbing damaged a URL inside prose"
+  local input expected out actual label
+  while IFS='|' read -r label input expected; do
+    out=$(render failed "project=alpha" "note=$input") \
+      || fail "$label did not render"
+    actual=${out##*$'\n'}
+    [ "$actual" = "$expected" ] \
+      || fail "$label scrubbed to '$actual' instead of '$expected'"
+  done <<'CASES'
+canonical URL|See https://github.com/codex/repo/pull/7|See https://github.com/codex/repo/pull/7
+parenthesized URL|See https://example.test/(draft)/details|See https://example.test/(draft)/details
+whitespace path|artifact at /home/captain/private/result failed|artifact at failed
+parenthesized path|build failed (/home/captain/private/result) today|build failed today
+quoted path|build failed "/home/captain/private/result" today|build failed today
+name value path|artifact=/home/captain/private/result missing|artifact= missing
+quoted colon path|failed:"/home/captain/private/result" today|failed: today
+bare branch|branch fm/task-x broke|branch broke
+bare harness|ran under claude today|ran under today
+ordinary prose|the ordinary build completed cleanly|the ordinary build completed cleanly
+CASES
   out=$(render pr-ready "project=alpha" "url=https://github.com/codex/repo/pull/7") \
     || fail "a PR URL containing a harness name would not render"
   grep -Fq 'https://github.com/codex/repo/pull/7' <<< "$out" \
@@ -569,7 +571,7 @@ test_internal_identifiers_do_not_reach_a_card() {
     || fail "a landed URL containing a harness name would not render"
   grep -Fq 'https://github.com/codex/repo/pull/7' <<< "$out" \
     || fail "the landed card damaged its canonical URL"
-  pass "internal identifiers are scrubbed while paths and canonical URLs stay safe"
+  pass "structural scrubbing preserves URLs and prose while removing internal identifiers"
 }
 
 test_pr_card_identity_tracks_the_canonical_pr() {
