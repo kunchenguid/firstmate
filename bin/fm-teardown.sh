@@ -139,10 +139,13 @@
 #     committed its fix round in its own repo and the task copy never fetched
 #     it - attribution falls to the same lib's shared
 #     fm_nm_runs_status_for_worktree ledger rule, whose anchored continuation
-#     recognition is the only remaining path and which refuses every row shape
-#     it cannot prove (observed 2026-09-03: a run parked at a post-CI gate
-#     after fix rounds advanced its head past the submitted head stayed parked
-#     forever once the task was cleaned up). A run already terminal
+#     recognition is the only remaining path, which refuses every row shape
+#     it cannot prove, and which authorizes the abort only for an explicitly
+#     active (`running`) proved continuation - a terminal newest word is
+#     finished history, never an abort authorization (observed 2026-09-03: a
+#     run parked at a post-CI gate after fix rounds advanced its head past
+#     the submitted head stayed parked forever once the task was cleaned up).
+#     A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
@@ -1548,11 +1551,15 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
     # never fetched it - the ONE shared runs-ledger rule in
     # bin/fm-nm-run-lib.sh owns the only remaining recognition, and it prints
     # nothing for any ledger shape it cannot prove, so the run stays
-    # untouched unless the ledger proves this exact continuation.
+    # untouched unless the ledger proves this exact continuation. Cleanup
+    # consumes only an explicitly active (`running`) proved word: a terminal
+    # newest row is finished history, never this parked run's abort
+    # authorization (the read path classifies the same owner's answer; the
+    # abort here must never fire for a run that already ended).
     [ -n "$run_head" ] || return 1
     [ -z "$(fm_nm_resolve_commit "$wt" "$run_head")" ] || return 1
     ledger=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
-    [ -n "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger")" ] || return 1
+    [ "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger")" = running ] || return 1
   fi
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1

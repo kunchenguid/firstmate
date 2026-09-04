@@ -112,9 +112,11 @@ SH
   # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
   # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
   # step is then a no-op), `axi abort` appends one line to
-  # FM_FAKE_NM_ABORT_LOG when set, and the top-level `runs` listing answers
+  # FM_FAKE_NM_ABORT_LOG when set, the top-level `runs` listing answers
   # FM_FAKE_NM_RUNS_LIST verbatim (the real `no-mistakes runs --limit N` is
-  # plain text with no run id and no quoting - see the ledger fixtures below).
+  # plain text with no run id and no quoting - see the ledger fixtures below),
+  # and `runs` appends its own invocation to FM_FAKE_NM_RUNS_LOG when set, so
+  # a test can prove whether the ledger fallback ever engaged.
   # This keeps every case hermetic - without it, `command -v no-mistakes`
   # would fall through to whatever real binary happens to be on the test
   # runner's own PATH. Tests exercising the run-abort path override
@@ -154,6 +156,7 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    [ -z "${FM_FAKE_NM_RUNS_LOG:-}" ] || printf 'runs %s\n' "$*" >> "$FM_FAKE_NM_RUNS_LOG"
     printf '%s\n' "${FM_FAKE_NM_RUNS_LIST:-}" ;;
 esac
 exit 0
@@ -2307,6 +2310,41 @@ EOF
   pass "a parked run the pipeline advanced past the task copy is still concluded from the runs ledger, not orphaned"
 }
 
+# Counterfactual twin of the unfetched defect above: the SAME parked-run shape
+# with the pipeline's advanced fix head FETCHED into the task copy (objects
+# only - no ref moves) resolves through the strict object-local rule alone,
+# because a fix round's commits descend from this worktree's submitted HEAD.
+# With an EMPTY ledger, teardown must still abort - and must never query the
+# ledger at all - proving the fallback stays dormant whenever the run head's
+# object is present locally (no ledger dependency on the strict-rule path).
+test_parked_run_advanced_head_locally_fetched_is_still_aborted() {
+  local case_dir rc advanced_short
+  case_dir=$(make_case parked-run-advanced-fetched)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  # The one changed condition vs the defect case: fetch the fix commits into
+  # the project clone's object store (shared with the task worktree) without
+  # moving any ref, so fm_nm_resolve_commit sees the head again.
+  git -C "$case_dir/project" fetch -q "$case_dir/pipeline-clone" fm/task-x1
+  [ -n "$(git -C "$case_dir/wt" rev-parse --verify --quiet "${advanced_short}^{commit}" 2>/dev/null)" ] \
+    || fail "parked-run-advanced-fetched: fixture broke - the pipeline head never reached the task copy"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="" \
+  FM_FAKE_NM_RUNS_LOG="$case_dir/nm-runs.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-advanced-fetched: teardown should still succeed"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-advanced-fetched: teardown did not abort the parked run the strict object-local rule binds"
+  assert_absent "$case_dir/nm-runs.log" \
+    "parked-run-advanced-fetched: the ledger fallback fired even though the advanced head resolves locally"
+  pass "an advanced head present locally aborts through the strict rule alone - the ledger fallback stays dormant"
+}
+
 # No anchor: the unresolvable active row is the branch's ONLY row, so nothing
 # proves the run ever touched this worktree's head - a branch-name coincidence
 # or an arbitrary daemon-side run must not be concluded.
@@ -2390,6 +2428,42 @@ EOF
   assert_absent "$case_dir/nm-abort.log" \
     "parked-run-terminal-unfetched: teardown concluded a run from a terminal unfetched row"
   pass "a terminal unfetched-head row is stale history and never concludes a run"
+}
+
+# The crafted d15 boundary, tightened deliberately: the axi-reported head is
+# unresolvable and the branch's newest ledger row is TERMINAL at exactly this
+# worktree's head - a perfectly anchored, already-finished run. A finished run
+# is history, so the ledger fallback authorizes cleanup only when its proved
+# answer is the explicitly active word (`running`): a terminal newest row,
+# even anchored at this head, never authorizes an abort. The runs log proves
+# the fallback actually engaged, so the refusal is this tightened boundary
+# and not an earlier guard.
+test_parked_run_terminal_newest_row_at_own_head_is_never_aborted() {
+  local case_dir rc advanced_short anchor_short
+  case_dir=$(make_case parked-run-terminal-newest-at-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-terminal-newest-at-head"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/other-task aaaaaaa 2026-09-03 22:10)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-03 06:36)
+EOF
+)" \
+  FM_FAKE_NM_RUNS_LOG="$case_dir/nm-runs.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-terminal-newest-at-head: teardown should still succeed"
+  assert_present "$case_dir/nm-runs.log" \
+    "parked-run-terminal-newest-at-head: fixture broke - the ledger fallback never engaged"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-terminal-newest-at-head: teardown aborted a run whose newest anchored ledger row is terminal"
+  pass "a terminal newest row anchored at this worktree's head never authorizes an abort"
 }
 
 # The branch's newest row resolves in this copy to a head that DIVERGED from
@@ -3060,9 +3134,11 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
+test_parked_run_advanced_head_locally_fetched_is_still_aborted
 test_parked_advanced_run_without_anchor_is_never_aborted
 test_parked_advanced_run_ancestor_anchor_is_never_aborted
 test_parked_terminal_unfetched_row_is_never_aborted
+test_parked_run_terminal_newest_row_at_own_head_is_never_aborted
 test_parked_run_behind_diverged_newer_row_is_never_aborted
 test_parked_advanced_run_ambiguous_rows_are_never_aborted
 test_ledger_proven_continuation_never_aborts_active_run
