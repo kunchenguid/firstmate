@@ -294,6 +294,8 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_NUMBER=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  # Recognized metadata keys may be written on either side of pr= as writers evolve.
+  # Unknown keys after pr= remain invalid so trailing record data cannot bypass this binding.
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       pr=*)
@@ -310,12 +312,10 @@ fm_pr_metadata_identity_parse() {
         seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
+        value=${line#pr_head=}
+        fm_pr_head_valid "$value" || post_pr_invalid=1
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|control_relaunch_tx=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
