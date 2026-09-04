@@ -374,7 +374,9 @@ export default function (pi: ExtensionAPI) {
     const names = contested.map((tool) => `"${tool.name}"`).join(", ");
     const plural = contested.length > 1;
     ui.notify(
-      `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
+      plural
+        ? `Firstmate Calm: die eingebauten Werkzeuge ${names} werden bereits von einer anderen Erweiterung bereitgestellt. Calm wirkt dafür in dieser Sitzung möglicherweise nicht vollständig.`
+        : `Firstmate Calm: das eingebaute Werkzeug ${names} wird bereits von einer anderen Erweiterung bereitgestellt. Calm wirkt dafür in dieser Sitzung möglicherweise nicht vollständig.`,
       "warning",
     );
     for (const tool of contested) {
@@ -475,7 +477,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("calm", {
-    description: "Toggle Firstmate's supported conversation-only transcript presentation.",
+    description: "Schaltet Firstmates Calm-Gesprächsdarstellung um.",
     handler: async (_args, ctx) => {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);

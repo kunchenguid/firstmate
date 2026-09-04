@@ -611,15 +611,23 @@ for (const name of ["read", "edit", "write", "grep", "find", "ls"]) {
 }
 
 // Part C: a single, prominent, user-facing warning naming the contested tool, not
-// merely a console diagnostic.
+// merely a console diagnostic. Singular German wording is part of the captain-facing
+// contract (plural coverage lives in test_calm_plural_contested_tools_warning).
 if (notifications.length !== 1) {
   throw new Error(`expected exactly one contested-tool notification, saw ${JSON.stringify(notifications)}`);
 }
 if (notifications[0].type !== "warning") {
   throw new Error(`contested-tool notification was not type "warning": ${JSON.stringify(notifications[0])}`);
 }
-if (!notifications[0].message.includes("bash") || !notifications[0].message.toLowerCase().includes("calm")) {
-  throw new Error(`contested-tool notification did not name the tool clearly: ${JSON.stringify(notifications[0])}`);
+const singularWarning = notifications[0].message;
+if (
+  !singularWarning.includes('"bash"') ||
+  !singularWarning.includes("das eingebaute Werkzeug") ||
+  !singularWarning.includes("wird bereits von einer anderen Erweiterung bereitgestellt") ||
+  singularWarning.includes("die eingebauten Werkzeuge") ||
+  singularWarning.includes("werden bereits")
+) {
+  throw new Error(`contested-tool notification missed singular German wording: ${JSON.stringify(notifications[0])}`);
 }
 const sawBashDiagnostic = diagnostics.some((line) => line.includes("bash"));
 if (!sawBashDiagnostic) {
@@ -654,6 +662,149 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm activation/collision/regression-bound path failed: $out"
   [ -z "$out" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
   pass "Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse"
+}
+
+test_calm_plural_contested_tools_warning() {
+  local fixture out output_file status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm plural contested warning test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/plural-contested-warning"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home/config"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    FM_HOME="$fixture/home" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const foreignPath = fileURLToPath(pathToFileURL(`${process.cwd()}/foreign-owner.ts`).href);
+const foreignBash = {
+  name: "bash",
+  label: "Foreign bash",
+  description: "Foreign bash",
+  parameters: { type: "object", properties: {} },
+  async execute() {
+    return { content: [{ type: "text", text: "bash" }], details: {}, isError: false };
+  },
+};
+const foreignGrep = {
+  name: "grep",
+  label: "Foreign grep",
+  description: "Foreign grep",
+  parameters: { type: "object", properties: {} },
+  async execute() {
+    return { content: [{ type: "text", text: "grep" }], details: {}, isError: false };
+  },
+};
+
+const registry = new Map([
+  ["bash", { tool: foreignBash, ownerPath: foreignPath }],
+  ["grep", { tool: foreignGrep, ownerPath: foreignPath }],
+]);
+const notifications = [];
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+const handlers = new Map();
+let calmCommand;
+const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  registerTool(tool) {
+    if (!registry.has(tool.name)) {
+      registry.set(tool.name, { tool, ownerPath: extPath });
+    }
+  },
+  getAllTools() {
+    return Array.from(registry.entries()).map(([name, { ownerPath }]) => ({
+      name,
+      sourceInfo: { source: "extension", path: ownerPath },
+    }));
+  },
+};
+
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?plural=${Date.now()}`);
+extension.default(pi);
+if (!calmCommand) {
+  console.error = originalConsoleError;
+  throw new Error("Calm did not register /calm");
+}
+
+await calmCommand.handler("", {
+  ui: {
+    getEditorText: () => "",
+    getToolsExpanded: () => false,
+    onTerminalInput: () => () => {},
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded() {},
+    setWorkingVisible() {},
+    notify(message, type) {
+      notifications.push({ message, type });
+    },
+  },
+});
+console.error = originalConsoleError;
+
+if (notifications.length !== 1) {
+  throw new Error(`expected exactly one plural contested-tool notification, saw ${JSON.stringify(notifications)}`);
+}
+if (notifications[0].type !== "warning") {
+  throw new Error(`plural contested-tool notification was not type "warning": ${JSON.stringify(notifications[0])}`);
+}
+const pluralWarning = notifications[0].message;
+if (
+  !pluralWarning.includes('"bash"') ||
+  !pluralWarning.includes('"grep"') ||
+  !pluralWarning.includes("die eingebauten Werkzeuge") ||
+  !pluralWarning.includes("werden bereits von einer anderen Erweiterung bereitgestellt") ||
+  pluralWarning.includes("das eingebaute Werkzeug") ||
+  pluralWarning.includes(" wird bereits ")
+) {
+  throw new Error(`plural contested-tool notification missed German plural wording: ${JSON.stringify(notifications[0])}`);
+}
+if (registry.get("bash")?.tool !== foreignBash || registry.get("grep")?.tool !== foreignGrep) {
+  throw new Error("Calm replaced a foreign contested built-in during the plural collision path");
+}
+const sawBashDiagnostic = diagnostics.some((line) => line.includes("bash"));
+const sawGrepDiagnostic = diagnostics.some((line) => line.includes("grep"));
+if (!sawBashDiagnostic || !sawGrepDiagnostic) {
+  throw new Error(`expected console diagnostics naming both skipped built-ins; saw: ${JSON.stringify(diagnostics)}`);
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm plural contested warning path failed: $out"
+  [ -z "$out" ] || fail "Pi calm plural contested warning test printed output: $out"
+  pass "Calm's first activation with multiple contested built-ins emits one German plural warning naming each contested tool and leaves those foreign registrations intact"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -797,7 +948,7 @@ if (handlers.has("input")) {
 }
 if (
   calmCommand.description !==
-  "Toggle Firstmate's supported conversation-only transcript presentation."
+  "Schaltet Firstmates Calm-Gesprächsdarstellung um."
 ) {
   throw new Error(`unexpected calm command description: ${calmCommand.description}`);
 }
@@ -3971,6 +4122,7 @@ test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
+test_calm_plural_contested_tools_warning
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
 test_operational_followup_turn_e2e

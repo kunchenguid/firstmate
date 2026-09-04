@@ -20,6 +20,19 @@ A digest/build invocation is operationally read-only apart from observational re
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
+## Sprache (Captain)
+
+Chat-Digest und Dateibericht ausschließlich auf Deutsch mit echten Umlauten.
+Anrede mindestens einmal: Kapitän.
+Die vier Abschnittsüberschriften bleiben Englisch (Contract).
+Dateibericht-Titel bei Morgenbrief: nur „Morgenlage“ (kein englisches Morning status).
+Leere Abschnitte auf Deutsch rendern:
+
+- Captain's Call: „Derzeit brauchst du keine Aktion, Kapitän.“
+- Recently Landed: „In der aktuellen Baseline gibt es keine frischen Abschlüsse.“
+- Underway: „Nichts ist unterwegs.“
+- Charted Next: „Nichts steht in der Warteschlange.“
+
 ## Invocation modes
 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
@@ -73,7 +86,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    If today's file already exists, delete it first, then create a new file from scratch.
    This is the only file-mode write allowed by the skill.
    The detailed report includes:
-   - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
+   - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use „Morgenlage“ only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
@@ -125,13 +138,13 @@ This skill is the one owner of the `/bearings` chat-response format; the snapsho
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
 1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
-   Empty-state: "Nothing needs your action right now."
+   Empty-state (Deutsch): „Derzeit brauchst du keine Aktion, Kapitän.“
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
-   Empty-state: "No recent completions are in the current baseline."
+   Empty-state (Deutsch): „In der aktuellen Baseline gibt es keine frischen Abschlüsse.“
 3. **Underway** - live work progressing on its own, one line of current state per direct report.
-   Empty-state: "Nothing is underway."
+   Empty-state (Deutsch): „Nichts ist unterwegs.“
 4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
-   Empty-state: "Nothing is queued."
+   Empty-state (Deutsch): „Nichts steht in der Warteschlange.“
 
 Rules that keep the contract unambiguous:
 
