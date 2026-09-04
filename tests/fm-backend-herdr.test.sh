@@ -3035,6 +3035,84 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+# --- self-hosted native agent-state (the away-mode delivery defect) ----------
+#
+# Regression for fm-afk-inject-never-delivers. Herdr's native `working` reports
+# that SOMETHING is running in the pane, not that the AGENT is mid-turn, so a
+# reader that is ITSELF that something (an away-mode daemon running as a
+# background job of the agent it injects into) is reading its own reflection.
+# fm_backend_herdr_agent_status_raw owns that boundary once for every consumer.
+
+test_agent_status_raw_masks_working_for_a_self_hosted_pane() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/raw-self-hosted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_status_raw default w1:p2' "$ROOT" )
+  [ -z "$out" ] || fail "a self-hosted pane's native working is the reader's own reflection and must carry no agent status, got '$out'"
+  rm -f "$resp/.count"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_classify_agent_status "$(fm_backend_herdr_agent_status_raw default w1:p2)"' "$ROOT" )
+  [ "$out" = unknown ] || fail "a masked self-hosted status must classify as unknown - never idle, which would assert the agent is free - got '$out'"
+  rm -f "$resp/.count"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_classify_submit_agent_status "$(fm_backend_herdr_agent_status_raw default w1:p2)"' "$ROOT" )
+  [ "$out" = unknown ] || fail "a masked self-hosted status must not read as an idle submit baseline, got '$out'"
+  pass "fm_backend_herdr_agent_status_raw: a self-hosted pane's native working reports no status, classifying as unknown (never idle)"
+}
+
+test_agent_status_raw_leaves_other_panes_and_states_unchanged() {
+  local dir log resp fb out st
+  dir="$TMP_ROOT/raw-not-self-hosted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # A daemon hosted in its own terminal, and a daemon hosted in a DIFFERENT
+  # pane of the same session: neither is reading its own reflection.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_status_raw default w1:p2' "$ROOT" )
+  [ "$out" = working ] || fail "native working must be reported unchanged when the reader is not inside the pane, got '$out'"
+  : > "$log"; rm -f "$resp/.count"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w9:p9 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_status_raw default w1:p2' "$ROOT" )
+  [ "$out" = working ] || fail "native working must be reported unchanged for a pane other than the reader's own, got '$out'"
+  # Only `working` is the reader's own reflection; every status that genuinely
+  # describes the agent passes through even for the self-hosted pane itself.
+  for st in idle 'done' blocked; do
+    : > "$log"; rm -f "$resp/.count"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$st" > "$resp/1.out"
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_status_raw default w1:p2' "$ROOT" )
+    [ "$out" = "$st" ] || fail "agent_status=$st describes the agent and must pass through even when self-hosted, got '$out'"
+  done
+  pass "fm_backend_herdr_agent_status_raw: a pane the reader does not host, and every non-working status, are unchanged"
+}
+
+# Blast radius: the shared reader also feeds the crew-state classifier used for
+# WORKER panes (bin/fm-busy-lib.sh, bin/fm-pending-reply-lib.sh). A worker pane
+# is never the pane its reader runs in, so worker classification is untouched.
+test_busy_state_for_a_worker_pane_is_unaffected_by_self_hosting() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/busy-worker-while-self-hosted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w4:p1' "$ROOT" )
+  [ "$out" = busy ] || fail "a working WORKER pane must still classify busy while the reader itself sits in another pane, got '$out'"
+  : > "$log"; rm -f "$resp/.count"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "the reader's OWN pane must report unknown, not busy and not idle, got '$out'"
+  pass "fm_backend_herdr_busy_state: worker-pane classification is unchanged; only the reader's own pane loses its native working"
+}
+
 # --- composer_state: structural border-row classification --------------------
 
 test_composer_state_bare_prompt_is_empty() {
@@ -3654,6 +3732,79 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
   [ "$out" = empty ] || fail "idle native + proven pending + rendered busy after retries is a queued Enter, got '$out'"
   pass "fm_backend_herdr_send_text_submit: idle native baseline uses a rendered busy footer to confirm a queued Enter"
+}
+
+# --- self-hosted submit confirmation (fm-afk-inject-never-delivers) ---------
+#
+# The silent-loss case. Away mode is active on the native hosting, so the
+# daemon is a background job of the very agent it is submitting to and native
+# agent_status is pinned `working` by its own existence. Before the shared
+# reader owned that boundary, the retries-exhausted queued-Enter conversion
+# read that pinned `working` as proof the harness had QUEUED the Enter, turned
+# a genuinely swallowed submit into `empty`, and the daemon discarded the
+# escalation as delivered while the text sat unsent in the composer.
+#
+# Reachability under self-hosting changes in exactly two places: the
+# rendered-footer transition escape (gated on `raw_status != working`) becomes
+# reachable for the first time, and the queued-Enter conversion now receives a
+# non-busy signal. The idle-native BASELINE branch does NOT become reachable:
+# the masked status classifies as `unknown`, never `idle`, so a self-hosted
+# submit still takes the composer branch. Both newly reachable outcomes are
+# covered below.
+
+test_send_text_submit_self_hosted_swallowed_enter_stays_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-self-hosted-swallowed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  ready\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  # Both remaining reads answer `working`, so this case cannot pass merely
+  # because masking shifted the fake's call numbering: whichever ordinal the
+  # queued-Enter busy primitive lands on, it sees native working. The rendered
+  # escape reads the same bytes and finds no harness busy signature in them,
+  # which is the honest answer - nothing here says the agent is generating.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a swallowed Enter must stay pending when the only 'busy' signal is the submitter's own background job, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a self-hosted submitter cannot use its own reflected native working as queued-Enter proof"
+}
+
+test_send_text_submit_self_hosted_uses_the_rendered_transition() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-self-hosted-rendered-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The escape that becomes reachable for the first time under self-hosting: an
+  # idle-to-busy transition in the harness's OWN rendered footer across our
+  # Enter is real evidence about the agent, so it still confirms delivery.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  ready\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf 'thinking... esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a rendered idle-to-busy transition across our Enter must still confirm delivery while self-hosted, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: self-hosting opens the rendered-footer transition escape, which confirms a real submit"
+}
+
+test_send_text_submit_self_hosted_cleared_composer_still_confirms() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-self-hosted-cleared"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The ordinary success path the whole fix exists to reach: the composer
+  # cleared, which is evidence about the AGENT rather than about the submitter.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '  ready\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p2 HERDR_SESSION=default \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a cleared composer must confirm delivery for a self-hosted submitter, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a self-hosted submit still confirms on a cleared composer"
 }
 
 # --- the never-idle-native-state harness (real cursor on herdr) --------------
@@ -4590,6 +4741,9 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_agent_status_raw_masks_working_for_a_self_hosted_pane
+test_agent_status_raw_leaves_other_panes_and_states_unchanged
+test_busy_state_for_a_worker_pane_is_unaffected_by_self_hosting
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
@@ -4627,6 +4781,9 @@ test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
 test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
+test_send_text_submit_self_hosted_swallowed_enter_stays_pending
+test_send_text_submit_self_hosted_uses_the_rendered_transition
+test_send_text_submit_self_hosted_cleared_composer_still_confirms
 test_composer_state_cursor_midturn_row_reads_pending
 test_rendered_busy_state_reads_the_cursor_busy_token
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition

@@ -600,6 +600,35 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Native busy while a background job runs
+
+Measured 2026-08-25 against Herdr 0.8.0 protocol 19 and Claude Code 2.1.245 on macOS aarch64, by read-only sampling of a live Claude pane that had a harness-hosted background job running while its turn had ended.
+This is the vendor fact the away-mode injection guard depends on, so it is measured rather than assumed.
+
+```sh
+herdr agent get w31:p2 --session default \
+  | jq -r '.result.agent | "agent_status=\(.agent_status) title=\(.terminal_title)"'
+```
+
+Sampled every 6 seconds for 121 seconds after the turn ended:
+
+```text
+17:46:38 agent_status=working title=◐ Away mode escalation delivery defect
+17:46:44 agent_status=working title=✳ Away mode escalation delivery defect
+17:46:50 agent_status=working title=✳ Away mode escalation delivery defect
+...
+17:48:45 agent_status=working title=✳ Away mode escalation delivery defect
+```
+
+The title glyph turned from Claude's working `◐` to its idle `✳` at 17:46:44 and stayed idle, and the rendered tail stopped matching the harness's delivery busy signature at the same sample, while `agent_status` stayed `working` for every one of the remaining 21 samples - for as long as the background job ran.
+A control pane with no background job reported `agent_status=done` while idle.
+So Herdr's native `busy` reports that something is running in the pane, not that the agent is mid-turn.
+
+The away-mode daemon on the native hosting IS such a background job, of the very agent it injects into, so it pins its own target's native state for as long as away mode lasts.
+`tests/fm-daemon.test.sh` pins the resulting precedence portably and with no harness: a self-hosted daemon falls through native `busy` to the rendered delivery signature and delivers, a self-hosted daemon still defers while that signature shows a live turn, a daemon hosted in its own terminal keeps native `busy` conclusive, and a submit that never left the composer keeps its escalation buffered.
+The same suite composes self-hosted delivery with the current status-span and declared-wait contracts: it surfaces an earlier actionable event, commits through the captured status endpoint, preserves the independent pause cadence, and delivers the digest while self-hosted native state reads busy.
+`tests/fm-backend-herdr.test.sh` pins the same boundary at the adapter's single native-state reader: a self-hosted pane's `working` reports no status and classifies as `unknown` rather than `idle`, every other status and every other pane passes through unchanged, and a self-hosted submit confirms only on a rendered transition or a cleared composer.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

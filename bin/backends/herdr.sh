@@ -2990,10 +2990,48 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 # server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
 # successful send-text), so re-checking server liveness on every poll would
 # only add latency without adding safety.
+#
+# This reader is also the ONE place that owns the self-hosted boundary, so no
+# consumer of native agent-state has to remember it. Native `working` reports
+# that SOMETHING is running in the pane, not that the AGENT is mid-turn
+# (measured in docs/verification/runtime-backends.md). When the process doing
+# the reading is itself that something - an away-mode daemon running as a
+# background job of the very agent it injects into, recognized by
+# supervisor_pane_hosts_daemon in bin/fm-supervisor-target-lib.sh - the status
+# is the reader's own reflection and carries no information about the agent.
+# It is then reported as EMPTY, which every classifier maps to `unknown`: never
+# `idle`, so no caller may read it as evidence the agent is free or that a
+# submission landed. Consumers fall through to a signal that really is about
+# the agent (the rendered delivery signature, or the composer verdict), so a
+# genuinely swallowed Enter still resolves to `pending` and its escalation is
+# never discarded as delivered. Only `working` is masked; idle/done/blocked
+# describe the agent and pass through unchanged.
+#
+# fm_backend_herdr_self_hosted_pane: the predicate, composing the target
+# exactly as discover_supervisor_target composes it. It lazily sources the
+# owner of that predicate (this adapter is normally sourced without it) and
+# stays a no-op - never self-hosted - when the library cannot be resolved, so
+# the adapter remains usable when sourced standalone.
+fm_backend_herdr_self_hosted_pane() {  # <session> <pane_id>
+  if ! declare -F supervisor_pane_hosts_daemon >/dev/null 2>&1; then
+    if [ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-supervisor-target-lib.sh" ]; then
+      # shellcheck source=bin/fm-supervisor-target-lib.sh
+      . "$FM_BACKEND_HERDR_ROOT/bin/fm-supervisor-target-lib.sh"
+    fi
+    declare -F supervisor_pane_hosts_daemon >/dev/null 2>&1 || return 1
+  fi
+  supervisor_pane_hosts_daemon "$1:$2"
+}
+
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out
+  local session=$1 pane_id=$2 out raw
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
-  printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
+  raw=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  if [ "$raw" = working ] && fm_backend_herdr_self_hosted_pane "$session" "$pane_id"; then
+    printf ''
+    return 0
+  fi
+  printf '%s' "$raw"
 }
 
 # fm_backend_herdr_busy_state: semantic busy state from herdr's native

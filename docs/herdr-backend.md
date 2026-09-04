@@ -238,6 +238,13 @@ This generous floor is required for small composer and peek reads.
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
 A human-blocked permission dialog has no busy banner and still surfaces.
+Native `busy` reports that something is running in the pane, not that the AGENT is mid-turn: a Claude pane keeps `agent_status=working` for as long as a harness-hosted background job runs in it, after the turn has ended and while the harness's own title glyph and rendered footer both show idle (measured in [`verification/runtime-backends.md`](verification/runtime-backends.md#native-busy-while-a-background-job-runs)).
+So a reader whose own process IS that background job is reading its own reflection.
+That boundary is owned once, in `fm_backend_herdr_agent_status_raw` - the shared `agent get` reader used by the affected delivery and reconciliation paths (`fm_backend_herdr_busy_state`, the submit baseline, `fm_backend_herdr_wait_for_working`, the queued-Enter busy primitive, and the event-stream reconcile) - rather than being re-checked at each call site.
+When `supervisor_pane_hosts_daemon` (`bin/fm-supervisor-target-lib.sh`) recognizes that hosting, a `working` status is reported as no status at all, which every classifier maps to `unknown`.
+Deliberately never `idle`: the signal carries no information about the agent, so it may not assert that the agent is free or that a submission landed either.
+Consumers fall through to a signal that really is about the agent - the rendered delivery signature or the composer verdict - so a swallowed Enter still resolves to `pending`.
+Only `working` is masked; `idle`, `done`, and `blocked` describe the agent and pass through unchanged, as do all statuses for any pane other than the reader's own (a worker pane is never the pane its reader runs in, so crew-state classification is untouched).
 
 ## Composer and injection safety
 
