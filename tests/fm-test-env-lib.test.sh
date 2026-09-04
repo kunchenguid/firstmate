@@ -35,17 +35,18 @@ make_probe_root() {
   cat > "$probe_root/bin/fm-test-env-lib.sh" <<'SH'
 #!/usr/bin/env bash
 fm_test_env_isolate() {
-  printf '%s\n' "$FM_TEST_ENV_PROBE_SUITE" > "$FM_TEST_ENV_PROBE_MARKER"
+  printf '%s\t%s\n' "$FM_TEST_ENV_PROBE_SUITE" "$$" > "$FM_TEST_ENV_PROBE_MARKER"
   exit "$FM_TEST_ENV_PROBE_EXIT_STATUS"
 }
 SH
 }
 
 probe_suite_reaches_owner() {
-  local probe_root=$1 suite=$2 suite_name marker private_tmp output sentinel pointer rc=0
+  local probe_root=$1 suite=$2 suite_name marker suite_pid_file suite_pid private_tmp output sentinel pointer rc=0
   local polluted=()
   suite_name=$(basename "$suite")
   marker="$probe_root/$suite_name.reached-owner"
+  suite_pid_file="$probe_root/$suite_name.suite-pid"
   private_tmp="$probe_root/tmp/$suite_name"
   output="$probe_root/$suite_name.output"
   sentinel="$probe_root/live-home-sentinel"
@@ -58,10 +59,13 @@ probe_suite_reaches_owner() {
     FM_TEST_ENV_PROBE_MARKER="$marker" \
     FM_TEST_ENV_PROBE_SUITE="$suite_name" \
     FM_TEST_ENV_PROBE_EXIT_STATUS="$PROBE_EXIT_STATUS" \
-    bash "$suite" > "$output" 2>&1 || rc=$?
+    bash -c 'printf "%s\n" "$$" > "$1"; exec bash "$2"' \
+      _ "$suite_pid_file" "$suite" > "$output" 2>&1 || rc=$?
   [ "$rc" -eq "$PROBE_EXIT_STATUS" ] || return 1
   [ -f "$marker" ] || return 1
-  [ "$(cat "$marker")" = "$suite_name" ]
+  [ -f "$suite_pid_file" ] || return 1
+  suite_pid=$(cat "$suite_pid_file")
+  [ "$(cat "$marker")" = "$suite_name"$'\t'"$suite_pid" ]
 }
 
 # --- OWNER ------------------------------------------------------------------
@@ -203,6 +207,33 @@ SH
   pass "the probe rejects isolation that leaves the top-level shell exposed"
 }
 
+test_probe_rejects_isolation_inside_a_child() {
+  local dir probe_root probe output marker
+  dir=$(fm_test_tmproot fm-test-env-lib)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  probe="$probe_root/tests/child-decoy.test.sh"
+  output="$probe_root/child-decoy.test.sh.output"
+  marker="$probe_root/child-decoy.test.sh.reached-owner"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+bash -c '
+  . "$1"
+  fm_test_env_isolate
+' _ "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+rc=$?
+printf 'FORWARDED_STATUS=%s\n' "$rc"
+exit "$rc"
+SH
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    && fail "the probe accepted isolation that executed only inside a child process"
+  assert_present "$marker" "the child decoy never reached the owner"
+  assert_contains "$(cat "$output")" "FORWARDED_STATUS=$PROBE_EXIT_STATUS" \
+    "the child decoy did not forward the isolation status"
+  pass "the probe rejects child isolation with a forwarded exit status"
+}
+
 test_probe_accepts_each_real_route() {
   local dir probe_root probe
   dir=$(fm_test_tmproot fm-test-env-lib)
@@ -265,6 +296,7 @@ test_every_suite_reaches_the_owner
 test_probe_rejects_an_unrelated_lib_substring
 test_probe_rejects_an_unexecuted_owner_reference
 test_probe_rejects_isolation_inside_a_subshell
+test_probe_rejects_isolation_inside_a_child
 test_probe_accepts_each_real_route
 test_direct_invocation_is_isolated
 
