@@ -30,20 +30,38 @@ set -u
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gemini-harness)
 
+make_neutral_ps() {
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+  *"ppid="*) printf '%s\n' 1; exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+NO_ANCESTRY_FAKEBIN=$(make_neutral_ps "$TMP_ROOT/no-ancestry")
+
 test_gemini_marker_outranks_inherited_claudecode() {
   local out
   # This is the exact hazard: gemini does not clear an inherited CLAUDECODE, so
   # a gemini worker under a claude primary carries both markers at once.
-  out=$(CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$NO_ANCESTRY_FAKEBIN:$PATH" CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "CLAUDECODE + GEMINI_CLI must detect gemini, got '$out'"
   # Drive the two signals apart so the case above cannot go quietly vacuous:
   # each marker alone must still produce its own verdict.
-  out=$(env -u CLAUDECODE GEMINI_CLI=1 "$HARNESS")
+  out=$(env -u CLAUDECODE PATH="$NO_ANCESTRY_FAKEBIN:$PATH" GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "GEMINI_CLI alone must detect gemini, got '$out'"
-  out=$(env -u GEMINI_CLI CLAUDECODE=1 "$HARNESS")
+  out=$(env -u GEMINI_CLI PATH="$NO_ANCESTRY_FAKEBIN:$PATH" CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks gemini's, preserving the documented order.
-  out=$(CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$NO_ANCESTRY_FAKEBIN:$PATH" CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT must still outrank GEMINI_CLI, got '$out'"
   pass "fm-harness.sh: gemini's marker outranks an inherited CLAUDECODE"
 }
@@ -156,7 +174,7 @@ JS
   [ "$out" != gemini ] \
     || fail "node reports comm=$comm here, so ancestry must not be claiming gemini; got '$out'"
   # And the marker closes exactly that gap on the same process shape.
-  out=$(FM_HARNESS_BIN="$HARNESS" GEMINI_CLI=1 node -e '
+  out=$(PATH="$NO_ANCESTRY_FAKEBIN:$PATH" FM_HARNESS_BIN="$HARNESS" GEMINI_CLI=1 node -e '
 const { spawnSync } = require("child_process");
 const r = spawnSync(process.env.FM_HARNESS_BIN, { encoding: "utf8" });
 process.stdout.write(r.stdout || "");' 2>/dev/null | tr -d '\n')
