@@ -670,7 +670,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
     "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
   baseline="$root/absolute-home-charter"
   cp "$brief" "$baseline"
-  rm -f "$brief"
+  rm -rf "$home/data/relative-home"
   (
     cd "$root" || exit 1
     CDPATH="$root/cdpath" FM_HOME=home FM_SECONDMATE_CHARTER=x \
@@ -686,7 +686,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
     "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
   baseline="$root/absolute-state-charter"
   cp "$brief" "$baseline"
-  rm -f "$brief"
+  rm -rf "$home/data/relative-state"
   (
     cd "$root" || exit 1
     CDPATH="$root/cdpath" FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
@@ -702,7 +702,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
     "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
   baseline="$root/absolute-data-charter"
   cp "$brief" "$baseline"
-  rm -f "$brief"
+  rm -rf "$data_override/relative-data"
   (
     cd "$root" || exit 1
     CDPATH="$root/cdpath" FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
@@ -846,6 +846,72 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Claiming a task id whose data/<id>/ already exists is refused and preserves retained reports.
+test_task_id_reuse_refused_and_preserves_retained_report() {
+  local home id report_path report_content err status
+  home="$TMP_ROOT/id-reuse-home"
+  mkdir -p "$home/data"
+
+  # Case 1: Existing data/<id>/ containing a retained report
+  id="vm-verify-12"
+  mkdir -p "$home/data/$id"
+  report_path="$home/data/$id/report.md"
+  report_content="Detailed verification report for earlier work. Preserved intact."
+  printf '%s\n' "$report_content" > "$report_path"
+
+  err="$home/retained-report.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes 2>"$err"; status=$?
+  expect_code 1 "$status" "claiming an id with an existing data/<id>/ directory must exit 1"
+  assert_grep "error: task id '$id' already exists at $home/data/$id (contains: report.md)" "$err" \
+    "refusal did not name the directory and list its retained contents"
+  assert_grep "choose a distinct task id (e.g. '$id-2' or mint a new one)" "$err" \
+    "refusal did not provide a way forward for the operator"
+
+  # Verify the retained report survives intact
+  [ -f "$report_path" ] || fail "retained report.md was removed"
+  [ "$(cat "$report_path")" = "$report_content" ] \
+    || fail "retained report.md content was modified during attempted id reuse"
+  assert_absent "$home/data/$id/brief.md" "brief.md was written despite id reuse refusal"
+
+  # Case 2: Existing data/<id>/ containing multiple artifacts (brief and report)
+  id="multi-artifact-task"
+  mkdir -p "$home/data/$id"
+  printf 'prior brief\n' > "$home/data/$id/brief.md"
+  printf 'prior report\n' > "$home/data/$id/report.md"
+  err="$home/multi-artifact.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout 2>"$err"; status=$?
+  expect_code 1 "$status" "scout scaffold with existing data/<id>/ must exit 1"
+  assert_grep "error: task id '$id' already exists at $home/data/$id (contains: brief.md, report.md)" "$err" \
+    "refusal did not list all entries in data/<id>"
+
+  # Case 3: Existing empty data/<id>/ directory
+  id="empty-dir-task"
+  mkdir -p "$home/data/$id"
+  err="$home/empty-dir.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR 2>"$err"; status=$?
+  expect_code 1 "$status" "scaffold with empty existing data/<id> must exit 1"
+  assert_grep "error: task id '$id' already exists at $home/data/$id (empty directory)" "$err" \
+    "refusal did not identify empty directory"
+
+  # Case 4: Existing file at data/<id>
+  id="file-task"
+  touch "$home/data/$id"
+  err="$home/file-task.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only 2>"$err"; status=$?
+  expect_code 1 "$status" "scaffold with existing file at data/<id> must exit 1"
+  assert_grep "error: task id '$id' already exists at $home/data/$id (existing file)" "$err" \
+    "refusal did not identify existing file"
+
+  # Case 5: Unused task id succeeds without tripping the refusal
+  id="fresh-task-unused"
+  err="$home/fresh-task.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>"$err"; status=$?
+  expect_code 0 "$status" "scaffold with unused task id must exit 0"
+  assert_present "$home/data/$id/brief.md" "brief was not scaffolded for unused task id"
+
+  pass "fm-brief: task id reuse is refused, reports directory contents, gives a way forward, and preserves retained artifacts"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -868,3 +934,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_task_id_reuse_refused_and_preserves_retained_report

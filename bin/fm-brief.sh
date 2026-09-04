@@ -64,6 +64,7 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Refuses claiming a task id whose data/<task-id>/ directory already exists.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -166,6 +167,7 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+[ "${#POS[@]}" -ge 1 ] || { echo "error: task id is required" >&2; exit 1; }
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -175,6 +177,34 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ -e "$DATA/$ID" ]; then
+  contents=""
+  if [ -d "$DATA/$ID" ]; then
+    entries=()
+    shopt -s nullglob dotglob
+    for entry in "$DATA/$ID"/*; do
+      entries+=("$(basename "$entry")")
+    done
+    shopt -u nullglob dotglob
+    for entry in "${entries[@]}"; do
+      if [ -n "$contents" ]; then
+        contents="$contents, $entry"
+      else
+        contents="$entry"
+      fi
+    done
+  fi
+  if [ -n "$contents" ]; then
+    contents_desc="contains: $contents"
+  elif [ -d "$DATA/$ID" ]; then
+    contents_desc="empty directory"
+  else
+    contents_desc="existing file"
+  fi
+  echo "error: task id '$ID' already exists at $DATA/$ID ($contents_desc); choose a distinct task id (e.g. '$ID-2' or mint a new one) to preserve retained history and avoid collisions" >&2
   exit 1
 fi
 
