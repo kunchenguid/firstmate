@@ -15,7 +15,10 @@
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
 # Outcome publication adds no new state file or transport; after publication it
-# delegates exact-front queue promotion to bin/fm-merge-front.sh's contract.
+# delegates identity-bound queue retirement to bin/fm-merge-front.sh's contract.
+# That retirement is advisory: a merge already confirmed must reach supervision
+# exactly once whatever the queue's shape, so a reconciliation failure is
+# reported and never suppresses or replays the outcome.
 #
 # Normal operation deduplicates the task's latest canonical PR identity through
 # the merge-notification marker owned by bin/fm-pr-lib.sh. Main-home wake keys
@@ -82,10 +85,9 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fm_lock_acquire_wait "$lock" || return 1
   if fm_pr_poll_merge_already_notified "$state" "$id" \
     "$provider" "$host" "$path" "$number"; then
-    if ! fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL"; then
-      fm_lock_release "$lock"
-      return 1
-    fi
+    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" \
+      || printf 'actionable: merge-front queue could not retire %s %s\n' \
+           "$id" "$FM_PR_URL" >&2
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_MERGE_OUTCOME_ALREADY_RECORDED=true
     fm_lock_release "$lock"
@@ -100,7 +102,9 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
       "check: merge landed: $id $FM_PR_URL" || status=1
   fi
   if [ "$status" -eq 0 ]; then
-    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" || status=1
+    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" \
+      || printf 'actionable: merge-front queue could not retire %s %s\n' \
+           "$id" "$FM_PR_URL" >&2
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

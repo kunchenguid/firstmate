@@ -6,15 +6,27 @@
 #   fm-merge-front.sh enqueue <project-key> <task-id> <pr-url>
 #   fm-merge-front.sh status <project-key>
 #   fm-merge-front.sh promote <project-key>
+#   fm-merge-front.sh remove <project-key> <task-id> <pr-url>
 #   fm-merge-front.sh greptile-kick <project-key>
 #
 # Each project has exactly one ordered queue. Its first entry is the front and
 # every later entry is parked. enqueue is idempotent for one exact task/URL pair
-# and refuses a task or URL rebound to another pair. promote reuses the canonical
-# merge poll to fail closed until the front is confirmed merged, then removes
-# exactly that entry and exposes the next one. The shared already-confirmed
-# merge-outcome path uses an identity-bound variant and refuses to remove an
-# out-of-order merged entry.
+# and rebinds a task in place, keeping its queue position, when that same task
+# opens a replacement PR; it refuses only a URL already bound to another task.
+# promote reuses the canonical merge poll to fail closed until the front is
+# confirmed merged, then removes exactly that entry and exposes the next one.
+#
+# remove is the operator recovery path for a queued PR that will never merge -
+# a closed or superseded PR, or a torn-down task. It retires exactly the named
+# identity wherever it sits and advances nothing by itself, so retiring a stuck
+# front simply exposes the next entry and unblocks the project.
+#
+# The shared already-confirmed merge-outcome path uses the same identity-bound
+# retirement. A confirmed merge is a fact the queue may never veto: an
+# out-of-order merged entry is removed where it sits with the current front left
+# untouched, and an unqueued identity is nothing to do. That path reports queue
+# reconciliation as advisory, so no queue state can suppress or replay a merge
+# already published to supervision.
 #
 # Durable private state lives at state/merge-front/<project-key>.queue under a
 # mode-0700 directory. Each single-link mode-0600 file has this schema:
@@ -27,6 +39,11 @@
 # and validate the result. Project keys and task IDs are confined path-safe
 # slugs; PR/MR URLs use bin/fm-pr-lib.sh's canonical parser. PR registration
 # derives the project key from the basename of the task metadata's project= path.
+#
+# Every wait for the per-project lock is bounded (FM_MERGE_FRONT_LOCK_TIMEOUT,
+# default 30s), and every live GitHub read or comment is bounded
+# (FM_MERGE_FRONT_GH_TIMEOUT, default 60s), so a stuck holder or a hung forge
+# call yields a refusal instead of wedging the watcher.
 #
 # status reports one front= row plus zero or more parked= rows. It never grants
 # authority by itself: only the front may be updated from main or retriggered.
@@ -69,12 +86,16 @@ case "${1:-}" in
     [ "$#" -eq 2 ] || { echo 'error: invalid merge-front promote request' >&2; exit 2; }
     fm_merge_front_promote "$STATE" "$2" || exit $?
     ;;
+  remove)
+    [ "$#" -eq 4 ] || { echo 'error: invalid merge-front remove request' >&2; exit 2; }
+    fm_merge_front_remove "$STATE" "$2" "$3" "$4" || exit $?
+    ;;
   greptile-kick)
     [ "$#" -eq 2 ] || { echo 'error: invalid merge-front Greptile request' >&2; exit 2; }
     fm_merge_front_greptile_kick "$STATE" "$2" || exit $?
     ;;
   *)
-    echo 'error: expected enqueue, status, promote, or greptile-kick' >&2
+    echo 'error: expected enqueue, status, promote, remove, or greptile-kick' >&2
     exit 2
     ;;
 esac

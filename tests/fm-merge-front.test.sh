@@ -100,10 +100,10 @@ test_queue_conflicts_and_paths_fail_closed() {
   run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
     || fail "conflict fixture enqueue failed"
   set +e
-  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/2 >/dev/null 2>&1
+  run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/1 >/dev/null 2>&1
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "one task was rebound to a different PR"
+  [ "$rc" -ne 0 ] || fail "one PR was rebound to a different task"
   [ "$(grep -c '^task=' "$dir/home/state/merge-front/project-alpha.queue")" -eq 1 ] \
     || fail "conflicting enqueue changed the queue"
 
@@ -129,6 +129,49 @@ test_queue_conflicts_and_paths_fail_closed() {
   pass "queue conflicts, traversal, and symlink destinations fail closed"
 }
 
+test_same_task_replacement_and_removal_recovery() {
+  local dir status rebound removed rc
+  dir=$(make_home recovery)
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "recovery fixture front enqueue failed"
+  run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "recovery fixture parked enqueue failed"
+
+  rebound=$(run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/3) \
+    || fail "same task could not register a replacement PR"
+  assert_contains "$rebound" $'front=task-a\thttps://github.com/o/r/pull/3' \
+    "replacement PR did not keep the task's queue position"
+  status=$(run_front "$dir" status project-alpha) || fail "rebound queue status failed"
+  assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/3' \
+    "replacement PR did not become the recorded front"
+  assert_contains "$status" $'parked=task-b\thttps://github.com/o/r/pull/2' \
+    "replacement PR disturbed the parked entry"
+  [ "$(grep -c '^task=' "$dir/home/state/merge-front/project-alpha.queue")" -eq 2 ] \
+    || fail "replacement PR changed queue cardinality"
+
+  removed=$(run_front "$dir" remove project-alpha task-a https://github.com/o/r/pull/3) \
+    || fail "stuck front could not be retired"
+  assert_contains "$removed" $'removed=task-a\thttps://github.com/o/r/pull/3' \
+    "removal did not report the retired identity"
+  assert_contains "$removed" $'front=task-b\thttps://github.com/o/r/pull/2' \
+    "retiring the front did not expose the next PR"
+  status=$(run_front "$dir" status project-alpha) || fail "post-removal status failed"
+  assert_contains "$status" 'front=task-b' "retired front was not durably removed"
+  assert_no_grep 'task-a' "$dir/home/state/merge-front/project-alpha.queue" \
+    "removal retained the retired entry"
+
+  removed=$(run_front "$dir" remove project-alpha task-a https://github.com/o/r/pull/3) \
+    || fail "repeated removal was not idempotent"
+  assert_contains "$removed" 'removed=none' "absent identity reported a removal"
+
+  set +e
+  run_front "$dir" remove project-alpha task-b >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "removal without a PR identity was accepted"
+  pass "same-task replacement rebinds in place and removal retires a stuck front"
+}
+
 test_pr_check_enqueues_project_front() {
   local dir status
   dir=$(make_home pr-check)
@@ -147,6 +190,15 @@ SH
   status=$(run_front "$dir" status project-alpha) || fail "registered queue status failed"
   assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/7' \
     "fm-pr-check did not enqueue by task project"
+  FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$PR_CHECK" task-a https://github.com/o/r/pull/8 >/dev/null \
+    || fail "fm-pr-check could not register a replacement PR for the same task"
+  status=$(run_front "$dir" status project-alpha) || fail "replacement queue status failed"
+  assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/8' \
+    "replacement registration did not rebind the queued PR"
+  [ "$(grep -c '^task=' "$dir/home/state/merge-front/project-alpha.queue")" -eq 1 ] \
+    || fail "replacement registration duplicated the task"
   pass "PR registration structurally enrolls the task in its project queue"
 }
 
@@ -157,34 +209,35 @@ run_outcome() {  # <dir> <task> <url>
       _ "$MERGE_OUTCOME" "$dir/home" "$dir/home/state" "$task" "$url"
 }
 
-test_confirmed_merge_promotes_only_exact_front() {
-  local dir status rc
+test_confirmed_merge_reconciles_exact_identity() {
+  local dir status
   dir=$(make_home merge-outcome)
   write_meta "$dir" task-a
   write_meta "$dir" task-b
+  write_meta "$dir" task-c
   run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
     || fail "first merge-outcome enqueue failed"
   run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null \
     || fail "second merge-outcome enqueue failed"
 
-  set +e
-  run_outcome "$dir" task-b https://github.com/o/r/pull/2 >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "out-of-order merged PR advanced the queue"
+  run_outcome "$dir" task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "out-of-order merged PR could not publish its outcome"
   status=$(run_front "$dir" status project-alpha) || fail "out-of-order queue status failed"
-  assert_contains "$status" 'front=task-a' "out-of-order merge displaced the front"
-  assert_contains "$status" 'parked=task-b' "out-of-order merge removed the parked PR"
+  assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/1' \
+    "out-of-order merge displaced the front"
+  assert_no_grep 'task-b' "$dir/home/state/merge-front/project-alpha.queue" \
+    "out-of-order merge retained its own queued entry"
+
+  run_outcome "$dir" task-c https://github.com/o/r/pull/9 >/dev/null \
+    || fail "unqueued merged PR could not publish its outcome"
+  status=$(run_front "$dir" status project-alpha) || fail "unqueued outcome status failed"
+  assert_contains "$status" 'front=task-a' "unqueued merged PR changed the queue"
 
   run_outcome "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
     || fail "confirmed front merge did not advance the queue"
   status=$(run_front "$dir" status project-alpha) || fail "advanced queue status failed"
-  assert_contains "$status" 'front=task-b' "confirmed front merge did not promote its successor"
-  run_outcome "$dir" task-b https://github.com/o/r/pull/2 >/dev/null \
-    || fail "promoted successor merge did not advance the queue"
-  status=$(run_front "$dir" status project-alpha) || fail "empty promoted queue status failed"
-  assert_contains "$status" 'front=none' "second confirmed merge did not empty the queue"
-  pass "confirmed merge completion promotes only the exact current front"
+  assert_contains "$status" 'front=none' "confirmed front merge did not empty the queue"
+  pass "a confirmed merge always publishes and retires only its own queued entry"
 }
 
 install_github_gate_fake() {  # <dir>
@@ -265,6 +318,13 @@ test_greptile_gate_refusals_and_single_action() {
   assert_no_grep '<pr><comment>' "$dir/gh.log" "pending Greptile review received a comment"
 
   : > "$dir/gh.log"
+  FM_TEST_REQUIRED_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    FM_TEST_ALL_JSON='[{"name":"CI","state":"SUCCESS"},{"name":"Greptile Review","state":"ERROR"}]' \
+    run_kick "$dir" >/dev/null || fail "errored Greptile check could not be retriggered"
+  comment_count=$(grep -c '^\[<pr><comment>' "$dir/gh.log")
+  [ "$comment_count" -eq 1 ] || fail "errored Greptile check did not get exactly one kick"
+
+  : > "$dir/gh.log"
   FM_TEST_REQUIRED_JSON='[{"name":"CI","state":"SUCCESS"},{"name":"Greptile Review","state":"PENDING"}]' \
     FM_TEST_ALL_JSON='[{"name":"CI","state":"SUCCESS"},{"name":"Greptile Review","state":"FAILURE"}]' \
     run_kick "$dir" >/dev/null || fail "fully eligible front was not kicked"
@@ -279,6 +339,7 @@ test_greptile_gate_refusals_and_single_action() {
 
 test_queue_order_and_promotion
 test_queue_conflicts_and_paths_fail_closed
+test_same_task_replacement_and_removal_recovery
 test_pr_check_enqueues_project_front
-test_confirmed_merge_promotes_only_exact_front
+test_confirmed_merge_reconciles_exact_identity
 test_greptile_gate_refusals_and_single_action
