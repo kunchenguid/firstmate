@@ -288,7 +288,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim.
+- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim, plus the independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture when Comparison Mode applies.
 - [ ] Scenario commands and fixture commands are never invented by the skill.
 - [ ] Tracked scenario definitions contain no secrets and refer to private values only by declared name.
 - [ ] **Scenario Values** remain ignored local state and never appear in manifests, reports, logs, or error text.
@@ -336,9 +336,9 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] **Comparison Mode** runs the exact target comparison version and candidate under equivalent viewport, setup, fixture, and authentication inputs.
-- [ ] Separate **Paired Capture Contexts** prevent state changes in one capture from reaching the other.
-- [ ] A **Verified Baseline** is labeled only after the exact comparison version runs successfully under equivalent conditions.
+- [ ] **Comparison Mode** runs the exact **Baseline Revision** and candidate head under equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs.
+- [ ] Separate browser contexts plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture prevent state changes in one capture from reaching the other.
+- [ ] A **Verified Baseline** is labeled only after the exact **Baseline Revision**, distinct from the candidate head, runs successfully under equivalent conditions.
 - [ ] User-provided and historical screenshots are never labeled as Verified Baseline evidence.
 - [ ] The review presents baseline and candidate views side by side.
 - [ ] An **Explanatory Diff** is produced only when requested by the scenario and becomes pass or fail only under documented project policy.
@@ -346,14 +346,14 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Prepare a synthetic fixture, one runnable baseline, one candidate visual change, and a historical screenshot unrelated to the run.
+- **Setup:** Prepare a synthetic fixture with independently isolated server-side namespaces or a deterministic reset, one runnable **Baseline Revision**, one candidate-head visual change, and a historical screenshot unrelated to the run.
 - **Steps:**
   1. Run baseline and candidate captures in their paired contexts.
-  2. Inspect viewport, setup, authentication, and fixture equivalence.
+  2. Inspect viewport, setup, authentication, fixture equivalence, and the declared server-side state isolation or reset.
   3. Open the side-by-side review with `chrome-devtools-axi`.
   4. Request a diff once with and once without a documented threshold.
-- **Expected Result:** The exact runnable baseline and candidate appear side by side, state does not cross contexts, the historical image is contextual only, and diff verdicts follow policy.
-- **Failure Indicator:** Captures share mutated state, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
+- **Expected Result:** The exact runnable **Baseline Revision** and candidate head appear side by side, browser and server state do not cross contexts, the historical image is contextual only, and diff verdicts follow policy.
+- **Failure Indicator:** Captures share mutated browser or server state, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
 
 ### US-015: Handle an unavailable baseline honestly
 
@@ -369,7 +369,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Prepare one required and one supplemental comparison scenario whose target commit cannot start while the candidate can start.
+- **Setup:** Prepare one required and one supplemental comparison scenario whose **Baseline Revision**, distinct from the candidate head, cannot start while the candidate head can start.
 - **Steps:**
   1. Run the required scenario.
   2. Run the supplemental scenario.
@@ -600,7 +600,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-28: Relevant evidence must default to supplemental unless the captain's request or documented project policy establishes it as required.
 - FR-29: Worker briefs must carry an explicit evidence contract and canonical public skill path when Visual Evidence is active.
 - FR-30: Workers must report unexpected impact, and Firstmate alone must perform **Evidence Reclassification** under the same authority rules.
-- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information.
+- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information and, for Comparison Mode, independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
 - FR-32: **Scenario Values** must remain ignored local state and must never enter portable output or diagnostics.
 - FR-33: Visual Evidence must never invent startup or fixture commands and must report scenarios that lack required explicit inputs.
 - FR-34: Version 1 must support macOS browser capture only and must make no Linux or Windows support claim.
@@ -608,8 +608,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-36: A task-scoped profile may preserve state only within its task and must not be reused by another task.
 - FR-37: Visual Evidence must seed captures only from **Synthetic Test Fixtures** or clean anonymous state and must never copy a current or production environment automatically.
 - FR-38: Visual Evidence must capture only scenario-named viewports and must not run an automatic device matrix.
-- FR-39: Comparison Mode must use separate paired contexts with equivalent viewport, setup, fixture, and authentication inputs.
-- FR-40: A before-and-after claim must require a successfully run and equivalently captured exact **Verified Baseline**.
+- FR-39: Comparison Mode must use separate browser contexts with equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
+- FR-40: A before-and-after claim must require a successfully run and equivalently captured exact **Baseline Revision**, distinct from the candidate head, as its **Verified Baseline**.
 - FR-41: Historical or user-provided screenshots must not be labeled as Verified Baseline evidence.
 - FR-42: Required comparison evidence must fail when the baseline is unavailable, while supplemental evidence may produce reasoned **After-only Evidence** without a comparison claim.
 - FR-43: Comparison Mode must always present baseline and candidate side by side.
@@ -683,7 +683,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Hashes must be computed from the exact protected or finalized copy used by the next authority step.
 - File operations must fail closed on symlinks, containment ambiguity, cross-device finalization, race detection, and non-identical destination collisions.
 - Browser startup must detect supported tool capabilities and versions without attaching to ambient browser sessions or installing dependencies automatically.
-- Capture must use separate safe contexts for baseline and candidate while preserving equivalent scenario inputs.
+- Capture must use separate safe browser contexts for the **Baseline Revision** and candidate head while preserving equivalent scenario inputs and isolating server-side synthetic state through independent fixture namespaces or deterministic reset before each capture.
 - The selected diff implementation must be deterministic for a declared metric, but a project threshold remains the only source of a pass-or-fail diff verdict.
 - Portable schema parsers must reject unsupported major versions and missing required fields while tolerating newer optional fields within the same major version.
 - Security tests must include hostile project content, nested validation processes, malformed manifests, path escapes, content drift, replay, concurrent consumption, and stale run or head bindings.
@@ -698,7 +698,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - **Risk:** Evidence may change between preview and publication.
 - **Mitigation:** Every transition binds hashes and context, and publication revalidates immediately before mutation.
 - **Risk:** Browser capture may expose personal or production data.
-- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state and never attaches to the ordinary signed-in browser.
+- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state, isolates server-side synthetic state through independent fixture namespaces or deterministic reset before each capture, and never attaches to the ordinary signed-in browser.
 - **Risk:** Visual evidence may be treated as proof of hidden behavior.
 - **Mitigation:** Automated assertions remain required where feasible, and reports limit claims to appearance and observable interaction.
 - **Risk:** Evidence storage may grow indefinitely because automatic expiry is prohibited.
@@ -714,7 +714,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Zero tests place evidence artifacts into a feature branch or default branch.
 - Zero privacy test values appear in portable manifests, reports, logs, or review pages.
 - Required-evidence failure tests always prevent full validation, while supplemental-evidence failure tests preserve otherwise successful automated validation and report the reason.
-- Comparison tests always show equivalent baseline and candidate inputs or explicitly refuse the comparison claim.
+- Comparison tests always show a **Baseline Revision** distinct from the candidate head, equivalent inputs, and no browser or server state flow between captures, or explicitly refuse the comparison claim.
 - Browser isolation tests show zero access to the ordinary signed-in profile and zero cross-task profile reuse.
 - Local export tests show zero non-identical overwrites and exact idempotence for identical replay.
 - Publication tests show exactly one remote mutation per consumed approval and immutable links in the Managed PR Description.

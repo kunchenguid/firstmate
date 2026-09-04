@@ -27,6 +27,7 @@ Firstmate's decision to add or change **Visual Evidence** after a worker reports
 
 **Evidence Scenario**:
 The explicit project or task definition of application startup, readiness, **Synthetic Test Fixture** setup, route, **Scenario Viewports**, interactions, assertions, and demonstrated claim for **Visual Evidence**.
+For **Comparison Mode**, it also declares independently isolated server-side synthetic fixture namespaces or a deterministic reset performed before each capture.
 
 **Scenario Viewport**:
 A browser viewport explicitly named by an **Evidence Scenario**.
@@ -119,13 +120,16 @@ A dedicated browser session separated from the captain's ordinary browser profil
 An **Isolated Test Browser** profile created for one task and never reused by another.
 
 **Paired Capture Contexts**:
-Separate before and after browser contexts created from the same safe test-state seed.
+Separate before and after browser contexts created with equivalent safe test-state seeds and independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
 
 **Synthetic Test Fixture**:
 Repeatable project-provided non-production data and setup used to seed **Paired Capture Contexts**.
 
+**Baseline Revision**:
+The exact base or other explicitly named reference revision selected for comparison, which must be distinct from the candidate head.
+
 **Verified Baseline**:
-The exact comparison version, normally the target commit, run successfully and captured under conditions equivalent to the changed version.
+A **Baseline Revision** run successfully and captured under conditions equivalent to the candidate head.
 
 **After-only Evidence**:
 An **Evidence Bundle** that proves only the changed version and makes no comparison claim.
@@ -226,9 +230,11 @@ Suspected sensitive content identified during a **Privacy Review**.
 - A **Task-scoped Browser Profile** is disposable test state rather than an **Evidence Bundle**.
 - A **Task-scoped Browser Profile** is discarded when its task finishes.
 - **Comparison Mode** uses **Paired Capture Contexts** within the task.
+- Each comparison **Evidence Scenario** declares independently isolated server-side synthetic fixture namespaces or a deterministic reset before each capture.
 - State changes in one of the **Paired Capture Contexts** never flow into the other.
-- The **Paired Capture Contexts** share equivalent viewport, setup, and authentication inputs.
+- The **Paired Capture Contexts** share equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs.
 - **Visual Evidence** version 1 seeds **Paired Capture Contexts** only with a **Synthetic Test Fixture** or clean anonymous state.
+- Server-side capture isolation and reset operate only on synthetic test state.
 - **Visual Evidence** never copies a current or production environment automatically.
 - If neither a **Synthetic Test Fixture** nor clean anonymous state can demonstrate the required scenario, the **Evidence Bundle** or report states that the scenario could not be evidenced.
 - **Comparison Mode** requires a **Verified Baseline** for a before-and-after claim.
@@ -320,11 +326,11 @@ Suspected sensitive content identified during a **Privacy Review**.
 > **Developer:** "Which browser session should version 1 use?"
 > **Domain expert:** "Use a **Task-scoped Browser Profile** in the **Isolated Test Browser**, never the captain's ordinary signed-in session, and discard the profile when the task finishes."
 > **Developer:** "Should the after capture reuse browser state changed during the before capture?"
-> **Domain expert:** "No, use **Paired Capture Contexts** created from the same safe test-state seed so state changes never cross between them."
+> **Domain expert:** "No, use separate browser contexts with equivalent safe test-state seeds and declare either independently isolated server-side synthetic fixture namespaces or a deterministic reset before each capture so state changes never cross between them."
 > **Developer:** "May Visual Evidence copy the current production environment to seed those contexts?"
 > **Domain expert:** "No, use a **Synthetic Test Fixture** or clean anonymous state, and report when neither can evidence the required scenario."
 > **Developer:** "May a historical screenshot serve as the before image?"
-> **Domain expert:** "It may provide context, but it cannot be labeled as a **Verified Baseline** because that requires successfully running and equivalently capturing the exact comparison version."
+> **Domain expert:** "It may provide context, but it cannot be labeled as a **Verified Baseline** because that requires successfully running and equivalently capturing the exact **Baseline Revision**."
 > **Developer:** "What happens if the baseline cannot run?"
 > **Domain expert:** "Fail when before-and-after proof is required, or otherwise produce **After-only Evidence** that records why the baseline was unavailable and makes no comparison claim."
 > **Developer:** "The **Privacy Review** flagged an email address, so may this exact bundle be published?"
@@ -359,7 +365,7 @@ Suspected sensitive content identified during a **Privacy Review**.
 - Whether version 1 should produce video or use operating-system-level recording was unresolved - resolved: version 1 produces no video and **Behavior Mode** uses sequenced screenshots, automated assertions, and timing notes within the browser-only boundary.
 - Whether an existing signed-in browser session is prohibited or allowed as an exceptional fallback was unresolved - resolved: version 1 never accesses the captain's ordinary signed-in browser session.
 - Whether the **Isolated Test Browser** profile is ephemeral per task or persistent was unresolved - resolved: each task uses a disposable **Task-scoped Browser Profile**.
-- How baseline and changed-state captures reset browser state within a **Task-scoped Browser Profile** was unresolved - resolved: **Comparison Mode** uses isolated **Paired Capture Contexts** created from one safe test-state seed.
+- How baseline and changed-state captures isolate browser and server state within a **Task-scoped Browser Profile** was unresolved - resolved: **Comparison Mode** uses separate browser contexts with equivalent safe test-state seeds plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
 - The source of the safe test-state seed for **Paired Capture Contexts** was unresolved - resolved: version 1 uses only a **Synthetic Test Fixture** or clean anonymous state.
 - The outcome when a **Verified Baseline** cannot run was unresolved - resolved: required comparisons fail, while other tasks may produce reasoned **After-only Evidence**.
 - The task outcome when expected visual evidence cannot be captured was unresolved - resolved: **Required Visual Evidence** blocks full validation, while unavailable **Supplemental Visual Evidence** is reported without failing automated validation.
