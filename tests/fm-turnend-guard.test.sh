@@ -90,6 +90,29 @@ test_predicate_x_mode_needs_supervision() {
   pass "fm_supervision_needed: X-mode relay poll needs supervision without changing the task predicate"
 }
 
+test_predicate_registered_custom_check_needs_supervision() {
+  local state="$TMP_ROOT/pred-custom-check/state"
+  mkdir -p "$state"
+  : > "$state/voice-inbox.check.sh"
+  : > "$state/voice-inbox.check-trust"
+  fm_supervision_needed "$state" 300 || fail "registered custom check did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a custom check must not count as an in-flight task"
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "task-specific unhealthy predicate must preserve its zero-task behavior"
+  fi
+  pass "fm_supervision_needed: a registered custom check needs supervision without an in-flight task"
+}
+
+test_predicate_unregistered_check_is_not_need() {
+  local state="$TMP_ROOT/pred-unregistered-check/state"
+  mkdir -p "$state"
+  : > "$state/stray.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "a check script without a trust binding must not create supervision need"
+  fi
+  pass "fm_supervision_needed: an unregistered check script alone is not a supervision need"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -1147,6 +1170,8 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_predicate_registered_custom_check_needs_supervision
+test_predicate_unregistered_check_is_not_need
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks

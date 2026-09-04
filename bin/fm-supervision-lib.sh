@@ -44,6 +44,21 @@ fm_supervision_status() {
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ]; then
     FM_SUP_NEEDED=true
   fi
+  # A registered custom check (state/<id>.check.sh bound by state/<id>.check-trust,
+  # see bin/fm-check-register.sh) is a standing poll the watcher must run even
+  # with no task in flight, e.g. an inbox watch that wakes firstmate.
+  if [ "$FM_SUP_NEEDED" = false ]; then
+    local check id
+    for check in "$state"/*.check.sh; do
+      [ -e "$check" ] || continue
+      id=${check##*/}; id=${id%.check.sh}
+      [ "$id" = x-watch ] && continue
+      if [ -f "$state/$id.check-trust" ]; then
+        FM_SUP_NEEDED=true
+        break
+      fi
+    done
+  fi
 
   beat="$state/.last-watcher-beat"
   if [ -e "$beat" ]; then

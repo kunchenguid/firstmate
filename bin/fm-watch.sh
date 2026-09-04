@@ -104,7 +104,11 @@ fi
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+# seconds between *.check.sh sweeps: FM_CHECK_INTERVAL, else an integer in
+# $FM_HOME/config/check-interval (docs/configuration.md "Check interval"), else 300
+_check_interval_cfg=$(tr -d '[:space:]' < "$FM_HOME/config/check-interval" 2>/dev/null || true)
+case $_check_interval_cfg in ''|*[!0-9]*) _check_interval_cfg=300 ;; esac
+CHECK_INTERVAL=${FM_CHECK_INTERVAL:-$_check_interval_cfg}
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
