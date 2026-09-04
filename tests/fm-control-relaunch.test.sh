@@ -370,6 +370,7 @@ test_relaunch_keeps_an_armed_pr_poll_valid() {
   add_ship_task "$dir" rl42 claude
   url=https://github.com/example/repo/pull/42
   seed_armed_pr_poll "$dir" rl42 "$url"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
   fm_pr_poll_artifacts_valid "$dir/home/state" rl42 "$PR_POLL" \
     || fail "the regression fixture did not start with a valid PR poll"
 

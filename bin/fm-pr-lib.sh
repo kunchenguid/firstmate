@@ -315,7 +315,7 @@ fm_pr_metadata_identity_parse() {
         value=${line#pr_head=}
         fm_pr_head_valid "$value" || post_pr_invalid=1
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|control_relaunch_tx=*)
+      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|control_relaunch_tx=*|traceparent=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
