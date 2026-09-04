@@ -249,12 +249,20 @@ while [ "$#" -gt 0 ]; do
       PART=1
       shift
       ;;
-    2|--part2|--context|stage2)
+    2|--part2|--fleet-state|stage2)
       PART=2
       shift
       ;;
     3|--part3|--supervision|stage3)
       PART=3
+      shift
+      ;;
+    4|--part4|--captain-context|stage4)
+      PART=4
+      shift
+      ;;
+    5|--part5|--learnings|stage5)
+      PART=5
       shift
       ;;
     all|--all)
@@ -267,7 +275,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [1|2|3|all|--part1|--part2|--part3]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [1|2|3|4|5|all]\n' >&2
       exit 2
       ;;
   esac
@@ -280,7 +288,9 @@ done
 case "$PART" in
   1) SESSION_START_STAGES='lock bootstrap' ;;
   2) SESSION_START_STAGES='wake-queue read-once fleet-state network-checks' ;;
-  3) SESSION_START_STAGES='supervision-instructions context copilot-boot next-step' ;;
+  3) SESSION_START_STAGES='supervision-instructions copilot-boot' ;;
+  4) SESSION_START_STAGES='context next-step' ;;
+  5) SESSION_START_STAGES='learnings' ;;
   *) SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context copilot-boot next-step' ;;
 esac
 
@@ -313,6 +323,8 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     1) CHILD_ARGS+=(1) ;;
     2) CHILD_ARGS+=(2) ;;
     3) CHILD_ARGS+=(3) ;;
+    4) CHILD_ARGS+=(4) ;;
+    5) CHILD_ARGS+=(5) ;;
   esac
   if [ ${#CHILD_ARGS[@]} -gt 0 ]; then
     fm_run_timed "$SESSION_START_BUDGET" \
@@ -936,6 +948,11 @@ stage_context_digest() {
   print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
   print_file_or_absent "$DATA/captain.md" "data/captain.md"
   print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+}
+
+stage_learnings_digest() {
+  stage learnings
+  section "LEARNINGS"
   print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 }
 
@@ -1013,9 +1030,9 @@ main() {
   case "$PART" in
     1)
       if [ "$REEMIT" -eq 1 ]; then
-        section "SESSION START (CONTEXT RE-EMIT) - STAGE 1/3 - $FM_HOME"
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 1/5 - $FM_HOME"
       else
-        section "SESSION START - STAGE 1/3 - $FM_HOME"
+        section "SESSION START - STAGE 1/5 - $FM_HOME"
       fi
       stage_lock
       stage_bootstrap
@@ -1023,9 +1040,9 @@ main() {
       ;;
     2)
       if [ "$REEMIT" -eq 1 ]; then
-        section "SESSION START (CONTEXT RE-EMIT) - STAGE 2/3 - $FM_HOME"
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 2/5 - $FM_HOME"
       else
-        section "SESSION START - STAGE 2/3 - $FM_HOME"
+        section "SESSION START - STAGE 2/5 - $FM_HOME"
       fi
       if "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
         READ_ONLY=0
@@ -1040,9 +1057,9 @@ main() {
       ;;
     3)
       if [ "$REEMIT" -eq 1 ]; then
-        section "SESSION START (CONTEXT RE-EMIT) - STAGE 3/3 - $FM_HOME"
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 3/5 - $FM_HOME"
       else
-        section "SESSION START - STAGE 3/3 - $FM_HOME"
+        section "SESSION START - STAGE 3/5 - $FM_HOME"
       fi
       if "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
         READ_ONLY=0
@@ -1050,10 +1067,32 @@ main() {
         READ_ONLY=1
       fi
       stage_supervision_instructions
-      stage_context_digest
       stage_copilot_boot
+      printf '\nSTAGE 3 COMPLETE -> NEXT: bin/fm-session-start.sh 4\n'
+      ;;
+    4)
+      if [ "$REEMIT" -eq 1 ]; then
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 4/5 - $FM_HOME"
+      else
+        section "SESSION START - STAGE 4/5 - $FM_HOME"
+      fi
+      if "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+        READ_ONLY=0
+      else
+        READ_ONLY=1
+      fi
+      stage_context_digest
       stage_closing_reminder
-      printf '\nSTAGE 3 COMPLETE - SESSION START COMPLETE\n'
+      printf '\nSTAGE 4 COMPLETE -> NEXT: bin/fm-session-start.sh 5\n'
+      ;;
+    5)
+      if [ "$REEMIT" -eq 1 ]; then
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 5/5 - $FM_HOME"
+      else
+        section "SESSION START - STAGE 5/5 - $FM_HOME"
+      fi
+      stage_learnings_digest
+      printf '\nSTAGE 5 COMPLETE - SESSION START COMPLETE\n'
       ;;
     all|*)
       if [ "$REEMIT" -eq 1 ]; then
@@ -1075,6 +1114,7 @@ main() {
       stage_fleet_digest
       stage_network_checks
       stage_context_digest
+      stage_learnings_digest
       stage_copilot_boot
       stage_closing_reminder
       ;;
