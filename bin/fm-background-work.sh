@@ -57,6 +57,7 @@ COLLECTION_PROBE_TIMEOUT=${FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT:-2}
 MAX_RECORDS=${FM_BACKGROUND_WORK_MAX_RECORDS:-32}
 MAX_PROGRESS_BYTES=512
 RUNTIME_LIBS_LOADED=0
+MEMBERSHIP_INDEX="$REGISTRY/.membership.json"
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -100,6 +101,23 @@ safe_arg() {
 
 valid_time() {
   [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+}
+
+refresh_membership_index() {
+  local record id tmp
+  local -a members=()
+  for record in "$REGISTRY"/*; do
+    [ -d "$record" ] && [ ! -L "$record" ] || continue
+    id=${record##*/}
+    valid_id "$id" || continue
+    members+=("$id")
+  done
+  tmp=$(umask 077; mktemp "$REGISTRY/.membership.XXXXXX") || return 1
+  if ! jq -n --args '$ARGS.positional' "${members[@]+"${members[@]}"}" > "$tmp" \
+    || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$MEMBERSHIP_INDEX"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 positive_integer() {
@@ -266,6 +284,11 @@ register_work() {
     rm -rf -- "$stage"
     fm_lock_release "$REGISTRY/.registry.lock"
     die "cannot publish background-work record"
+  fi
+  if ! refresh_membership_index; then
+    rm -rf -- "$record"
+    fm_lock_release "$REGISTRY/.registry.lock"
+    die "cannot update background-work membership index"
   fi
   fm_lock_release "$REGISTRY/.registry.lock"
   printf 'registered: %s pid=%s\n' "$id" "$pid"
@@ -558,8 +581,29 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
 
 write_unknown_fallback() {
   local path=$1 id=$2 reason=$3
-  printf '{"id":"%s","description":null,"task":null,"pid":null,"started_at":null,"expected_finish_at":null,"liveness":{"status":"unknown","reason":"%s"},"progress":{"status":"unknown","reason":"%s","value":null,"observed_at":null,"last_changed_at":null,"stale_after_seconds":null,"timeout_seconds":null}}\n' \
-    "$id" "$reason" "$reason" > "$path"
+  jq -n --arg id "$id" --arg reason "$reason" '
+    {id:$id,description:null,task:null,pid:null,started_at:null,expected_finish_at:null,
+     liveness:{status:"unknown",reason:$reason},
+     progress:{status:"unknown",reason:$reason,value:null,observed_at:null,
+       last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}' > "$path"
+}
+
+membership_error_document() {
+  local generated=$1 remaining=$2
+  if [ -f "$MEMBERSHIP_INDEX" ] && [ ! -L "$MEMBERSHIP_INDEX" ]; then
+    fm_run_timed "$remaining" jq --arg generated "$generated" --arg home "$FM_HOME" \
+      --argjson budget "$COLLECTION_BUDGET" '
+      {schema:"fm-background-work-list.v1",generated:$generated,fm_home:$home,
+       collection:{status:"unknown",reason:"registry-lock-timeout",budget_seconds:$budget,
+         total_records:length,probes_attempted:0,probes_completed:0,truncated:true},
+       records:map({id:.,description:null,task:null,pid:null,started_at:null,
+         expected_finish_at:null,liveness:{status:"unknown",reason:"registry-lock-timeout"},
+         progress:{status:"unknown",reason:"registry-lock-timeout",value:null,
+           observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}})}' \
+      "$MEMBERSHIP_INDEX" </dev/null
+    return
+  fi
+  return 1
 }
 
 list_work() {
@@ -598,11 +642,19 @@ list_work() {
     fi
     if [ "$lock_rc" -ne 0 ]; then
       rm -rf -- "$stage"
+      remaining=$((collection_deadline - $(date +%s)))
+      if [ "$remaining" -gt 0 ]; then
+        document=$(membership_error_document "$generated" "$remaining" 2>/dev/null) || document=$lock_error_document
+      else
+        document=$lock_error_document
+      fi
       if [ "$format" = --json ]; then
-        printf '%s\n' "$lock_error_document"
+        printf '%s\n' "$document"
       else
         printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
-        printf '(registry)\t-\tunknown\tunknown\t-\t-\t-\tBackground-work registry unavailable\n'
+        printf '%s\n' "$document" | jq -r '.records[] | [
+          .id, "-", .liveness.status, .progress.status, "-", "-", "-", "Registry unavailable"
+        ] | @tsv'
       fi
       return 0
     fi
@@ -625,6 +677,11 @@ list_work() {
       records+=("$record")
       ids+=("$id")
     done
+    refresh_membership_index || {
+      fm_lock_release "$REGISTRY/.registry.lock"
+      rm -rf -- "$stage"
+      die "cannot update background-work membership index"
+    }
     fm_lock_release "$REGISTRY/.registry.lock"
     remaining=$((collection_deadline - $(date +%s) - 1))
     if [ "$remaining" -gt 0 ]; then
@@ -700,6 +757,8 @@ retire_work() {
   fm_lock_release "$record/.observe.lock"
   rmdir -- "$record" \
     || { fm_lock_release "$REGISTRY/.registry.lock"; die "cannot retire background-work record: $id"; }
+  refresh_membership_index \
+    || { fm_lock_release "$REGISTRY/.registry.lock"; die "cannot update background-work membership index"; }
   fm_lock_release "$REGISTRY/.registry.lock"
   printf 'retired: %s (process was not signalled)\n' "$id"
 }

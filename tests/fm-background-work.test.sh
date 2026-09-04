@@ -382,11 +382,30 @@ test_registry_lock_contention_returns_disclosed_unknown() {
     .collection.status == "unknown"
       and .collection.reason == "registry-lock-timeout"
       and .collection.truncated == true
-      and .records[0].id == "(registry)"
+      and .collection.total_records == 1
+      and .records[0].id == "visible"
       and .records[0].liveness.status == "unknown"
       and .records[0].progress.status == "unknown"
-  ' >/dev/null || fail "lock contention was not disclosed as collection-level unknown: $result"
-  pass "registry lock contention returns promptly as a disclosed unknown collection"
+  ' >/dev/null || fail "lock contention hid cached membership or was not disclosed: $result"
+  pass "registry lock contention preserves cached identities as disclosed unknowns"
+}
+
+test_malformed_directory_id_cannot_break_unknown_output() {
+  local home progress malformed result
+  home=$(make_home malformed-id)
+  progress=$(make_progress_command malformed-id-progress 'printf "ready\n"')
+  start_sleeper
+  register_fixture "$home" valid "$STARTED_PID" "$progress" ''
+  malformed="$home/state/background-work/bad\"id"
+  mkdir "$malformed"
+  result=$(list_json "$home") || fail "malformed directory id made list fail"
+  printf '%s\n' "$result" | jq -e '
+    (.records | map(.id) | sort) == ["bad\"id", "valid"]
+      and (.records[] | select(.id == "bad\"id") | .liveness.status) == "unknown"
+      and (.records[] | select(.id == "bad\"id") | .progress.status) == "unknown"
+      and .collection.truncated == true
+  ' >/dev/null || fail "malformed directory id was not safely represented: $result"
+  pass "malformed directory ids remain valid unknown JSON rows"
 }
 
 test_blocked_record_with_hanging_probe_remains_visible() {
@@ -430,4 +449,5 @@ test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
 test_registry_lock_contention_returns_disclosed_unknown
+test_malformed_directory_id_cannot_break_unknown_output
 test_blocked_record_with_hanging_probe_remains_visible
