@@ -882,6 +882,81 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# True when the remainder after a steal-mutex name is one or more literal
+# ".steal" suffixes - the exact name shape the retired recursive recovery
+# protocol minted one level deeper per recovery.
+fm_lock_is_steal_chain_suffix() {  # <remainder-after-mutex-name>
+  local rest=$1
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      .steal) rest='' ;;
+      .steal*) rest=${rest#'.steal'} ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# Remove the retired recursion's residue beyond the steal mutex: the pre-fix
+# protocol nested one fresh .steal suffix per recovery level (<mutex>.steal,
+# <mutex>.steal.steal, ...) and a holder crash left those names behind, so
+# repeated killed recoveries ratcheted the same path component toward the
+# filesystem name limit, where recovery then spun forever failing to create
+# deeper names. Such names are dead protocol state once the mutex itself is
+# stale or absent: a live holder announces itself through its recorded pid, so
+# every link gets the same pid and freshness identity checks as any lock before
+# it is removed. A live link defers the whole recovery; the caller's wait loop
+# retries after it exits. Dangling links (owner dir already discarded) are
+# recoverable only past the mid-acquire freshness window, like any empty-pid
+# lock.
+fm_lock_steal_residue_sweep() {  # <steal-mutex-path>
+  local steal=$1 name owner pid rest
+  for name in "$steal".steal*; do
+    [ -e "$name" ] || [ -L "$name" ] || continue
+    rest=${name#"$steal"}
+    fm_lock_is_steal_chain_suffix "$rest" || continue
+    owner=$(fm_lock_link_owner "$name" 2>/dev/null || true)
+    pid=$(cat "$name/pid" 2>/dev/null || true)
+    if [ -n "$owner" ]; then
+      fm_lock_recheck_stale_owner "$name" "$owner" "$pid" || return 1
+    elif fm_lock_mid_acquire_is_fresh "$name" "$pid"; then
+      return 1
+    fi
+    fm_lock_remove_path "$name" || true
+  done
+  return 0
+}
+
+# Acquire the stale-owner recovery mutex <lock>.steal without recursion.
+# The mutex is an ordinary lock with one bounded recovery rule: a stale mutex
+# (its holder crashed mid-recovery) is proven stale with the same pid and
+# freshness checks as any lock and then removed directly, because concurrent
+# recoverers serialize through fm_lock_try_create's atomic link creation - no
+# second mutex and no deeper lock name is ever needed. The retired protocol
+# recursed into <lock>.steal.steal with one fresh suffix per recovery level,
+# which is what let crash residue grow unbounded (see the residue sweep above).
+# Sets FM_LOCK_OWNER_DIR while held, like fm_lock_try_create.
+fm_lock_steal_acquire() {  # <lockdir>
+  local lockdir=$1 steal pid
+  steal="$lockdir.steal"
+  if fm_lock_try_create "$steal"; then
+    return 0
+  fi
+  pid=$(cat "$steal/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+    # This frame abandoned the mutex mid-recovery (same interrupting-trap
+    # reclaim rule as the primary lock in fm_lock_try_acquire).
+    fm_lock_remove_path "$steal" || true
+  elif fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$steal" "$pid";
+  then
+    return 1
+  else
+    fm_lock_remove_path "$steal" || true
+  fi
+  fm_lock_steal_residue_sweep "$steal" || return 1
+  fm_lock_try_create "$steal"
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -920,7 +995,14 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  # The recovery mutex has a FIXED name one suffix deep, acquired without
+  # recursion: a stale mutex is removed directly after its own staleness
+  # checks (see fm_lock_steal_acquire). Recursing on $steal here - the retired
+  # protocol - minted one fresh .steal suffix per recovery level on this same
+  # path component, so every holder crash ratcheted recovery state one suffix
+  # deeper until names crossed the filesystem limit and every later recovery
+  # spun forever failing to create deeper names.
+  if ! fm_lock_steal_acquire "$lockdir"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
