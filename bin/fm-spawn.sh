@@ -2985,7 +2985,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  TREEHOUSE_HOME_ROOT=$(fm_treehouse_root_for_home "$FM_ROOT" "$FM_HOME")
+  if ! TREEHOUSE_HOME_ROOT=$(fm_treehouse_root_for_home "$FM_ROOT" "$FM_HOME"); then
+    echo "error: could not resolve the Treehouse root for this home's worker pool" >&2
+    exit 1
+  fi
   if [ -n "$TREEHOUSE_HOME_ROOT" ]; then
     TREEHOUSE_GET_COMMAND="treehouse get --root $(printf '%q' "$TREEHOUSE_HOME_ROOT")"
   else

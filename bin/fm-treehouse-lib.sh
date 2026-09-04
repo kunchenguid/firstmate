@@ -32,7 +32,7 @@ fm_treehouse_root_for_home() {
   [ "$code_real" != "$home_real" ] || return 0
 
   home_top=$(git -C "$home_real" rev-parse --show-toplevel 2>/dev/null) || {
-    fm_root_is_secondmate_home "$home_real" && return 1
+    fm_root_is_secondmate_home "$home_real" && printf '%s' "$home_real/config" && return 0
     return 0
   }
   home_top_real=$(fm_treehouse_real_dir "$home_top") || {
