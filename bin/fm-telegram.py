@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""fm-telegram.py - Firstmate's Telegram terminal mirror bot (WSL only).
+"""fm-telegram.py - Firstmate's Telegram terminal mirror bot (WSL and macOS).
 
 One private Telegram bot that mirrors the one Firstmate terminal conversation
-in both directions. It runs beside Pi as a WSL user service and talks to the
+in both directions. It runs beside Pi as a WSL systemd user service or a macOS
+LaunchAgent and talks to the
 tracked Pi extension .pi/extensions/fm-telegram-mirror.ts over one local Unix
 socket. The bot contains no model, agent loop, or Firstmate reasoning.
 
@@ -61,7 +62,7 @@ restart always returns to on even when /telegram_off disabled the last run,
 and nothing about the previous mode is written to disk. The inbound
 queue is an in-memory FIFO with no durable queue, expiry, replay journal, or
 retention subsystem: a queued message that has not reached Pi is lost when the
-bot or WSL stops.
+bot or its host service stops.
 
 Reply threading: every transport status the bot itself produces replies to the
 exact Telegram message it describes, because the bot knows that message. A
@@ -73,9 +74,9 @@ Usage:
   fm-telegram.py run                run the bot in the foreground (the service)
   fm-telegram.py pair               record the first private sender as the pair
   fm-telegram.py status             print pairing, service, and socket status
-  fm-telegram.py service-unit       print the systemd user unit text
-  fm-telegram.py install-service    write, enable, and start the WSL user service
-  fm-telegram.py uninstall-service  stop, disable, and remove that service
+  fm-telegram.py service-unit       print the systemd unit or LaunchAgent plist
+  fm-telegram.py install-service    install and start the WSL or macOS user service
+  fm-telegram.py uninstall-service  stop and remove that user service
 
 Environment:
   FM_TELEGRAM_DIR        private directory (default ~/.firstmate-telegram)
@@ -90,8 +91,11 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import ctypes
 import json
 import os
+import platform
+import plistlib
 import secrets
 import shlex
 import signal
@@ -116,6 +120,8 @@ except ImportError:  # pragma: no cover - exercised by its own regression
     mistune = None
 
 SERVICE_NAME = "firstmate-telegram.service"
+MAC_SERVICE_LABEL = "com.firstmate.telegram"
+MAC_SERVICE_NAME = f"{MAC_SERVICE_LABEL}.plist"
 DEFAULT_API_BASE = "https://api.telegram.org"
 DEFAULT_TRANSCRIBE_COMMAND = "parakeet-tdt-0.6b-v3"
 
@@ -1581,13 +1587,27 @@ def accept_outbound_images(images: Any) -> tuple[list[tuple[bytes, str]], int]:
 
 
 def peer_credentials(writer: asyncio.StreamWriter) -> Optional[tuple[int, int]]:
-    """Linux kernel identity for this Unix-socket peer."""
+    """Return the kernel-supplied PID and UID of a Unix-socket peer."""
     try:
         sock = writer.get_extra_info("socket")
+        if platform.system() == "Darwin":
+            # macOS does not implement Linux's SO_PEERCRED. LOCAL_PEERPID is
+            # kernel supplied, while getpeereid supplies the peer UID.
+            peer_pid = struct.unpack("i", sock.getsockopt(0, 0x002, 4))[0]
+            libc = ctypes.CDLL(None, use_errno=True)
+            uid = ctypes.c_uint()
+            gid = ctypes.c_uint()
+            libc.getpeereid.argtypes = [ctypes.c_int,
+                                        ctypes.POINTER(ctypes.c_uint),
+                                        ctypes.POINTER(ctypes.c_uint)]
+            libc.getpeereid.restype = ctypes.c_int
+            if libc.getpeereid(sock.fileno(), ctypes.byref(uid), ctypes.byref(gid)) != 0:
+                return None
+            return peer_pid, uid.value
         credentials = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                       struct.calcsize("3i"))
         pid, uid, _gid = struct.unpack("3i", credentials)
-    except (OSError, AttributeError, struct.error):
+    except (OSError, AttributeError, struct.error, ctypes.error):
         return None
     return pid, uid
 
@@ -1803,7 +1823,13 @@ def is_wsl() -> bool:
         return False
 
 
+def on_macos() -> bool:
+    return platform.system() == "Darwin"
+
+
 def unit_path() -> Path:
+    if on_macos():
+        return Path.home() / "Library" / "LaunchAgents" / MAC_SERVICE_NAME
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "systemd" / "user" / SERVICE_NAME
 
@@ -1813,6 +1839,18 @@ def unit_text(home: Path) -> str:
     firstmate_home = Path(
         os.environ.get("FM_HOME") or Path(__file__).resolve().parents[1]
     ).resolve()
+    if on_macos():
+        return plistlib.dumps({
+            "Label": MAC_SERVICE_LABEL,
+            "ProgramArguments": [sys.executable, str(script), "run"],
+            "EnvironmentVariables": {
+                "FM_TELEGRAM_DIR": str(home),
+                "FM_HOME": str(firstmate_home),
+            },
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ProcessType": "Interactive",
+        }, sort_keys=False).decode("utf-8")
     return (
         "[Unit]\n"
         "Description=Firstmate Telegram terminal mirror\n"
@@ -1841,16 +1879,37 @@ def systemctl(*arguments: str) -> subprocess.CompletedProcess:
     )
 
 
-def require_wsl() -> None:
-    if not is_wsl():
-        raise TelegramError("the Telegram mirror service is WSL only; this host is not WSL")
+def require_service_platform() -> None:
+    if not is_wsl() and not on_macos():
+        raise TelegramError("the Telegram mirror service requires WSL or macOS")
+
+
+def launchctl(*arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["launchctl", *arguments], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, check=False)
+
+
+def mac_service_target() -> str:
+    return f"gui/{os.getuid()}/{MAC_SERVICE_LABEL}"
 
 
 def install_service(home: Path) -> int:
-    require_wsl()
+    require_service_platform()
     target = unit_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(unit_text(home), encoding="utf-8")
+    target.chmod(0o600)
+    if on_macos():
+        result = launchctl("bootstrap", f"gui/{os.getuid()}", str(target))
+        if result.returncode != 0 and not any(
+                phrase in result.stdout.lower()
+                for phrase in ("already bootstrapped", "service already loaded")):
+            raise TelegramError(f"launchctl bootstrap failed: {result.stdout.strip()}")
+        result = launchctl("kickstart", "-k", mac_service_target())
+        if result.returncode != 0:
+            raise TelegramError(f"launchctl kickstart failed: {result.stdout.strip()}")
+        print(f"installed {target} and started {MAC_SERVICE_LABEL}")
+        return 0
     for arguments in (("daemon-reload",), ("enable", "--now", SERVICE_NAME)):
         result = systemctl(*arguments)
         if result.returncode != 0:
@@ -1861,9 +1920,19 @@ def install_service(home: Path) -> int:
 
 
 def uninstall_service() -> int:
-    require_wsl()
-    systemctl("disable", "--now", SERVICE_NAME)
+    require_service_platform()
     target = unit_path()
+    if on_macos():
+        result = launchctl("bootout", mac_service_target())
+        if result.returncode != 0 and not any(
+                phrase in result.stdout.lower()
+                for phrase in ("could not find service", "service not found", "no such process")
+        ):
+            raise TelegramError(f"launchctl bootout failed: {result.stdout.strip()}")
+        remove_file(target)
+        print(f"removed {target}")
+        return 0
+    systemctl("disable", "--now", SERVICE_NAME)
     remove_file(target)
     systemctl("daemon-reload")
     print(f"removed {target}")
@@ -1911,8 +1980,12 @@ def status(home: Path) -> int:
     print(f"paired chat: {data.get('chat_id', 'none')}")
     print(f"transcribe command: {data.get('transcribe_command', DEFAULT_TRANSCRIBE_COMMAND)}")
     print(f"socket: {'present' if socket_path(home).exists() else 'absent'}")
-    result = systemctl("is-active", SERVICE_NAME)
-    print(f"service: {result.stdout.strip() or 'unknown'}")
+    if on_macos():
+        result = launchctl("print", mac_service_target())
+        print(f"service: {'active' if result.returncode == 0 else 'inactive'}")
+    else:
+        result = systemctl("is-active", SERVICE_NAME)
+        print(f"service: {result.stdout.strip() or 'unknown'}")
     return 0
 
 
@@ -1929,7 +2002,7 @@ def run(home: Path) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="fm-telegram.py",
-        description="Firstmate's Telegram terminal mirror bot (WSL only).",
+        description="Firstmate's Telegram terminal mirror bot (WSL and macOS).",
         epilog=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

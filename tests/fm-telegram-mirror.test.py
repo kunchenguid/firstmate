@@ -9,8 +9,11 @@ local Parakeet command. Nothing here inspects the bot's source.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
+import platform
+import plistlib
 import shlex
 import signal
 import socket
@@ -20,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +35,24 @@ USER_ID = 4242
 CHAT_ID = 9797
 VOICE_BYTES = b"OggS-fake-voice"
 DEADLINE = 10.0
+
+
+def parse_systemd_unit(unit: str) -> dict[str, dict[str, list[str]]]:
+    """Parse the generated unit into its section/key/value model."""
+    sections: dict[str, dict[str, list[str]]] = {}
+    section: Optional[dict[str, list[str]]] = None
+    for line in unit.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = sections.setdefault(line[1:-1], {})
+            continue
+        if section is None or "=" not in line:
+            raise ValueError(f"invalid systemd unit line: {line}")
+        key, value = line.split("=", 1)
+        section.setdefault(key, []).append(value)
+    return sections
 
 
 def parse_multipart(body: bytes, boundary: str) -> tuple[dict[str, str],
@@ -525,32 +547,24 @@ class MirrorTestCase(unittest.TestCase):
         self.assertIn("Mirror is on", pi.read()["text"])
 
     def processes_matching(self, needle: str) -> list[int]:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True, text=True, check=False,
+        )
         found = []
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
-            except OSError:
-                continue
-            if needle in cmdline:
-                found.append(int(entry.name))
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) == 2 and fields[0].isdigit() and needle in fields[1]:
+                found.append(int(fields[0]))
         return found
 
     def reap_by_cmdline(self, needle: str) -> None:
         """Kill fixture leftovers so a regression fails loudly instead of hanging."""
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
+        for pid in self.processes_matching(needle):
             try:
-                cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
-            except OSError:
-                continue
-            if needle in cmdline:
-                try:
-                    os.kill(int(entry.name), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
+                os.kill(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
 
     def test_stop_is_bounded_while_a_transcription_is_running(self) -> None:
         # The field failure: a local speech model was still running when the
@@ -1999,7 +2013,67 @@ class MirrorTestCase(unittest.TestCase):
         self.assertNotIn("wrong chat", joined)
 
 
+class PeerIdentityTestCase(unittest.TestCase):
+    def test_darwin_peer_identity_uses_kernel_pid_and_getpeereid(self) -> None:
+        spec = importlib.util.spec_from_file_location("fm_telegram_peer", BOT)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        class PeerSocket:
+            def fileno(self) -> int:
+                return 81
+
+            def getsockopt(self, level: int, option: int, size: int) -> bytes:
+                self_level_option = (level, option, size)
+                self.observed = self_level_option
+                return (4321).to_bytes(4, byteorder=sys.byteorder, signed=True)
+
+        peer_socket = PeerSocket()
+        writer = mock.Mock()
+        writer.get_extra_info.return_value = peer_socket
+        libc = mock.Mock()
+        libc.getpeereid.return_value = 0
+
+        def fill_uid(_fd: int, uid: Any, gid: Any) -> int:
+            uid._obj.value = 4242
+            gid._obj.value = 4242
+            return 0
+
+        libc.getpeereid.side_effect = fill_uid
+        with mock.patch.object(module.platform, "system", return_value="Darwin"), \
+             mock.patch.object(module.ctypes, "CDLL", return_value=libc):
+            self.assertEqual(module.peer_credentials(writer), (4321, 4242))
+        self.assertEqual(peer_socket.observed, (0, 2, 4))
+
+
 class ServiceUnitTestCase(unittest.TestCase):
+    def test_macos_unit_and_lifecycle_carry_no_secret(self) -> None:
+        spec = importlib.util.spec_from_file_location("fm_telegram", BOT)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "com.firstmate.telegram.plist"
+            calls: list[tuple[str, ...]] = []
+            completed = subprocess.CompletedProcess([], 0, "")
+            with mock.patch.object(module, "on_macos", return_value=True), \
+                 mock.patch.object(module, "unit_path", return_value=target), \
+                 mock.patch.object(module, "launchctl", side_effect=lambda *args: calls.append(args) or completed), \
+                 mock.patch.object(module.os, "getuid", return_value=4242):
+                module.install_service(Path(tmp) / "telegram")
+                payload = target.read_bytes()
+                self.assertNotIn(TOKEN.encode(), payload)
+                module.uninstall_service()
+            self.assertEqual(calls, [
+                ("bootstrap", "gui/4242", str(target)),
+                ("kickstart", "-k", "gui/4242/com.firstmate.telegram"),
+                ("bootout", "gui/4242/com.firstmate.telegram"),
+            ])
+            self.assertFalse(target.exists())
+
     def test_unit_starts_the_bot_and_carries_no_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             environment = dict(os.environ)
@@ -2013,16 +2087,40 @@ class ServiceUnitTestCase(unittest.TestCase):
                 [sys.executable, str(BOT), "service-unit"], env=environment,
                 stdout=subprocess.PIPE, text=True, check=True,
             ).stdout
-        self.assertIn("WantedBy=default.target", unit)
-        self.assertIn(f"{BOT} run", unit)
-        self.assertIn(f"Environment=FM_TELEGRAM_DIR={tmp}", unit)
-        self.assertIn(f"Environment=FM_HOME={firstmate_home}", unit)
-        # The bot's own stop is bounded; the unit must not fall back to the 90s
-        # default that killed it in the field.
-        self.assertIn("TimeoutStopSec=20", unit)
+        if platform.system() == "Darwin":
+            payload = plistlib.loads(unit.encode("utf-8"))
+            self.assertEqual(payload["Label"], "com.firstmate.telegram")
+            self.assertEqual(payload["ProgramArguments"], [sys.executable, str(BOT), "run"])
+            self.assertEqual(payload["EnvironmentVariables"], {
+                "FM_TELEGRAM_DIR": tmp,
+                "FM_HOME": str(Path(firstmate_home).resolve()),
+            })
+            self.assertTrue(payload["RunAtLoad"])
+            self.assertTrue(payload["KeepAlive"])
+            self.assertEqual(payload["ProcessType"], "Interactive")
+        else:
+            sections = parse_systemd_unit(unit)
+            self.assertEqual(sections["Install"]["WantedBy"], ["default.target"])
+            service = sections["Service"]
+            self.assertEqual(service["Type"], ["simple"])
+            self.assertEqual(service["ExecStart"], [
+                f"{sys.executable} {shlex.quote(str(BOT))} run",
+            ])
+            self.assertEqual(
+                {entry.split("=", 1)[0]: entry.split("=", 1)[1]
+                 for entry in service["Environment"]},
+                {"FM_TELEGRAM_DIR": tmp, "FM_HOME": firstmate_home},
+            )
+            self.assertEqual(service["Restart"], ["always"])
+            self.assertEqual(service["RestartSec"], ["5"])
+            # The bot's own stop is bounded; the unit must not fall back to the 90s
+            # default that killed it in the field.
+            self.assertEqual(service["TimeoutStopSec"], ["20"])
         self.assertNotIn(TOKEN, unit)
 
     def test_service_install_refuses_outside_wsl(self) -> None:
+        if platform.system() == "Darwin":
+            self.skipTest("macOS has a supported LaunchAgent service")
         with tempfile.TemporaryDirectory() as tmp:
             environment = dict(os.environ)
             environment.update({"FM_TELEGRAM_DIR": tmp, "TELEGRAM_BOT_TOKEN": TOKEN})
@@ -2034,7 +2132,7 @@ class ServiceUnitTestCase(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
             )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("WSL only", result.stderr)
+        self.assertIn("requires WSL or macOS", result.stderr)
 
 
 if __name__ == "__main__":

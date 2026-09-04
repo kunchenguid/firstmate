@@ -50,6 +50,16 @@ esac
 # Linux exposes process starts in clock ticks from boot while lock mtimes have
 # one-second portable precision. One second admits the precision boundary only.
 LOCK_TIME_TOLERANCE_SECONDS=1
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  process_start=$(LC_ALL=C ps -o lstart= -p "$lock_pid" 2>/dev/null) || exit 1
+  process_start_epoch=$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$process_start" +%s 2>/dev/null) || exit 1
+  lock_time=$(stat -f %m "$lock_path" 2>/dev/null) || exit 1
+  case "$process_start_epoch:$lock_time" in
+    *[!0-9:]*) exit 1 ;;
+  esac
+  [ "$process_start_epoch" -le "$((lock_time + LOCK_TIME_TOLERANCE_SECONDS))" ] 2>/dev/null || exit 1
+  exit 0
+fi
 PROC_ROOT=${FM_TELEGRAM_PROC_ROOT:-/proc}
 proc_stat=$(cat "$PROC_ROOT/$lock_pid/stat" 2>/dev/null) || exit 1
 proc_fields=${proc_stat##*) }

@@ -63,11 +63,10 @@ fi
 [ "\$(cat "\$1/.lock")" = "\$2" ]
 SH
 chmod +x "$TMP_ROOT/session-lock-check"
-# A real verified-harness process for the fixture to point locks at: a copy of
-# bash named "pi", which Firstmate's shared classification identifies exactly as
-# it identifies a live Pi session.
-cp /bin/bash "$TMP_ROOT/pi"
-chmod +x "$TMP_ROOT/pi"
+# A real verified-harness process for the fixture to point locks at: bash
+# launched through a symlink named "pi", which Firstmate's shared
+# classification identifies exactly as it identifies a live Pi session.
+ln -s /bin/bash "$TMP_ROOT/pi"
 
 OUT="$TMP_ROOT/node-output"
 if ! (cd "$FIXTURE" && \

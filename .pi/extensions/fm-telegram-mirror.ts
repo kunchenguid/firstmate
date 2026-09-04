@@ -1,6 +1,6 @@
 // Firstmate Telegram terminal mirror bridge for Pi.
 //
-// This extension is the Pi half of the WSL Telegram mirror. bin/fm-telegram.py
+// This extension is the Pi half of the WSL and macOS Telegram mirror. bin/fm-telegram.py
 // owns Telegram, pairing, mirror mode, the in-memory inbound queue, voice
 // transcription, and every Telegram reply. This half only:
 //
