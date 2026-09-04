@@ -683,12 +683,9 @@ fm_nm_run_progress() {  # <toon-output>
 }
 
 # Local-time epoch for the ledger's date column ("YYYY-MM-DD HH:MM"); empty when
-# the column is absent or does not parse. The column stamps a run's START, not
-# its end - verified 2026-09-04 against no-mistakes v1.60.2, where run
-# 01M186HDY76G4RJHW5Z7CFHQDB is listed at "2026-08-30 10:03" and the mtime of
-# its first step log (intent.log) is 10:03 while its last (ci.log) is 11:13.
-# So this epoch can only prove a record OLDER than the run; it can never prove
-# one newer than the run finished, and callers must treat it that way.
+# the column is absent or does not parse. The column stamps run start, not end,
+# so this epoch can prove only that a record predates the run. Dated evidence is
+# owned by docs/verification/supervision.md.
 fm_nm_ledger_epoch() {  # <YYYY-MM-DD HH:MM>
   local stamp=$1
   case "$stamp" in

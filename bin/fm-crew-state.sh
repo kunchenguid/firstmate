@@ -1416,29 +1416,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  # A terminal failed/cancelled run describes a finished RUN, not the crew. The
-  # head rule binds a run to this worktree's code identity, so it cannot tell
-  # this branch's CURRENT run from whatever run last sat on this head - and a
-  # stale failure that keeps answering here is not merely a misleading line: it
-  # is promoted into a captain-facing terminal outcome (bin/fm-inactive-reconcile.sh).
-  # So a failure must be the newest thing known about this crew before it is
-  # reported. Three records may outrank it, in this order:
-  #   1. a LATER RUN on the same branch that this copy can PROVE is the current
-  #      one, answered from that run under the single attribution bar in
-  #      bin/fm-nm-run-lib.sh - no second evidence rule lives here.
-  #   2. a LATER SELF-DECLARED pause or completion in the status log, admitted
-  #      only where the branch's newest ledger row proves the log was appended
-  #      after the failed run began. Both AGENTS.md section 8 semantics depend on
-  #      it: a declared pause must reach the supervisor as a pause, and a crew's
-  #      own terminal done must not read as a failure.
-  #   3. a LATER RUN this copy cannot bind. That is no proof of the present, but
-  #      it IS proof the failed answer is history, so the honest answer is
-  #      unknown - which keeps ordinary supervision on the crew instead of
-  #      absorbing it as provably working, and never becomes a terminal outcome.
-  # Nothing else may: a stale working/needs-decision/blocked line is exactly the
-  # log staleness this reader exists to correct, and it is left to the
-  # supersession flagging below. With no ordering evidence the failure stands,
-  # so a real failure is never hidden by a line that might predate it.
+  # Apply the terminal-failure precedence contract owned by header rule 2b.
   if [ "$RUN_STATE" = failed ]; then
     case "$LEDGER_STATUS" in
       running)
