@@ -3,6 +3,10 @@
 # Drives the public argv interface with a mocked quota-axi JSON source.
 set -u
 
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+fm_test_env_isolate || exit 2
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$FM_ROOT/bin"
