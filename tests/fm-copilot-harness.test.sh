@@ -8,6 +8,7 @@ set -u
 HARNESS="$ROOT/bin/fm-harness.sh"
 LOCK_LIB="$ROOT/bin/fm-session-lock-lib.sh"
 HOOK="$ROOT/bin/fm-copilot-hook.sh"
+OPINPUT="$ROOT/bin/fm-operational-input.sh"
 TMP_ROOT=$(fm_test_tmproot fm-copilot-harness)
 
 make_ps() {
@@ -289,6 +290,61 @@ test_agent_stop_allows_clean_stop() {
   pass "Copilot agentStop leaves a healthy turn end unchanged"
 }
 
+make_notification_fixture() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/state"
+  git -C "$dir" init -q
+  : > "$dir/AGENTS.md"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+     "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+     "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/"
+  chmod +x "$dir/bin/fm-copilot-hook.sh" "$dir/bin/fm-operational-input.sh"
+}
+
+test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
+  local dir fakebin out message body kind
+  dir="$TMP_ROOT/notification-watcher"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir"
+  make_ps "$fakebin"
+  make_notification_fixture "$dir"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh"}' > "$dir/in.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
+  message=$(printf '%s' "$out" | jq -r '.additionalContext')
+  kind=$(printf '%s' "$message" | "$OPINPUT" kind)
+  [ "$kind" = watcher ] || fail "Copilot watcher notification must inject watcher operational context, got '$kind' from: $out"
+  body=$(printf '%s' "$message" | "$OPINPUT" body)
+  case "$body" in
+    *'Run bin/fm-wake-drain.sh first'*'queued wake or watcher failure'*'Start the next attached asynchronous arm only if supervision remains required.'*) ;;
+    *) fail "Copilot watcher notification lost the required recovery protocol: $body" ;;
+  esac
+
+  printf '%s' '{"notification_type":"shell_completed","command":"sleep 1; printf done > background-result"}' > "$dir/other.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/other.json")
+  [ -z "$out" ] || fail "an unrelated background completion must stay inert, got: $out"
+  pass "Copilot notification injects only watcher-arm completion follow-ups"
+}
+
+test_notification_requires_primary_scope() {
+  local dir fakebin out
+  dir="$TMP_ROOT/notification-nonprimary"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/bin"
+  make_ps "$fakebin"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+     "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+     "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/"
+  chmod +x "$dir/bin/fm-copilot-hook.sh" "$dir/bin/fm-operational-input.sh"
+  printf '%s' '{"notification_type":"shell_completed","command":"exec bin/fm-watch-arm.sh"}' > "$dir/in.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
+  [ -z "$out" ] || fail "notification hook must stay inert outside a genuine Firstmate primary, got: $out"
+  pass "Copilot notification stands down outside genuine primary scope"
+}
+
 test_primary_hook_registration() {
   local hooks="$ROOT/.github/hooks/fm-primary.json"
   jq -e '
@@ -296,8 +352,10 @@ test_primary_hook_registration() {
     and (.hooks.sessionStart | length) == 1
     and (.hooks.agentStop | length) == 1
     and ([.hooks.preToolUse[].matcher] | sort) == [".*","bash","bash"]
+    and (.hooks.notification | length) == 1
+    and .hooks.notification[0].matcher == "shell_completed"
   ' "$hooks" >/dev/null || fail "tracked Copilot hook registration is incomplete"
-  pass "tracked Copilot hooks register startup, safety policies, and turn-end continuation"
+  pass "tracked Copilot hooks register startup, safety policies, turn-end continuation, and watcher notifications"
 }
 
 test_non_cli_hook_surface_stands_down() {
@@ -316,6 +374,10 @@ test_non_cli_hook_surface_stands_down() {
       "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/in-stop.json")
   [ -z "$out" ] || fail "non-CLI agentStop hook printed output: $out"
   assert_absent "$dir/payload.json" "non-CLI hook invoked the Firstmate turn-end owner"
+  printf '%s' '{"notification_type":"shell_completed","command":"exec bin/fm-watch-arm.sh"}' > "$dir/in-note.json"
+  out=$(env -u COPILOT_CLI PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' \
+      "$dir/bin/fm-copilot-hook.sh" notification < "$dir/in-note.json")
+  [ -z "$out" ] || fail "non-CLI notification hook printed output: $out"
   pass "Copilot repository hooks stay inert outside local Copilot CLI"
 }
 
@@ -393,6 +455,8 @@ test_session_start_translates_context
 test_agent_stop_translates_block
 test_copilot_native_policies_bypass_compatibility_stand_down
 test_agent_stop_allows_clean_stop
+test_notification_injects_watcher_followup_only_for_watcher_arm_completion
+test_notification_requires_primary_scope
 test_primary_hook_registration
 test_non_cli_hook_surface_stands_down
 test_claude_compatibility_hooks_stand_down

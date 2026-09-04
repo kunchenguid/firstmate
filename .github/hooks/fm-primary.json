@@ -39,6 +39,15 @@
         "cwd": ".",
         "timeoutSec": 30
       }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "matcher": "shell_completed",
+        "bash": "./bin/fm-copilot-hook.sh notification",
+        "cwd": ".",
+        "timeoutSec": 30
+      }
     ]
   }
 }
