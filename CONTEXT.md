@@ -27,7 +27,7 @@ Firstmate's decision to add or change **Visual Evidence** after a worker reports
 
 **Evidence Scenario**:
 The explicit project or task definition of application startup, readiness, **Synthetic Test Fixture** setup, route, **Scenario Viewports**, interactions, assertions, and demonstrated claim for **Visual Evidence**.
-For **Comparison Mode**, it also declares independently isolated server-side synthetic fixture namespaces or a deterministic reset performed before each capture.
+For **Comparison Mode**, it also declares independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset**.
 
 **Scenario Viewport**:
 A browser viewport explicitly named by an **Evidence Scenario**.
@@ -123,7 +123,11 @@ A dedicated browser session separated from the captain's ordinary browser profil
 An **Isolated Test Browser** profile created for one task and never reused by another.
 
 **Paired Capture Contexts**:
-Separate before and after browser contexts created with equivalent safe test-state seeds and independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
+Separate before and after browser contexts created with equivalent safe test-state seeds and the server-side synthetic state isolation declared by their **Evidence Scenario**.
+
+**Deterministic Capture Reset**:
+A scenario-declared synthetic-state procedure that serializes paired captures, stops or drains the prior capture's server-side work before resetting, and verifies quiescence before the next capture begins.
+It is unavailable when deterministic draining cannot be guaranteed and is never used for asynchronous scenarios, which require independently isolated server-side synthetic fixture namespaces.
 
 **Synthetic Test Fixture**:
 Repeatable project-provided non-production data and setup used to seed **Paired Capture Contexts**.
@@ -136,6 +140,9 @@ A **Baseline Revision** run successfully and captured under conditions equivalen
 
 **After-only Evidence**:
 An **Evidence Bundle** that proves only the changed version and makes no comparison claim.
+
+**Privacy Scan Result**:
+The immutable portable record of a **Privacy Review** scan outcome and its exact **Privacy Finding** set, excluding acceptance and other approval state.
 
 **Privacy Review**:
 Inspection of an exact **Evidence Bundle** for suspected sensitive content before publication.
@@ -197,7 +204,7 @@ Suspected sensitive content identified during a **Privacy Review**.
 - An **Evidence Intake Classification** that finds visual evidence relevant produces **Supplemental Visual Evidence** by default.
 - Firstmate may recommend promoting **Supplemental Visual Evidence** to **Required Visual Evidence** but cannot silently reclassify it or add a failure condition.
 - Each **Evidence Bundle** contains a **Portable Manifest**.
-- A **Portable Manifest** includes the demonstrated claim, relative artifact names, artifact types, capture time, file hashes, **Capture Scope**, **Privacy Review** result, and relevant tool versions.
+- A **Portable Manifest** includes the demonstrated claim, relative artifact names, artifact types, capture time, file hashes, **Capture Scope**, **Privacy Scan Result**, and relevant tool versions.
 - A **Portable Manifest** excludes usernames, absolute local paths, environment variables, credentials, and unnecessary URL parameters.
 - Every **Portable Manifest** declares an **Evidence Schema Version**.
 - Unsupported major **Evidence Schema Versions** are rejected.
@@ -236,11 +243,11 @@ Suspected sensitive content identified during a **Privacy Review**.
 - A **Task-scoped Browser Profile** is disposable test state rather than an **Evidence Bundle**.
 - A **Task-scoped Browser Profile** is discarded when its task finishes.
 - **Comparison Mode** uses **Paired Capture Contexts** within the task.
-- Each comparison **Evidence Scenario** declares independently isolated server-side synthetic fixture namespaces or a deterministic reset before each capture.
+- Each comparison **Evidence Scenario** declares independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset**.
 - State changes in one of the **Paired Capture Contexts** never flow into the other.
 - The **Paired Capture Contexts** share equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs.
 - **Visual Evidence** version 1 seeds **Paired Capture Contexts** only with a **Synthetic Test Fixture** or clean anonymous state.
-- Server-side capture isolation and reset operate only on synthetic test state.
+- Server-side capture isolation and **Deterministic Capture Reset** operate only on synthetic test state.
 - **Visual Evidence** never copies a current or production environment automatically.
 - If neither a **Synthetic Test Fixture** nor clean anonymous state can demonstrate the required scenario, the **Evidence Bundle** or report states that the scenario could not be evidenced.
 - **Comparison Mode** requires a **Verified Baseline** for a before-and-after claim.
@@ -257,11 +264,13 @@ Suspected sensitive content identified during a **Privacy Review**.
 - Suspected sensitive content in an **Evidence Bundle** is flagged for captain review through a **Privacy Review**.
 - Originals in the **Local Evidence Store** are never silently altered during a **Privacy Review**.
 - A **Privacy Review** may identify one or more **Privacy Findings**.
+- A finalized **Portable Manifest** records the immutable **Privacy Scan Result**, including the exact **Privacy Finding** set, without recording any later acceptance or approval state.
 - Any unresolved **Privacy Finding** prevents publication of the **Evidence Bundle**.
 - Each **Privacy Finding** must be resolved individually by the captain through explicit acceptance, cropping or redacting into a derived artifact, or excluding the artifact from the previewed batch.
 - Resolution of a **Privacy Finding** is bound to the exact previewed **Evidence Bundle**.
-- Explicit acceptance does not require a new preview when the artifact bytes, batch, **Privacy Finding** set, and destination remain unchanged.
-- Derivation, cropping, redaction, exclusion, file change, batch change, **Privacy Finding** set change, or destination change requires a new exact preview and **Review Decision**.
+- The active trusted host controller stores explicit acceptance in private decision state bound to the unchanged manifest hash, artifact bytes, exact **Privacy Finding** set, batch, and destination.
+- Explicit acceptance changes no **Privacy Scan Result** or bundle byte, so it does not rewrite the **Evidence Bundle** or require a new preview while those bindings remain unchanged.
+- Derivation, cropping, redaction, exclusion, byte change, batch change, **Privacy Finding** set change, or destination change invalidates the decision and requires a new exact preview and **Review Decision**.
 - A **Private Output** goes to the **Local Evidence Store** by default.
 - No **Private Output** expires automatically.
 - Evidence cleanup previews the exact files and sizes before requesting **Evidence Cleanup Approval**.
@@ -335,7 +344,7 @@ Suspected sensitive content identified during a **Privacy Review**.
 > **Developer:** "Which browser session should version 1 use?"
 > **Domain expert:** "Use a **Task-scoped Browser Profile** in the **Isolated Test Browser**, never the captain's ordinary signed-in session, and discard the profile when the task finishes."
 > **Developer:** "Should the after capture reuse browser state changed during the before capture?"
-> **Domain expert:** "No, use separate browser contexts with equivalent safe test-state seeds and declare either independently isolated server-side synthetic fixture namespaces or a deterministic reset before each capture so state changes never cross between them."
+> **Domain expert:** "No, use separate browser contexts with equivalent safe test-state seeds, require independently isolated server-side synthetic fixture namespaces for asynchronous scenarios or whenever quiescence cannot be guaranteed, and otherwise use a scenario-declared **Deterministic Capture Reset**."
 > **Developer:** "May Visual Evidence copy the current production environment to seed those contexts?"
 > **Domain expert:** "No, use a **Synthetic Test Fixture** or clean anonymous state, and report when neither can evidence the required scenario."
 > **Developer:** "May a historical screenshot serve as the before image?"
@@ -353,7 +362,7 @@ Suspected sensitive content identified during a **Privacy Review**.
 > **Developer:** "May Firstmate permanently delete those files afterward?"
 > **Domain expert:** "Only after a separate explicit captain request names the exact files, because Firstmate never empties recoverable trash."
 > **Developer:** "May I send this bundle to an anonymous upload site?"
-> **Domain expert:** "No, version 1 supports only a user-chosen local export folder or an approved GitHub pull request through Firstmate's validated publication flow."
+> **Domain expert:** "No, version 1 supports only a user-chosen local export folder or an approved GitHub pull request through the active trusted host controller and no-mistakes' validated publication flow, where only no-mistakes grants **Publication Approval** or mutates the pull request."
 > **Developer:** "May I add manual text to the PR description alongside the approved bundle?"
 > **Domain expert:** "The **Managed PR Description** may be regenerated in full, so version 1 does not preserve manual author text there or publish evidence through a comment."
 > **Developer:** "May this local **Evidence Import Consent** publish the previewed **Evidence Bundle** to PR #42?"
@@ -374,7 +383,7 @@ Suspected sensitive content identified during a **Privacy Review**.
 - Whether version 1 should produce video or use operating-system-level recording was unresolved - resolved: version 1 produces no video and **Behavior Mode** uses sequenced screenshots, automated assertions, and timing notes within the browser-only boundary.
 - Whether an existing signed-in browser session is prohibited or allowed as an exceptional fallback was unresolved - resolved: version 1 never accesses the captain's ordinary signed-in browser session.
 - Whether the **Isolated Test Browser** profile is ephemeral per task or persistent was unresolved - resolved: each task uses a disposable **Task-scoped Browser Profile**.
-- How baseline and changed-state captures isolate browser and server state within a **Task-scoped Browser Profile** was unresolved - resolved: **Comparison Mode** uses separate browser contexts with equivalent safe test-state seeds plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
+- How baseline and changed-state captures isolate browser and server state within a **Task-scoped Browser Profile** was unresolved - resolved: **Comparison Mode** uses separate browser contexts with equivalent safe test-state seeds plus independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset**, with namespaces required for asynchronous or non-quiesceable scenarios.
 - The source of the safe test-state seed for **Paired Capture Contexts** was unresolved - resolved: version 1 uses only a **Synthetic Test Fixture** or clean anonymous state.
 - The outcome when a **Verified Baseline** cannot run was unresolved - resolved: required comparisons fail, while other tasks may produce reasoned **After-only Evidence**.
 - The task outcome when expected visual evidence cannot be captured was unresolved - resolved: **Required Visual Evidence** blocks full validation, while unavailable **Supplemental Visual Evidence** is reported without failing automated validation.

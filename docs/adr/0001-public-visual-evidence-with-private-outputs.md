@@ -14,6 +14,7 @@ The authoritative domain language and approval contract remain in [Firstmate Con
 - One public **Visual Evidence** skill owns both comparison and behavior evidence so capture, privacy, storage, publication, and cleanup do not acquire competing implementations.
 - Version 1 supports macOS browser capture with screenshot-focused comparison and behavior evidence rather than native desktop capture or video.
 - Evidence is packaged in versioned **Evidence Bundles**, while originals and other **Private Outputs** remain in the ignored **Local Evidence Store** unless an exact authorized copy is exported or published.
+- Portable manifests record immutable **Privacy Scan Result** data rather than later controller-owned acceptance state, under the exact contract in [Firstmate Context](../../CONTEXT.md).
 - The public skill includes a trusted non-browser **Local Evidence Controller** so standalone installations own private storage, decision intake, revalidation, export, cleanup, and no-mistakes consent routing without depending on Firstmate.
 - A local review may grant **Evidence Import Consent** under the exact bindings defined in [Firstmate Context](../../CONTEXT.md), but only no-mistakes may grant **Publication Approval** after protected staging, revalidation, and its own exact preview.
 - **Approved Evidence Import** is a narrow producer-neutral no-mistakes interface with no Firstmate-specific or **Visual Evidence**-specific behavior.

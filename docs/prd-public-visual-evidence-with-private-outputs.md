@@ -288,7 +288,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim, plus the independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture when Comparison Mode applies.
+- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim, plus independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset** when Comparison Mode applies.
 - [ ] Scenario commands and fixture commands are never invented by the skill.
 - [ ] Tracked scenario definitions contain no secrets and refer to private values only by declared name.
 - [ ] **Scenario Values** remain ignored local state and never appear in manifests, reports, logs, or error text.
@@ -337,7 +337,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] **Comparison Mode** runs the exact **Baseline Revision** and candidate head under equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs.
-- [ ] Separate browser contexts plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture prevent state changes in one capture from reaching the other.
+- [ ] Separate browser contexts use the server-side synthetic state mechanism declared by the **Evidence Scenario**: independently isolated fixture namespaces or a **Deterministic Capture Reset**.
+- [ ] Reset-based scenarios satisfy the authoritative **Deterministic Capture Reset** contract, while asynchronous scenarios or scenarios without guaranteed deterministic draining require independently isolated fixture namespaces.
 - [ ] A **Verified Baseline** is labeled only after the exact **Baseline Revision**, distinct from the candidate head, runs successfully under equivalent conditions.
 - [ ] User-provided and historical screenshots are never labeled as Verified Baseline evidence.
 - [ ] The review presents baseline and candidate views side by side.
@@ -346,14 +347,15 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Prepare a synthetic fixture with independently isolated server-side namespaces or a deterministic reset, one runnable **Baseline Revision**, one candidate-head visual change, and a historical screenshot unrelated to the run.
+- **Setup:** Prepare one reset-safe synchronous synthetic scenario with delayed baseline work that can be drained, one asynchronous synthetic scenario with independently isolated server-side namespaces, one reset-only scenario whose prior work cannot be drained deterministically, one runnable **Baseline Revision**, one candidate-head visual change, and a historical screenshot unrelated to the run.
 - **Steps:**
-  1. Run baseline and candidate captures in their paired contexts.
-  2. Inspect viewport, setup, authentication, fixture equivalence, and the declared server-side state isolation or reset.
-  3. Open the side-by-side review with `chrome-devtools-axi`.
-  4. Request a diff once with and once without a documented threshold.
-- **Expected Result:** The exact runnable **Baseline Revision** and candidate head appear side by side, browser and server state do not cross contexts, the historical image is contextual only, and diff verdicts follow policy.
-- **Failure Indicator:** Captures share mutated browser or server state, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
+  1. Run the reset-safe baseline and candidate captures and observe capture ordering, prior-work draining, reset, and quiescence verification.
+  2. Run the asynchronous scenario with isolated namespaces, then attempt its reset-only variant and the scenario whose prior work cannot be drained deterministically.
+  3. Inspect viewport, setup, authentication, fixture equivalence, and server-side state after every attempt.
+  4. Open the side-by-side review with `chrome-devtools-axi`.
+  5. Request a diff once with and once without a documented threshold.
+- **Expected Result:** The reset path starts the candidate only after prior work drains and quiescence is verified, asynchronous capture uses isolated namespaces, unsafe reset-only variants are refused, browser and server state never cross contexts, the exact runnable revisions appear side by side, the historical image is contextual only, and diff verdicts follow policy.
+- **Failure Indicator:** Captures overlap on the reset path, a late server write crosses captures, an asynchronous or non-quiesceable scenario uses reset-only isolation, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
 
 ### US-015: Handle an unavailable baseline honestly
 
@@ -408,7 +410,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] Each **Evidence Bundle** contains a human-readable report, a **Portable Manifest**, and zero or more visual artifacts.
-- [ ] Every manifest declares **Evidence Schema Version** `1.0` and includes the claim, relative artifact names, types, capture times, hashes, capture scope, privacy result, and relevant tool versions.
+- [ ] Every manifest declares **Evidence Schema Version** `1.0` and includes the claim, relative artifact names, types, capture times, hashes, capture scope, immutable **Privacy Scan Result** and exact finding set, and relevant tool versions.
+- [ ] A manifest never records explicit acceptance or other approval state.
 - [ ] Comparison manifests identify the exact baseline and candidate revisions used for capture.
 - [ ] Portable output excludes usernames, absolute paths, environment variables, credentials, unnecessary URL parameters, and private values.
 - [ ] Detailed diagnostics remain separate **Private Outputs** and are excluded from the portable bundle by default.
@@ -417,14 +420,14 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Produce comparison, behavior, after-only, empty-artifact, and tampered bundle fixtures with private machine details present in the runtime environment.
+- **Setup:** Produce comparison, behavior, after-only, empty-artifact, privacy-finding, and tampered bundle fixtures with private machine details present in the runtime environment.
 - **Steps:**
   1. Validate and finalize each legitimate fixture.
-  2. Inspect required fields and revision identities.
+  2. Inspect required fields, revision identities, immutable privacy scan results, and finding sets.
   3. Search portable files for private machine details.
   4. Validate the tampered fixture and attempt a destination collision.
-- **Expected Result:** Legitimate bundles validate without private details, tampering is detected, and a non-identical collision is refused without overwrite.
-- **Failure Indicator:** A required identity is missing, private data is portable, tampering passes, or finalization replaces an existing bundle.
+- **Expected Result:** Legitimate bundles validate without private details or approval state, privacy-finding output records its immutable scan result and exact finding set, tampering is detected, and a non-identical collision is refused without overwrite.
+- **Failure Indicator:** A required identity is missing, acceptance or another private value becomes portable, tampering passes, or finalization replaces an existing bundle.
 
 ### US-018: Review privacy findings without altering originals
 
@@ -437,8 +440,9 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - [ ] Any unresolved finding blocks local export and **Evidence Import Consent**.
 - [ ] Each finding can be explicitly accepted, cropped, redacted into a derived artifact, or resolved by excluding its artifact.
 - [ ] Originals in the **Local Evidence Store** are never silently altered.
-- [ ] Explicit acceptance alone does not require a new preview when artifact bytes, batch, finding set, and destination remain unchanged.
-- [ ] A derivation, crop, redaction, exclusion, file change, batch change, finding-set change, or destination change produces a new exact preview before authority can be granted.
+- [ ] The active trusted host controller stores explicit acceptance only in private decision state bound to the unchanged manifest hash, artifact bytes, exact finding set, batch, and destination.
+- [ ] Explicit acceptance changes no **Privacy Scan Result** or bundle byte and does not require a new preview while those bindings remain unchanged.
+- [ ] A derivation, crop, redaction, exclusion, byte change, batch change, finding-set change, or destination change invalidates the decision and produces a new exact preview before authority can be granted.
 - [ ] Privacy review and derived output are verified in browser using `chrome-devtools-axi`.
 
 **Validation Test:**
@@ -447,11 +451,11 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - **Steps:**
   1. Open the privacy review using `chrome-devtools-axi`.
   2. Attempt export and import consent with the finding unresolved.
-  3. Explicitly accept one finding without changing its artifact bytes, the batch, the finding set, or the destination, and confirm the current exact preview remains valid.
+  3. Explicitly accept one finding, compare the bundle and manifest hashes before and after, and inspect the active host controller's bound private decision state.
   4. Resolve the other finding through a redacted derivative.
   5. Compare original and derived hashes and open the new preview.
-- **Expected Result:** Unresolved publication is blocked, unchanged explicit acceptance preserves the current preview, the original remains byte-identical, the derivative has a new identity, and only the newly previewed changed batch can receive authority.
-- **Failure Indicator:** Original bytes change, unresolved evidence proceeds, unchanged acceptance invalidates the preview, or an old decision applies to the derived batch.
+- **Expected Result:** Unresolved publication is blocked, unchanged explicit acceptance preserves the bundle bytes, manifest hash, immutable scan result, finding set, and current preview while remaining only in bound private decision state, the original remains byte-identical, the derivative has a new identity, and only the newly previewed changed batch can receive authority.
+- **Failure Indicator:** Acceptance changes portable bytes or state, unresolved evidence proceeds, unchanged acceptance invalidates the preview, or an old decision applies to the derived batch.
 
 ### US-019: Operate the local Evidence Review Surface
 
@@ -606,7 +610,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-28: Relevant evidence must default to supplemental unless the captain's request or documented project policy establishes it as required.
 - FR-29: Worker briefs must carry an explicit evidence contract and canonical public skill path when Visual Evidence is active.
 - FR-30: Workers must report unexpected impact, and Firstmate alone must perform **Evidence Reclassification** under the same authority rules.
-- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information and, for Comparison Mode, independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
+- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information and, for Comparison Mode, independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset**.
 - FR-32: **Scenario Values** must remain ignored local state and must never enter portable output or diagnostics.
 - FR-33: Visual Evidence must never invent startup or fixture commands and must report scenarios that lack required explicit inputs.
 - FR-34: Version 1 must support macOS browser capture only and must make no Linux or Windows support claim.
@@ -614,7 +618,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-36: A task-scoped profile may preserve state only within its task and must not be reused by another task.
 - FR-37: Visual Evidence must seed captures only from **Synthetic Test Fixtures** or clean anonymous state and must never copy a current or production environment automatically.
 - FR-38: Visual Evidence must capture only scenario-named viewports and must not run an automatic device matrix.
-- FR-39: Comparison Mode must use separate browser contexts with equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs plus independently isolated server-side synthetic fixture namespaces or deterministic reset before each capture.
+- FR-39: Comparison Mode must use separate browser contexts with equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs plus independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset** satisfying the authoritative contract in [CONTEXT.md](../CONTEXT.md).
 - FR-40: A before-and-after claim must require a successfully run and equivalently captured exact **Baseline Revision**, distinct from the candidate head, as its **Verified Baseline**.
 - FR-41: Historical or user-provided screenshots must not be labeled as Verified Baseline evidence.
 - FR-42: Required comparison evidence must fail when the baseline is unavailable, while supplemental evidence may produce reasoned **After-only Evidence** without a comparison claim.
@@ -626,11 +630,11 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-48: Version 1 must not produce video or use operating-system-level screen capture.
 - FR-49: Visual evidence must complement feasible automated assertions and must not claim to prove hidden application behavior.
 - FR-50: Every **Evidence Bundle** must contain a versioned Portable Manifest and human-readable report with zero or more visual artifacts.
-- FR-51: Portable manifests must include claim, relative artifact identity, type, capture time, hash, capture scope, privacy result, tool versions, and applicable revision identities.
+- FR-51: Portable manifests must include claim, relative artifact identity, type, capture time, hash, capture scope, immutable **Privacy Scan Result** and exact finding set, tool versions, and applicable revision identities without acceptance or approval state.
 - FR-52: Portable bundles must exclude usernames, absolute paths, environment variables, credentials, private values, and unnecessary URL parameters.
 - FR-53: Original bundles and diagnostic appendices must remain private in the ignored **Local Evidence Store** unless exact authority permits an export or publication copy.
 - FR-54: **Privacy Review** must flag suspected sensitive content and block export or import consent while any finding remains unresolved.
-- FR-55: Privacy resolution must preserve originals; explicit acceptance alone must preserve the current exact preview when bytes, batch, finding set, and destination are unchanged, while derivation, crop, redaction, exclusion, file change, batch change, finding-set change, or destination change must require a new exact preview.
+- FR-55: Privacy resolution must preserve originals and keep explicit acceptance in controller-owned private decision state bound to the unchanged manifest hash, bytes, exact finding set, batch, and destination; acceptance alone must not rewrite the bundle or require a new preview, while derivation, crop, redaction, exclusion, byte change, batch change, finding-set change, or destination change must invalidate the decision and require a new exact preview.
 - FR-56: The **Evidence Review Surface** must render locally, cause no upload or mutation, and provide exact review choices without performing external actions directly.
 - FR-57: The active trusted host controller must revalidate hashes, batch, and destination after a Review Decision and before performing an approved local action, and must also revalidate the no-mistakes run and reviewed head before routing consent for protected staging.
 - FR-57a: Firstmate must be the host controller in integrated use, while the public skill's trusted non-browser Local Evidence Controller must own private storage, decision intake, approved local actions, and no-mistakes consent routing in standalone use.
@@ -693,7 +697,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Hashes must be computed from the exact protected or finalized copy used by the next authority step.
 - File operations must fail closed on symlinks, containment ambiguity, cross-device finalization, race detection, and non-identical destination collisions.
 - Browser startup must detect supported tool capabilities and versions without attaching to ambient browser sessions or installing dependencies automatically.
-- Capture must use separate safe browser contexts for the **Baseline Revision** and candidate head while preserving equivalent scenario inputs and isolating server-side synthetic state through independent fixture namespaces or deterministic reset before each capture.
+- Capture must use separate safe browser contexts for the **Baseline Revision** and candidate head while preserving equivalent scenario inputs and isolating server-side synthetic state through independent fixture namespaces or a **Deterministic Capture Reset**.
+- Portable privacy scan data must remain immutable and separate from controller-owned acceptance and approval state.
 - The selected diff implementation must be deterministic for a declared metric, but a project threshold remains the only source of a pass-or-fail diff verdict.
 - Portable schema parsers must reject unsupported major versions and missing required fields while tolerating newer optional fields within the same major version.
 - Security tests must include hostile project content, nested validation processes, malformed manifests, path escapes, content drift, replay, concurrent consumption, and stale run or head bindings.
@@ -708,7 +713,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - **Risk:** Evidence may change between preview and publication.
 - **Mitigation:** Every transition binds hashes and context, and publication revalidates immediately before mutation.
 - **Risk:** Browser capture may expose personal or production data.
-- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state, isolates server-side synthetic state through independent fixture namespaces or deterministic reset before each capture, and never attaches to the ordinary signed-in browser.
+- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state, applies independently isolated server-side fixture namespaces or the scenario-declared **Deterministic Capture Reset**, and never attaches to the ordinary signed-in browser.
 - **Risk:** Visual evidence may be treated as proof of hidden behavior.
 - **Mitigation:** Automated assertions remain required where feasible, and reports limit claims to appearance and observable interaction.
 - **Risk:** Evidence storage may grow indefinitely because automatic expiry is prohibited.
