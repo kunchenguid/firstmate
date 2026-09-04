@@ -355,3 +355,38 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_target_exists: the tmux half of fm_backend_target_exists's
+# cheap READ-ONLY presence probe. Replaces the old raw `tmux display-message -p
+# -t "$target" '#{pane_id}'` call, which answered from the client's ACTIVE
+# window whenever any tmux server was running - so it reported an absent window
+# or session as present (the exact hazard fm_backend_tmux_current_command and
+# the agent_state classifier above document and guard against). list-panes is
+# authoritative instead: it exits non-zero when the target resolves to no pane,
+# and never starts a server (a down server simply fails, which IS "does not
+# exist" for a passive liveness probe).
+#
+# Two target shapes reach here. A bare pane or window id (`%N` or `@N`, e.g. the
+# away-mode daemon's supervisor pane) is queried directly. A `session:window`
+# endpoint is matched EXACTLY by anchoring both atoms with `=`, so
+# `firstmate:fm-task` cannot match a `fm-task-2` prefix. A window atom that is
+# itself an `@N`/`%N` id takes no `=` prefix, since exact-match anchoring is for
+# names, not ids. The optional expected-label argument is accepted for a uniform
+# signature but unused: tmux presence is settled by the target alone.
+fm_backend_tmux_target_exists() {  # <target> [expected-label]
+  local target=$1 session window resolved
+  case "$target" in
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      case "$window" in
+        @*|%*) resolved="=$session:$window" ;;
+        *) resolved="=$session:=$window" ;;
+      esac
+      ;;
+    *)
+      resolved=$target
+      ;;
+  esac
+  tmux list-panes -t "$resolved" >/dev/null 2>&1
+}

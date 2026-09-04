@@ -2514,6 +2514,29 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+# fm_backend_herdr_target_exists: the herdr half of fm_backend_target_exists's
+# cheap READ-ONLY presence probe. Deliberately queries the pane DIRECTLY instead
+# of going through fm_backend_herdr_target_ready, which auto-starts the herdr
+# server as a side effect via fm_backend_herdr_server_ensure - fine for an
+# operation about to use the pane, wrong for a passive liveness probe. An
+# unqueryable pane (server down, pane closed) simply fails, which IS "does not
+# exist" for this purpose.
+fm_backend_herdr_target_exists() {  # <target> [expected-label]
+  local target=$1 session pane
+  session=${target%%:*}
+  pane=${target#*:}
+  [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+  # fm_backend_herdr_cli (not a raw HERDR_SESSION-only call): verified
+  # empirically (docs/herdr-backend.md "Session targeting") that the bare
+  # env var alone is NOT reliably honored once another herdr server is
+  # already bound on the machine - it silently queries whatever server IS
+  # running instead. fm_backend_herdr_cli appends the required --session
+  # flag on top, so this check is correctly scoped even when the caller's
+  # own ambient session (e.g. the primary firstmate's default session) is
+  # a DIFFERENT one than the target's.
+  fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
+}
+
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1

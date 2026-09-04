@@ -45,7 +45,9 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, and a cheap per-task endpoint-liveness read
+#                       (a remote:<id> endpoint lives on another host, so it is
+#                       reported as not locally probed instead of alive/dead):
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -822,11 +824,22 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+    # A remote secondmate's agent runs on another host, so no local backend
+    # probe could ever resolve its window; report that rather than reading a
+    # live remote endpoint as dead. docs/remote-secondmates.md owns how remote
+    # endpoints are actually read.
+    case "$window" in
+    remote:*)
+      printf 'endpoint: remote (not locally probed; window=%s)\n' "$window"
+      ;;
+    *)
+      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
+      ;;
+    esac
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi

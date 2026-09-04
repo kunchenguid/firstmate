@@ -59,6 +59,22 @@ case "${1:-}" in
   capture-pane)
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
+  list-panes)
+    # target_exists's presence probe (was a display-message pane read); honor
+    # the same FM_FAKE_TMUX_DEAD_TARGET knob, stripping the probe's `=`
+    # exact-match anchors before comparing, so a dead target fails the check.
+    target=
+    prev=
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target=$a
+      prev=$a
+    done
+    target="${target//=/}"
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    printf '%%1\n'
+    exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;

@@ -290,22 +290,27 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: list-panes succeeds only for the given
+# "session:window" target - the exact primitive fm_backend_target_exists now
+# uses for a tmux endpoint liveness read. tmux's `=sess:=win` exact-match
+# anchoring is modeled by stripping the `=` atoms before comparing, so an absent
+# window or session correctly fails (the old raw display-message probe this
+# replaces answered from the client's active window instead, reporting an absent
+# endpoint as present).
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  list-panes)
     target=""
     prev=""
     for a in "\$@"; do
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
+    target="\${target//=/}"
     [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
     exit 1
     ;;
@@ -371,6 +376,21 @@ case "${1:-}" in
         ;;
       unreadable) exit 1 ;;
     esac
+    ;;
+  list-panes)
+    # target_exists's cheap presence probe (was a raw display-message that
+    # answered from the active window). Mirror the same window-in-inventory
+    # truth list-windows models below, so the fleet digest reports the correct
+    # alive/dead symptom: a present window succeeds, while a missing or
+    # transiently unreadable target fails.
+    if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
+      exit 1
+    fi
+    if [ -e "$spawned" ] || { [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; }; then
+      printf '%%1\n'
+      exit 0
+    fi
+    exit 1
     ;;
   list-windows)
     if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
@@ -1345,6 +1365,28 @@ EOF
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+}
+
+test_endpoint_liveness_remote_not_probed() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=remote:sm-far\nkind=secondmate\nremote_host=box\nremote_backend=herdr\n' > "$home/state/sm-far.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: remote (not locally probed; window=remote:sm-far)" "remote endpoint not reported as remote"
+  case "$out" in
+  *"endpoint: dead (backend=tmux window=remote:sm-far)"*)
+    fail "remote endpoint was probed locally and reported dead" ;;
+  esac
+
+  pass "a remote secondmate endpoint is reported as remote, never probed as a local target"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------
@@ -2587,6 +2629,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_liveness_remote_not_probed
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

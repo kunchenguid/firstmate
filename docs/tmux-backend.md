@@ -47,6 +47,9 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists.
+It answers from exact pane membership (`tmux list-panes`), never from the attached client's active window, so an absent window, an absent session, or an absent `%N`/`@N` id reads as gone even while a tmux server is running.
+Both atoms of a `session:window` endpoint are anchored to an exact name match, so `firstmate:fm-task` never matches a longer `fm-task-2` window.
+The check never starts a tmux server: a down server simply fails, which is the correct answer for a passive liveness probe.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
