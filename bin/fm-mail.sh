@@ -51,9 +51,8 @@ if [ -z "$FM_HOME" ]; then
 fi
 ENV_FILE="$FM_HOME/.env"
 if [ -f "$ENV_FILE" ]; then
-  # shellcheck source=/dev/null
   set -a
-  # shellcheck source=/dev/null
+  # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
 fi
