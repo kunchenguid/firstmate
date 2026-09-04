@@ -81,6 +81,28 @@ daemon_lock_owner() {
   printf '%s\n' "$FM_AFK_LOCK"
 }
 
+daemon_command_is_supervisor() {
+  local command=$1 executable
+  command=${command#"${command%%[![:space:]]*}"}
+  case "$command" in
+    "$FM_AFK_DAEMON"|"$FM_AFK_DAEMON "*) return 0 ;;
+  esac
+
+  executable=${command%%[[:space:]]*}
+  [ "$executable" != "$command" ] || return 1
+  case "$executable" in
+    bash|*/bash) ;;
+    *) return 1 ;;
+  esac
+
+  command=${command#"$executable"}
+  command=${command#"${command%%[![:space:]]*}"}
+  case "$command" in
+    "$FM_AFK_DAEMON"|"$FM_AFK_DAEMON "*) return 0 ;;
+  esac
+  return 1
+}
+
 daemon_pid_matches() {
   local pid=$1 owner=$2 identity current command
   identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
@@ -89,11 +111,9 @@ daemon_pid_matches() {
     [ "$current" = "$identity" ]
     return
   fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
+  # -ww preserves the complete executable and script arguments under narrow COLUMNS.
+  command=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+  daemon_command_is_supervisor "$command"
 }
 
 daemon_lock_pid() {

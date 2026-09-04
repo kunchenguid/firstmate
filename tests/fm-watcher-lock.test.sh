@@ -1001,6 +1001,25 @@ SH
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_fallback_ignores_terminal_width() {
+  local live no_proc baseline narrow
+  bash -c 'while :; do sleep 1; done' fm-pid-identity-width-regression-marker &
+  live=$!
+  no_proc="$TMP_ROOT/no-proc"
+  baseline=$(FM_PROC_ROOT_OVERRIDE="$no_proc" COLUMNS=200 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  narrow=$(FM_PROC_ROOT_OVERRIDE="$no_proc" COLUMNS=40 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$baseline" ] || fail "fm_pid_identity produced no fallback identity"
+  case "$baseline" in
+    *fm-pid-identity-width-regression-marker*) ;;
+    *) fail "fm_pid_identity fallback baseline was incomplete ('$baseline')" ;;
+  esac
+  [ "$narrow" = "$baseline" ] \
+    || fail "fm_pid_identity fallback varied with terminal width (narrow '$narrow', baseline '$baseline')"
+  pass "fm_pid_identity fallback is invariant under narrow terminal width"
+}
+
 write_fake_proc_identity() {
   local proc_root=$1 pid=$2 starttime=$3
   mkdir -p "$proc_root/$pid"
@@ -1104,6 +1123,7 @@ test_msys_pid_identity_uses_proc() {
 
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_fallback_ignores_terminal_width
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
