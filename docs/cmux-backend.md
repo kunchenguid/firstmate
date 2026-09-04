@@ -33,7 +33,8 @@ Open Settings > Automation and choose a viable Socket Control Mode before the fi
 
 Automation mode is the recommended same-user boundary.
 `allowAll` can execute commands through a world-writable control socket and should be selected only as an explicit security tradeoff.
-`cmuxOnly` can appear to work while Firstmate itself runs inside cmux, because every Firstmate process is then a descendant of the app. But it fails once any of them is reparented, so a working socket under that mode is not evidence of support.
+`cmuxOnly` can appear to work while Firstmate itself runs inside cmux, because every Firstmate process is then a descendant of the app.
+It fails once any of them is reparented, so a working socket under that mode is not evidence of support.
 
 For Password mode, store the password as the first line of local gitignored `config/cmux-socket-password` or provide `CMUX_SOCKET_PASSWORD` in Firstmate's environment.
 The adapter reads the file fresh from the effective config directory and does not overwrite an ambient password when the file is absent.
