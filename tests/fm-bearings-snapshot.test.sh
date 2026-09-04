@@ -15,6 +15,7 @@ set -u
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
+TASKS_AXI_BIN=$(command -v tasks-axi || true)
 # Keep disposable homes outside the snapshot's fixture repo boundary even when
 # TMPDIR is inside an isolated source worktree.
 FM_ROOT_OVERRIDE="$TMP_ROOT/fixture-root"
@@ -1393,10 +1394,11 @@ EOF
 # tasks-axi clears the held flag on close but retains hold-kind/hold reason as the
 # history of that call, and the recorded answer stays as an indented block under the
 # entry. Recently Landed is delivered work, so a captain-approved merge belongs in it
-# in every home; only a captain question that closed with no delivery of its own stays
-# out. Local, deterministic, no GitHub call.
+# in every home. A captain-kind question never becomes a delivery merely because its
+# title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json
+  local home mate fakebin json backlog
+  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
   cat >> "$home/data/backlog.md" <<'EOF'
@@ -1405,8 +1407,6 @@ test_captain_approved_delivery_stays_in_landed() {
   Captain decision:
   Merge now, chosen on the board on 2026-07-10.
 - [x] approved-scout - Trace the redirect data/scout-x/report.md (repo: firstmate) (kind: scout) (reported 2026-07-10) (hold: report ready; awaiting your read) (hold-kind: captain)
-- [x] approved-local - Land it locally (repo: firstmate) (kind: ship) (done 2026-07-10) - local main (hold: ready on the local branch; awaiting your word) (hold-kind: captain)
-- [x] answered-question - Which order should we subscribe in (repo: firstmate) (kind: captain) (done 2026-07-10) (hold: captain choice pending) (hold-kind: captain)
 EOF
   cat >> "$mate/data/backlog.md" <<'EOF'
 - [x] mate-approved-merge - Secondmate fix https://github.com/kunchenguid/firstmate/pull/1361 (repo: firstmate) (kind: ship) (merged 2026-07-11) (hold: PR 1361 open, all green; awaiting your merge word) (hold-kind: captain)
@@ -1414,6 +1414,31 @@ EOF
   Merge now.
 EOF
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  backlog="$home/data/backlog.md"
+  "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate --file "$backlog" >/dev/null \
+    || fail "could not create the local delivery fixture"
+  "$TASKS_AXI_BIN" hold approved-local --reason "ready on the local branch; awaiting your word" \
+    --kind captain --file "$backlog" >/dev/null || fail "could not hold the local delivery fixture"
+  "$TASKS_AXI_BIN" done approved-local --note "local main" --file "$backlog" >/dev/null \
+    || fail "could not close the local delivery fixture"
+  printf 'Land the local branch.\n' > "$home/local-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer approved-local --decision-file "$home/local-answer.txt" >/dev/null \
+    || fail "could not record the local delivery answer"
+  "$TASKS_AXI_BIN" add answered-question \
+    "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
+    --kind captain --repo firstmate --file "$backlog" >/dev/null \
+    || fail "could not create the answered question fixture"
+  "$TASKS_AXI_BIN" hold answered-question --reason "captain choice pending" \
+    --kind captain --file "$backlog" >/dev/null || fail "could not hold the answered question fixture"
+  printf 'Do not merge it.\n' > "$home/question-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer answered-question --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not record the answered question"
   json=$(run "$home" "$fakebin" --json --all-landed)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "approved-merge" and (.artifact | test("/pull/1365"))))
