@@ -828,6 +828,28 @@ test_concurrent_drains_send_one_card_once() {
   pass "concurrent drains serialize one card delivery"
 }
 
+test_concurrent_publishers_queue_one_card_once() {
+  local dir publisher pid
+  dir=$(make_home concurrent-publish)
+
+  for publisher in 1 2 3 4 5 6 7 8; do
+    {
+      report "$dir" "pr-ready [key=pr-alpha-7]: PR ready: alpha https://example.test/o/r/pull/7" \
+        pr-ready pr-alpha-7 "project=alpha" "url=https://example.test/o/r/pull/7" \
+        || true
+    } >"$dir/publisher-$publisher.out" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" >> "$dir/publisher-pids"
+  done
+  while IFS= read -r pid; do
+    wait "$pid" || fail "concurrent publisher $pid failed"
+  done < "$dir/publisher-pids"
+
+  [ "$(card_count "$dir")" = 1 ] \
+    || fail "concurrent publishers queued duplicate cards: $(cards_in "$dir")"
+  pass "concurrent publishers atomically converge on one card identity"
+}
+
 test_semantic_success_response_is_accepted() {
   local dir base out
   dir=$(make_home spaced-response)
@@ -978,6 +1000,7 @@ test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
 test_secondmate_failure_cards_track_incarnations
 test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
+test_concurrent_publishers_queue_one_card_once
 test_concurrent_drains_send_one_card_once
 test_semantic_success_response_is_accepted
 test_non_loopback_api_override_is_refused

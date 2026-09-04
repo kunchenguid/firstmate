@@ -569,13 +569,13 @@ fm_telegram_mark_delivered() {  # <state> <card-identity>
   fi
 }
 
-# The card file this key would occupy. Naming is epoch-then-key so a plain sort
-# drains roughly in the order the outcomes happened; cards are independent
-# notifications, so ordering within one second is deliberately unspecified.
+# The card file this key occupies. The deterministic name is the atomic
+# deduplication boundary: concurrent publishers may replace the same queued
+# card, but they cannot create two cards for one notification identity.
 _fm_telegram_card_path() {  # <state> <key>
   local hash
   hash=$(_fm_telegram_key_hash "$1|$2") || return 1
-  printf '%s/%s-%s.card\n' "$(fm_telegram_outbox_dir "$1")" "$(date +%s)" "$hash"
+  printf '%s/%s.card\n' "$(fm_telegram_outbox_dir "$1")" "$hash"
 }
 
 # True when a card for <key> is already queued.
@@ -584,7 +584,7 @@ fm_telegram_queued() {  # <state> <key>
   dir=$(fm_telegram_outbox_dir "$1")
   hash=$(_fm_telegram_key_hash "$1|$2") || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  ls "$dir"/*-"$hash".card >/dev/null 2>&1
+  [ -f "$dir/$hash.card" ] && [ ! -L "$dir/$hash.card" ]
 }
 
 # One loud local diagnostic. A refused or undeliverable card is never silent:
