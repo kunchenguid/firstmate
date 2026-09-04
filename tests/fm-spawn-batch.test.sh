@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh batch dispatch (`id=repo` pairs).
 #
-# These exercise argument routing only: each spawn attempt fails fast at the
-# missing-brief check, which is reached before any tmux/treehouse side effect, so
-# the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# These exercise argument routing only: each spawn attempt fails before endpoint
+# creation, so the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps
+# them off the live watcher guard, and every home-local path points into TMP_ROOT.
+# Parser and path-scoping cases are table-driven.
+# Standalone regressions pin both multi-pair completion and the active-profile
+# explicit-harness backstop.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,18 +14,26 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+TEST_HOME="$TMP_ROOT/home"
+mkdir -p "$TEST_HOME/state" "$TEST_HOME/data" "$TEST_HOME/projects" "$TEST_HOME/config"
 export FM_BACKEND=tmux
 
-# Clear ambient firstmate overrides so the behavior test owns its environment.
-run_spawn() {
+# Drive the public spawn interface against one fully isolated Firstmate home.
+run_spawn_in_home() {
+  local home=$1
+  shift
   FM_ROOT_OVERRIDE='' \
-    FM_HOME='' \
-    FM_STATE_OVERRIDE='' \
-    FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
+}
+
+run_spawn() {
+  run_spawn_in_home "$TEST_HOME" "$@"
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); the
@@ -46,6 +54,35 @@ test_batch_dispatches_every_pair() {
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
     || fail "second pair was not dispatched/reported (loop stopped early?)"
   pass "batch dispatch re-execs and reports every id=repo pair"
+}
+
+# A real home may carry dispatch profiles, but that local state must never leak
+# into the argument-routing fixture above. Pin the production backstop separately:
+# it refuses a profile-aware batch without a resolved harness, while adding that
+# one shared input reaches and reports every pair.
+test_batch_honors_active_dispatch_profile() {
+  local home out status
+  home="$TMP_ROOT/profile-home"
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config"
+  printf '%s\n' '{"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
+    > "$home/config/crew-dispatch.json"
+
+  out=$(run_spawn_in_home "$home" nope-batch-profile-a-z13=projects/none-a nope-batch-profile-b-z14=projects/none-b --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "active dispatch profile should require an explicit harness"
+  printf '%s\n' "$out" | grep -F 'config/crew-dispatch.json is active - pass an explicit harness' >/dev/null \
+    || fail "active dispatch profile refusal was not reported"
+  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null \
+    && fail "active dispatch profile reached pair dispatch without an explicit harness"
+
+  out=$(run_spawn_in_home "$home" nope-batch-profile-a-z13=projects/none-a nope-batch-profile-b-z14=projects/none-b --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "profile-aware batch with missing projects should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-profile-a-z13 (projects/none-a)' >/dev/null \
+    || fail "explicit shared harness did not dispatch/report the first profile-aware pair"
+  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-profile-b-z14 (projects/none-b)' >/dev/null \
+    || fail "explicit shared harness did not dispatch/report the second profile-aware pair"
+  pass "batch dispatch isolates local config and honors the active-profile harness backstop"
 }
 
 # Boundary cases for batch detection. Each row:
@@ -142,6 +179,7 @@ test_scout_batch_refuses_delivery_flags() {
 }
 
 test_batch_dispatches_every_pair
+test_batch_honors_active_dispatch_profile
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
