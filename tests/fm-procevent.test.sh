@@ -60,7 +60,7 @@ procevent_teardown() {
   fm_test_cleanup
 }
 trap procevent_teardown EXIT
-new_home() { mkdir -p "$1/state"; }
+new_home() { (umask 077; mkdir -p "$1/state"); }
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 
 first_result() {  # <home> <source-id>: print the first captured result, if any
@@ -138,7 +138,7 @@ hold_source_lock_then_handle() {  # <home> <source-id> <sequence> <ready-file> <
 }
 
 # --- inert with nothing configured ------------------------------------------
-IDLE="$TMP_ROOT/idle"; mkdir -p "$IDLE"
+IDLE="$TMP_ROOT/idle"; new_home "$IDLE"
 out=$(pe "$IDLE" list)
 assert_contains "$out" "no sources registered" "an unconfigured home reports no sources"
 out=$(pe "$IDLE" reconcile)
@@ -151,7 +151,7 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- a blocking source completes into exactly one normalized event ----------
-H1="$TMP_ROOT/h1"; mkdir -p "$H1"
+H1="$TMP_ROOT/h1"; new_home "$H1"
 TRIG="$TMP_ROOT/trigger-one"
 out=$(pe_register "$H1" lavish src-one -- "$BLOCKER" "$TRIG" "payload one")
 assert_contains "$out" "registered: src-one" "register records a source"
@@ -1771,29 +1771,66 @@ link_listing() {
     "$1" > "$FM_TEST_LINK_LISTING"
 }
 
-LINK_EVEN=0 LINK_ODD=0
+LINK_HOSTS=
+LINK_KEYS=
+LINK_SELECTED=0
+LINK_PARITY=
 for n in $(seq 1 128); do
   LINK_ARTIFACT="$LINK_HOME/board-$n.html"
   printf '<h1>Review</h1>\n' > "$LINK_ARTIFACT"
   LINK_ID=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_ARTIFACT")
   LINK_KEY=${LINK_ID#lavish-}
   case "${LINK_KEY:0:1}" in
-    0|2|4|6|8|a|c|e)
-      [ "$LINK_EVEN" -lt 3 ] || continue
-      LINK_EXPECTED_HOST=localhost; LINK_EVEN=$((LINK_EVEN + 1)) ;;
-    *)
-      [ "$LINK_ODD" -lt 3 ] || continue
-      LINK_EXPECTED_HOST=127.0.0.1; LINK_ODD=$((LINK_ODD + 1)) ;;
+    0|2|4|6|8|a|c|e) LINK_KEY_PARITY=even ;;
+    *) LINK_KEY_PARITY=odd ;;
   esac
+  [ -n "$LINK_PARITY" ] || LINK_PARITY=$LINK_KEY_PARITY
+  [ "$LINK_KEY_PARITY" = "$LINK_PARITY" ] || continue
+  LINK_SELECTED=$((LINK_SELECTED + 1))
+  if [ $((LINK_SELECTED % 2)) -eq 1 ]; then LINK_EXPECTED_HOST=localhost; else LINK_EXPECTED_HOST=127.0.0.1; fi
   link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
   LINK_EXPECTED="http://$LINK_EXPECTED_HOST:4876/session/$LINK_KEY?no_gate=1"
-  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link did not partition the key or preserve the served port/query"
+  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link did not allocate the key or preserve the served port/query"
   [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link changed on an unchanged rerun"
-  [ "$LINK_EVEN" -ne 3 ] || [ "$LINK_ODD" -ne 3 ] || break
+  LINK_HOSTS+="$LINK_EXPECTED_HOST\n"
+  LINK_KEYS+="$LINK_KEY\n"
+  [ "$LINK_SELECTED" -lt 6 ] || break
 done
-[ "$LINK_EVEN" -eq 3 ] && [ "$LINK_ODD" -eq 3 ] || fail "link spreading test did not exercise both partitions"
-pass "link stably partitions six selected session keys across both loopback hosts"
+[ "$LINK_SELECTED" -eq 6 ] || fail "link regression could not construct six colliding legacy keys"
+[ "$(printf '%b' "$LINK_HOSTS" | sort | uniq -c | awk '{print $1}' | sort -u)" = 3 ] \
+  || fail "link did not balance six arbitrary keys across both fallback addresses"
+[ "$(awk -F '\t' '$1 == "v1" && $2 == 4876 { print $3 }' "$LINK_HOME/state/lavish-reviewer-addresses.tsv" | sort)" \
+    = "$(printf '%b' "$LINK_KEYS" | sort)" ] || fail "link did not persist every board assignment"
+LINK_MAP_MODE=$(bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$LINK_HOME/state/lavish-reviewer-addresses.tsv")
+[ "$LINK_MAP_MODE" = 600 ] \
+  || fail "link did not keep its fallback allocation map private"
+pass "link stably balances six colliding session keys across both loopback hosts"
 
+LINK_SIXTH_ARTIFACT=$LINK_ARTIFACT
+LINK_SIXTH_KEY=$LINK_KEY
+LINK_SIXTH_EXPECTED=$LINK_EXPECTED
+LINK_ARTIFACT="$LINK_HOME/board-over-limit.html"
+printf '<h1>Review</h1>\n' > "$LINK_ARTIFACT"
+LINK_ID=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_ARTIFACT")
+LINK_KEY=${LINK_ID#lavish-}
+link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
+LINK_WARNING="$LINK_HOME/link-warning"
+LINK_SEVENTH=$(link_out "$LINK_ARTIFACT" 2> "$LINK_WARNING")
+assert_contains "$(cat "$LINK_WARNING")" 'limit is three boards per address and six per server' "link did not warn at the fallback capacity boundary"
+assert_contains "$(cat "$LINK_WARNING")" "http://lavish-$LINK_KEY.localhost:4876/session/$LINK_KEY" "link warning did not name the accepted alias path"
+case "$LINK_SEVENTH" in
+  "http://localhost:4876/session/$LINK_KEY?no_gate=1") LINK_EXPECTED_HOST=localhost ;;
+  "http://127.0.0.1:4876/session/$LINK_KEY?no_gate=1") LINK_EXPECTED_HOST=127.0.0.1 ;;
+  *) fail "link warning changed the reviewer URL contract" ;;
+esac
+LINK_EXPECTED=$LINK_SEVENTH
+pass "link warns with the accepted alias path when fallback exceeds six boards"
+
+LINK_ARTIFACT=$LINK_SIXTH_ARTIFACT
+LINK_KEY=$LINK_SIXTH_KEY
+LINK_EXPECTED=$LINK_SIXTH_EXPECTED
+link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
 : > "$FM_TEST_LINK_PROBE_LOG"
 [ "$(FM_TEST_LINK_STATUS=200 link_out "$LINK_ARTIFACT")" = "http://lavish-$LINK_KEY.localhost:4876/session/$LINK_KEY?no_gate=1" ] \
   || fail "link did not prefer a positively accepted alias"
@@ -1813,7 +1850,7 @@ link_listing "http://lavish-$LINK_KEY.localhost:4876/session/$LINK_KEY"
 FM_TEST_LINK_STATUS=200 link_out "$LINK_ARTIFACT" >/dev/null || fail "link could not inspect a previously aliased session"
 assert_contains "$(cat "$FM_TEST_LINK_PROBE_LOG")" 'http://127.0.0.1:4876/health' "alias probe depended on local subdomain DNS resolution"
 link_listing "http://localhost/session/$LINK_KEY"
-[ "$(link_out "$LINK_ARTIFACT")" = "http://$LINK_EXPECTED_HOST:80/session/$LINK_KEY" ] || fail "link invented a nonstandard default HTTP port"
+[ "$(link_out "$LINK_ARTIFACT")" = "http://localhost:80/session/$LINK_KEY" ] || fail "link invented a nonstandard default HTTP port"
 for url in "https://localhost:7443/session/$LINK_KEY" "http://review.example:4876/session/$LINK_KEY" "http://[::1]:4876/session/$LINK_KEY"; do
   link_listing "$url"
   : > "$FM_TEST_LINK_PROBE_LOG"

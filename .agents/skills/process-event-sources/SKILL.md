@@ -35,8 +35,8 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 
 After the listener is armed, hand the captain the URL from `bin/fm-procevent-lavish.sh link <artifact.html>`.
 The script's header owns hostname selection and its read-only probe mechanics.
-Keep at most three open boards per address when the link uses `localhost` or `127.0.0.1`; deterministic partitioning does not guarantee an equal split for every set of boards.
-If a partition exceeds that limit, use the other already-supported address for an empty or fully drained board tab while preserving its scheme, port and session path.
+The fallback allocation is bounded to six boards per server until the event-stream transport fix lands.
+If `link` warns that an address exceeds three boards, enable the exact alias path it prints before handing out that board.
 Drain each queued tab on its original address before moving it, because changing origins does not carry over its unsent items.
 Verify active reviews through session listings and listener state without fetching a review page or taking over its handoff.
 

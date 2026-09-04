@@ -34,12 +34,14 @@
 #            URL in lavish-axi's session listing, never opening or polling it.
 #            For HTTP IPv4 loopback sessions, prefer lavish-<key>.localhost if
 #            a bounded /health probe with that Host returns exactly 200.
-#            Otherwise an even first key digit selects localhost, an odd one
-#            127.0.0.1. This is stable partitioning, not a capacity guarantee:
-#            hosts must keep at most three boards per address. Scheme, port,
-#            and session suffix come from the served URL (an omitted HTTP
-#            port means 80). HTTPS, IPv6, and remote URLs remain unchanged.
-#            No allow-list, server, listener, or browser state is changed.
+#            Otherwise a private state map assigns the key first come,
+#            round-robin to localhost or 127.0.0.1 and preserves that choice.
+#            This fallback is bounded to six boards per server until the
+#            event-stream transport fix lands; a seventh prints the accepted
+#            alias path and the three-board-per-address limit. Scheme, port,
+#            and session suffix come from the served URL (an omitted HTTP port
+#            means 80). HTTPS, IPv6, and remote URLs remain unchanged. No
+#            allow-list, server, listener, or browser state is changed.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -153,6 +155,58 @@ cmd_source_id() {
   fi
 }
 
+fallback_host_for_key() (
+  local key=$1 port=$2 alias=$3 map lock tmp host localhost_count ip_count host_count
+  map="$STATE/lavish-reviewer-addresses.tsv"
+  lock="$STATE/.lavish-reviewer-addresses.lock"
+  fm_lock_acquire_wait "$lock" || die "cannot lock the Lavish reviewer address map"
+  trap 'fm_lock_release "$lock" >/dev/null 2>&1 || true' EXIT
+  if [ -e "$map" ]; then
+    [ -f "$map" ] && [ ! -L "$map" ] && [ "$(fm_pr_file_mode "$map")" = 600 ] \
+      && [ "$(fm_pr_file_link_count "$map")" = 1 ] \
+      || die "Lavish reviewer address map is not a private regular file"
+    awk -F '\t' '
+      NF != 4 || $1 != "v1" || $2 !~ /^[0-9]+$/ || length($3) != 16 ||
+        $3 ~ /[^0-9a-f]/ || ($4 != "localhost" && $4 != "127.0.0.1") ||
+        seen[$2 FS $3]++ { exit 1 }
+    ' "$map" || die "Lavish reviewer address map is invalid"
+    host=$(awk -F '\t' -v port="$port" -v key="$key" \
+      '$1 == "v1" && $2 == port && $3 == key { print $4 }' "$map")
+  else
+    host=
+  fi
+  if [ -z "$host" ]; then
+    localhost_count=$(awk -F '\t' -v port="$port" \
+      '$1 == "v1" && $2 == port && $4 == "localhost" { count++ } END { print count + 0 }' \
+      "$map" 2>/dev/null || printf '0\n')
+    ip_count=$(awk -F '\t' -v port="$port" \
+      '$1 == "v1" && $2 == port && $4 == "127.0.0.1" { count++ } END { print count + 0 }' \
+      "$map" 2>/dev/null || printf '0\n')
+    if [ "$localhost_count" -le "$ip_count" ]; then
+      host=localhost
+    else
+      host=127.0.0.1
+    fi
+    tmp=$(umask 077; mktemp "$STATE/.lavish-reviewer-addresses.XXXXXX") \
+      || die "cannot stage the Lavish reviewer address map"
+    if { [ ! -e "$map" ] || cat "$map"; } > "$tmp" \
+      && printf 'v1\t%s\t%s\t%s\n' "$port" "$key" "$host" >> "$tmp" \
+      && chmod 0600 "$tmp" && mv -f -- "$tmp" "$map"; then
+      :
+    else
+      rm -f -- "$tmp"
+      die "cannot update the Lavish reviewer address map"
+    fi
+  fi
+  host_count=$(awk -F '\t' -v port="$port" -v host="$host" \
+    '$1 == "v1" && $2 == port && $4 == host { count++ } END { print count + 0 }' "$map")
+  if [ "$host_count" -gt 3 ]; then
+    printf 'WARNING: Lavish fallback limit is three boards per address and six per server; enable alias http://%s:%s/session/%s until the event-stream transport fix lands.\n' \
+      "$alias" "$port" "$key" >&2
+  fi
+  printf '%s\n' "$host"
+)
+
 cmd_link() {
   if [ "$#" -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
     printf 'Usage: fm-procevent-lavish.sh link <artifact.html>\nPrint the existing session reviewer URL without opening it.\nExample: fm-procevent-lavish.sh link .lavish/review.html\n'
@@ -224,10 +278,7 @@ cmd_link() {
   if [ "$status" = 200 ]; then
     host=$alias
   else
-    case "${key:0:1}" in
-      0|2|4|6|8|a|c|e) host=localhost ;;
-      *) host=127.0.0.1 ;;
-    esac
+    host=$(fallback_host_for_key "$key" "$port" "$alias") || return 1
   fi
   printf '%s://%s:%s%s\n' "$scheme" "$host" "$port" "$suffix"
 }
