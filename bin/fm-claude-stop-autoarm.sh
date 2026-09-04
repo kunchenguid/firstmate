@@ -90,7 +90,7 @@ fi
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
 
-# --- need: in-flight work or an X-mode relay poll ----------------------------
+# --- need: in-flight work, an X-mode relay poll, or a registered custom check -
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
