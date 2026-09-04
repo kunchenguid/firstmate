@@ -753,6 +753,42 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+# Teardown retires the task's merge-front queue entry. Without it, a torn-down
+# front stays queued and parks every later PR in that project with no
+# update-branch or Greptile authority.
+test_teardown_retires_merge_front_queue_entry() {
+  local case_dir rc pr_head key status
+  case_dir=$(make_case merge-front-teardown)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  key=$(bash -c '. "$1"; fm_merge_front_project_key_from_path "$2"' \
+    _ "$ROOT/bin/fm-merge-front-lib.sh" "$case_dir/project") \
+    || fail "merge-front-teardown: project key could not be derived"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null \
+    || fail "merge-front-teardown: fm-pr-check could not register the PR"
+  status=$(FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-merge-front.sh" status "$key") \
+    || fail "merge-front-teardown: queue status before teardown failed"
+  assert_contains "$status" 'front=task-x1' \
+    "merge-front-teardown: registration did not make the task the front"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "merge-front-teardown: teardown should succeed for a merged PR"
+
+  status=$(FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-merge-front.sh" status "$key") \
+    || fail "merge-front-teardown: queue status after teardown failed"
+  assert_contains "$status" 'front=none' \
+    "merge-front-teardown: the torn-down task stayed queued as the front"
+  pass "teardown retires the task's merge-front queue entry"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -3222,6 +3258,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_teardown_retires_merge_front_queue_entry
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

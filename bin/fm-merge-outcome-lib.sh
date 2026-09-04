@@ -85,7 +85,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fm_lock_acquire_wait "$lock" || return 1
   if fm_pr_poll_merge_already_notified "$state" "$id" \
     "$provider" "$host" "$path" "$number"; then
-    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" \
+    fm_merge_front_retire_task "$state" "$id" "$FM_PR_URL" \
       || printf 'actionable: merge-front queue could not retire %s %s\n' \
            "$id" "$FM_PR_URL" >&2
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
@@ -102,7 +102,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
       "check: merge landed: $id $FM_PR_URL" || status=1
   fi
   if [ "$status" -eq 0 ]; then
-    fm_merge_front_promote_task "$state" "$id" "$FM_PR_URL" \
+    fm_merge_front_retire_task "$state" "$id" "$FM_PR_URL" \
       || printf 'actionable: merge-front queue could not retire %s %s\n' \
            "$id" "$FM_PR_URL" >&2
   fi

@@ -25,6 +25,9 @@ FM_MERGE_FRONT_URLS=()
 FM_MERGE_FRONT_EXISTS=0
 FM_MERGE_FRONT_DROPPED_TASK=
 FM_MERGE_FRONT_DROPPED_URL=
+FM_MERGE_FRONT_CONFLICT_TASK=
+FM_MERGE_FRONT_SNAPSHOT_TASK=
+FM_MERGE_FRONT_SNAPSHOT_URL=
 
 fm_merge_front_project_key_valid() {
   local key=${1-}
@@ -138,9 +141,10 @@ fm_merge_front_file_write() {  # <project-key>
   fi
 }
 
-# Every queue lock wait is bounded. greptile-kick deliberately holds this lock
-# across live GitHub reads, and the shared merge-outcome path runs inside the
-# watcher, which must refuse rather than wedge behind a stuck holder.
+# Every queue lock wait is bounded and every hold is local: no path holds this
+# lock across a live GitHub call, so the longest hold is a state read plus an
+# atomic rewrite. The shared merge-outcome path runs inside the watcher, which
+# must refuse rather than wedge behind a stuck holder.
 _fm_merge_front_bounded_seconds() {  # <value> <default>
   local seconds=$1 fallback=$2
   case "$seconds" in ''|*[!0-9]*|0) seconds=$fallback ;; esac
@@ -178,8 +182,43 @@ fm_merge_front_unlock() {
   fm_lock_release "$FM_MERGE_FRONT_LOCK"
 }
 
+# Map a project checkout path onto its durable queue key. The key is the
+# path-safe remnant of the checkout basename joined to a digest of the whole
+# path, so an ordinary basename such as "my repo" or "app (v2)" registers
+# instead of refusing, while two checkouts that share a basename keep separate
+# queues. The mapping is pure and deterministic, so every caller that holds the
+# same project path resolves the same key without consulting shared state.
+fm_merge_front_project_key_from_path() {  # <project-path>
+  local project=${1-} base hash key
+  [ -n "$project" ] || return 1
+  while [ "$project" != "${project%/}" ]; do
+    project=${project%/}
+  done
+  [ -n "$project" ] || project=/
+  base=${project##*/}
+  base=$(printf '%s' "$base" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-' | cut -c1-40) || return 1
+  while :; do
+    case "$base" in
+      ''|[A-Za-z0-9]*) break ;;
+      *) base=${base#?} ;;
+    esac
+  done
+  [ -n "$base" ] || base=project
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$project" | shasum -a 256 | awk '{print substr($1,1,12)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$project" | sha256sum | awk '{print substr($1,1,12)}')
+  else
+    hash=$(printf '%s' "$project" | cksum | awk '{printf "%08x-%s", $1, $2}')
+  fi
+  [ -n "$hash" ] || return 1
+  key="$base-$hash"
+  fm_merge_front_project_key_valid "$key" || return 1
+  printf '%s\n' "$key"
+}
+
 fm_merge_front_project_key_from_meta() {  # <state> <task-id>
-  local state=$1 id=$2 meta line project='' count=0 key
+  local state=$1 id=$2 meta line project='' count=0
   fm_pr_task_id_valid "$id" || return 1
   meta="$state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
@@ -192,12 +231,47 @@ fm_merge_front_project_key_from_meta() {  # <state> <task-id>
     esac
   done < "$meta"
   [ "$count" -eq 1 ] && [ -n "$project" ] || return 1
-  while [ "$project" != "${project%/}" ]; do
-    project=${project%/}
+  fm_merge_front_project_key_from_path "$project"
+}
+
+# Pure read of durable queue state: report whether this PR URL is already bound
+# to a different task in this project. PR registration consults it before it
+# rewrites task metadata or publishes a poll, so a conflict - which no retry can
+# clear - refuses over untouched state instead of over a half-applied
+# registration. Returns 0 when the URL is free or already this task's, 3 on a
+# conflict (with FM_MERGE_FRONT_CONFLICT_TASK naming the holder), 2 on an
+# invalid request, and 1 when the queue cannot be read.
+fm_merge_front_url_conflict() {  # <state> <project-key> <task-id> <pr-url>
+  local state=$1 project=$2 task=$3 raw_url=$4 url index rc=0
+  FM_MERGE_FRONT_CONFLICT_TASK=
+  fm_merge_front_project_key_valid "$project" || return 2
+  fm_pr_task_id_valid "$task" || return 2
+  fm_pr_url_parse "$raw_url" || return 2
+  url=$FM_PR_URL
+  if fm_merge_front_paths "$state" "$project" 0; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && return 0
+    return 1
+  fi
+  _fm_merge_front_lock_acquire || return 1
+  if ! fm_merge_front_file_load "$project"; then
+    fm_merge_front_unlock
+    return 1
+  fi
+  index=0
+  while [ "$index" -lt "${#FM_MERGE_FRONT_TASKS[@]}" ]; do
+    if [ "${FM_MERGE_FRONT_URLS[$index]}" = "$url" ] \
+      && [ "${FM_MERGE_FRONT_TASKS[$index]}" != "$task" ]; then
+      FM_MERGE_FRONT_CONFLICT_TASK=${FM_MERGE_FRONT_TASKS[$index]}
+      rc=3
+      break
+    fi
+    index=$((index + 1))
   done
-  key=${project##*/}
-  fm_merge_front_project_key_valid "$key" || return 1
-  printf '%s\n' "$key"
+  fm_merge_front_unlock
+  return "$rc"
 }
 
 fm_merge_front_enqueue() {  # <state> <project-key> <task-id> <pr-url>
@@ -425,11 +499,48 @@ fm_merge_front_remove() {  # <state> <project-key> <task-id> <pr-url>
   return "$rc"
 }
 
-fm_merge_front_promote_task() {  # <state> <task-id> <pr-url>
-  local state=$1 task=$2 url=$3 project
+# Retire an identity from whichever project queue holds it when the task's own
+# project key is no longer derivable. Returns 3 when nothing matched anywhere.
+fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url>
+  local state=$1 task=$2 url=$3 file project rc dropped=0
+  if fm_merge_front_root_prepare "$state" 0; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && return 3
+    return 1
+  fi
+  for file in "$FM_MERGE_FRONT_ROOT"/*.queue; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    project=${file##*/}
+    project=${project%.queue}
+    fm_merge_front_project_key_valid "$project" || continue
+    rc=0
+    fm_merge_front_drop "$state" "$project" "$task" "$url" || rc=$?
+    case "$rc" in
+      0) dropped=1 ;;
+      3) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$dropped" -eq 1 ] || return 3
+}
+
+# The one identity-bound retirement entry point for a task leaving the queue -
+# a confirmed merge, or a teardown. It prefers the task's own project key and
+# falls back to a scan of every project queue when the task metadata is already
+# gone, so a completed or torn-down front can never stay queued in front of the
+# live PRs behind it. A missing identity is nothing to do, never a failure.
+fm_merge_front_retire_task() {  # <state> <task-id> <pr-url>
+  local state=$1 task=$2 url=$3 project rc=0
   [ -e "$state/merge-front" ] || [ -L "$state/merge-front" ] || return 0
-  project=$(fm_merge_front_project_key_from_meta "$state" "$task") || return 0
-  fm_merge_front_reconcile_merged "$state" "$project" "$task" "$url"
+  if project=$(fm_merge_front_project_key_from_meta "$state" "$task" 2>/dev/null); then
+    fm_merge_front_reconcile_merged "$state" "$project" "$task" "$url" || return 1
+    [ -z "$FM_MERGE_FRONT_DROPPED_TASK" ] || return 0
+  fi
+  fm_merge_front_drop_anywhere "$state" "$task" "$url" || rc=$?
+  [ "$rc" -ne 3 ] || rc=0
+  return "$rc"
 }
 
 fm_merge_front_checks_json() {  # <github-check-command...>
@@ -454,6 +565,29 @@ fm_merge_front_checks_json() {  # <github-check-command...>
   esac
 }
 
+# Snapshot the current front under the queue lock. The lock is never held
+# across a live GitHub call, so an ordinary enqueue or a confirmed-merge
+# retirement can never queue behind a slow forge read.
+_fm_merge_front_snapshot_front() {  # <project-key>
+  local project=$1
+  FM_MERGE_FRONT_SNAPSHOT_TASK=
+  FM_MERGE_FRONT_SNAPSHOT_URL=
+  _fm_merge_front_lock_acquire || return 1
+  if ! fm_merge_front_file_load "$project"; then
+    fm_merge_front_unlock
+    echo 'error: merge-front queue is invalid' >&2
+    return 1
+  fi
+  if [ "${#FM_MERGE_FRONT_TASKS[@]}" -eq 0 ]; then
+    fm_merge_front_unlock
+    printf 'error: project %s has no merge-front PR\n' "$project" >&2
+    return 1
+  fi
+  FM_MERGE_FRONT_SNAPSHOT_TASK=${FM_MERGE_FRONT_TASKS[0]}
+  FM_MERGE_FRONT_SNAPSHOT_URL=${FM_MERGE_FRONT_URLS[0]}
+  fm_merge_front_unlock
+}
+
 fm_merge_front_greptile_kick() {  # <state> <project-key>
   local state=$1 project=$2 task url provider repo_path number pr_row pr_state base head
   local behind required_json blocked all_json unknown pending rc
@@ -475,21 +609,10 @@ fm_merge_front_greptile_kick() {  # <state> <project-key>
     fi
     return 1
   fi
-  _fm_merge_front_lock_acquire || return 1
-  if ! fm_merge_front_file_load "$project"; then
-    fm_merge_front_unlock
-    echo 'error: merge-front queue is invalid' >&2
-    return 1
-  fi
-  if [ "${#FM_MERGE_FRONT_TASKS[@]}" -eq 0 ]; then
-    fm_merge_front_unlock
-    printf 'error: project %s has no merge-front PR\n' "$project" >&2
-    return 1
-  fi
-  task=${FM_MERGE_FRONT_TASKS[0]}
-  url=${FM_MERGE_FRONT_URLS[0]}
+  _fm_merge_front_snapshot_front "$project" || return 1
+  task=$FM_MERGE_FRONT_SNAPSHOT_TASK
+  url=$FM_MERGE_FRONT_SNAPSHOT_URL
   fm_pr_url_parse "$url" || {
-    fm_merge_front_unlock
     echo 'error: merge-front PR identity is invalid' >&2
     return 1
   }
@@ -497,99 +620,86 @@ fm_merge_front_greptile_kick() {  # <state> <project-key>
   repo_path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   if [ "$provider" != github ]; then
-    fm_merge_front_unlock
     echo 'error: greptile-kick supports GitHub pull requests only' >&2
     return 1
   fi
   if ! pr_row=$(_fm_merge_front_gh gh pr view "$number" \
       --repo "$repo_path" --json state,baseRefName,headRefOid \
       --jq '[.state,.baseRefName,.headRefOid] | @tsv' 2>/dev/null); then
-    fm_merge_front_unlock
     echo 'error: merge-front PR state could not be read' >&2
     return 1
   fi
   IFS=$'\t' read -r pr_state base head <<< "$pr_row"
   if [ "$pr_state" != OPEN ]; then
-    fm_merge_front_unlock
     printf 'error: merge-front PR is not open (state=%s)\n' "${pr_state:-unknown}" >&2
     return 1
   fi
   if [ "$base" != main ]; then
-    fm_merge_front_unlock
     printf 'error: merge-front PR targets %s, not main\n' "${base:-unknown}" >&2
     return 1
   fi
   if ! fm_pr_head_valid "$head"; then
-    fm_merge_front_unlock
     echo 'error: merge-front PR head could not be validated' >&2
     return 1
   fi
   if ! behind=$(_fm_merge_front_gh gh api \
       "repos/$repo_path/compare/main...$head" --jq .behind_by 2>/dev/null); then
-    fm_merge_front_unlock
     echo 'error: merge-front PR freshness could not be read' >&2
     return 1
   fi
   case "$behind" in ''|*[!0-9]*)
-    fm_merge_front_unlock
     echo 'error: merge-front PR freshness was not numeric' >&2
     return 1
     ;;
   esac
   if [ "$behind" -ne 0 ]; then
-    fm_merge_front_unlock
     printf 'error: merge-front PR is behind main (behind_by=%s)\n' "$behind" >&2
     return 1
   fi
-  if ! required_json=$(fm_merge_front_checks_json gh pr checks "$number" \
-      --repo "$repo_path" --required --json name,state); then
-    fm_merge_front_unlock
-    return 1
-  fi
+  required_json=$(fm_merge_front_checks_json gh pr checks "$number" \
+    --repo "$repo_path" --required --json name,state) || return 1
   blocked=$(printf '%s\n' "$required_json" | jq -r \
     '[.[] | select(((.name | ascii_downcase | contains("greptile")) | not) and .state != "SUCCESS") | "\(.name)=\(.state)"] | join(", ")') || {
-      fm_merge_front_unlock
       echo 'error: required check state could not be evaluated' >&2
       return 1
     }
   if [ -n "$blocked" ]; then
-    fm_merge_front_unlock
     printf 'error: non-Greptile required checks are not green: %s\n' "$blocked" >&2
     return 1
   fi
-  if ! all_json=$(fm_merge_front_checks_json gh pr checks "$number" \
-      --repo "$repo_path" --json name,state); then
-    fm_merge_front_unlock
-    return 1
-  fi
+  all_json=$(fm_merge_front_checks_json gh pr checks "$number" \
+    --repo "$repo_path" --json name,state) || return 1
   unknown=$(printf '%s\n' "$all_json" | jq -r \
     '[.[] | select(.name | ascii_downcase | contains("greptile")) | .state | select(. as $state | ["PENDING","QUEUED","IN_PROGRESS","WAITING","REQUESTED","EXPECTED","SUCCESS","FAILURE","ERROR","CANCELLED","SKIPPED","NEUTRAL","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($state) | not)] | unique | join(", ")') || {
-      fm_merge_front_unlock
       echo 'error: Greptile check state could not be evaluated' >&2
       return 1
     }
   if [ -n "$unknown" ]; then
-    fm_merge_front_unlock
     printf 'error: unrecognised Greptile check state: %s\n' "$unknown" >&2
     return 1
   fi
   pending=$(printf '%s\n' "$all_json" | jq -r \
     '[.[] | select(.name | ascii_downcase | contains("greptile")) | .state | select(. == "PENDING" or . == "QUEUED" or . == "IN_PROGRESS" or . == "WAITING" or . == "REQUESTED" or . == "EXPECTED")] | length') || {
-      fm_merge_front_unlock
       echo 'error: Greptile pending state could not be evaluated' >&2
       return 1
     }
   if [ "$pending" -ne 0 ]; then
-    fm_merge_front_unlock
     echo 'error: Greptile review is already pending' >&2
     return 1
   fi
+  # The structural gate is re-read under the lock immediately before the single
+  # side effect: the queue may have promoted, rebound, or retired this identity
+  # while the GitHub reads above ran, and only the current front may be kicked.
+  _fm_merge_front_snapshot_front "$project" || return 1
+  if [ "$FM_MERGE_FRONT_SNAPSHOT_TASK" != "$task" ] \
+    || [ "$FM_MERGE_FRONT_SNAPSHOT_URL" != "$url" ]; then
+    printf 'error: merge-front PR is no longer the front of project %s\n' "$project" >&2
+    return 1
+  fi
   if ! _fm_merge_front_gh gh pr comment "$number" \
-      --repo "$repo_path" --body '@greptile review'; then
-    fm_merge_front_unlock
+      --repo "$repo_path" --body '@greptile review' >/dev/null; then
     echo 'error: Greptile review comment failed' >&2
     return 1
   fi
-  fm_merge_front_unlock
   printf 'kicked=%s\t%s\n' "$task" "$url"
 }

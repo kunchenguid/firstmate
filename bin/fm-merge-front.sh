@@ -19,7 +19,11 @@
 # remove is the operator recovery path for a queued PR that will never merge -
 # a closed or superseded PR, or a torn-down task. It retires exactly the named
 # identity wherever it sits and advances nothing by itself, so retiring a stuck
-# front simply exposes the next entry and unblocks the project.
+# front simply exposes the next entry and unblocks the project. Teardown and a
+# confirmed merge whose task metadata is already gone reach the same retirement
+# automatically (bin/fm-teardown.sh, bin/fm-merge-outcome-lib.sh), scanning every
+# project queue when the task's own project key can no longer be derived, so a
+# torn-down front cannot silently park the PRs behind it.
 #
 # The shared already-confirmed merge-outcome path uses the same identity-bound
 # retirement. A confirmed merge is a fact the queue may never veto: an
@@ -38,16 +42,29 @@
 # complete old state, publish a complete same-device temporary by atomic rename,
 # and validate the result. Project keys and task IDs are confined path-safe
 # slugs; PR/MR URLs use bin/fm-pr-lib.sh's canonical parser. PR registration
-# derives the project key from the basename of the task metadata's project= path.
+# derives the project key from the task metadata's project= path with a pure,
+# deterministic mapping: the checkout basename with every character outside
+# [A-Za-z0-9._-] replaced by "-", trimmed to 40 characters and to a leading
+# alphanumeric (or "project" when nothing survives), then "-" and a 12-hex-digit
+# SHA-256 prefix of the whole path. So an ordinary checkout named "my repo" or
+# "app (v2)" registers instead of refusing, and two checkouts sharing a basename
+# keep isolated queues. Registration also refuses a PR URL already bound to a
+# different task before it rewrites any task metadata or arms any poll, so that
+# unretryable conflict never lands on half-applied registration state.
 #
 # Every wait for the per-project lock is bounded (FM_MERGE_FRONT_LOCK_TIMEOUT,
 # default 30s), and every live GitHub read or comment is bounded
 # (FM_MERGE_FRONT_GH_TIMEOUT, default 60s), so a stuck holder or a hung forge
-# call yields a refusal instead of wedging the watcher.
+# call yields a refusal instead of wedging the watcher. No command holds the
+# lock across a GitHub call, so the longest hold is one state read plus one
+# atomic rewrite and a slow forge can never starve enqueue or merge retirement.
 #
 # status reports one front= row plus zero or more parked= rows. It never grants
 # authority by itself: only the front may be updated from main or retriggered.
-# greptile-kick holds the project lock through its live GitHub reads and comment.
+# greptile-kick snapshots the front under the lock, releases it for its live
+# GitHub reads, and reacquires it to re-read the structural gate immediately
+# before its single side effect, so a front that promoted, rebound, or retired
+# meanwhile is refused rather than kicked.
 # It refuses unless the queued PR is the first entry (therefore has no preceding
 # entry), is open against main, has behind_by=0 compared with main, has every
 # non-Greptile required check at SUCCESS, and has no pending Greptile check. Any

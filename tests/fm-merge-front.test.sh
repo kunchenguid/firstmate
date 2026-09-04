@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=bin/fm-merge-front-lib.sh
+. "$ROOT/bin/fm-merge-front-lib.sh"
 
 MERGE_FRONT="$ROOT/bin/fm-merge-front.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -45,14 +47,28 @@ run_front() {  # <dir> <args...>
     PATH="$dir/fakebin:$BASE_PATH" "$MERGE_FRONT" "$@"
 }
 
-write_meta() {  # <dir> <task>
-  local dir=$1 task=$2
+write_meta() {  # <dir> <task> [project-path]
+  local dir=$1 task=$2 project=${3:-$1/project-alpha}
   fm_write_meta "$dir/home/state/$task.meta" \
     "window=fm-$task" \
     "worktree=$dir/worktree-$task" \
-    "project=$dir/project-alpha" \
+    "project=$project" \
     "kind=ship" \
     "mode=no-mistakes"
+}
+
+# The durable queue key a registration derives from a project checkout path.
+# Callers that reach the queue through the CLI need the same mapping the
+# registration path used.
+project_key() {  # <project-path>
+  fm_merge_front_project_key_from_path "$1"
+}
+
+run_pr_check() {  # <dir> <task> <url>
+  local dir=$1 task=$2 url=$3
+  FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" "$task" "$url"
 }
 
 test_queue_order_and_promotion() {
@@ -173,9 +189,10 @@ test_same_task_replacement_and_removal_recovery() {
 }
 
 test_pr_check_enqueues_project_front() {
-  local dir status
+  local dir status key
   dir=$(make_home pr-check)
   write_meta "$dir" task-a
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
   cat > "$dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
@@ -183,23 +200,62 @@ case "\${1:-} \${2:-}" in
 esac
 SH
   chmod +x "$dir/fakebin/gh"
-  FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
-    PATH="$dir/fakebin:$BASE_PATH" \
-    "$PR_CHECK" task-a https://github.com/o/r/pull/7 >/dev/null \
+  run_pr_check "$dir" task-a https://github.com/o/r/pull/7 >/dev/null \
     || fail "fm-pr-check could not register the queue entry"
-  status=$(run_front "$dir" status project-alpha) || fail "registered queue status failed"
+  status=$(run_front "$dir" status "$key") || fail "registered queue status failed"
   assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/7' \
     "fm-pr-check did not enqueue by task project"
-  FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
-    PATH="$dir/fakebin:$BASE_PATH" \
-    "$PR_CHECK" task-a https://github.com/o/r/pull/8 >/dev/null \
+  run_pr_check "$dir" task-a https://github.com/o/r/pull/8 >/dev/null \
     || fail "fm-pr-check could not register a replacement PR for the same task"
-  status=$(run_front "$dir" status project-alpha) || fail "replacement queue status failed"
+  status=$(run_front "$dir" status "$key") || fail "replacement queue status failed"
   assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/8' \
     "replacement registration did not rebind the queued PR"
-  [ "$(grep -c '^task=' "$dir/home/state/merge-front/project-alpha.queue")" -eq 1 ] \
+  [ "$(grep -c '^task=' "$dir/home/state/merge-front/$key.queue")" -eq 1 ] \
     || fail "replacement registration duplicated the task"
   pass "PR registration structurally enrolls the task in its project queue"
+}
+
+# An ordinary checkout basename is a naming convention, not a registration
+# precondition: a project directory that is not slug-shaped must still register.
+test_pr_check_registers_any_checkout_basename() {
+  local dir status key
+  dir=$(make_home odd-basename)
+  mkdir -p "$dir/my repo (v2)"
+  write_meta "$dir" task-a "$dir/my repo (v2)"
+  key=$(project_key "$dir/my repo (v2)") || fail "odd basename yielded no queue key"
+  run_pr_check "$dir" task-a https://github.com/o/r/pull/7 >/dev/null \
+    || fail "a non-slug checkout basename blocked PR registration"
+  status=$(run_front "$dir" status "$key") || fail "odd-basename queue status failed"
+  assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/7' \
+    "the odd-basename project did not get its own front"
+  pass "PR registration accepts any checkout basename and isolates its queue"
+}
+
+# The one enqueue refusal no retry can clear must land before any mutation:
+# neither the task meta nor the poll may be touched when the URL is taken.
+test_pr_check_refuses_bound_url_before_mutating() {
+  local dir key rc
+  dir=$(make_home bound-url)
+  write_meta "$dir" task-a
+  write_meta "$dir" task-b
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
+  run_pr_check "$dir" task-a https://github.com/o/r/pull/7 >/dev/null \
+    || fail "bound-url fixture registration failed"
+
+  set +e
+  run_pr_check "$dir" task-b https://github.com/o/r/pull/7 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a PR bound to another task was re-registered"
+  assert_no_grep '^pr=' "$dir/home/state/task-b.meta" \
+    "refused registration still rewrote the task metadata"
+  [ ! -e "$dir/home/state/task-b.check.sh" ] \
+    || fail "refused registration still armed a merge poll"
+  [ ! -e "$dir/home/state/task-b.pr-poll" ] \
+    || fail "refused registration still published a poll"
+  [ "$(grep -c '^task=' "$dir/home/state/merge-front/$key.queue")" -eq 1 ] \
+    || fail "refused registration changed the queue"
+  pass "registration refuses an already-bound PR URL over untouched state"
 }
 
 run_outcome() {  # <dir> <task> <url>
@@ -210,34 +266,59 @@ run_outcome() {  # <dir> <task> <url>
 }
 
 test_confirmed_merge_reconciles_exact_identity() {
-  local dir status
+  local dir status key
   dir=$(make_home merge-outcome)
   write_meta "$dir" task-a
   write_meta "$dir" task-b
   write_meta "$dir" task-c
-  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
+  run_front "$dir" enqueue "$key" task-a https://github.com/o/r/pull/1 >/dev/null \
     || fail "first merge-outcome enqueue failed"
-  run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null \
+  run_front "$dir" enqueue "$key" task-b https://github.com/o/r/pull/2 >/dev/null \
     || fail "second merge-outcome enqueue failed"
 
   run_outcome "$dir" task-b https://github.com/o/r/pull/2 >/dev/null \
     || fail "out-of-order merged PR could not publish its outcome"
-  status=$(run_front "$dir" status project-alpha) || fail "out-of-order queue status failed"
+  status=$(run_front "$dir" status "$key") || fail "out-of-order queue status failed"
   assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/1' \
     "out-of-order merge displaced the front"
-  assert_no_grep 'task-b' "$dir/home/state/merge-front/project-alpha.queue" \
+  assert_no_grep 'task-b' "$dir/home/state/merge-front/$key.queue" \
     "out-of-order merge retained its own queued entry"
 
   run_outcome "$dir" task-c https://github.com/o/r/pull/9 >/dev/null \
     || fail "unqueued merged PR could not publish its outcome"
-  status=$(run_front "$dir" status project-alpha) || fail "unqueued outcome status failed"
+  status=$(run_front "$dir" status "$key") || fail "unqueued outcome status failed"
   assert_contains "$status" 'front=task-a' "unqueued merged PR changed the queue"
 
   run_outcome "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
     || fail "confirmed front merge did not advance the queue"
-  status=$(run_front "$dir" status project-alpha) || fail "advanced queue status failed"
+  status=$(run_front "$dir" status "$key") || fail "advanced queue status failed"
   assert_contains "$status" 'front=none' "confirmed front merge did not empty the queue"
   pass "a confirmed merge always publishes and retires only its own queued entry"
+}
+
+# A front whose task record is already gone (teardown, or a merge observed after
+# the record was removed) must still be retired, or it parks every PR behind it.
+test_confirmed_merge_retires_front_without_task_metadata() {
+  local dir status key
+  dir=$(make_home merge-outcome-no-meta)
+  write_meta "$dir" task-a
+  write_meta "$dir" task-b
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
+  run_front "$dir" enqueue "$key" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "no-meta fixture front enqueue failed"
+  run_front "$dir" enqueue "$key" task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "no-meta fixture parked enqueue failed"
+  rm -f "$dir/home/state/task-a.meta"
+
+  run_outcome "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "merged front without task metadata could not publish its outcome"
+  status=$(run_front "$dir" status "$key") || fail "no-meta queue status failed"
+  assert_contains "$status" $'front=task-b\thttps://github.com/o/r/pull/2' \
+    "a front with no task metadata stayed queued in front of the next PR"
+  assert_no_grep 'task-a' "$dir/home/state/merge-front/$key.queue" \
+    "the metadata-less front was not retired"
+  pass "a merged front is retired even when its task record is already gone"
 }
 
 install_github_gate_fake() {  # <dir>
@@ -251,6 +332,9 @@ install_github_gate_fake() {  # <dir>
 } >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
+    if [ -n "${FM_TEST_GH_HOOK:-}" ]; then
+      "$FM_TEST_GH_HOOK" >> "$FM_TEST_GH_LOG" 2>&1
+    fi
     printf 'OPEN\t%s\t%s\n' "${FM_TEST_BASE:-main}" "${FM_TEST_HEAD:?}"
     ;;
   "api repos"*)
@@ -278,6 +362,7 @@ run_kick() {  # <dir>
     FM_TEST_BASE="${FM_TEST_BASE:-main}" FM_TEST_BEHIND="${FM_TEST_BEHIND:-0}" \
     FM_TEST_REQUIRED_JSON="${FM_TEST_REQUIRED_JSON:-[]}" \
     FM_TEST_ALL_JSON="${FM_TEST_ALL_JSON:-[]}" \
+    FM_TEST_GH_HOOK="${FM_TEST_GH_HOOK:-}" \
     PATH="$dir/fakebin:$BASE_PATH" run_front "$dir" greptile-kick project-alpha
 }
 
@@ -337,9 +422,72 @@ test_greptile_gate_refusals_and_single_action() {
   pass "Greptile kick fails closed at every gate and comments once for the front"
 }
 
+# The gate's GitHub reads must not hold the per-project queue lock: a slow forge
+# would otherwise starve ordinary enqueue and confirmed-merge retirement, whose
+# waits are bounded far below the gate's total GitHub budget.
+test_greptile_kick_leaves_the_queue_usable_during_github_reads() {
+  local dir
+  dir=$(make_home greptile-lock)
+  install_github_gate_fake "$dir"
+  : > "$dir/gh.log"
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "lock-hold fixture enqueue failed"
+  cat > "$dir/hook.sh" <<SH
+#!/usr/bin/env bash
+FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+  FM_MERGE_FRONT_LOCK_TIMEOUT=2 "$MERGE_FRONT" \
+  enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null 2>&1 \
+  && printf 'concurrent-enqueue=ok\n' > "$dir/hook.out" \
+  || printf 'concurrent-enqueue=blocked\n' > "$dir/hook.out"
+SH
+  chmod +x "$dir/hook.sh"
+  FM_TEST_GH_HOOK="$dir/hook.sh" \
+    FM_TEST_REQUIRED_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    FM_TEST_ALL_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    run_kick "$dir" >/dev/null || fail "eligible front was not kicked"
+  assert_grep 'concurrent-enqueue=ok' "$dir/hook.out" \
+    "the queue lock was held across the gate's GitHub reads"
+  pass "the Greptile gate never holds the queue lock across GitHub calls"
+}
+
+# Releasing the lock means the front can change mid-gate, so the structural gate
+# is re-read before the single side effect.
+test_greptile_kick_refuses_when_the_front_changes_mid_gate() {
+  local dir rc
+  dir=$(make_home greptile-revalidate)
+  install_github_gate_fake "$dir"
+  : > "$dir/gh.log"
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "revalidate fixture front enqueue failed"
+  run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "revalidate fixture parked enqueue failed"
+  cat > "$dir/hook.sh" <<SH
+#!/usr/bin/env bash
+FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$MERGE_FRONT" \
+  remove project-alpha task-a https://github.com/o/r/pull/1 >/dev/null 2>&1
+SH
+  chmod +x "$dir/hook.sh"
+  set +e
+  FM_TEST_GH_HOOK="$dir/hook.sh" \
+    FM_TEST_REQUIRED_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    FM_TEST_ALL_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    run_kick "$dir" >/dev/null 2> "$dir/revalidate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a PR retired mid-gate was still kicked"
+  assert_no_grep '<pr><comment>' "$dir/gh.log" \
+    "a PR that stopped being the front still received a Greptile comment"
+  pass "the Greptile gate revalidates the front before its single side effect"
+}
+
 test_queue_order_and_promotion
 test_queue_conflicts_and_paths_fail_closed
 test_same_task_replacement_and_removal_recovery
 test_pr_check_enqueues_project_front
+test_pr_check_registers_any_checkout_basename
+test_pr_check_refuses_bound_url_before_mutating
 test_confirmed_merge_reconciles_exact_identity
+test_confirmed_merge_retires_front_without_task_metadata
 test_greptile_gate_refusals_and_single_action
+test_greptile_kick_leaves_the_queue_usable_during_github_reads
+test_greptile_kick_refuses_when_the_front_changes_mid_gate

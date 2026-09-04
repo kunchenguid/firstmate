@@ -2,9 +2,11 @@
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # A successful registration also delegates project-queue enrollment to the
-# contract owned by bin/fm-merge-front.sh's header; the task's project key is
-# resolved before any state is mutated so an unresolvable project refuses the
-# whole registration rather than reporting failure over a rewritten meta.
+# contract owned by bin/fm-merge-front.sh's header; the task's project key and
+# the only unretryable enqueue refusal - a PR URL already bound to another task -
+# are both resolved before any state is mutated, so a registration that cannot
+# succeed refuses over untouched state rather than over a rewritten meta and an
+# armed poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -93,6 +95,18 @@ PROJECT_KEY=$(fm_merge_front_project_key_from_meta "$STATE" "$ID") || {
   echo "error: task project cannot be resolved for the merge-front queue" >&2
   exit 1
 }
+# The one enqueue refusal no retry can clear is a URL already bound to another
+# task. Evaluate it here, over untouched state, so registration never reports
+# failure on top of a rewritten meta and an armed poll.
+MERGE_FRONT_RC=0
+fm_merge_front_url_conflict "$STATE" "$PROJECT_KEY" "$ID" "$URL" || MERGE_FRONT_RC=$?
+if [ "$MERGE_FRONT_RC" -eq 3 ]; then
+  echo "error: $URL is already registered to task $FM_MERGE_FRONT_CONFLICT_TASK in this project" >&2
+  exit 1
+elif [ "$MERGE_FRONT_RC" -ne 0 ]; then
+  echo "error: the merge-front queue could not be read for this project" >&2
+  exit 1
+fi
 
 META_TMP=
 META_LOCK=
