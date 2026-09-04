@@ -605,6 +605,7 @@ list_work_impl() {
   [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] && [ "$capture_degraded" -eq 0 ] || truncated=true
   remaining=$((collection_deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || { [ -z "${stage:-}" ] || rm -rf -- "$stage"; die "background-work collection budget exhausted before assembly"; }
+  # shellcheck disable=SC2016 # Dollar-prefixed names in the single-quoted program are jq variables.
   document=$(fm_run_timed "$remaining" jq -s --arg generated "$generated" --arg home "$FM_HOME" \
     --argjson budget "$COLLECTION_BUDGET" --argjson total "$total" \
     --argjson attempted "$attempted" --argjson completed "$completed" --argjson truncated "$truncated" \
