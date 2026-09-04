@@ -698,7 +698,7 @@ resolve_relaunch_profile() {
     RELAUNCH_EXEMPTION=$NEW_CURSOR_EXEMPTION
   else
     RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-      "$(fm_meta_get "$META" cursor_exemption)" "$TARGET_HARNESS")
+      "$(fm_meta_get "$META" cursor_exemption)" "$RECORDED_HARNESS" "$TARGET_HARNESS")
   fi
   if ! RELAUNCH_REFUSAL=$(fm_control_launch_refusal "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION"); then
     die "$RELAUNCH_REFUSAL Relaunching $ID onto it would stop the running agent for a launch that must be refused."

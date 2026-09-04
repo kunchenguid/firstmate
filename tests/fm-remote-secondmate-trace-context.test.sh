@@ -469,6 +469,18 @@ case "$NONE_OUT" in *cursor_exemption=*) \
   || fail "a parent whose endpoint carries no grant must record no cursor_exemption line"
 pass "remote route: the parent records the endpoint's actual grant, never an undelivered request"
 
+sed -e 's/^harness=.*/harness=codex/' -e '/^cursor_exemption=/d' \
+  "$REMOTE_HOME/state/parent-route/ios.meta" > "$REMOTE_HOME/state/parent-route/ios.meta.stale"
+printf 'cursor_exemption=envelope:stale-codex\n' >> "$REMOTE_HOME/state/parent-route/ios.meta.stale"
+mv "$REMOTE_HOME/state/parent-route/ios.meta.stale" "$REMOTE_HOME/state/parent-route/ios.meta"
+STALE_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness codex 2>&1) \
+  || fail "a live non-cursor remote endpoint should be reused: $STALE_OUT"
+case "$STALE_OUT" in *cursor_exemption=*) \
+  fail "a non-cursor remote endpoint must not report a cursor exemption: $STALE_OUT" ;; esac
+! grep -q '^cursor_exemption=' "$PARENT/state/ios.meta" \
+  || fail "a parent must drop a stale grant reported by a non-cursor remote endpoint"
+pass "remote route: a reused non-cursor endpoint cannot republish a stale cursor grant"
+
 # Mixed-version wire contract, OLD parent against this NEW remote. Before the
 # self-describing tokens existed a parent sent its carrier as a bare positional
 # sixth argument, and a fleet upgrades one host at a time, so that shape must

@@ -502,6 +502,12 @@ spawn_recorded_cursor_exemption() {  # <state-dir> <id>
   fm_meta_get "$meta" cursor_exemption
 }
 
+spawn_recorded_harness() {  # <state-dir> <id>
+  local meta="$1/$2.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  fm_meta_get "$meta" harness
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -558,7 +564,8 @@ spawn_remote_secondmate() {
   # reason an envelope grant is inheritable and an attended one is not.
   if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
     CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-      "$(spawn_recorded_cursor_exemption "$STATE" "$id")" "$harness")
+      "$(spawn_recorded_cursor_exemption "$STATE" "$id")" \
+      "$(spawn_recorded_harness "$STATE" "$id")" "$harness")
   fi
   # This path launches and returns long before the shared guards below, so it
   # asks the same owners rather than carrying its own copy of either rule: a
@@ -790,6 +797,7 @@ spawn_remote_secondmate() {
   # none rather than recorded.
   remote_recorded_exemption=$(printf '%s\n' "$out" | sed -n 's/^cursor_exemption=//p' | tail -1)
   fm_control_cursor_exemption_valid "$remote_recorded_exemption" || remote_recorded_exemption=
+  fm_control_cursor_exemption_applies "$remote_harness" || remote_recorded_exemption=
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -1962,7 +1970,8 @@ esac
 if [ "$CURSOR_EXEMPTION_SET" -eq 0 ] &&
   { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
   CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-    "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" "$HARNESS")
+    "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" \
+    "$(spawn_recorded_harness "$STATE" "$ID")" "$HARNESS")
 fi
 
 # Every POLICY admissibility rule is composed by fm_control_launch_refusal in

@@ -916,6 +916,17 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
   pass "fm-spawn --relaunch: a named isolation-envelope grant is inherited so automatic recovery still works"
 }
 
+test_control_relaunch_refuses_a_non_cursor_stale_envelope_before_stopping() {
+  local dir
+  dir=$(new_case cursorstalesource rl48)
+  add_ship_task "$dir" rl48 codex
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl48.meta"
+  assert_relaunch_refused_without_stopping "$dir" rl48 \
+    "refused for an unattended ship launch" \
+    "a non-cursor task's stale envelope" --harness cursor --note "moving runtimes"
+  pass "fm-control relaunch: a non-cursor stale envelope cannot authorize cursor"
+}
+
 # THE pre-stop invariant for POLICY refusals, stated once and driven for every
 # way it has been breached: if a relaunch would be refused on harness, kind, or
 # grant, the running agent must never be stopped. Both known doors are covered
@@ -1717,6 +1728,7 @@ test_a_refused_relaunch_never_stops_the_running_agent
 test_relaunch_accepts_a_fresh_attended_grant_on_the_verb
 test_relaunch_refuses_a_malformed_grant_before_stopping
 test_relaunch_inherits_a_named_isolation_envelope_grant
+test_control_relaunch_refuses_a_non_cursor_stale_envelope_before_stopping
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

@@ -167,8 +167,9 @@ fm_control_cursor_exemption_valid() {  # <grant>
 }
 
 # The grant that is still in force for an UNATTENDED relaunch of a task whose
-# record holds <recorded-grant> onto <target-harness>. Prints that grant, or
-# nothing when none survives. Two independent conditions must both hold.
+# record holds <recorded-grant> from <source-harness> onto <target-harness>.
+# Prints that grant, or nothing when none survives. Three independent conditions
+# must all hold.
 #
 # envelope:<name> describes a mechanically proven outer isolation envelope that
 # still governs the replacement agent, so it carries over and automatic recovery
@@ -178,12 +179,12 @@ fm_control_cursor_exemption_valid() {  # <grant>
 # nobody there.
 #
 # The grant also describes an exemption from CURSOR's unattended bar and nothing
-# else, so it survives only onto cursor. A relaunch that resolves to another
-# adapter drops it rather than carrying it into that task's record, where a
-# later relaunch back onto cursor would read it as authority nobody granted for
-# cursor. Dropping is right here and refusing is not: the harness switch itself
-# is legitimate, and refusing it after the control plane had already stopped the
-# agent is the stranding this helper exists to prevent.
+# else, so it survives only from and onto cursor. A relaunch that resolves from
+# or to another adapter drops it rather than carrying it into that task's record,
+# where a later relaunch back onto cursor would read it as authority nobody
+# granted for cursor. Dropping is right here and refusing is not: the harness
+# switch itself is legitimate, and refusing it after the control plane had
+# already stopped the agent is the stranding this helper exists to prevent.
 #
 # This is the ONE owner of that inheritance rule. bin/fm-spawn.sh's --relaunch
 # path asks it for the grant it will actually launch under, and the control
@@ -191,10 +192,11 @@ fm_control_cursor_exemption_valid() {  # <grant>
 # it must evaluate the relaunch against. Restating the rule at either site
 # would let the two answers disagree, and a disagreement here stops a running
 # agent for a launch the owner then refuses.
-fm_control_cursor_exemption_inherited() {  # <recorded-grant> <target-harness>
-  local grant=${1-} target=${2-}
+fm_control_cursor_exemption_inherited() {  # <recorded-grant> <source-harness> <target-harness>
+  local grant=${1-} source=${2-} target=${3-}
   fm_control_cursor_exemption_valid "$grant" || return 0
   [ "$grant" != attended ] || return 0
+  fm_control_cursor_exemption_applies "$source" || return 0
   fm_control_cursor_exemption_applies "$target" || return 0
   printf '%s' "$grant"
 }
