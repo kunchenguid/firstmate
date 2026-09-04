@@ -812,7 +812,8 @@ test_create_task_refuses_when_agent_state_ambiguous() {
 # agent get -> the stale <status>, and a bare idle-shell process-info sample,
 # plus the fake ps the idle-shell proof reads. Echoes the fakebin dir.
 exited_agent_pane_probes() {  # <dir> <status> <shell-pid>
-  local dir=$1 status=$2 pid=$3 resp="$dir/responses"
+  local dir=$1 status=$2 pid=$3
+  local resp="$dir/responses"
   mkdir -p "$resp"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
@@ -824,7 +825,7 @@ exited_agent_pane_probes() {  # <dir> <status> <shell-pid>
 test_pane_agent_state_exited_agent_stale_done_status_is_no_agent() {
   local dir log resp fb out
   dir="$TMP_ROOT/exited-done"; log="$dir/log"; resp="$dir/responses"
-  fb=$(exited_agent_pane_probes "$dir" done 4242); : > "$log"
+  fb=$(exited_agent_pane_probes "$dir" 'done' 4242); : > "$log"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
   [ "$out" = no-agent ] || fail "an exited agent (stale agent_status=done, bare-shell pane) must classify no-agent, got '$out'"
@@ -869,7 +870,7 @@ test_agent_state_exited_agent_is_dead_relaunchable() {
   # `alive` that stalls exit forever or the `unreadable` that refuses recovery.
   local dir log resp fb out
   dir="$TMP_ROOT/exited-recovery"; log="$dir/log"; resp="$dir/responses"
-  fb=$(exited_agent_pane_probes "$dir" done 4242); : > "$log"
+  fb=$(exited_agent_pane_probes "$dir" 'done' 4242); : > "$log"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
   [ "$out" = dead ] || fail "the recovery-grade state of an exited-agent pane must be dead (relaunchable), got '$out'"
