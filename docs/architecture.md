@@ -285,8 +285,10 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
-`bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered both into a generated ship brief and into the ship instructions a promoted scout receives, so a promoted worker cannot be handed a weaker contract than a briefed one.
-It is also the one owner of the no-mistakes `--intent` contract those workers follow.
+`bin/fm-dod-lib.sh` is the one owner of the ship's Ponytail development contract and mode-specific definition of done, rendered into both a generated ship brief and the ship instructions a promoted scout receives.
+`bin/fm-spawn.sh` adds that same contract to legacy ship briefs and refuses any worker-facing ship artifact that does not reproduce it exactly.
+The development contract is ship-only and self-scopes to code generation and development edits, so scout and secondmate briefs remain unaffected.
+For no-mistakes mode, `bin/fm-dod-lib.sh` also owns the `--intent` contract and operational Ponytail handoff, while spawn and promotion refuse a selected no-mistakes CLI that lacks that capability.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
 `bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
