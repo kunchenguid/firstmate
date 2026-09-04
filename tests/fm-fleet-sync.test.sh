@@ -587,6 +587,30 @@ test_escape_shaped_name_preserves_gone_unmerged_branch() {
   pass "escape-shaped project identity preserves remote-gone unmerged work"
 }
 
+test_numeric_shaped_name_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" 01)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "numeric-shaped local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- 1 [no-mistakes] - collision fixture (added 2026-09-04)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "01: synced" "numeric-shaped default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "unregistered numeric-shaped branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "unregistered numeric-shaped branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "unregistered numeric-shaped branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "numeric-shaped default branch did not fast-forward"
+  pass "numeric-shaped project identity preserves remote-gone unmerged work"
+}
+
 test_remote_backed_prunes_gone_branch() {
   local home clone out
   home=$(new_home)
@@ -904,6 +928,7 @@ test_absent_registry_preserves_gone_unmerged_branch
 test_malformed_registry_preserves_gone_unmerged_branch
 test_missing_mode_annotation_preserves_gone_unmerged_branch
 test_escape_shaped_name_preserves_gone_unmerged_branch
+test_numeric_shaped_name_preserves_gone_unmerged_branch
 test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow

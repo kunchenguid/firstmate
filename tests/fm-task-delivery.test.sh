@@ -414,6 +414,7 @@ test_project_mode_maps_the_conditional_policy() {
 - missingmodeproj [+yolo] - fixture (added 2026-01-01)
 - foo [no-mistakes] - collision fixture (added 2026-01-01)
 - \146oo [local-only] - escape-shaped fixture (added 2026-01-01)
+- 1 [no-mistakes] - numeric collision fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -443,6 +444,14 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- '\146oo' 2>/dev/null)
   [ "$out" = "local-only off" ] || fail "escape-shaped project key collided with the plain project (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- 1 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "strict lookup rejected the registered numeric project key (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- 01 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "numeric-shaped project key collided with the registered numeric key"
+  [ -z "$out" ] || fail "numeric-shaped collision lookup emitted fallback output '$out'"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
   status=$?

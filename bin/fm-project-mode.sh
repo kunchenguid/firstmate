@@ -78,7 +78,7 @@ parsed=$(FM_PROJECT_MODE_NAME="$NAME" awk '
     return candidate == "no-mistakes" || candidate == "direct-PR" ||
       candidate == "local-only" || candidate == "no-mistakes-prod-only"
   }
-  $1=="-" && $2==n {
+  $1=="-" && ("x" $2)==("x" n) {
     matches++;
     if (matches > 1) next;
     mode="no-mistakes"; yolo="off";
