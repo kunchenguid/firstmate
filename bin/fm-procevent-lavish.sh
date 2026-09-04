@@ -10,6 +10,7 @@
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
+#   fm-procevent-lavish.sh reply <artifact.html> [<text>|--file <path>]
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
@@ -33,6 +34,13 @@
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
 #            transient interruption described below.
+# reply      Durably stage a short host acknowledgement for the listener that
+#            already owns the poll, then request an immediate listener restart
+#            and return without polling in the caller's turn.
+#            Pass one text argument, pass --file <path>, or omit both to read
+#            multiline text from stdin.
+#            A second reply staged before consumption is appended after one
+#            blank line, so concurrent host progress is not overwritten.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -79,7 +87,7 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
+# It wraps ONLY the currently published interface, verified against 0.1.64:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
@@ -114,6 +122,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -123,7 +132,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -162,10 +171,153 @@ cmd_arm() {
 }
 
 cmd_retire() {
-  local artifact=${1-} id
+  local artifact=${1-} id state pending
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || exit 1
+  if [ -e "$STATE" ] && state=$(fm_procevent_state_root_resolve "$STATE"); then
+    STATE=$state
+    pending=$(pending_reply_path "$id")
+    if [ -e "$pending" ] || [ -L "$pending" ]; then
+      pending_reply_is_private "$pending" \
+        || die "retired source left an unsafe pending reply path: $id"
+      rm -f -- "$pending" || die "cannot remove retired source reply: $id"
+    fi
+  fi
+}
+
+pending_reply_path() {  # <source-id>
+  printf '%s/%s.pending-reply\n' "$(fm_procevent_registry_dir "$STATE")" "$1"
+}
+
+pending_reply_is_private() {  # <path>
+  [ -f "$1" ] && [ ! -L "$1" ] \
+    && [ "$(fm_pr_file_mode "$1" 2>/dev/null)" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$1" 2>/dev/null)" = 1 ]
+}
+
+cmd_reply() {
+  local artifact=${1-} input real id reg pending staged cleanup_command
+  [ -n "$artifact" ] || usage
+  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+    || die "cannot resolve the artifact path: $artifact"
+  id=$(cmd_source_id "$real") || exit 1
+  input=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-reply.XXXXXX") || die "cannot stage reply input"
+  printf -v cleanup_command 'rm -f -- %q' "$input"
+  # shellcheck disable=SC2064 # Expand the private path while it is still set.
+  trap "$cleanup_command" EXIT
+  case "$#" in
+    1) cat > "$input" || die "cannot read reply text from stdin" ;;
+    2)
+      [ "$2" != --file ] || usage
+      printf '%s' "$2" > "$input" || die "cannot stage reply text"
+      ;;
+    3)
+      [ "$2" = --file ] || usage
+      [ -f "$3" ] && [ ! -L "$3" ] || die "reply file is not a regular file: $3"
+      cp -- "$3" "$input" || die "cannot read reply file: $3"
+      ;;
+    *) usage ;;
+  esac
+  [ -s "$input" ] || die "reply text must not be empty"
+  perl -0777 -ne 'exit(index($_, "\0") >= 0 ? 1 : 0)' "$input" \
+    || die "reply text cannot contain NUL bytes"
+
+  STATE=$(fm_procevent_state_root_resolve "$STATE") \
+    || die "process-event state root is not a private directory"
+  reg=$(fm_procevent_registry_dir "$STATE")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || die "Lavish source is not armed: $id"
+  pending=$(pending_reply_path "$id")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if ! fm_procevent_registration_matches_locked "$STATE" lavish "$id" \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"; then
+    fm_procevent_source_lock_release "$id"
+    die "Lavish source is not armed by this adapter: $id"
+  fi
+  staged=$(umask 077; mktemp "$reg/.pending-reply.XXXXXX") || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot stage reply"
+  }
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    if ! pending_reply_is_private "$pending"; then
+      rm -f -- "$staged"
+      fm_procevent_source_lock_release "$id"
+      die "pending reply is not a private regular file: $id"
+    fi
+    if ! perl -0777 -e '
+      use strict;
+      use warnings;
+      my ($old_path, $new_path) = @ARGV;
+      open my $old, "<", $old_path or exit 1;
+      open my $new, "<", $new_path or exit 1;
+      local $/;
+      my $old_text = <$old>;
+      my $new_text = <$new>;
+      $old_text =~ s/\n+\z//;
+      $new_text =~ s/\A\n+//;
+      print $old_text, "\n\n", $new_text;
+    ' "$pending" "$input" > "$staged"; then
+      rm -f -- "$staged"
+      fm_procevent_source_lock_release "$id"
+      die "cannot append pending reply"
+    fi
+  else
+    cp -- "$input" "$staged" || {
+      rm -f -- "$staged"
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage reply"
+    }
+  fi
+  chmod 0600 "$staged" || {
+    rm -f -- "$staged"
+    fm_procevent_source_lock_release "$id"
+    die "cannot protect pending reply"
+  }
+  mv -f -- "$staged" "$pending" || {
+    rm -f -- "$staged"
+    fm_procevent_source_lock_release "$id"
+    die "cannot publish pending reply"
+  }
+  fm_procevent_source_lock_release "$id"
+
+  "$SCRIPT_DIR/fm-procevent.sh" restart "$id" --if-matches lavish -- \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" >/dev/null \
+    || die "reply is staged but the listener could not be restarted: $id"
+  printf 'reply staged: %s\n' "$id"
+}
+
+take_pending_reply() {  # <artifact>
+  local artifact=$1 id reg pending claimed
+  POLL_AGENT_REPLY=
+  [ -e "$STATE" ] || return 1
+  STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
+  reg=$(fm_procevent_registry_dir "$STATE")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  id=$(cmd_source_id "$artifact") || return 1
+  pending=$(pending_reply_path "$id")
+  [ -e "$pending" ] || [ -L "$pending" ] || return 1
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if ! pending_reply_is_private "$pending"; then
+    fm_procevent_source_lock_release "$id"
+    die "pending reply is not a private regular file: $id"
+  fi
+  claimed=$(umask 077; mktemp "$reg/.consuming-reply.XXXXXX") || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot claim pending reply"
+  }
+  if ! mv -f -- "$pending" "$claimed"; then
+    rm -f -- "$claimed"
+    fm_procevent_source_lock_release "$id"
+    die "cannot claim pending reply"
+  fi
+  fm_procevent_source_lock_release "$id"
+  POLL_AGENT_REPLY=$(cat -- "$claimed") || {
+    rm -f -- "$claimed"
+    die "cannot read claimed reply"
+  }
+  rm -f -- "$claimed" || die "cannot consume claimed reply"
+  [ -n "$POLL_AGENT_REPLY" ] || die "claimed reply text is empty"
+  return 0
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -245,30 +397,67 @@ poll_retry_delay() {
 }
 
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
-  local pipeline_status
+  local artifact=${1-} delay attempt=0 response poll_pipe cleanup_command rc filter_rc
+  local poll_pid='' filter_pid='' restart_signal=''
+  local -a poll_argv
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
-  printf -v cleanup_command 'rm -f -- %q' "$response"
-  # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
+  poll_pipe=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-pipe.XXXXXX") || die "cannot stage the poll pipe"
+  rm -f -- "$poll_pipe" || die "cannot prepare the poll pipe"
+  mkfifo -m 600 "$poll_pipe" || die "cannot prepare the poll pipe"
+  printf -v cleanup_command 'rm -f -- %q %q' "$response" "$poll_pipe"
+  # shellcheck disable=SC2064 # Expand private paths while both are still set.
   trap "$cleanup_command" EXIT
-  # Retirement stops this listener by signalling its process group, and bash runs
-  # no EXIT trap for an uncaught signal, so each one cleans up the staged
-  # response and then re-raises itself with the default disposition, leaving the
-  # process dying exactly as the runner expects.
+
+  # The generic restart hook signals this wrapper, not the runner group. Waiting
+  # through the shell builtin lets the trap forward that signal to the exact
+  # lavish-axi poll child while the runner stays alive to drain any response
+  # bytes that had already arrived.
+  forward_poll_signal() {
+    restart_signal=$1
+    [ -z "$poll_pid" ] || kill -"$1" "$poll_pid" 2>/dev/null || true
+  }
   local signal
   for signal in INT TERM HUP; do
-    # shellcheck disable=SC2064 # Same reason: expand now, while both are set.
-    trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
+    # shellcheck disable=SC2064 # Bind this iteration's signal name now.
+    trap "forward_poll_signal $signal" "$signal"
   done
+  poll_argv=(poll "$artifact")
+  if take_pending_reply "$artifact"; then
+    poll_argv+=(--agent-reply "$POLL_AGENT_REPLY")
+  fi
   while :; do
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
-    pipeline_status=("${PIPESTATUS[@]}")
-    rc=${pipeline_status[0]}
-    filter_rc=${pipeline_status[1]}
+    if [ -n "$restart_signal" ]; then
+      case "$restart_signal" in
+        HUP) return 129 ;;
+        INT) return 130 ;;
+        TERM) return 143 ;;
+      esac
+    fi
+    lavish-axi "${poll_argv[@]}" > "$poll_pipe" &
+    poll_pid=$!
+    poll_response_filter "$response" < "$poll_pipe" &
+    filter_pid=$!
+    wait "$poll_pid"
+    rc=$?
+    if [ -n "$restart_signal" ]; then
+      wait "$poll_pid" 2>/dev/null || true
+    fi
+    poll_pid=
+    wait "$filter_pid"
+    filter_rc=$?
+    filter_pid=
+    if [ -n "$restart_signal" ]; then
+      case "$restart_signal" in
+        HUP) return 129 ;;
+        INT) return 130 ;;
+        TERM) return 143 ;;
+      esac
+    fi
+    poll_argv=(poll "$artifact")
     case "$filter_rc" in
       0) break ;;
       10)
@@ -616,6 +805,7 @@ cmd_read() {
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
+  reply)     shift; cmd_reply "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;

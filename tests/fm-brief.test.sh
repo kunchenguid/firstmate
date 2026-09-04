@@ -828,6 +828,10 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "you may host the Lavish review loop yourself" "$brief" \
     "scout brief must mention the option to host a Lavish review loop"
+  assert_grep "fm-procevent-lavish.sh reply <artifact.html> <text>" "$brief" \
+    "scout brief must route host acknowledgements through the existing listener"
+  assert_grep "never start a competing poll from the host turn" "$brief" \
+    "scout brief must forbid a host-owned competing poll"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"

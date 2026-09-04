@@ -8,15 +8,53 @@ This record holds reusable version-scoped evidence for the runner's active guara
 Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
+
+## Lavish host acknowledgement path
+
+The listener-mediated reply path was verified on 2026-09-04 with `lavish-axi` 0.1.64 against a throwaway board under `data/lavish-host-agent-reply/`.
+The installed `lavish-axi poll --help` states that `--agent-reply` displays the response before polling continues and that feedback remains queued when a poll is killed before delivery.
+Source inspection confirmed that the CLI posts `/api/<session>/agent-reply` before opening `/api/poll`, and the server restores feedback when a poll request closes before delivery completes.
+
+```text
+$ lavish-axi --version
+0.1.64
+$ lavish-axi poll --help | head -1
+Usage: lavish-axi poll <html-file> [--agent-reply "..."]
+$ FM_LAVISH_REPLY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-procevent-lavish-live-e2e.test.sh
+FM_TEST_BEGIN 2026-09-04T23:22:56Z tests/fm-procevent-lavish-live-e2e.test.sh family=live-harness-optin expected_gate_skip=optin-env
+ok - Lavish 0.1.64 displays a reply sent through the watcher-owned listener
+FM_TEST_END 2026-09-04T23:23:00Z tests/fm-procevent-lavish-live-e2e.test.sh exit=0 duration_ms=4676 gate_skip=false
+```
+
+The same throwaway session was opened with `chrome-devtools-axi`, and its Conversation panel exposed the listener reply as agent chat:
+
+```text
+StaticText "AGENT"
+StaticText "Acknowledged through the watcher-owned listener."
+```
+
+A second live pass queued a browser prompt before the host reply requested its listener restart.
+The old listener's durable result retained the prompt, and the Conversation panel then showed the new acknowledgement:
+
+```text
+"",Prompt queued during listener restart verification.,"",message,Freeform message
+StaticText "YOU"
+StaticText "Prompt queued during listener restart verification."
+StaticText "AGENT"
+StaticText "Applied the queued restart verification note."
+```
+
+The portable `tests/fm-procevent.test.sh` regression drives the executable adapter and generic restart interface.
+It verifies private staging, blank-line append, stdin and file input, consume-once behavior, one multiline `--agent-reply` argv element, exact-registration restart, capture of the old child's final queued output, and immediate replacement of that runner generation.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
 ## The published Lavish poll interface the adapter wraps
 
-Verified at implementation time without upgrading the installed build:
+Re-verified on 2026-09-04 against the installed build:
 
 ```sh
 $ lavish-axi --version
-0.1.45
+0.1.64
 $ lavish-axi poll --help | head -1
 Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 ```

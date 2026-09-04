@@ -31,6 +31,15 @@ For a Lavish review artifact firstmate owns (a live investigating scout should h
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
+After a host applies and re-serves one batch of captain feedback, send a short acknowledgement that says exactly what changed through the listener that already owns the poll:
+
+```sh
+bin/fm-procevent-lavish.sh reply <artifact.html> "<short change summary>"
+```
+
+The reply command stages the acknowledgement durably, requests an immediate listener restart, and returns without polling in the host's turn.
+Never start a competing `lavish-axi poll` from the host turn.
+
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 
 ```sh

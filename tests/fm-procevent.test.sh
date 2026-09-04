@@ -1406,6 +1406,144 @@ newline_artifact_out=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ART_NEWLIN
 assert_contains "$newline_artifact_out" "cannot contain newlines" "Lavish rejects newline paths before canonicalization"
 pass "the adapter derives physical identity without newline path corruption"
 
+# Host replies are staged through the executable adapter while a fake generic
+# restart boundary keeps the pending file observable before the poll consumes
+# it. The fake Lavish binary records argv as framed data so multiline text is
+# checked as one argument without inspecting implementation source.
+REPLY_RUNTIME="$TMP_ROOT/reply-runtime"
+REPLY_HOME="$TMP_ROOT/reply-home"
+REPLY_BIN="$TMP_ROOT/reply-bin"
+REPLY_LOG="$TMP_ROOT/reply-argv.log"
+RESTART_LOG="$TMP_ROOT/reply-restart.log"
+mkdir -p "$REPLY_RUNTIME/bin" "$REPLY_BIN"
+new_home "$REPLY_HOME"
+chmod 700 "$REPLY_HOME/state"
+cp "$ROOT/bin/fm-procevent-lavish.sh" "$ROOT/bin/fm-procevent-lib.sh" \
+  "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$REPLY_RUNTIME/bin/"
+cat > "$REPLY_RUNTIME/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$RESTART_LOG"
+[ "${1-}" = restart ] || exit 97
+SH
+chmod +x "$REPLY_RUNTIME/bin/fm-procevent.sh"
+cat > "$REPLY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'BEGIN\n'
+  for arg in "$@"; do
+    printf 'ARG\n%s\nENDARG\n' "$arg"
+  done
+  printf 'END\n'
+} >> "$REPLY_LOG"
+printf 'session:\n  file: fixture\n  status: waiting\n'
+SH
+chmod +x "$REPLY_BIN/lavish-axi"
+REPLY_ART="$TMP_ROOT/reply-artifact.html"
+printf '<h1>reply fixture</h1>\n' > "$REPLY_ART"
+reply_id=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" "First change applied." >/dev/null
+printf '\nSecond change applied.\nWith detail.\n' | \
+  FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+    "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" >/dev/null
+pending_reply="$REPLY_HOME/state/procevent/$reply_id.pending-reply"
+assert_present "$pending_reply" "reply did not leave one durable pending file"
+if [ "$(uname)" = Darwin ]; then
+  pending_reply_mode=$(stat -f %Lp "$pending_reply")
+else
+  pending_reply_mode=$(stat -c %a "$pending_reply")
+fi
+[ "$pending_reply_mode" = 600 ] \
+  || fail "pending reply mode is not 0600"
+cat > "$TMP_ROOT/expected-pending-reply" <<'EOF'
+First change applied.
+
+Second change applied.
+With detail.
+EOF
+cmp -s "$TMP_ROOT/expected-pending-reply" "$pending_reply" \
+  || fail "a second staged reply was not appended after one blank line"
+[ "$(wc -l < "$RESTART_LOG" | tr -d ' ')" -eq 2 ] \
+  || fail "each reply did not request exactly one nonblocking listener restart"
+
+PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  REPLY_LOG="$REPLY_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+assert_absent "$pending_reply" "poll did not consume the staged reply exactly once"
+PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  REPLY_LOG="$REPLY_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+cat > "$TMP_ROOT/expected-reply-argv" <<EOF
+BEGIN
+ARG
+poll
+ENDARG
+ARG
+$REPLY_ART
+ENDARG
+ARG
+--agent-reply
+ENDARG
+ARG
+First change applied.
+
+Second change applied.
+With detail.
+ENDARG
+END
+BEGIN
+ARG
+poll
+ENDARG
+ARG
+$REPLY_ART
+ENDARG
+END
+EOF
+cmp -s "$TMP_ROOT/expected-reply-argv" "$REPLY_LOG" \
+  || fail "poll did not pass the staged multiline reply once as one --agent-reply argument"
+
+printf 'File-backed acknowledgement.\n' > "$TMP_ROOT/reply-text"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" --file "$TMP_ROOT/reply-text" >/dev/null
+assert_contains "$(cat "$pending_reply")" "File-backed acknowledgement." \
+  "reply --file did not stage its text"
+pass "Lavish host replies stage privately, append safely, and reach poll argv once"
+
+# The generic control hook restarts the exact registered generation immediately
+# instead of waiting for a watcher reconcile cycle.
+RESTART_HOME="$TMP_ROOT/restart-home"; new_home "$RESTART_HOME"
+RESTART_STARTED="$TMP_ROOT/restart-started"
+RESTART_BLOCKER="$TMP_ROOT/restart-blocker.sh"
+: > "$RESTART_STARTED"
+cat > "$RESTART_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' >> "$1"
+trap 'printf "queued prompt survived restart\n"; exit 0' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$RESTART_BLOCKER"
+pe_register "$RESTART_HOME" lavish restart-src -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+pe "$RESTART_HOME" reconcile >/dev/null
+wait_for_lines "$RESTART_STARTED" 1 || fail "restart fixture did not start its first generation"
+pe "$RESTART_HOME" restart restart-src --if-matches lavish -- \
+  "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+wait_for_lines "$RESTART_STARTED" 2 \
+  || fail "restart did not launch a replacement generation immediately"
+restart_result=$(first_result "$RESTART_HOME" restart-src) \
+  || fail "restart discarded the old child's final output instead of capturing it"
+assert_contains "$(cat "$restart_result")" "queued prompt survived restart" \
+  "restart did not let the old runner drain a queued result before replacement"
+restart_bad_status=0
+pe "$RESTART_HOME" restart restart-src --if-matches lavish -- /bin/false >/dev/null 2>&1 \
+  || restart_bad_status=$?
+[ "$restart_bad_status" -ne 0 ] || fail "restart accepted argv that did not match the registration"
+pe "$RESTART_HOME" retire restart-src >/dev/null
+pass "the generic restart hook drains the old child and replaces only an exact owned registration"
+
 HS="$TMP_ROOT/hs"; new_home "$HS"
 mkdir -p "$HS/state/procevent"
 : > "$HS/state/procevent/source-only.source"

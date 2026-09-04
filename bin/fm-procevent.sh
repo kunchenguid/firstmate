@@ -7,6 +7,7 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
+#   fm-procevent.sh restart <source-id> --if-matches <adapter> -- <argv>...
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -41,6 +42,13 @@
 #            turn. After publishing, it asks the source's own adapter whether the
 #            captured result ends the source and retires the registration when it
 #            says so, so a source that has ended stops being restarted.
+# restart    Signal this home's runner-owned registered-command child, wait for
+#            the runner to drain and release it, then immediately launch the
+#            registered built-in command again.
+#            The complete registration must match the supplied adapter and argv,
+#            so an adapter cannot restart a replacement source by stale identity.
+#            This is a bounded control operation for adapter-owned state that
+#            must be picked up by a fresh child invocation, never a source poll.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
@@ -320,6 +328,7 @@ adapter_self_announcing() {  # <adapter>
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
+child_file()   { printf '%s/%s.child\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 
 # Let the source's own adapter apply and acknowledge one captured result. See
@@ -756,7 +765,49 @@ EOF
     [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
     (umask 077; : > "$out") || die "cannot stage output"
     STAGED_OUTPUT=$out
-    "${ARGV[@]}" 2>/dev/null | perl -e '
+    (
+      child=$(child_file "$id")
+      child_tmp=$(umask 077; mktemp "$REG/.child.XXXXXX") || exit 125
+      child_pid=${BASHPID:-}
+      if [ -z "$child_pid" ] || [ "$child_pid" = "$$" ]; then
+        child_pid=$(sh -c 'printf "%s\n" "$PPID"') || exit 125
+      fi
+      child_identity=$(fm_pid_identity "$child_pid") || exit 125
+      if {
+        printf '%s\n' "$child_pid"
+        printf '%s\n' "$$"
+        printf '%s\n' "$CLAIM_TOKEN"
+        printf '%s\n' "$child_identity"
+      } > "$child_tmp" && chmod 0600 "$child_tmp" && mv -f -- "$child_tmp" "$child"; then
+        registered_pid=
+        registered_signal=
+        # shellcheck disable=SC2329 # Signal traps invoke this function indirectly.
+        forward_registered_signal() {
+          registered_signal=$1
+          [ -z "$registered_pid" ] || kill -"$1" "$registered_pid" 2>/dev/null || true
+        }
+        for registered_trap in INT TERM HUP; do
+          # shellcheck disable=SC2064 # Bind this iteration's signal name now.
+          trap "forward_registered_signal $registered_trap" "$registered_trap"
+        done
+        "${ARGV[@]}" &
+        registered_pid=$!
+        wait "$registered_pid"
+        registered_rc=$?
+        if [ -n "$registered_signal" ]; then
+          wait "$registered_pid" 2>/dev/null || true
+        fi
+        registered_pid=
+        case "$registered_signal" in
+          HUP) exit 129 ;;
+          INT) exit 130 ;;
+          TERM) exit 143 ;;
+        esac
+        exit "$registered_rc"
+      fi
+      rm -f -- "$child_tmp"
+      exit 125
+    ) 2>/dev/null | perl -e '
       use strict;
       use warnings;
       my $limit = shift;
@@ -783,6 +834,7 @@ EOF
     local pipe_status=("${PIPESTATUS[@]}")
     rc=${pipe_status[0]}
     bound_rc=${pipe_status[1]}
+    rm -f -- "$(child_file "$id")"
     case "$bound_rc" in
       0) ;;
       3) truncated=1 ;;
@@ -944,7 +996,7 @@ cmd_reconcile() {
       0|1)
         if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
           rm -f -- "$(staging_file "$id" "$token")"
-          rm -f -- "$(runner_file "$id")"
+          rm -f -- "$(runner_file "$id")" "$(child_file "$id")"
           stopped=$((stopped + 1))
         else
           uncertain=$((uncertain + 1))
@@ -1006,7 +1058,7 @@ cmd_reconcile() {
             && cleanup_extension_registration_invocations_locked "$id" \
             && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             rm -f -- "$(staging_file "$id" "$token")"
-            rm -f -- "$(runner_file "$id")"
+            rm -f -- "$(runner_file "$id")" "$(child_file "$id")"
             fm_procevent_source_lock_release "$id"
             detach_runner "$id"
             started=$((started + 1))
@@ -1066,6 +1118,119 @@ stop_runner_pid() {  # <pid> <identity>
     i=$((i + 1))
   done
   return 2
+}
+
+# Load the direct registered-command child that the current built-in generation
+# published. The child must still belong to the identity-matched runner and its
+# process group, so a stale record can never signal a reused pid.
+runner_child_load_locked() {  # <source-id> <runner-pid> <claim-token>
+  local file child runner token identity extra ppid pgid child_state
+  file=$(child_file "$1")
+  [ -f "$file" ] && [ ! -L "$file" ] \
+    && [ "$(fm_pr_file_mode "$file")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  {
+    IFS= read -r child \
+      && IFS= read -r runner \
+      && IFS= read -r token \
+      && IFS= read -r identity \
+      && ! IFS= read -r extra
+  } < "$file" || return 1
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$runner" = "$2" ] && [ "$token" = "$3" ] || return 1
+  [ -n "$identity" ] || return 1
+  fm_procevent_pid_state "$child" "$identity"
+  child_state=$?
+  [ "$child_state" -eq 0 ] || return 1
+  ppid=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]') || return 1
+  pgid=$(ps -o pgid= -p "$child" 2>/dev/null | tr -d '[:space:]') || return 1
+  [ "$ppid" = "$runner" ] && [ "$pgid" = "$runner" ] || return 1
+  RUNNER_CHILD_PID=$child
+}
+
+# Restart one exact built-in registration without waiting for the watcher cycle.
+# Signal only its registered-command child, then let the runner finish draining
+# and durably capture any result that had already arrived before replacement.
+cmd_restart() {
+  local id=${1-} condition=${2-} adapter=${3-} sep=${4-}
+  local claim_state pid token child='' i=0 current_token
+  shift 4 2>/dev/null || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ "$condition" = --if-matches ] || usage
+  fm_procevent_adapter_valid "$adapter" \
+    || die "adapter name must be lowercase alphanumeric or dash: $adapter"
+  [ "$sep" = -- ] && [ "$#" -ge 1 ] || usage
+
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
+    fm_procevent_source_lock_release "$id"
+    die "source registration does not match the expected owner: $id"
+  fi
+
+  fm_procevent_claim_state_locked "$id"
+  claim_state=$?
+  case "$claim_state" in
+    0)
+      pid=$FM_PROCEVENT_CLAIM_PID
+      token=$FM_PROCEVENT_CLAIM_TOKEN
+      if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+        fm_procevent_source_lock_release "$id"
+        die "source runner belongs to another home: $id"
+      fi
+      if runner_child_load_locked "$id" "$pid" "$token"; then
+        child=$RUNNER_CHILD_PID
+      fi
+      fm_procevent_source_lock_release "$id"
+      if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null || true
+      fi
+
+      while [ "$i" -lt 100 ]; do
+        sleep 0.05
+        fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+        if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
+          fm_procevent_source_lock_release "$id"
+          die "source registration changed while restarting: $id"
+        fi
+        if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+          fm_procevent_source_lock_release "$id"
+          detach_runner "$id" || die "cannot restart source: $id"
+          printf 'restarted: %s\n' "$id"
+          return 0
+        fi
+        current_token=$FM_PROCEVENT_CLAIM_TOKEN
+        if [ "$current_token" != "$token" ]; then
+          fm_procevent_source_lock_release "$id"
+          printf 'restarted: %s\n' "$id"
+          return 0
+        fi
+        fm_procevent_source_lock_release "$id"
+        i=$((i + 1))
+      done
+      if [ -n "$child" ]; then
+        die "registered-command child stopped but its runner did not release ownership: $id"
+      fi
+      die "cannot confirm registered-command child; source was not restarted: $id"
+      ;;
+    1)
+      fm_procevent_source_lock_release "$id"
+      detach_runner "$id" || die "cannot restart source: $id"
+      printf 'restarted: %s\n' "$id"
+      return 0
+      ;;
+    2|3)
+      fm_procevent_source_lock_release "$id"
+      die "cannot confirm runner identity; source was not restarted: $id"
+      ;;
+    4)
+      fm_procevent_source_lock_release "$id"
+      die "source is completing terminal retirement: $id"
+      ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "cannot read source ownership: $id"
+      ;;
+  esac
 }
 
 # The owned handling interface: durably and idempotently record that a
@@ -1205,7 +1370,7 @@ cmd_retire() {
     die "cannot prove external adapter cleanup; source remains registered: $id"
   fi
   rm -f -- "$(source_file "$id")"
-  rm -f -- "$(runner_file "$id")"
+  rm -f -- "$(runner_file "$id")" "$(child_file "$id")"
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this
@@ -1491,6 +1656,7 @@ case "${1-}" in
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;
+  restart)            shift; cmd_restart "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;
   classify)           shift; cmd_classify "$@" ;;
   handled)            shift; cmd_handled "$@" ;;
