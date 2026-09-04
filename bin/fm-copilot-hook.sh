@@ -115,7 +115,7 @@ case "$MODE" in
     . "$SCRIPT_DIR/fm-operational-input.sh"
     BODY='FIRSTMATE WATCHER WAKE: shell_completed: bin/fm-watch-arm.sh
 
-Run bin/fm-wake-drain.sh first and handle the queued wake or watcher failure. Start the next attached asynchronous arm only if supervision remains required.'
+Inspect the completed task result for the reason line when needed. Run bin/fm-wake-drain.sh first, handle every emitted wake, reconcile open decisions and unread status lines, then run the exact WAKE_ACK_REQUIRED --ack-through command printed by the drain. Until that post-handling acknowledgement, interruption leaves the work durable for idempotent re-handling. Start the next attached asynchronous arm only if supervision remains required.'
     fm_operational_input_encode watcher "$BODY" FOLLOWUP || exit 0
     jq -cn --arg text "$FOLLOWUP" '{additionalContext:$text}'
     ;;
