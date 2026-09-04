@@ -417,7 +417,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_hook_policy_follows_launch_kind() {
+test_all_codex_launches_bypass_hook_trust() {
   local rec id out status launch sm harness
   id=profile-codex-hook-trust-z3b
   rec=$(make_spawn_case profile-codex-hook-trust codex "$id")
@@ -427,10 +427,10 @@ test_codex_hook_policy_follows_launch_kind() {
   status=$?
   expect_code 0 "$status" "ordinary codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--disable hooks" \
-    "ordinary codex launch omitted invocation-scoped hook disabling"
-  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "ordinary codex launch trusted effective hook sources"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "ordinary codex launch omitted the hook-trust bypass"
+  assert_not_contains "$launch" "--disable hooks" \
+    "ordinary codex launch disabled hooks"
   assert_contains "$launch" "notify=" \
     "ordinary codex launch lost its turn-end notify configuration"
 
@@ -441,10 +441,10 @@ test_codex_hook_policy_follows_launch_kind() {
   status=$?
   expect_code 0 "$status" "scout codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--disable hooks" \
-    "scout codex launch omitted invocation-scoped hook disabling"
-  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "scout codex launch trusted effective hook sources"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "scout codex launch omitted the hook-trust bypass"
+  assert_not_contains "$launch" "--disable hooks" \
+    "scout codex launch disabled hooks"
   assert_contains "$launch" "notify=" \
     "scout codex launch lost its turn-end notify configuration"
 
@@ -464,8 +464,21 @@ test_codex_hook_policy_follows_launch_kind() {
   assert_not_contains "$launch" "notify=" \
     "secondmate codex launch gained the parent worker's turn-end notify configuration"
 
+  id=profile-codex-hook-trust-raw-z3e
+  rec=$(make_spawn_case profile-codex-hook-trust-raw codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --dangerously-bypass-approvals-and-sandbox")
+  status=$?
+  expect_code 0 "$status" "raw codex spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" ] \
+    || fail "raw codex launch did not receive only the hook-trust bypass"$'\n'"actual: $launch"
+  assert_not_contains "$launch" "--disable hooks" \
+    "raw codex launch disabled hooks"
+
   for harness in claude opencode pi grok cursor gemini; do
-    id="profile-hook-trust-negative-$harness-z3e"
+    id="profile-hook-trust-negative-$harness-z3f"
     rec=$(make_spawn_case "profile-hook-trust-negative-$harness" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -474,8 +487,10 @@ test_codex_hook_policy_follows_launch_kind() {
     launch=$(cat "$LAUNCH_LOG")
     assert_not_contains "$launch" "--disable hooks" \
       "$harness launch received Codex-only hook disabling"
+    assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+      "$harness launch received the Codex-only hook-trust bypass"
   done
-  pass "codex hook trust follows worker and secondmate lifecycle contracts"
+  pass "all codex launch paths bypass hook trust without disabling hooks"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -869,7 +884,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_hook_policy_follows_launch_kind
+test_all_codex_launches_bypass_hook_trust
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
