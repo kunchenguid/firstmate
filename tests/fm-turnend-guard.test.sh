@@ -847,6 +847,61 @@ test_tracked_claude_entries_inert_under_grok() {
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
+test_codex_hook_wrappers_ignore_noisy_bash_login_profile() {
+  local settings dir home target command payload stdout stderr status wrapper_count login_output
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  dir="$TMP_ROOT/codex-hooks-nonlogin"
+  home="$dir/noisy-bash-home"
+  mkdir -p "$dir/bin" "$dir/.codex" "$home"
+  cp "$settings" "$dir/.codex/hooks.json"
+  : > "$dir/AGENTS.md"
+  cat > "$home/.bash_profile" <<'EOF'
+printf '%s\n' BASH_LOGIN_PROFILE_NOISE
+EOF
+
+  login_output=$(HOME="$home" bash -lc ':')
+  assert_contains "$login_output" "BASH_LOGIN_PROFILE_NOISE" "the noisy Bash login-profile fixture did not emit stdout"
+
+  for target in \
+    fm-sessionstart-run.sh \
+    fm-arm-pretool-check.sh \
+    fm-cd-pretool-check.sh \
+    fm-turnend-guard.sh
+  do
+    cat > "$dir/bin/$target" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+EOF
+    chmod +x "$dir/bin/$target"
+  done
+
+  wrapper_count=0
+  while IFS=$'\t' read -r target command; do
+    [ -n "$command" ] || fail "Codex hook wrapper for $target is missing"
+    payload=$(jq -cn --arg target "$target" '{hook_event_name:"test",target:$target}')
+    stdout="$dir/$target.stdout"
+    stderr="$dir/$target.stderr"
+    printf '%s' "$payload" | (cd "$dir" && HOME="$home" bash -c "$command") > "$stdout" 2> "$stderr"
+    status=$?
+    expect_code 0 "$status" "Codex hook wrapper for $target must execute under a noisy Bash login profile"
+    [ ! -s "$stdout" ] \
+      || fail "Codex hook wrapper for $target wrote stdout under a noisy Bash login profile: $(cat "$stdout")"
+    wrapper_count=$((wrapper_count + 1))
+  done < <(
+    jq -r '
+      [
+        ["fm-sessionstart-run.sh", .hooks.SessionStart[0].hooks[0].command],
+        ["fm-arm-pretool-check.sh", .hooks.PreToolUse[0].hooks[0].command],
+        ["fm-cd-pretool-check.sh", .hooks.PreToolUse[0].hooks[1].command],
+        ["fm-turnend-guard.sh", .hooks.Stop[0].hooks[0].command]
+      ][] | @tsv
+    ' "$settings"
+  )
+  [ "$wrapper_count" -eq 4 ] || fail "expected four Codex hook wrappers, ran $wrapper_count"
+  pass ".codex/hooks.json: all four wrappers stay silent under a noisy Bash login profile"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -1942,6 +1997,7 @@ test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
+test_codex_hook_wrappers_ignore_noisy_bash_login_profile
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
