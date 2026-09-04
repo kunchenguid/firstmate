@@ -59,11 +59,11 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git, plus the authenticated forge CLI required by each registered non-local GitHub or GitLab project; GitHub projects use `gh auth login`, and GitLab projects use `glab auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.
-Backend-specific setup is linked in [Documentation](#documentation).
+Forge and backend-specific requirements are owned by [docs/configuration.md](docs/configuration.md#toolchain).
 
 ### Recommended harnesses
 
@@ -79,7 +79,6 @@ Launch it with `--trust`, or none of its project hooks load; it also has no turn
 ### Install and launch
 
 ```sh
-gh auth login
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```

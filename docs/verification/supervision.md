@@ -158,7 +158,7 @@ after              real 0m3.36s    digest prints IN PROGRESS; the same 3 SSH att
                                    run in the detached worker and finish at +77s
 ```
 
-The remaining seconds are entirely local subprocess work; the `NETWORK CHECKS` section named GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh as not yet confirmed.
+The remaining seconds are entirely local subprocess work; the `NETWORK CHECKS` section named registered-forge authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh as not yet confirmed.
 
 Deferring the sweeps changed only when they run, not what they conclude.
 The deferred worker's published report was byte-identical to the three sweep lines the blocking baseline printed, on the same fixture:

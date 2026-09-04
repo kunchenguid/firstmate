@@ -410,6 +410,29 @@ EOF
   pass "fm-startup-network: manual callers cannot forge mutation authority"
 }
 
+test_phase_labels_are_provider_neutral() {
+  local rec home root output
+  rec=$(new_world phase-labels)
+  IFS='|' read -r home root _ <<EOF
+$rec
+EOF
+  cat > "$home/state/.startup-network.status" <<EOF
+state=timeout
+pid=0
+started=1
+finished=3
+locked=0
+phases=probe
+report_published=1
+EOF
+  output=$(run_stage "$home" "$root" report)
+  assert_contains "$output" "registered-forge authentication" \
+    "deferred diagnostics must use provider-neutral authentication wording"
+  assert_not_contains "$output" "GitHub authentication" \
+    "deferred diagnostics must not claim GitHub authentication for every home"
+  pass "fm-startup-network: deferred auth labels are provider neutral"
+}
+
 # The unbounded per-call network work is exactly what could wedge a startup. The
 # stage carries one aggregate bound, and hitting it is an actionable line.
 test_the_stage_bound_is_reported_not_swallowed() {
@@ -768,6 +791,7 @@ test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
 test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
+test_phase_labels_are_provider_neutral
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
 test_locked_start_is_not_satisfied_by_an_inflight_probe

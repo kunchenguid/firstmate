@@ -777,7 +777,7 @@ churn_config() {  # <dir> [off]
 # unchanging fixture pane could reach the stale backbone.
 wait_for_absorbed() {  # <state> <pid> <needle>
   local state=$1 pid=$2 needle=$3 i=0
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 300 ]; do
     grep -Fq "$needle" "$state/.watch-triage.log" 2>/dev/null && return 0
     kill -0 "$pid" 2>/dev/null || return 1
     sleep 0.1
@@ -856,7 +856,10 @@ test_turn_ended_churn_resets_prior_stale_classification() {
   # This is a new quiet interval, so it must surface through ordinary staleness
   # instead of inheriting the earlier interval's wedge timer.
   printf 'idle prompt from an earlier turn' > "$capture_file"
-  wait_for_exit "$pid" 100 \
+  # This case follows several bounded startup probes before the first poll.
+  # Keep the wait bounded, but allow loaded CI runners enough time to reach the
+  # unchanged-pane classification instead of reporting a startup false negative.
+  wait_for_exit "$pid" 300 \
     || { reap "$pid"; fail "a stopped pane matching an earlier stale render waited for the wedge timeout"; }
   grep -Fx "stale: $window" "$out" >/dev/null \
     || fail "the returned stale render did not surface through ordinary staleness"
@@ -944,7 +947,7 @@ test_turn_ended_malformed_prior_hash_surfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a malformed prior hash"
+  wait_for_exit "$pid" 300 || fail "watcher absorbed a turn-end backed by a malformed prior hash"
   grep -F "signal: $state/codexmalformed.turn-ended" "$out" >/dev/null \
     || fail "watcher did not print the surfaced malformed-hash turn-end"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
@@ -972,7 +975,7 @@ test_turn_ended_trailing_newline_prior_hash_surfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a newline-terminated prior hash"
+  wait_for_exit "$pid" 300 || fail "watcher absorbed a turn-end backed by a newline-terminated prior hash"
   grep -F "signal: $state/codexnewline.turn-ended" "$out" >/dev/null \
     || fail "watcher did not print the surfaced newline-hash turn-end"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
@@ -3561,7 +3564,8 @@ seed_captured_procevent_result() {  # <dir>
   pe_case "$dir" register lavish delivery-src -- \
     /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
   pe_case "$dir" reconcile >/dev/null || return 1
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 300 ]; do
+    pe_case "$dir" reconcile >/dev/null || return 1
     [ -s "$dir/state/.wake-queue" ] && break
     sleep 0.1
     i=$((i + 1))

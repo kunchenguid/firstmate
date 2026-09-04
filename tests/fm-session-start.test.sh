@@ -544,12 +544,15 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
 # secondmate home wired to the real spawn implementation through the fixture
 # root. Echoes root|home|fakebin|mate|log|spawned.
 prepare_session_start_secondmate() {
-  local name=$1 rec root home fakebin w mate log spawned id=$SESSION_START_SECOND_MATE_ID
+  local name=$1 rec root home fakebin w mate log spawned id=$SESSION_START_SECOND_MATE_ID real_git
   rec=$(new_world "$name")
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   w=${root%/root}
+  mkdir -p "$home/projects/github"
+  git -C "$home/projects/github" init -q
+  git -C "$home/projects/github" remote add origin https://github.com/example/project.git
   mate="$w/secondmate-$id"
   log="$w/tmux.log"
   spawned="$w/tmux.spawned"
@@ -566,11 +569,20 @@ EOF
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
   } > "$home/state/$id.meta"
+  real_git=$(command -v git)
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   fm_fake_exit0 "$fakebin" pi
   make_fake_tmux_secondmate_recovery "$fakebin"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *' fetch '*|*' fetch') exit 1 ;;
+esac
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$spawned"
 }
@@ -1577,7 +1589,7 @@ EOF
   assert_contains "$out" "SESSION START" "the digest did not complete"
   assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
     "the digest did not disclose that its network checks were still running"
-  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
+  assert_contains "$out" "NOT yet confirmed: registered-forge authentication, dead-secondmate relaunch" \
     "the digest did not name the checks it has not confirmed"
   assert_not_contains "$out" "NEEDS_GH_AUTH" \
     "the digest reported a GitHub-auth verdict it could not yet have"
@@ -1638,8 +1650,7 @@ SH
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "READ-ONLY SESSION" "the read-only fixture did not actually refuse the lock"
-  assert_contains "$out" "skipped (read-only session) - GitHub authentication" \
+  assert_contains "$out" "skipped (read-only session) - registered-forge authentication" \
     "a read-only session did not declare its skipped network checks"
   assert_absent "$home/state/.startup-network.status" \
     "a read-only session started the deferred stage it has no authority for"

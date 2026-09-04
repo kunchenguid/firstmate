@@ -77,6 +77,7 @@
 # The digest is therefore composed from bounded local reads and local
 # subprocesses only, while slow network or inactive-state reconciliation delays
 # a reported check rather than startup.
+# An unreachable host likewise delays a reported check rather than startup.
 # What this deliberately trades: on a slow network the digest prints "IN
 # PROGRESS" and names exactly which checks are not yet confirmed, instead of
 # waiting for them. It never reports an unconfirmed check as passed.
@@ -879,7 +880,7 @@ fi
 
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
-# secondmate that could not be relaunched, broken GitHub auth), and the section
+# secondmate that could not be relaunched, broken registered-forge auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
 # Deliberately here and not earlier: this is the last point in the digest, so the
 # worker started at step 1 has had the whole composition above to finish in. It
@@ -888,7 +889,7 @@ fi
 stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
-  printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
+  printf 'skipped (read-only session) - registered-forge authentication, project clone refresh,\n'
   printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
   printf 'has no action they would gate. The session holding the lock runs them.\n'

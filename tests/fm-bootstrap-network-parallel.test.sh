@@ -221,6 +221,9 @@ SH
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$dir/alpha.origin.git"
 
+  # Keep the synthetic remote work long enough that the concurrency contract
+  # is observable on slower CI runners; this is a scheduling test, not a
+  # benchmark of the remote command latency.
   out=$(
     PATH="$fakebin:$BASE_PATH" \
     FM_HOME="$home" \
@@ -228,7 +231,7 @@ SH
     FM_BOOTSTRAP_NETWORK=only \
     FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_FAKE_SSH_LOG="$log" \
-    FM_FAKE_SSH_SLEEP=0.4 \
+    FM_FAKE_SSH_SLEEP=2 \
     FM_FAKE_SSH_UNREACHABLE_HOST=host-bravo \
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \

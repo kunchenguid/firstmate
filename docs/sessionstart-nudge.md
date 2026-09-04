@@ -62,7 +62,7 @@ Before printing, the nudge wrapper reads `state/.lock` and walks at most eight p
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every ordinary transport path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
 The run wrapper's internal `--pi-prerequisite` mode uses silent exit 3 only for an intentional gate or scope stand-down, letting Pi distinguish ineligibility from an eligible empty native result without changing any harness hook's exit contract.
-A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
+A lock another session holds and a truncated digest therefore surface as digest text, while broken registered-forge authentication, including GitHub auth, surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
 
 ## Harness transports
 

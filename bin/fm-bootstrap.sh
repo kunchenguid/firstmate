@@ -6,7 +6,9 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)",
+#                 "NEEDS_GH_AUTH[: <host>]", "NEEDS_GLAB_AUTH[: <host>]",
+#                 "FORGE_UNSUPPORTED: <project> (host: <host|unresolved>)",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -114,14 +116,14 @@
 #                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
-#                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
+#                 provider authentication, secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
 #                 reconciliation, no x_mode_setup: those already ran on the
 #                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
-#          detect-only is the read-only `gh auth status` probe on its own.
+#          detect-only is the read-only provider authentication probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
@@ -153,6 +155,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-forge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -191,6 +195,25 @@ case "${FM_BOOTSTRAP_NETWORK:-all}" in
 esac
 local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
+
+FORGE_UNSUPPORTED_REPORTED=0
+forge_report_unsupported() {
+  local unsupported=0
+  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+    [ -n "${_proj_provider:-}" ] || continue
+    if [ "$_proj_provider" = unknown ]; then
+      unsupported=1
+      if [ "$FORGE_UNSUPPORTED_REPORTED" -eq 0 ]; then
+        echo "FORGE_UNSUPPORTED: $_proj_id (host: ${_proj_host:-unresolved})"
+      fi
+    fi
+  done <<< "$FORGE_PROJECTS"
+  if [ "$unsupported" -eq 1 ]; then
+    FORGE_UNSUPPORTED_REPORTED=1
+    return 1
+  fi
+  return 0
+}
 
 network_mutation_authorized() {
   local expected=${FM_BOOTSTRAP_NETWORK_LOCK_PID:-} current
@@ -856,7 +879,7 @@ secondmate_handoff_detect() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    tmux|node|git|gh|glab|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -883,12 +906,30 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
-# Required-tool detection follows the RESOLVED backend, not a one-size default:
-# a universal toolchain every home needs plus the backend-specific delta owned by
-# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
-# no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+# Required-tool detection combines the universal toolchain, the provider tools
+# derived from registered project origins, and the resolved backend's delta from
+# fm_backend_required_tools (bin/fm-backend.sh). Thus GitLab-only homes do not
+# require GitHub tooling, inactive backends do not add tools, and an invalid
+# backend is reported before the universal checks continue.
+COMMON_TOOLS="node git no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
+FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+  [ -n "${_proj_provider:-}" ] || continue
+  _proj_mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null || true)
+  [ "${_proj_mode%% *}" = local-only ] && continue
+  printf '%s\t%s\t%s\n' "$_proj_id" "$_proj_provider" "${_proj_host:-}"
+done <<< "$FORGE_PROJECTS_RAW")
+FORGE_PROVIDERS_SEEN=$(printf '%s\n' "$FORGE_PROJECTS" | awk -F '\t' 'NF >= 2 {print $2}' | sort -u)
+while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+  [ -n "${_proj_provider:-}" ] || continue
+  while read -r _forge_tool; do
+    [ -n "${_forge_tool:-}" ] || continue
+    case " $COMMON_TOOLS " in
+      *" $_forge_tool "*) ;;
+      *) COMMON_TOOLS="$COMMON_TOOLS $_forge_tool" ;;
+    esac
+  done < <(fm_forge_provider_tools "$_proj_provider" 2>/dev/null || true)
+done <<< "$FORGE_PROJECTS"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -1420,7 +1461,8 @@ detect_local_tools() {
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
-  if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
+  if printf '%s\n' "$FORGE_PROVIDERS_SEEN" | grep -qx github \
+    && command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
   if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
@@ -1432,6 +1474,7 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
+  forge_report_unsupported || true
 }
 
 detect_local_config() {
@@ -1520,8 +1563,7 @@ detect_home_summary_publication() {
 
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
-# reshuffle. `gh auth status` sits between the two local blocks because that is
-# where it has always been.
+# reshuffle. Registered-forge authentication sits between the two local blocks.
 # Each network owner below is bracketed by an elapsed-time record, so a deferred
 # stage that ran long can be attributed to the phase that spent the time.
 # fm-timing-lib.sh discards the record unless the caller asked for timings, and
@@ -1533,9 +1575,28 @@ detect_home_summary_publication() {
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
 if network_phase; then
+  forge_report_unsupported || true
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
-  fm_timing_record phase gh-auth "$__fm_timing_stamp"
+  # Authentication is checked for each registered supported forge. An unknown
+  # origin is reported by the local pass, but must not suppress authentication
+  # remediation for an unrelated supported project in the same home.
+  # The deferred network phase repeats these provider-aware checks rather than a
+  # global GitHub probe that mislabels GitLab-only and local homes.
+  FORGE_AUTH_CHECKED=""
+  while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
+    [ -n "${_proj_provider:-}" ] || continue
+    case "$_proj_provider" in
+      github|gitlab) : ;;
+      *) continue ;;
+    esac
+    _pair="$_proj_provider:${_proj_host:-}"
+    case " $FORGE_AUTH_CHECKED " in
+      *" $_pair "*) continue ;;
+    esac
+    FORGE_AUTH_CHECKED="$FORGE_AUTH_CHECKED $_pair"
+    fm_forge_check_auth "$_proj_provider" "${_proj_host:-}"
+  done <<< "$FORGE_PROJECTS"
+  fm_timing_record phase forge-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 
@@ -1545,16 +1606,26 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # depend on them, so it starts in the background and overlaps their wall clock.
   fleet_sync_pid=
   fleet_sync_out=
+  # Never hand an unclassified registered origin to the clone-refresh worker:
+  # its remote transport is not a supported forge boundary, so fail closed for
+  # that project while leaving unrelated secondmate supervision sweeps intact.
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
     if [ -n "$fleet_sync_out" ]; then
+      # Resolve the timeout before starting the worker. The project-count scan
+      # is part of the launch decision and must not overlap fleet sync.
+      fleet_sync_timeout=$(fleet_sync_bootstrap_timeout)
       (
+        FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=$fleet_sync_timeout
+        export FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT
         __fm_timing_stamp=$(fm_timing_now_ms)
         fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
+      fleet_sync_timeout=$(fleet_sync_bootstrap_timeout)
+      FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=$fleet_sync_timeout
       __fm_timing_stamp=$(fm_timing_now_ms)
       fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
