@@ -25,13 +25,45 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+test_afk_start_refuses_an_unowned_direct_launch() {
+  local dir state out status
+  dir=$(make_supercase afk-start-unowned-launch)
+  state="$dir/state"
+
+  # A bare (or `exec`-wrapped) operator invocation declares neither supported
+  # launch shape. It must refuse before writing state/.afk, because an away
+  # session with no launcher lifecycle record cannot be stopped or reconciled by
+  # bin/fm-afk-launch.sh or bin/fm-afk-return.sh.
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -eq 2 ] || fail "an unowned direct fm-afk-start.sh launch should refuse with exit 2 (got $status): $out"
+  assert_contains "$out" "refusing to start the away-mode daemon directly" "the refusal did not name the unowned direct launch"
+  assert_contains "$out" "bin/fm-afk-launch.sh start-native" "the refusal did not name the harness-native launch shape"
+  assert_contains "$out" "harness without one: run bin/fm-afk-launch.sh start" "the refusal did not name the terminal-backed launch shape"
+  assert_not_contains "$out" "starting supervise daemon" "the unowned launch reached daemon startup"
+  assert_absent "$state/.afk" "the unowned launch wrote the away-mode flag before refusing"
+  assert_absent "$state/.supervise-daemon.log" "the unowned launch started the daemon"
+
+  # Both declared shapes get past the ownership gate (they then fail later, on
+  # the deliberately unsupported supervisor backend).
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_LAUNCH_OWNED=1 FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  assert_contains "$out" "starting supervise daemon" "a launcher-owned terminal launch was refused"
+  rm -f "$state/.afk" "$state/.supervise-daemon.log"
+
+  date +%s > "$state/.afk"
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_STATE_PREPARED=1 FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  assert_contains "$out" "starting supervise daemon" "a launcher-prepared native launch was refused"
+  pass "fm-afk-start.sh refuses an unowned direct launch and accepts both declared launch shapes"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_LAUNCH_OWNED=1 FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -46,7 +78,7 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   state="$dir/state"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_LAUNCH_OWNED=1 FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
@@ -66,7 +98,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   printf '%s\n' "$$" > "$lock/pid"
   printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_AFK_LAUNCH_OWNED=1 FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
@@ -2615,6 +2647,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_afk_start_refuses_an_unowned_direct_launch
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid

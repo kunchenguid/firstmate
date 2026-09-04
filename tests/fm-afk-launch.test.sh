@@ -4,8 +4,9 @@
 # (bin/fm-afk-start.sh). Two layers:
 #
 #   UNIT (always run, no backend): the session-scoped stale-artifact clear on a
-#   fresh entry vs a refresh, and the correct-ordered stop (daemon SIGTERM'd
-#   while state/.afk is still present, .afk cleared last).
+#   fresh entry vs a refresh, the correct-ordered stop (daemon SIGTERM'd while
+#   state/.afk is still present, .afk cleared last), and the launcher-ownership
+#   declaration both terminal launch commands must hand the daemon entry.
 #
 #   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
 #   regression for the pane split/shrink - entering AND exiting away mode leaves
@@ -123,7 +124,7 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock
+  local st sleep_pid lock out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -136,7 +137,12 @@ unit_fresh_vs_refresh() {
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_OWNED=1 "$START" 2>&1)
+  if printf '%s\n' "$out" | grep -F 'afk: daemon already running pid=' >/dev/null; then
+    pass "refresh: the entry reached the live-daemon check instead of refusing"
+  else
+    fail "refresh: the entry never reached the live-daemon check ($out)"
+  fi
   if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
@@ -254,6 +260,108 @@ unit_concurrent_start_serialized() {
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   tmux kill-session -t "$cap_session" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT 4: both terminal launch commands DECLARE launcher-owned entry.
+# bin/fm-afk-start.sh refuses (exit 2) an entry that declares neither
+# FM_AFK_STATE_PREPARED=1 nor FM_AFK_LAUNCH_OWNED=1, so a launch command that
+# lost that declaration cannot start the daemon at all on a harness with no
+# native background tool. Observed where the entry RECEIVES it: the
+# FM_AFK_LAUNCH_ENTRY seam points at a recorder that dumps its own environment
+# and then blocks like the sleeper. Both backends are covered - tmux through a
+# real detached session, herdr through a stubbed `pane run` that EXECUTES the
+# command the launcher built, so no herdr server is required.
+# ---------------------------------------------------------------------------
+make_entry_recorder() {  # <env-dump-path> -> prints the recorder script path
+  local dump=$1 script
+  script=$(mktemp "${TMPDIR:-/tmp}/fm-afk-recorder.XXXXXX")
+  # The dump path is baked in rather than passed through the environment: a tmux
+  # server does not forward arbitrary client variables into a new session, so an
+  # inherited variable would not reach the entry.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'env > %q.pending\n' "$dump"
+    printf 'mv %q.pending %q\n' "$dump" "$dump"
+    printf 'exec sleep 600\n'
+  } > "$script"
+  chmod +x "$script"
+  printf '%s\n' "$script"
+}
+
+assert_entry_declares_launch_owned() {  # <label> <env-dump-path>
+  local label=$1 dump=$2 waited=0
+  while [ "$waited" -lt 200 ]; do
+    [ -e "$dump" ] && break
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  if [ ! -e "$dump" ]; then
+    fail "$label: the daemon entry never ran, so its environment was never observed"
+    return 0
+  fi
+  if grep -qx 'FM_AFK_LAUNCH_OWNED=1' "$dump"; then
+    pass "$label: hands FM_AFK_LAUNCH_OWNED=1 to the daemon entry"
+  else
+    fail "$label: daemon entry received no FM_AFK_LAUNCH_OWNED=1 declaration"
+  fi
+}
+
+unit_tmux_launch_declares_owned_entry() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux ownership declaration)"; return 0; }
+  local st cap_session cap_pane recorder dump rec
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-owned-tmux.XXXXXX")
+  dump="$st/entry-env"
+  recorder=$(make_entry_recorder "$dump")
+  cap_session="fm-afk-owned-cap-$$"
+  tmux new-session -d -s "$cap_session" 2>/dev/null || {
+    fail "tmux ownership declaration: captain session creation failed"
+    rm -f "$recorder"; rm -rf "$st"; return 0
+  }
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
+  cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$recorder" "$LAUNCH" start >/dev/null 2>&1
+  rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  assert_entry_declares_launch_owned "tmux launch command" "$dump"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  tmux kill-session -t "$cap_session" 2>/dev/null || true
+  rm -f "$recorder"
+  rm -rf "$st"
+}
+
+unit_herdr_launch_declares_owned_entry() {
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr ownership declaration)"; return 0; }
+  local st recorder dump entry_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-owned-herdr.XXXXXX")
+  mkdir -p "$st/state"
+  dump="$st/entry-env"
+  recorder=$(make_entry_recorder "$dump")
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$recorder" \
+    ENTRY_PID_FILE="$st/entry.pid" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "workspace create")
+          printf %s '\''{"result":{"workspace":{"workspace_id":"ws-owned"},"root_pane":{"pane_id":"pane-owned"}}}'\''
+          ;;
+        "pane run")
+          bash -c "$5" >/dev/null 2>&1 &
+          printf "%s" "$!" > "$ENTRY_PID_FILE"
+          ;;
+        *) printf %s '\''{"result":{"pane":{"pane_id":"pane-owned"}}}'\'' ;;
+      esac
+    }
+    fm_afk_launch_create_herdr lab:captain herdr
+  ' _ "$LAUNCH" >/dev/null 2>&1
+  assert_entry_declares_launch_owned "herdr launch command" "$dump"
+  entry_pid=$(cat "$st/entry.pid" 2>/dev/null || true)
+  [ -z "$entry_pid" ] || kill "$entry_pid" 2>/dev/null || true
+  rm -f "$recorder"
   rm -rf "$st"
 }
 
@@ -930,6 +1038,8 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
+unit_tmux_launch_declares_owned_entry
+unit_herdr_launch_declares_owned_entry
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery

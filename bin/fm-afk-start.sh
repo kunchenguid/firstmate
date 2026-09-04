@@ -3,12 +3,16 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   Not a standalone command: bin/fm-afk-launch.sh owns the away-mode lifecycle
+#   and this entry refuses (exit 2) unless the caller declares which of the two
+#   supported launch shapes it is - FM_AFK_STATE_PREPARED=1 for the
+#   harness-native background job, FM_AFK_LAUNCH_OWNED=1 for the launcher's own
+#   non-visible terminal. Once declared, it sets state/.afk unless
+#   FM_AFK_STATE_PREPARED=1, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
-#       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
+#       (fm_afk_clear_stale_artifacts) for a launcher-terminal start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
 #
@@ -20,8 +24,9 @@
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:
 #   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
+#     run this via that tool with FM_AFK_STATE_PREPARED=1, after
+#     bin/fm-afk-launch.sh start-native has recorded the no-terminal lifecycle,
+#     so the daemon inherits the captain pane's env and auto-discovers it.
 #   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
 #     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
 #     backend (herdr tab/workspace, tmux detached session) and passes the
@@ -43,7 +48,7 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -130,12 +135,38 @@ fm_afk_flag_write() {  # <state-dir>
   return 1
 }
 
+# fm_afk_start_launch_owned: this entry is a hosted daemon body, never a
+# standalone command. Exactly two launch shapes are supported, and each declares
+# itself:
+#   - the harness-native background job, which runs FM_AFK_STATE_PREPARED=1
+#     after bin/fm-afk-launch.sh start-native recorded the no-terminal lifecycle;
+#   - the launcher's own non-visible terminal, which sets FM_AFK_LAUNCH_OWNED=1
+#     in the command it runs there.
+# A bare or `exec`-wrapped operator invocation declares neither, and would open
+# an away session with NO lifecycle record: bin/fm-afk-launch.sh stop then has
+# no terminal to close and bin/fm-afk-return.sh cannot reconcile it. Refuse it
+# here rather than trusting the operator to remember which shape is correct.
+fm_afk_start_launch_owned() {
+  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ] || [ "${FM_AFK_LAUNCH_OWNED:-0}" = 1 ]; then
+    return 0
+  fi
+  return 1
+}
+
 fm_afk_start_main() {
   case "${1:-}" in
     '' ) ;;
     -h|--help) fm_afk_start_usage; return 0 ;;
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
+
+  if ! fm_afk_start_launch_owned; then
+    echo "afk: refusing to start the away-mode daemon directly; bin/fm-afk-launch.sh owns the away-mode lifecycle" >&2
+    echo "afk:   harness with a native background tool: run bin/fm-afk-launch.sh start-native, then run" >&2
+    echo "afk:     FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh through that tool (no nohup, no shell &)" >&2
+    echo "afk:   harness without one: run bin/fm-afk-launch.sh start" >&2
+    return 2
+  fi
 
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
