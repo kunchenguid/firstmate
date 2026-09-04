@@ -465,6 +465,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/liveness-guardian.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/wedge-alarm.md",
       "audience": "operator-current"
     },
