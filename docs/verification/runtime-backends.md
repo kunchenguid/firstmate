@@ -283,7 +283,9 @@ The composer-classification record below observes the same gate from the other s
 Verified on 2026-09-04 with codex-cli 0.153.2 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
 Codex 0.153.2 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
 `bin/fm-spawn.sh` passes `--dangerously-bypass-hook-trust` on every interactive Codex launch it composes, including crewmate, scout, secondmate, and raw Codex commands, so hooks remain enabled and no interactive decision is required.
-The worker branches retain their independent `notify=` turn-end signal, while the secondmate branch preserves the project SessionStart and Stop lifecycle hooks required by a Firstmate primary.
+The worker branches retain their independent `notify=` turn-end signal.
+Codex secondmate project-hook firing under the bypass is UNPROVEN on this branch because the live guard covers scouts only and asserts only the global hook.
+The open [Codex worktree hook issue](https://github.com/openai/codex/issues/27133) reports project hooks being silently ignored in worktrees even with the bypass, so this record makes no claim that secondmate lifecycle hooks are preserved.
 
 The live guard captures the candidate launch through the real `bin/fm-spawn.sh` executable, then runs it in a trusted scratch worktree with isolated untrusted global and project hook records.
 Its treatment uses the captured command unchanged and proves the enabled global hook executes.

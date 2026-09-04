@@ -519,7 +519,21 @@ test_all_codex_launches_bypass_hook_trust() {
   [ ! -s "$LAUNCH_LOG" ] \
     || fail "compound raw codex refusal typed a launch command"
 
-  id=profile-codex-hook-trust-option-end-raw-z3i
+  id=profile-codex-hook-trust-comment-raw-z3i
+  rec=$(make_spawn_case profile-codex-hook-trust-comment-raw codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --dangerously-bypass-approvals-and-sandbox # comment")
+  status=$?
+  expect_code 1 "$status" "commented raw codex spawn should be refused"
+  assert_contains "$out" "use --harness codex with --model and --effort as needed" \
+    "commented raw codex refusal omitted the supported alternative"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "commented raw codex refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "commented raw codex refusal typed a launch command"
+
+  id=profile-codex-hook-trust-option-end-raw-z3j
   rec=$(make_spawn_case profile-codex-hook-trust-option-end-raw codex "$id")
   read_case_record "$rec"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -534,7 +548,7 @@ test_all_codex_launches_bypass_hook_trust() {
     || fail "option-terminated raw codex refusal typed a launch command"
 
   for harness in claude opencode pi grok cursor gemini; do
-    id="profile-hook-trust-negative-$harness-z3j"
+    id="profile-hook-trust-negative-$harness-z3k"
     rec=$(make_spawn_case "profile-hook-trust-negative-$harness" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")

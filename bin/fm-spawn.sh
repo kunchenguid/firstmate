@@ -1387,29 +1387,41 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     raw_launch_error='error: raw launch command cannot be classified safely; use --harness codex with --model and --effort as needed'
-    case "$LAUNCH" in
-      *\"*|*\'*|*\\*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'*'*|*'?'*|*$'\n'*)
-        echo "$raw_launch_error" >&2
-        exit 1
-        ;;
-    esac
+    if [[ ! $LAUNCH =~ ^[A-Za-z0-9_./=@:+,-]+([[:blank:]]+[A-Za-z0-9_./=@:+,-]+)*$ ]]; then
+      echo "$raw_launch_error" >&2
+      exit 1
+    fi
     raw_env_prefix=0
     raw_env_unset_value=0
     for word in $LAUNCH; do
       if [ "$raw_env_unset_value" -eq 1 ]; then
+        if [[ ! $word =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          echo "$raw_launch_error" >&2
+          exit 1
+        fi
         raw_env_unset_value=0
         continue
       fi
       if [ "$raw_env_prefix" -eq 1 ]; then
         case "$word" in
-          [A-Za-z_]*=*) continue ;;
+          *=*)
+            raw_env_name=${word%%=*}
+            [[ $raw_env_name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+              || { echo "$raw_launch_error" >&2; exit 1; }
+            continue
+            ;;
           -u|--unset) raw_env_unset_value=1; continue ;;
           -*) echo "$raw_launch_error" >&2; exit 1 ;;
           *) HARNESS=$(basename "$word"); break ;;
         esac
       fi
       case "$word" in
-        [A-Za-z_]*=*) continue ;;
+        *=*)
+          raw_env_name=${word%%=*}
+          [[ $raw_env_name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+            || { echo "$raw_launch_error" >&2; exit 1; }
+          continue
+          ;;
         *)
           HARNESS=$(basename "$word")
           [ "$HARNESS" != env ] || { raw_env_prefix=1; HARNESS=""; continue; }

@@ -22,7 +22,9 @@ The decision persists for the repository, so later worktrees of the same project
 Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
 Every interactive Codex launch Firstmate composes includes `--dangerously-bypass-hook-trust`, including crewmate, scout, secondmate, and raw Codex launches.
 This keeps effective hooks enabled and accepts their sources for the invocation without persisting a trust decision.
-Crewmate and scout turn-end detection retains the independent launch `notify=` signal, while a secondmate uses the tracked project hooks that provide primary SessionStart initialization, pre-tool protection, and Stop-based turn-end supervision.
+Crewmate and scout turn-end detection retains the independent launch `notify=` signal.
+Codex secondmate project-hook firing under the bypass is UNPROVEN on this branch, and the live guard covers scouts only.
+The open [Codex worktree hook issue](https://github.com/openai/codex/issues/27133) reports project hooks being silently ignored in worktrees even with the bypass, so do not treat that flag as proof that a secondmate's SessionStart, pre-tool, or Stop lifecycle hooks execute.
 If an already-parked worker shows this dialog, choose "Continue without trusting" by running these commands in order, then verify that the brief starts processing.
 Replace `TASK_ID` with the recorded task ID.
 
