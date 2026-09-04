@@ -47,7 +47,7 @@ detect_own() {
       ancestry=cursor
       break
     fi
-    if fm_gemini_path_is_gemini "$comm"; then
+    if fm_gemini_pid_is_gemini "$pid" 2>/dev/null; then
       ancestry=gemini
       break
     fi
@@ -61,7 +61,7 @@ detect_own() {
       muse|muse-bin-*) ancestry=muse; break ;;
       pi-signed) ancestry=pi-signed; break ;;
       pi) ancestry=pi; break ;;
-      node*|python*)
+      node*|python*|MainThread)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         if fm_gemini_args_are_gemini "$args"; then
           ancestry=gemini
@@ -77,12 +77,6 @@ detect_own() {
           *grok*) ancestry=grok; break ;;
           *" pi "*|*/pi) ancestry=pi; break ;;
         esac ;;
-      MainThread)
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        case "${args%% *}" in
-          copilot|*/copilot) ancestry=copilot; break ;;
-        esac
-        ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     case "$pid" in ''|*[!0-9]*) break ;; esac
@@ -103,6 +97,18 @@ detect_own() {
   [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # Gemini is checked BEFORE claude for exactly cursor's reason above: the
+  # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
+  # launched from a claude primary carries BOTH markers and whichever is
+  # tested first wins. Verified live on gemini-cli 0.58.0: a tool process
+  # spawned by a gemini worker under a claude primary reported GEMINI_CLI=1
+  # AND CLAUDECODE=1 together. GEMINI_CLI is gemini's own and is unset in the
+  # launching environment, so ordering it first is what makes the verdict
+  # correct; bin/fm-spawn.sh additionally clears the foreign markers at the
+  # launch boundary. Both are kept for the same reason cursor keeps both.
+  # AI_AGENT is deliberately NOT used: it was present in that same process
+  # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
+  # an inherited launcher marker, not a Gemini identity.
   [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
@@ -110,6 +116,8 @@ detect_own() {
     return
   fi
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # muse (Muse Code) publishes no verified child-process identity marker, so it
+  # is detected by ancestry alone above rather than by any inherited MUSE_* env.
   echo unknown
 }
 
