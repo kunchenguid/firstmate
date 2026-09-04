@@ -635,6 +635,7 @@ function validateInboundLedger(ledger) {
   requireSafeInteger(ledger.binding_generation, "inbound ledger generation", { min: 1 });
   requireString(ledger.delivery_ref, "inbound ledger delivery ref", DELIVERY_REF);
   if (ledger.last_error !== null && typeof ledger.last_error !== "string") throw new Error("invalid Feishu inbound ledger error");
+  if (ledger.content_digest != null) requireString(ledger.content_digest, "inbound ledger content digest", RECORD_HASH);
   requireIso(ledger.created_at, "inbound ledger creation time");
   if (ledger.offered_at !== undefined && ledger.offered_at !== null) requireIso(ledger.offered_at, "inbound native queue offer time");
   if (ledger.delivered_at !== undefined && ledger.delivered_at !== null) requireIso(ledger.delivered_at, "inbound delivery time");
@@ -2105,6 +2106,34 @@ export function findInboundByDeliveryRef(home, deliveryRef) {
     repairInboundPublicationsLocked(paths);
     const found = readInboundByDeliveryRef(paths, deliveryRef);
     return found ? deliveryEventForLedger(found.event, found.ledger) : undefined;
+  });
+}
+
+export function recordInboundContentDigest(home, deliveryRef, contentDigest) {
+  const paths = ensurePrivateLayout(home);
+  requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);
+  requireString(contentDigest, "inbound content digest", RECORD_HASH);
+  return withLock(paths, "inbound-state", () => {
+    const found = readInboundByDeliveryRef(paths, deliveryRef);
+    if (!found) throw new Error("Feishu inbound content evidence referenced an unknown delivery");
+    if (found.ledger.content_digest === contentDigest) return false;
+    if (found.ledger.content_digest != null) throw new Error("conflicting immutable Feishu inbound content evidence");
+    atomicJson(join(paths.inboundLedger, found.name), { ...found.ledger, content_digest: contentDigest });
+    return true;
+  });
+}
+
+export function findInboundDeliveryEvidence(home, deliveryRef) {
+  const paths = ensurePrivateLayout(home);
+  requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);
+  return withLock(paths, "inbound-state", () => {
+    repairInboundPublicationsLocked(paths);
+    const found = readInboundByDeliveryRef(paths, deliveryRef);
+    if (!found) return undefined;
+    return {
+      event: deliveryEventForLedger(found.event, found.ledger),
+      contentDigest: typeof found.ledger.content_digest === "string" ? found.ledger.content_digest : undefined,
+    };
   });
 }
 

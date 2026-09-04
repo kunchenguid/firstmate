@@ -155,8 +155,8 @@ They do not enter Feishu state.
 
 An accepted Feishu event remains pending until the exact bound live Pi session and current transport identity are available.
 Transient contention from a live Feishu state-lock owner leaves accepted events pending, and the existing bridge pump retries with bounded backoff after contention clears without restarting Pi or the transport or adding another scheduler.
-The bridge rereads cached bytes through their private generated path, verifies the durable length and SHA-256 binding, records one owner-fenced submission attempt, and calls `sendUserMessage` with Pi's native `steer` mode.
-Text-only input retains the established string call.
+The bridge rereads cached bytes through their private generated path, verifies the durable length and SHA-256 binding, records one owner-fenced submission attempt and the immutable exact-content digest of the delivered body, and calls Pi's `sendMessage` with a metadata-bearing custom message, `triggerTurn: true`, and native `steer` delivery.
+Text-only input retains a string body.
 Image-only and ordered text-plus-image input use Pi's official `TextContent | ImageContent` array with `{ type: "image", data, mimeType }`; the ordered parts remain one logical Pi input and image-only input contains the actual image without invented prose.
 While Pi is busy, each accepted Feishu message is delivered after the current Assistant turn finishes its tool calls and before the next model call.
 While Pi is idle, the same call starts a normal turn immediately.
@@ -164,15 +164,18 @@ It submits every pending event once to Pi and does not wait for one event to fin
 Pi owns turn sequencing, steering order, and pending-message scheduling.
 Firstmate does not maintain a cross-channel scheduler.
 
-A privacy-safe leading marker carries only the derived delivery reference and binding generation.
-It carries no app ID, open ID, chat ID, credential, or path.
-A session restart scans exact persisted Feishu markers to settle prior native-queue submissions.
+The custom message's private `details` carries only a schema, derived delivery reference, and binding generation.
+It carries no app ID, open ID, chat ID, credential, or path, and Pi does not send `details` to the model.
+A session restart scans exact persisted Feishu custom-message metadata, and still recognizes the pre-upgrade leading-marker form, to settle prior native-queue submissions.
 An owner change resets an unpersisted prior submission to pending instead of redirecting it to another session.
 A wrong session, stale generation, lost lock, or closed live owner leaves durable input suspended.
 
-The marker exists only to reconcile accepted inbound submission after restart and to render the authorized Feishu source badge.
-It does not control outbound eligibility.
-Native TUI and operational user messages remain unmodified and need no synthetic provenance.
+The registered custom renderer verifies that metadata and the exact content against the durable accepted event, then renders only the captain's text and images with no title, source badge, slash instruction, delivery reference, or bridge framing.
+Immediately before provider conversion, the context hook performs the same verification and adds the source fence and slash-handling instruction to model text without changing persisted or rendered content.
+Verification matches the exact content against the immutable digest recorded in the private inbound ledger when the message is offered to Pi, so routine terminal media cleanup never changes trust, rendering, or fencing, and repeated provider/UI verification reuses that evidence without rereading media bytes or reacquiring Feishu state locks.
+A message persisted by an earlier build keeps its already-fenced model context, while display strips only its exact legacy prefix after the marker matches the durable accepted event.
+The metadata does not control outbound eligibility.
+Native TUI and operational user messages remain unmodified, cannot acquire Feishu trust from body text, and need no synthetic provenance.
 
 ## Outbound delivery
 
