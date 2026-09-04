@@ -693,7 +693,7 @@ test_no_mistakes_origin_remote_allows() {
   # A progress observation record (bin/fm-progress-lib.sh) left by supervision:
   # a finished task's phase durations are recorded to this home's history at
   # teardown and the record retired with the rest of the volatile state.
-  printf 'v=1\nspawn_gen=teardown-test-task-x1\nobserved=100\nphase=ci\nstep=ci\nsince=90\nfix_rounds=1\nsecs_implementing=1200\nsecs_validating=600\nsecs_fixing=300\nsecs_ci=120\nsecs_waiting=0\nsecs_ready=0\nsecs_other=0\nlabel=\nlabel_attempt=0\n' \
+  printf 'v=1\nspawn_gen=teardown-test-task-x1\nobserved=100\nphase=ci\nstep=ci\nsince=90\nfix_rounds=1\nsecs_implementing=1200\nsecs_validating=600\nsecs_fixing=300\nsecs_ci=120\nsecs_waiting=0\nsecs_ready=0\nsecs_other=0\n' \
     > "$case_dir/state/.progress-task-x1"
 
   set +e

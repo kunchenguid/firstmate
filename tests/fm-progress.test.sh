@@ -740,6 +740,41 @@ test_tick_commit_checks_the_clock_under_the_records_lock() {
   pass "the tick checks the record's clock and writes as one step under its commit lock, and breaks a dead holder's lock"
 }
 
+# A hold that outlasts the bounded wait but is younger than the stale bound
+# belongs to a live commit: the pass returns promptly without breaking it,
+# leaves the record untouched, and skips its label refresh, so a watcher poll
+# never sits on the lock; the next cadence re-reads.
+test_tick_skips_the_pass_when_the_commit_lock_stays_held() {
+  local d rec lock base seeded started elapsed
+  d=$(make_case commit-lock-held)
+  base="└ cl2 · p:$TOKEN"
+  write_task "$d" cl2 ship no-mistakes "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w2" "herdr_tab_id=w2:t2" "herdr_pane_id=w2:p2" "spawn_gen=s$NOW.1.1"
+  write_v2_journal "$d" cl2 "$base"
+  printf '%s\n' "$base" > "$d/label"
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
+  rec="$d/state/.progress-cl2"
+  lock="$d/state/.progress.lock-cl2"
+  [ "$(rename_count "$d")" = 1 ] || fail "the seeding tick renames once: $(cat "$d/herdr.log")"
+  seeded=$(cat "$rec")
+  mkdir "$lock" || fail "cannot hold the commit lock"
+  : > "$d/crew.log"
+  started=$(date +%s)
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" observe "$d" $((NOW + 60)) 'state: working · source: run-step · validating (running) · step: review' 0
+  elapsed=$(( $(date +%s) - started ))
+  [ -s "$d/crew.log" ] || fail "the pass must still perform its read before contending for the lock"
+  [ "$elapsed" -ge 3 ] || fail "the pass must wait the bounded window before giving up: ${elapsed}s"
+  [ "$elapsed" -le 6 ] || fail "a pass blocked on a live hold must return promptly after the bounded wait: ${elapsed}s"
+  [ "$(cat "$rec")" = "$seeded" ] || fail "a pass that could not take the lock must leave the record untouched: $(cat "$rec")"
+  [ -d "$lock" ] || fail "a young hold must not be broken"
+  [ "$(rename_count "$d")" = 1 ] || fail "a dropped pass skips its label refresh: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ cl2 · implementing · 35 to 130 min · p:$TOKEN" ] || fail "the label must not move on a dropped pass: $(cat "$d/label")"
+  rmdir "$lock" || fail "cannot release the commit lock"
+  observe "$d" $((NOW + 120)) 'state: working · source: run-step · validating (running) · step: review' 0
+  grep -q "^phase=validating$" "$rec" || fail "the next cadence re-reads once the lock is released: $(cat "$rec")"
+  [ "$(rename_count "$d")" = 2 ] || fail "the next cadence applies the label the dropped pass skipped: $(cat "$d/herdr.log")"
+  pass "a pass blocked on a live commit hold returns within the bounded wait, leaves the record and lock alone, and skips its label refresh"
+}
+
 # The real watcher launches the tick as a detached single-flight child: the
 # poll loop keeps beating while a slow current-state read is in flight, the
 # record still appears, and a second cycle never doubles a running tick.
@@ -990,6 +1025,7 @@ test_tick_reads_phase_once_per_cadence
 test_label_refresh_resumed_after_a_replacement_tick_keeps_its_observation
 test_tick_stamped_before_the_records_last_tick_drops_its_observation
 test_tick_commit_checks_the_clock_under_the_records_lock
+test_tick_skips_the_pass_when_the_commit_lock_stays_held
 test_watcher_launches_tick_detached_with_single_flight
 test_watcher_tick_marker_of_live_tick_child_suppresses_launch
 test_watcher_tick_marker_of_unrelated_process_is_reclaimed
