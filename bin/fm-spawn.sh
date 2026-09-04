@@ -1287,7 +1287,7 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
@@ -1479,10 +1479,21 @@ if [ "$HARNESS" = codex ]; then
       *' -- '*) echo "$raw_launch_error" >&2; exit 1 ;;
     esac
   fi
-  case " $LAUNCH " in
-    *' --disable hooks '*) ;;
-    *) LAUNCH="$LAUNCH --disable hooks" ;;
-  esac
+  if [ "$KIND" = secondmate ]; then
+    case " $LAUNCH " in
+      *' --disable hooks '*)
+        echo "error: a Codex secondmate must keep its supervised lifecycle hooks enabled" >&2
+        exit 1
+        ;;
+      *' --dangerously-bypass-hook-trust '*) ;;
+      *) LAUNCH="$LAUNCH --dangerously-bypass-hook-trust" ;;
+    esac
+  else
+    case " $LAUNCH " in
+      *' --disable hooks '*) ;;
+      *) LAUNCH="$LAUNCH --disable hooks" ;;
+    esac
+  fi
 fi
 
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
