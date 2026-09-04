@@ -3,9 +3,12 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
-# strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned attribution paths defined below. Getting this wrong in either
+# (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
+# by strict branch-and-head identity first, and both then recognize a provable
+# pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
+# crew-state for an ACTIVE run, so a fix round never reads as an older failed
+# run, and teardown for a run PARKED at a gate, so cleanup concludes it
+# instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
@@ -129,8 +132,9 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # "<status> <branch> <short-sha> <date> [<pr-url>]"; the `axi` surface has no
 # runs-listing subcommand - verified against the installed CLI). Prints the
 # status word of the branch's CURRENT run row, or nothing when the ledger
-# cannot prove attribution. The branch's NEWEST row alone decides; older rows
-# are history and never answer for the present:
+# cannot prove attribution. When optional expected head $4 is supplied, its
+# abbreviated commit identity must match the newest row. The branch's NEWEST
+# row alone decides; older rows are history and never answer for the present:
 #   - newest row's head resolves and matches the worktree (fm_nm_head_matches_worktree):
 #     its status word
 #   - newest row's head resolves but does not match: nothing (a newer run that
@@ -147,20 +151,41 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 #     ancestor, a terminal unresolvable row) prints nothing, so branch-name
 #     coincidence, arbitrary remote state, and other tasks' runs never match.
 # Read-only: git reads resolve objects in place; custody never changes.
-fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output>
-  local wt=$1 branch=$2 list=$3
-  local local_full row st rest br sha pending_st=''
+fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
+  local wt=$1 branch=$2 list=$3 expected_head=${4:-}
+  local local_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=$(fm_nm_trim "${row#* }")
-    br=${rest%% *}
+    IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
+    [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || return 0
+    [ -z "$extra" ] || return 0
+    case "$st" in *[!a-z_-]*|'') return 0 ;; esac
+    case "$br" in *[!A-Za-z0-9._/-]*|'') return 0 ;; esac
+    case "$sha" in *[!A-Fa-f0-9]*|'') return 0 ;; esac
+    case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 0 ;; esac
+    case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 0 ;; esac
+    case "$pr" in ''|https://*) ;; *) return 0 ;; esac
+    [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 0
+    year_num=$((10#${day%%-*}))
+    month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
+    day_num=$((10#${day##*-}))
+    [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || return 0
+    case "$month_num" in
+      1|3|5|7|8|10|12) max_day=31 ;;
+      4|6|9|11) max_day=30 ;;
+      2)
+        if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
+          max_day=29
+        else
+          max_day=28
+        fi
+        ;;
+    esac
+    [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || return 0
     [ "$br" = "$branch" ] || continue
-    rest=$(fm_nm_trim "${rest#* }")
-    sha=${rest%% *}
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:
       # the only admissible anchor, and only exact head equality proves the
@@ -169,6 +194,14 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output>
         printf '%s' "$pending_st"
       fi
       return 0
+    fi
+    if [ -n "$expected_head" ]; then
+      case "$expected_head" in *[!A-Fa-f0-9]*|'') return 0 ;; esac
+      [ "${#expected_head}" -ge 7 ] && [ "${#expected_head}" -le 40 ] || return 0
+      case "$expected_head" in
+        "$sha"*) ;;
+        *) case "$sha" in "$expected_head"*) ;; *) return 0 ;; esac ;;
+      esac
     fi
     if [ -n "$(fm_nm_resolve_commit "$wt" "$sha")" ]; then
       if fm_nm_head_matches_worktree "$wt" "$sha"; then
