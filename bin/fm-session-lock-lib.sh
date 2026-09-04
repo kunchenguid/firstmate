@@ -23,7 +23,7 @@ FM_HARNESS_RE='claude|codex|^copilot$|opencode|grok|kimi|^pi$|^pi-signed$'
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex copilot opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -43,6 +43,10 @@ fm_harness_path_name() {  # <path>
     esac
   done
   return 1
+}
+
+fm_harness_copilot_path_matches() {  # <path>
+  [ "${1##*/}" = copilot ]
 }
 
 fm_harness_interpreter_script_path() {  # <comm> <args>
@@ -103,7 +107,14 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+  if name=$(fm_harness_path_name "$comm"); then
+    :
+  elif fm_harness_copilot_path_matches "$argv0"; then
+    name=copilot
+  elif name=$(fm_harness_path_name "$argv0"); then
+    :
+  fi
+  if [ -n "$name" ]; then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     FM_HARNESS_MATCH_NAME=$name
     return 0

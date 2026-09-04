@@ -54,6 +54,10 @@ test_process_shapes_are_anchored() {
   [ "$out" = copilot ] || fail "MainThread with Copilot argv zero detected as '$out'"
 
   out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/runner.js --allow-all' "$HARNESS")
+  [ "$out" = unknown ] || fail "a MainThread decoy under a copilot-named directory detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=/opt/copilot/bin/copilot FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
   [ "$out" = copilot ] || fail "path-prefixed copilot executable detected as '$out'"
 
@@ -162,7 +166,23 @@ SH
   [ "$out" = $'copilot	present' ] || fail "tmux composer identity detected a node-bundled Copilot pane as '$out'"
   out=$(PATH="$fakebin:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c '. "$1"; fm_backend_tmux_agent_state s:fm-copilot' -- "$ROOT/bin/backends/tmux.sh") || fail "tmux agent-state did not evaluate the node-bundled Copilot pane"
   [ "$out" = alive ] || fail "tmux agent-state detected a node-bundled Copilot pane as '$out'"
-  pass "tmux composer identity and liveness recognize a node-bundled Copilot pane"
+
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'-t pts/fm-copilot -o pid=,pgid=,tpgid=,comm='*) printf '%s\n' '111 222 222 MainThread' ;;
+  *'-p 111 -o args='*) printf '%s\n' '/opt/copilot/bin/runner.js --allow-all' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if PATH="$fakebin:$PATH" bash -c '. "$1"; fm_tmux_composer_identity s:fm-copilot' -- "$TMUX_LIB" >/dev/null 2>&1; then
+    fail "tmux composer identity treated a MainThread decoy under a copilot-named directory as Copilot"
+  fi
+  out=$(PATH="$fakebin:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c '. "$1"; fm_backend_tmux_agent_state s:fm-copilot' -- "$ROOT/bin/backends/tmux.sh") || fail "tmux agent-state did not evaluate the MainThread decoy pane"
+  [ "$out" = ambiguous ] || fail "tmux agent-state detected a MainThread decoy pane as '$out'"
+  pass "tmux composer identity and liveness recognize node-bundled Copilot and reject MainThread decoys"
 }
 
 test_actual_host_overrides_inherited_markers() {
