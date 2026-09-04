@@ -374,14 +374,15 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "opencode --flag")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_contains "$out" "spawned $id harness=opencode" "spawn did not report raw command harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI opencode --flag" ] \
+    || fail "verified raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a verified raw launch command"
 }
 
 test_claude_threads_model_and_effort() {
@@ -547,8 +548,22 @@ test_all_codex_launches_bypass_hook_trust() {
   [ ! -s "$LAUNCH_LOG" ] \
     || fail "option-terminated raw codex refusal typed a launch command"
 
+  id=profile-codex-hook-trust-command-raw-z3k
+  rec=$(make_spawn_case profile-codex-hook-trust-command-raw codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "command codex --dangerously-bypass-approvals-and-sandbox")
+  status=$?
+  expect_code 1 "$status" "command-wrapped raw codex spawn should be refused"
+  assert_contains "$out" "use --harness codex with --model and --effort as needed" \
+    "command-wrapped raw codex refusal omitted the supported alternative"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "command-wrapped raw codex refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] \
+    || fail "command-wrapped raw codex refusal typed a launch command"
+
   for harness in claude opencode pi grok cursor gemini; do
-    id="profile-hook-trust-negative-$harness-z3k"
+    id="profile-hook-trust-negative-$harness-z3l"
     rec=$(make_spawn_case "profile-hook-trust-negative-$harness" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")

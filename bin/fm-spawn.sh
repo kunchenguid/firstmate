@@ -113,8 +113,8 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   whitespace is treated as a RAW launch command for a verified harness command.
+#   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -1382,7 +1382,7 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command for a verified harness
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
@@ -1412,7 +1412,7 @@ case "$ARG3" in
             ;;
           -u|--unset) raw_env_unset_value=1; continue ;;
           -*) echo "$raw_launch_error" >&2; exit 1 ;;
-          *) HARNESS=$(basename "$word"); break ;;
+          *) HARNESS=$word; break ;;
         esac
       fi
       case "$word" in
@@ -1423,7 +1423,7 @@ case "$ARG3" in
           continue
           ;;
         *)
-          HARNESS=$(basename "$word")
+          HARNESS=$word
           [ "$HARNESS" != env ] || { raw_env_prefix=1; HARNESS=""; continue; }
           break
           ;;
@@ -1433,6 +1433,10 @@ case "$ARG3" in
       echo "$raw_launch_error" >&2
       exit 1
     fi
+    case "$HARNESS" in
+      claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse) ;;
+      *) echo "$raw_launch_error" >&2; exit 1 ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1454,11 +1458,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); select a verified harness" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; select a verified harness" >&2; exit 1; }
     ;;
 esac
 
