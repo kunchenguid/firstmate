@@ -57,9 +57,13 @@
 #                           keys its FM_PROGRESS_REFRESH_SECS cadence on this
 #                           field alone, so no other read can postpone a
 #                           label refresh, and never writes a pass stamped
-#                           older than it, so a tick that outlived the
-#                           watcher's marker age bound cannot turn the clock
-#                           back over its replacement's observation
+#                           older than it: the check and the write are one
+#                           step under the record's commit lock
+#                           (fm_progress_record_commit), so a tick that
+#                           outlived the watcher's marker age bound cannot
+#                           turn the clock back over its replacement's
+#                           observation, even when both read the record
+#                           before either wrote it
 #   spawn_gen=<gen>         the meta's spawn_gen this record belongs to; a
 #                           record whose spawn_gen differs from the meta's
 #                           current one (or has none while the meta has one)
@@ -88,6 +92,14 @@
 #   spawn_gen=<gen>         the meta's spawn_gen it belongs to, bound like the
 #                           record, so a relaunched incarnation's fresh
 #                           workspace is decorated again
+# COMMIT LOCK, state/.progress.lock-<id>, a directory the tick holds only
+# across its clock check and record write (fm_progress_record_commit): mkdir
+# is atomic on every filesystem, so two ticks that both loaded the record
+# before either wrote it cannot both pass the check; the second to take the
+# lock sees the first's tick_at. A commit takes milliseconds, so a live hold is
+# waited on briefly and a hold older than _FM_PROGRESS_LOCK_STALE_SECS (its
+# holder died mid-commit) is broken; a hold still live after the wait drops
+# the pass and the next cadence re-reads. Retired with the record.
 # The first observation seeds observed= from the task's spawn instant (the
 # epoch inside spawn_gen=s<epoch>.<pid>.<random>, else the record's mtime), so
 # time before the first observation counts as implementing.
@@ -191,10 +203,16 @@ fm_progress_label_path() {  # <state-dir> <id>
   printf '%s/.progress.label-%s' "$1" "$2"
 }
 
-# fm_progress_record_remove <state-dir> <id>: retire the record and its label
-# bookkeeping together (teardown through `fm-progress.sh record`).
+fm_progress_lock_path() {  # <state-dir> <id>
+  printf '%s/.progress.lock-%s' "$1" "$2"
+}
+
+# fm_progress_record_remove <state-dir> <id>: retire the record, its label
+# bookkeeping, and a commit lock a dead tick left behind, together (teardown
+# through `fm-progress.sh record`).
 fm_progress_record_remove() {  # <state-dir> <id>
   rm -f "$(fm_progress_record_path "$1" "$2")" "$(fm_progress_label_path "$1" "$2")"
+  rmdir "$(fm_progress_lock_path "$1" "$2")" 2>/dev/null || true
 }
 
 fm_progress_history_path() {  # <data-dir>
@@ -471,6 +489,40 @@ fm_progress_record_write() {
     return 1
   fi
   mv -f "$tmp" "$rec" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# fm_progress_record_commit <state-dir> <id> <now>: the tick's write. The
+# record's clock never runs backwards: a pass stamped at or before the tick_at
+# on disk is dropped (1). Two ticks overlap only when one outlives the
+# watcher's marker age bound and a replacement is launched beside it, and both
+# may load the record before either writes, so the check and the write are one
+# step under the record's commit lock (see COMMIT LOCK above): whichever takes
+# it second sees the other's stamp. A hold that outlasts the wait is broken
+# only once older than _FM_PROGRESS_LOCK_STALE_SECS (its holder died);
+# otherwise this pass is dropped and the next cadence re-reads.
+_FM_PROGRESS_LOCK_WAIT_TRIES=30      # 0.1 s apart: a commit takes milliseconds
+_FM_PROGRESS_LOCK_STALE_SECS=10
+fm_progress_record_commit() {
+  local state=$1 id=$2 now=$3 lock tries=0 born rc=1
+  lock=$(fm_progress_lock_path "$state" "$id")
+  until mkdir "$lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -le "$_FM_PROGRESS_LOCK_WAIT_TRIES" ]; then
+      sleep 0.1
+      continue
+    fi
+    born=$(_fm_progress_mtime "$lock") || born=$(date +%s)
+    [ $(( $(date +%s) - born )) -ge "$_FM_PROGRESS_LOCK_STALE_SECS" ] || return 1
+    rmdir "$lock" 2>/dev/null || true
+    mkdir "$lock" 2>/dev/null || return 1
+    break
+  done
+  if [ "$(fm_progress_record_tick_at "$state" "$id")" -lt "$now" ]; then
+    FM_PROGRESS_REC_TICK_AT=$now
+    fm_progress_record_write "$state" "$id" && rc=0
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
 }
 
 _fm_progress_rec_add() {  # <key> <secs>
@@ -1045,12 +1097,11 @@ fm_progress_tick() {
     # The record's clock never runs backwards. Two ticks can overlap only when
     # one outlives the watcher's marker age bound (a read wedged on Herdr) and
     # a replacement is launched beside it; the earlier-stamped pass then drops
-    # its observation instead of reverting the phase and clock the later one
-    # published. Checked against the file right before the write, since the
-    # read above is where a pass can stall.
-    [ "$(fm_progress_record_tick_at "$state" "$id")" -lt "$now" ] || continue
-    FM_PROGRESS_REC_TICK_AT=$now
-    fm_progress_record_write "$state" "$id" || true
+    # its observation (write and label refresh both) instead of reverting the
+    # phase and clock the later one published. The check and the write are
+    # one step under the record's commit lock, so it holds even when both
+    # passes loaded the record before either wrote it.
+    fm_progress_record_commit "$state" "$id" "$now" || continue
     fm_progress_label_refresh "$state" "$id" "$FM_PROGRESS_LABEL_SUFFIX" "$now" || true
   done
   return 0

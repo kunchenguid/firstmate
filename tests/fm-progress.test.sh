@@ -695,6 +695,51 @@ test_tick_stamped_before_the_records_last_tick_drops_its_observation() {
   pass "a tick pass stamped before the record's last tick drops its observation instead of turning the clock back"
 }
 
+# Both overlapping passes can load the record before either writes it, so a
+# clock check made outside the write guards nothing: the older pass could still
+# write last. The check and the write are one step under the record's commit
+# lock (state/.progress.lock-<id>). Held from outside, that lock parks a pass
+# between its read and its write, the exact window the check must cover: the
+# record must not move while the lock is held, and once the record advanced
+# under the lock and it is released, the parked pass must find the later stamp
+# and drop. A hold whose holder died is broken rather than honored forever.
+test_tick_commit_checks_the_clock_under_the_records_lock() {
+  local d rec lock seeded later stale
+  d=$(make_case commit-lock)
+  write_task "$d" cl1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
+  rec="$d/state/.progress-cl1"
+  lock="$d/state/.progress.lock-cl1"
+  grep -q "^tick_at=$NOW$" "$rec" || fail "the seeding tick stamps the record: $(cat "$rec")"
+  [ ! -d "$lock" ] || fail "the tick releases the commit lock after its write"
+  seeded=$(cat "$rec")
+  mkdir "$lock" || fail "cannot hold the commit lock"
+  : > "$d/crew.log"
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" FM_PROGRESS_REFRESH_SECS=1 \
+    progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick &
+  stale=$!
+  wait_for 40 test -s "$d/crew.log" || { kill "$stale" 2>/dev/null; fail "the pass never started its read"; }
+  sleep 1
+  [ "$(cat "$rec")" = "$seeded" ] || { kill "$stale" 2>/dev/null; fail "a pass must not write the record while its commit lock is held: $(cat "$rec")"; }
+  # The replacement's commit lands under the lock (the record is an owned
+  # key=value contract): stamped later, with the transition it observed.
+  later=$(sed -e "s/^observed=.*/observed=$((NOW + 120))/" -e 's/^phase=.*/phase=validating/' \
+    -e "s/^since=.*/since=$((NOW + 120))/" -e "s/^tick_at=.*/tick_at=$((NOW + 120))/" "$rec")
+  printf '%s\n' "$later" > "$rec"
+  rmdir "$lock" || fail "cannot release the commit lock"
+  wait "$stale" 2>/dev/null || true
+  [ "$(cat "$rec")" = "$later" ] || fail "a pass that waited for the lock must re-check the clock under it and drop: $(cat "$rec")"
+  [ ! -d "$lock" ] || fail "a dropped pass releases the commit lock"
+  # A hold left by a tick that died mid-commit (nothing alive holds it and it
+  # is older than the stale bound) is broken and the pass writes.
+  mkdir "$lock" || fail "cannot leave a stale hold"
+  touch -t 202001010000 "$lock" || fail "cannot age the stale hold"
+  observe "$d" $((NOW + 180)) 'state: working · source: pane · busy' 0
+  grep -q "^tick_at=$((NOW + 180))$" "$rec" || fail "a hold left by a dead tick must be broken, not honored forever: $(cat "$rec")"
+  [ ! -d "$lock" ] || fail "the tick releases a lock it reclaimed"
+  pass "the tick checks the record's clock and writes as one step under its commit lock, and breaks a dead holder's lock"
+}
+
 # The real watcher launches the tick as a detached single-flight child: the
 # poll loop keeps beating while a slow current-state read is in flight, the
 # record still appears, and a second cycle never doubles a running tick.
@@ -944,6 +989,7 @@ test_label_refresh_failure_warns_once_per_reason
 test_tick_reads_phase_once_per_cadence
 test_label_refresh_resumed_after_a_replacement_tick_keeps_its_observation
 test_tick_stamped_before_the_records_last_tick_drops_its_observation
+test_tick_commit_checks_the_clock_under_the_records_lock
 test_watcher_launches_tick_detached_with_single_flight
 test_watcher_tick_marker_of_live_tick_child_suppresses_launch
 test_watcher_tick_marker_of_unrelated_process_is_reclaimed

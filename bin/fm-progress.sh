@@ -3,8 +3,9 @@
 # progress phase and remaining-time guess for this home's live tasks.
 #
 # bin/fm-progress-lib.sh is the single owner of the phase model, the
-# observation record (state/.progress-<id>) and the label bookkeeping beside
-# it (state/.progress.label-<id>), the history record
+# observation record (state/.progress-<id>), the label bookkeeping beside it
+# (state/.progress.label-<id>) and the tick's commit lock
+# (state/.progress.lock-<id>), the history record
 # (data/phase-history.jsonl), the default bands, and the label suffix; this
 # script is its executable surface.
 #
