@@ -299,31 +299,62 @@ log_reports_ci_ready() {
 
 # Every row of the steps[N]{step,status,findings,duration_ms} table, in the
 # order `axi status` renders them - the pipeline's own step order, so a row's
-# position is what says which steps ran after which. The NUMERIC third column is
-# what separates a step row from a findings row, whose third column is a file
-# path, so the status word itself is matched loosely: an unrecognized or newly
-# added status must still be read and reported, not silently dropped.
+# position is what says which steps ran after which.
+#
+# A row belongs to that table when it sits INSIDE it: after the `steps[N]{...}:`
+# header and indented deeper than it, up to the first line that dedents back to
+# the header's own level. Every other table `axi status` renders is therefore
+# excluded structurally, whatever its rows happen to contain - the findings
+# table, whose first column is a finding id that can read `pr` exactly like a
+# step name, and the separate
+# active_steps{step,status,active_for,last_activity,agent_pid,round} table an
+# ACTIVE run also renders. Nothing is lost by rejecting the latter, because the
+# same output's steps table still carries that step as `ci,running,0,0`.
+#
+# Scoping by position rather than by column content is deliberate. Column
+# content is an encoder choice: this reader once separated a step row from a
+# findings row by requiring an unquoted numeric third column, which held only
+# because v1.60.2's encoder quotes a numeric-looking string field, so a finding
+# on file `123` rendered as `"123"` and fell out. That is an observation about
+# one version's quoting, not a guarantee the format offers - and the step a
+# merge claim depends on is exactly the one a finding can be named after. The
+# table a row sits in is structural, so it cannot be changed out from under this
+# reader by a quoting decision.
+#
+# The header is matched with `steps[` anchored to the start of the line so
+# `active_steps[...]` cannot open the section. Within the section the status
+# word itself is matched loosely: an unrecognized or newly added status must
+# still be read and reported, not silently dropped.
+#
 # Verified against all 495 step rows `no-mistakes axi status --run` renders for
 # every run in the local v1.60.2 store, every one of them terminal: all 495 are
-# read. This deliberately does not match the separate
-# active_steps{step,status,active_for,last_activity,agent_pid,round} table an
-# ACTIVE run also renders, whose third column is a duration, as in
-# `ci,running,1m40s,...`. The narrower ci-only predicate this replaced did match
-# those rows; nothing is lost by rejecting them, because the same output's steps
-# table still carries that step as `ci,running,0,0`. That store-wide scan reached
-# terminal runs only, so the active-run shape was settled by direct observation
-# instead - `axi status` captured mid-step on live runs (v1.60.2, eb4e379, built
-# 2026-08-29), sampled on three different running steps - three distinct step
-# names, not three runs - renders the running step as `<step>,running,0,0` in the
-# steps table beside `<step>,running,<duration>,...` in active_steps. The
-# durations observed across those samples span both second scale (7s, 18s, 19s)
-# and minute scale (2m34s, 3m41s, both on a running test step), so the
-# minute-scale third column the test fixture carries is a shape this version
-# actually renders rather than a plausible-looking one. An output shape is a fact
-# about a version, not a law.
+# read. That store-wide scan reached terminal runs only, so the active-run shape
+# was settled by direct observation instead - `axi status` captured mid-step on
+# live runs (v1.60.2, eb4e379, built 2026-08-29), sampled on three different
+# running steps - three distinct step names, not three runs - renders the
+# running step as `<step>,running,0,0` in the steps table beside
+# `<step>,running,<duration>,...` in active_steps. An output shape is a fact
+# about a version, not a law; the table boundary this reads is the part of the
+# shape the format itself defines.
 nm_step_rows() {
-  printf '%s\n' "$RUN_OUT" \
-    | grep -E "^[[:space:]]*[A-Za-z0-9_-]+,[[:space:]]*\"?[A-Za-z0-9_-]+\"?[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,"
+  printf '%s\n' "$RUN_OUT" | awk '
+    {
+      if (in_table) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH > header_indent) {
+          if ($0 ~ /^[[:space:]]*[^,[:space:]][^,]*,/) print
+          next
+        }
+        in_table = 0
+      }
+      if ($0 ~ /^[[:space:]]*steps\[[0-9]+\]/ && $0 ~ /:[[:space:]]*$/) {
+        match($0, /^[[:space:]]*/)
+        header_indent = RLENGTH
+        in_table = 1
+      }
+    }
+  '
 }
 
 # Status word of one named step row, or empty when the run output carries no

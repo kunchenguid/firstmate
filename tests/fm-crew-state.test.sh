@@ -579,8 +579,9 @@ EOF
 # table and the active_steps table a live run carries (see
 # run_ci_monitoring_with_active_steps). The ci status must come from the steps
 # row `ci,running,0,0`, never from the active_steps row `ci,running,1m40s,...`
-# whose third column is a duration: the step-row reader matches a NUMERIC third
-# column only, so this pins that the narrowing left the ACTIVE-run path intact.
+# whose third column is a duration: the step-row reader reads only rows inside
+# the steps table, so this pins that the narrowing left the ACTIVE-run path
+# intact.
 # Stop reading that steps row and this run's ci step reads as nothing at all, the
 # override never fires, and a green PR reads as validating forever - the PR #252
 # incident class.
@@ -808,13 +809,22 @@ test_terminal_passed_pr_skipped_claims_no_merge() {
   pass "outcome=passed with a skipped pr step does not claim a merge"
 }
 
-# The step-row reader separates a step row from a findings row by the numeric
-# third column alone. The findings table is emitted BEFORE the steps table, so
-# without that guard a findings row whose id is `pr` is matched first and
-# shadows the real pr step row entirely, making the reported PR step status the
-# finding's SEVERITY. This fixture is that collision: a `pr` finding sitting
-# above a genuine `pr,skipped` step row.
-run_passed_findings_row_shadowing_pr_step() {  # <branch>
+# The findings table is emitted BEFORE the steps table, so a findings row whose
+# id is `pr` sits above the genuine pr step row and is matched first by any
+# reader that scans the whole run output for a row shape. That collision makes
+# the reported PR step status the finding's SEVERITY. This fixture is that
+# collision - a `pr` finding above a genuine `pr,skipped` step row - and its
+# file column is parameterized because a findings row can take more than one
+# shape there.
+#
+# `a.go` is the ordinary shape. `123` is a bare numeric file column: on the
+# encoder shape observed for v1.60.2 a numeric-looking string field renders
+# quoted, so that row is not one this version emits today, but nothing in the
+# reader's contract makes that quoting a guarantee. Both must be rejected
+# because of where the row SITS in the output rather than what its columns
+# happen to contain, so a change in how the encoder quotes cannot turn a
+# finding into a step.
+run_passed_findings_row_shadowing_pr_step() {  # <branch> [<file-column>]
   cat <<EOF
 run:
   id: "01RUN"
@@ -822,7 +832,7 @@ run:
   status: completed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   findings[1]{id,severity,file,line,action,description}:
-    pr,warning,a.go,,auto-fix,ignored error
+    pr,warning,${2:-a.go},,auto-fix,ignored error
   steps[9]{step,status,findings,duration_ms}:
     intent,completed,0,13
     rebase,skipped,42,521
@@ -984,24 +994,28 @@ test_terminal_passed_without_a_pr_row_claims_no_merge() {
   pass "outcome=passed with no pr step row does not claim a merge"
 }
 
-# Negative case for the numeric-third-column guard in the step-row reader. The
-# run below genuinely skipped its pr step, and a `pr` finding sits above that
-# row in the output. Drop the guard and the finding is matched first, so the pr
-# step reads as the finding's severity ("warning") and the real skipped step is
-# never seen. Asserting the SPECIFIC skipped detail, not merely the absence of a
+# Negative case for the table scoping in the step-row reader. The run below
+# genuinely skipped its pr step, and a `pr` finding sits above that row in the
+# output. Drop the scoping and the finding is matched first, so the pr step
+# reads as the finding's severity ("warning") and the real skipped step is never
+# seen. Asserting the SPECIFIC skipped detail, not merely the absence of a
 # merge claim, is what makes this case fail when the guard is removed.
 test_findings_row_is_not_read_as_a_step_row() {
-  reset_fakes
-  local d; d=$(new_case findings-row-shadowing-pr)
-  make_repo_on_branch "$d/wt" fm/feat-d-findings
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-d-findings.meta" "window=fm:fm-feat-d-findings" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_passed_findings_row_shadowing_pr_step fm/feat-d-findings)"
-  local out; out=$(run_crew_state "$d" feat-d-findings)
-  assert_contains "$out" "PR step skipped" "the real skipped pr step must be read, not the pr-named finding"
-  assert_not_contains "$out" "PR step warning" "a finding severity must never be reported as a step status"
-  assert_not_contains "$out" "merged/closed" "the shadowed case must still not claim a merged-or-closed PR"
-  pass "a findings row is never mistaken for a step row"
+  local case_n=0 file_col d out
+  for file_col in a.go 123; do
+    case_n=$((case_n + 1))
+    reset_fakes
+    d=$(new_case "findings-row-shadowing-pr-$case_n")
+    make_repo_on_branch "$d/wt" fm/feat-d-findings
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-d-findings.meta" "window=fm:fm-feat-d-findings" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_passed_findings_row_shadowing_pr_step fm/feat-d-findings "$file_col")"
+    out=$(run_crew_state "$d" feat-d-findings)
+    assert_contains "$out" "PR step skipped" "the real skipped pr step must be read, not the pr-named finding (file column $file_col)"
+    assert_not_contains "$out" "PR step warning" "a finding severity must never be reported as a step status (file column $file_col)"
+    assert_not_contains "$out" "merged/closed" "the shadowed case must still not claim a merged-or-closed PR (file column $file_col)"
+  done
+  pass "a findings row is never mistaken for a step row, whatever its columns hold"
 }
 
 test_terminal_failed() {
