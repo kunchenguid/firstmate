@@ -2594,14 +2594,22 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # the composer-state guard/fallback reads around submit and injection). Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
+#
+# Fetches --format ansi and strips locally instead of asking for text: on herdr
+# 0.8.0 a text-format `pane read --source recent` against an idle alt-screen
+# agent triggers the wheel-event history harvest (src/server/alt_screen_read.rs)
+# — the pane VISIBLY scrolls up for seconds and snaps back on every poll
+# (herdrdev/herdr#2669, closed as dup of #2387). The ansi path skips the
+# harvest entirely and returns herdr's retained rows instantly, which matches
+# the pre-0.8.0 text behavior this capture was written against.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
-  printf '%s' "$out" | tail -n "$lines"
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines" | fm_composer_strip_ansi
 }
 
 fm_backend_herdr_capture_ansi() {  # <target> <lines>
