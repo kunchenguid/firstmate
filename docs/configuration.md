@@ -294,6 +294,15 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Per-home Treehouse pool root
+
+The primary Firstmate home keeps Treehouse's normal root precedence and pool location unchanged.
+Task workers launched from a non-primary Firstmate home pass Treehouse's explicit `--root` option on both acquisition and return commands, so the typed command is independent of the active tmux, Herdr, Zellij, or cmux backend.
+For a local secondmate, the structural home check is a linked git worktree of the Firstmate code root with a different physical top level and shared git common directory; a marked standalone home is supported for remote secondmates.
+The per-home option uses `FM_HOME/config` as Treehouse's root, which makes the effective pool location `FM_HOME/config/treehouse/` and keeps it inside the home-local gitignored configuration area.
+This choice changes no project clone, project-level `treehouse.toml`, user-level Treehouse configuration, or primary-home pool.
+Relaunches reuse the recorded worktree, while teardown passes the same home-specific root when returning a task worktree and retains the primary root when releasing a leased secondmate home.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.

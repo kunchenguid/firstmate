@@ -49,7 +49,16 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      if [ "${4:-}" = "-l" ]; then
+        printf '%s\n' "${5:-}" >> "$FM_FAKE_LAUNCH_LOG"
+      else
+        printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+      fi
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -87,6 +96,69 @@ Record only the pane's stable worktree.
 EOF
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
+}
+
+# make_secondmate_pool_case <name> <id> builds a real linked Firstmate home and
+# matching project clones whose worktree common dirs are intentionally distinct.
+make_secondmate_pool_case() {
+  local name=$1 id=$2 case_dir code_root home source origin project primary_project
+  local primary_wt home_wt fakebin countfile launchlog
+  case_dir="$TMP_ROOT/$name"
+  code_root="$case_dir/code-root"
+  home="$case_dir/secondmate-home"
+  source="$case_dir/project-source"
+  origin="$case_dir/project-origin.git"
+  project="$home/projects/widget"
+  primary_project="$case_dir/primary-project"
+  primary_wt="$case_dir/primary-pool-worktree"
+  home_wt="$case_dir/secondmate-pool-worktree"
+  countfile="$case_dir/pane-call-count"
+  launchlog="$case_dir/launch.log"
+
+  git clone --quiet --local "$ROOT" "$code_root"
+  git -C "$code_root" worktree add --quiet --detach "$home" HEAD
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the secondmate-specific Treehouse pool root for $id.
+
+## Firstmate spec
+Use the active home's own project pool.
+EOF
+  touch "$home/state/.last-watcher-beat"
+
+  fm_git_init_commit "$source"
+  git -C "$source" branch -M main
+  fm_git_add_origin "$source" "$origin"
+  git clone --quiet "file://$origin" "$project"
+  git clone --quiet "file://$origin" "$primary_project"
+  git -C "$primary_project" worktree add --quiet --detach "$primary_wt" HEAD
+  git -C "$project" worktree add --quiet --detach "$home_wt" HEAD
+
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  fm_fake_exit0 "$fakebin" codex
+  printf '%s\n' "$case_dir|$code_root|$home|$project|$primary_wt|$home_wt|$fakebin|$countfile|$launchlog"
+}
+
+read_secondmate_pool_record() {
+  IFS='|' read -r SECOND_CASE SECOND_CODE_ROOT SECOND_HOME SECOND_PROJECT \
+    SECOND_PRIMARY_WT SECOND_HOME_WT SECOND_FAKEBIN SECOND_COUNTFILE SECOND_LAUNCHLOG <<EOF
+$1
+EOF
+}
+
+run_secondmate_pool_spawn() {
+  local id=$1
+  FM_ROOT_OVERRIDE="$SECOND_CODE_ROOT" FM_HOME="$SECOND_HOME" \
+    FM_STATE_OVERRIDE="$SECOND_HOME/state" FM_DATA_OVERRIDE="$SECOND_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$SECOND_HOME/projects" FM_CONFIG_OVERRIDE="$SECOND_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$SECOND_HOME_WT" FM_FAKE_PANE_STALE_READS=0 \
+    FM_FAKE_PANE_COUNTFILE="$SECOND_COUNTFILE" FM_FAKE_LAUNCH_LOG="$SECOND_LAUNCHLOG" \
+    PATH="$SECOND_FAKEBIN:$PATH" \
+    "$SPAWN" "$id" "$SECOND_PROJECT" --mode no-mistakes --yolo off 2>&1
 }
 
 read_settle_record() {
@@ -148,7 +220,35 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_secondmate_home_uses_own_treehouse_pool() {
+  local rec id out status trust_home
+  id=settle-secondmate-pool-z3
+  rec=$(make_secondmate_pool_case settle-secondmate-pool "$id")
+  read_secondmate_pool_record "$rec"
+  trust_home="$SECOND_CASE/claude-home"
+  mkdir -p "$trust_home"
+
+  if HOME="$trust_home" CLAUDE_CONFIG_DIR='' \
+    "$ROOT/bin/fm-claude-trust.sh" "$SECOND_PRIMARY_WT" "$SECOND_PROJECT" >/dev/null 2>&1; then
+    fail "Claude trust accepted a worktree from the primary project clone for a secondmate project"
+  fi
+  HOME="$trust_home" CLAUDE_CONFIG_DIR='' \
+    "$ROOT/bin/fm-claude-trust.sh" "$SECOND_HOME_WT" "$SECOND_PROJECT" >/dev/null \
+    || fail "Claude trust rejected the secondmate project's own worktree"
+
+  out=$(run_secondmate_pool_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "secondmate-home spawn should succeed with its own pooled worktree"
+  assert_contains "$out" "spawned $id" "secondmate-home spawn did not report success"
+  assert_grep "treehouse get --root $SECOND_HOME/config" "$SECOND_LAUNCHLOG" \
+    "secondmate-home spawn did not type the home-specific Treehouse root"
+  assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
+    "secondmate-home spawn did not record the worktree from its own pool"
+  pass "a linked secondmate home scopes Treehouse get to its own project pool and passes Claude trust"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_secondmate_home_uses_own_treehouse_pool
 
 echo "# all fm-spawn-worktree-settle tests passed"
