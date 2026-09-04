@@ -697,8 +697,29 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
+# assert_full_annotation <drain-out> <status-key> <status-file> <message>: assert
+# that <drain-out> carries the drain's unread-status annotation for <status-key>
+# with the status file's bytes reproduced in full.
+#
+# The UNREAD STATUS section is deliberately unbounded - it exists so an answer
+# buried under later routine lines is never dropped - so a single annotation can
+# be arbitrarily long, which puts it past the size a grep PATTERN may be (see
+# CONTRIBUTING.md "Testing"). Matching a whole annotation line as a grep pattern
+# would therefore measure the assertion tool's budget rather than the drain, so
+# select the line by its short key prefix and compare the bytes with cmp, which
+# has no pattern-size limit and stays exact at any annotation length.
+assert_full_annotation() {
+  local out=$1 key=$2 status_file=$3 message=$4 prefix found expected
+  prefix="wake annotation: latest wake-EVENT observed at drain, not current state: $key: "
+  found="$out.$key.found"
+  expected="$out.$key.expected"
+  grep -F "$prefix" "$out" > "$found" || fail "$message"
+  { printf '%s' "$prefix"; cat "$status_file"; } > "$expected"
+  cmp -s "$expected" "$found" || fail "$message"
+}
+
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
-  local dir state out i raw_count expected
+  local dir state out i raw_count
   dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -724,14 +745,12 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
-  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
-    || fail "the oversized unread status line was truncated or omitted"
+  assert_full_annotation "$out" huge.status "$state/huge.status" \
+    "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
-    expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
-    grep -Fx "$expected" "$out" >/dev/null \
-      || fail "readable status many-$i was truncated or omitted"
+    assert_full_annotation "$out" "many-$i.status" "$state/many-$i.status" \
+      "readable status many-$i was truncated or omitted"
     i=$((i + 1))
   done
   if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then

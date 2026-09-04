@@ -117,6 +117,8 @@ Shared test helpers live in `tests/lib.sh` (reporters, temp roots, git fixtures)
 Source those instead of copying a fake toolchain into a new suite.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
+Never assert an arbitrarily long output line by passing the whole line as a grep pattern: macOS BSD grep aborts with `grep: out of memory` on a `-F` pattern larger than 5117 bytes (measured on macOS 26.3), so such an assertion measures grep's pattern budget rather than the subject.
+Select the line with a short fixed prefix and compare the bytes with `cmp`, which has no pattern-size limit; `assert_full_annotation` in `tests/fm-wake-queue.test.sh` is the worked example.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
