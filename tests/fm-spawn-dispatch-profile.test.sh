@@ -589,8 +589,8 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not force the regular TUI while threading the requested model and max thinking level"
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not pass per-run project trust while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -611,8 +611,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not pass per-run project trust with Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -652,9 +652,11 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       if [ "$version" = 0.82.0 ]; then
         assert_not_contains "$launch" "--tui-mode" \
           "$harness $version launch must omit unsupported --tui-mode"
+        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --approve -e" \
+          "$harness $version launch must keep per-run project trust with single-space composition when --tui-mode is omitted"
       else
-        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular" \
-          "$harness $version launch must preserve the regular TUI"
+        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular --approve" \
+          "$harness $version launch must preserve per-run project trust and the regular TUI"
       fi
     done
   done
@@ -701,9 +703,51 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
-    "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not pass per-run project trust with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+}
+
+test_pi_crewmate_launch_uses_per_run_project_trust() {
+  local harness rec id out status launch
+  for harness in pi pi-signed; do
+    id="profile-${harness}-approve-z8e"
+    rec=$(make_spawn_case "profile-approve-$harness" "$harness" "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness crewmate spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
+      "$harness crewmate launch must use the executable selected for probing"
+    assert_contains "$launch" " --approve " \
+      "$harness crewmate launch must pass per-run project trust so the pane never sits on the trust dialog"
+  done
+  pass "Pi crewmate launches pass --approve for both pi and pi-signed"
+}
+
+test_pi_secondmate_launch_uses_per_run_project_trust() {
+  local harness rec id sm out status launch
+  for harness in pi pi-signed; do
+    id="profile-${harness}-sm-approve-z8f"
+    rec=$(make_spawn_case "profile-sm-approve-$harness" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home-$harness"
+    make_seeded_secondmate_home "$sm" "$id"
+    sm=$(cd "$sm" && pwd -P)
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness secondmate spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
+      "$harness secondmate launch must use the executable selected for probing"
+    assert_contains "$launch" " --approve " \
+      "$harness secondmate launch must pass per-run project trust so the pane never sits on the trust dialog"
+  done
+  pass "Pi secondmate launches pass --approve for both pi and pi-signed"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -821,6 +865,8 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_pi_crewmate_launch_uses_per_run_project_trust
+test_pi_secondmate_launch_uses_per_run_project_trust
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
