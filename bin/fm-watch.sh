@@ -779,19 +779,102 @@ NODE
   fm_pr_private_file_valid "$file" 600 "$device"
 }
 
+# Publish the wait-premise occurrence marker as a private file with the same
+# invariant the sibling shadow logs enforce through shadow_wait_log_append:
+# regular, not a symlink, mode 0600, link count 1, on the state directory
+# device. The marker holds the LATEST premise occurrence for a task (a single
+# row read back by shadow_wait_correction), so it replaces any prior content
+# rather than appending. An untrusted or legacy marker at the path (a
+# pre-planted symlink, a shared hardlink, or a base-created mode-0644 marker)
+# is refused and left in place for the consumer to refuse; only an absent or
+# already-private marker is refreshed. Publication is atomic and never
+# truncates in place: a unique mode-0600 single-link file is staged on the
+# state directory's filesystem, written and fsynced, validated on its open
+# descriptor, then rename(2)'d over the marker. rename(2) does not follow the
+# destination, so a killed or failed write leaves the prior marker intact
+# and never exposes a torn or empty marker through the marker path; the
+# staged file is unlinked, never published.
+shadow_wait_marker_write() {  # <file> <row>
+  local file=$1 row=$2 device
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    fm_pr_private_file_valid "$file" 600 "$device" || return 1
+  fi
+  node - "$file" "$row" "$device" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const [file, row, stateDevice] = process.argv.slice(2);
+const state = path.dirname(file);
+const noFollow = fs.constants.O_NOFOLLOW ?? 0x20000;
+const stateStat = fs.lstatSync(state);
+if (!stateStat.isDirectory() || String(fs.statSync(state).dev) !== stateDevice) process.exit(1);
+const tmp = path.join(state, `.wait-premise.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
+let fd;
+try {
+  fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+  fs.writeSync(fd, `${row}\n`, null, 'utf8');
+  fs.fsyncSync(fd);
+  const stat = fs.fstatSync(fd);
+  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600 || String(stat.dev) !== stateDevice) {
+    fs.closeSync(fd); fs.unlinkSync(tmp); process.exit(1);
+  }
+  fs.closeSync(fd);
+  fs.renameSync(tmp, file);
+} catch (e) {
+  try { if (fd !== undefined) fs.closeSync(fd); } catch (_) {}
+  try { fs.unlinkSync(tmp); } catch (_) {}
+  process.exit(1);
+}
+NODE
+  fm_pr_private_file_valid "$file" 600 "$device"
+}
+
 shadow_wait_events_append() {  # <row>
   shadow_wait_log_append "$STATE/wait-events.log" "$1"
 }
 
 shadow_wait_correction() {  # <task>
-  local task=$1 marker premise pause_line row
+  local task=$1 marker premise pause_line row cor device
   marker="$STATE/.wait-premise-$task"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
-  IFS=$'\t' read -r premise pause_line < "$marker" 2>/dev/null || return 0
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  device=$(fm_pr_file_device "$STATE") || return 0
+  # Read the marker through the same private/no-follow/identity contract the
+  # publisher applies: a descriptor opened with O_NOFOLLOW and validated as a
+  # regular single-link mode-0600 file on the state device. A marker that
+  # fails this contract (a pre-planted symlink or hardlink, or a legacy
+  # mode-0644 marker left by an older publisher) is refused before use or
+  # removal, so its bytes never become a correction record. unlink(2) never
+  # follows the path, so a marker swapped between validation and removal
+  # cannot drag an attacker-selected target into the correction log.
+  row=$(node - "$marker" "$device" <<'NODE'
+const fs = require('fs');
+const [marker, stateDevice] = process.argv.slice(2);
+const noFollow = fs.constants.O_NOFOLLOW ?? 0x20000;
+let fd;
+try { fd = fs.openSync(marker, fs.constants.O_RDONLY | noFollow); }
+catch (e) { process.exit(0); }
+const stat = fs.fstatSync(fd);
+if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600 || String(stat.dev) !== stateDevice) {
+  fs.closeSync(fd); process.exit(0);
+}
+let content = '';
+while (true) {
+  const buf = Buffer.alloc(4096);
+  const n = fs.readSync(fd, buf, 0, 4096, null);
+  if (n === 0) break;
+  content += buf.toString('utf8', 0, n);
+}
+fs.closeSync(fd);
+process.stdout.write(content);
+NODE
+  ) || return 0
+  [ -n "$row" ] || return 0
+  IFS=$'\t' read -r premise pause_line <<< "$row"
   [ -n "$premise" ] && [ -n "$pause_line" ] || return 0
-  row=$(printf '%s\t%s\t%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  cor=$(printf '%s\t%s\t%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$task" "$premise" corrected "$pause_line")
-  shadow_wait_log_append "$STATE/wait-corrections.log" "$row" 2>/dev/null || return 0
+  shadow_wait_log_append "$STATE/wait-corrections.log" "$cor" 2>/dev/null || return 0
   rm -f -- "$marker"
 }
 
@@ -805,7 +888,8 @@ shadow_wait_premise() {  # <task>
   pause_line=${verdict#*$'\t'}
   verdict=${verdict%%$'\t'*}
   [ -n "$premise" ] && [ -n "$verdict" ] || return 0
-  printf '%s\t%s\n' "$premise" "$pause_line" > "$STATE/.wait-premise-$task" 2>/dev/null || true
+  shadow_wait_marker_write "$STATE/.wait-premise-$task" \
+    "$(printf '%s\t%s' "$premise" "$pause_line")" 2>/dev/null || true
   printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$task" "$premise" "$verdict" "$pause_line" | {
       IFS= read -r event_row

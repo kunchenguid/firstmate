@@ -17,6 +17,78 @@ new_state() {
   printf '%s\n' "$dir"
 }
 
+# --- real crew-state path fixtures (for the false-stale regression) ----------
+# These drive the REAL bin/fm-crew-state.sh (no FM_PIPELINE_CREW_STATE_BIN fake)
+# over a throwaway git worktree, a fake no-mistakes that reports no run, and a
+# fake tmux pane, plus a real busy/idle record armed through bin/fm-busy-event.sh.
+# This is the same hermetic machinery tests/fm-crew-state.test.sh uses, so the
+# probe exercises the actual state-derivation the false-stale defect lives in.
+fm_git_identity fmtest fmtest@example.invalid
+
+make_crew_repo() {  # <dir> <branch>
+  local dir=$1 branch=$2
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  git -C "$dir" commit -q --allow-empty -m init
+  git -C "$dir" checkout -q -b "$branch"
+}
+
+make_crew_fakebin() {  # <dir> -> echoes fakebin path
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi)
+    shift
+    case "${1:-}" in
+      status)
+        shift
+        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+      logs) printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+    esac ;;
+  runs) printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+exit 0
+SH
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    printf '%%1\n' ;;
+  capture-pane)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
+    else printf 'all quiet\n> \n'; fi ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+arm_busy_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
+arm_idle_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
+    --source claude-hook --event stop
+}
+
+run_real_crew_state() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-crew-state.sh" "$2"
+}
+
 test_line_format_and_unknown_preservation() {
   local root output line rc=0
   root=$(new_state unknown)
@@ -82,23 +154,89 @@ test_stale_wait_is_shadow_only() {
   root=$(new_state stale)
   printf 'paused: [key=vendor-release] waiting on vendor\n' > "$root/state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\nworktree=%s/worktree\nharness=tmux\n' "$root" > "$root/state/task.meta"
+  # A declared wait is genuinely contradicted only by a state the existing
+  # contract treats as positive disproof: done/blocked/failed. working and
+  # parked are concurrent activity, not disproof (see
+  # test_working_does_not_contradict_keyed_wait and
+  # test_parked_does_not_contradict_keyed_wait), so this case uses done to keep
+  # exercising the stall/would-heal shadow-only path under the corrected contract.
   cat > "$root/fake-crew-state.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' 'state: working · source: pane · pane is active'
+printf '%s\n' 'state: done · source: run-step · run passed'
 EOF
   chmod +x "$root/fake-crew-state.sh"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
     FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
-  expect_code 0 "$rc" "a stale declared wait should be observed successfully"
+  expect_code 0 "$rc" "a contradicted declared wait should be observed successfully"
   line=$(tail -1 "$root/state/pipeline-events.log")
-  assert_contains "$line" 'probe=stall' "a non-paused authoritative state must be a stall"
+  assert_contains "$line" 'probe=stall' "a positively contradicted wait must be a stall"
   assert_contains "$line" 'rule=recheck-external' "stale waits must identify the shadow rule"
   assert_contains "$line" 'action=would-heal' "stale waits must never execute a heal"
   assert_contains "$line" 'mode=shadow' "stale waits must remain shadow-only"
   assert_contains "$line" 'since=0' "first observations must start their lower-bound duration at zero"
   assert_contains "$line" 'gen=gen-1' "events must use the spawn incarnation"
   [ -f "$root/state/task.pipeline" ] || fail "the first observation was not recorded"
-  pass "fm-pipeline.sh: stale waits log a would-heal without acting"
+  pass "fm-pipeline.sh: contradicted waits log a would-heal without acting"
+}
+
+# An open keyed external wait remains live while the crew is concurrently
+# working: the worker's busy pane is not evidence about the wait. The probe must
+# map working to probe=unknown / rule=- / action=none, not stall/would-heal.
+# Before the fix this fails red: working shares the stall arm and emits
+# action=would-heal.
+test_working_does_not_contradict_keyed_wait() {
+  local d crew_state out line rc=0
+  d=$(new_state working-live)
+  make_crew_repo "$d/worktree" fm/feat-work
+  make_crew_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-work.meta" "window=fm:fm-feat-work" "worktree=$d/worktree" "kind=ship" "harness=claude"
+  printf '%s\n' \
+    'paused: [key=vendor-release] holding for the upstream vendor cut' \
+    'working: [key=impl-slice] continuing the unrelated implementation slice' > "$d/state/feat-work.status"
+  FM_FAKE_AXI_STATUS=""; FM_FAKE_RUNS_LIST=""; FM_FAKE_BUSY=1
+  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_BUSY
+  arm_busy_record "$d/state" feat-work
+  crew_state=$(run_real_crew_state "$d" feat-work)
+  assert_contains "$crew_state" "state: working" "fixture must report working through the real crew-state path"
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "probe should succeed for a live keyed wait while the crew is working"
+  line=$(tail -1 "$d/state/pipeline-events.log")
+  assert_contains "$line" 'probe=unknown' "a concurrent working state must not contradict a keyed wait"
+  assert_contains "$line" 'rule=-' "a non-contradicting state carries no rule"
+  assert_contains "$line" 'action=none' "a live keyed wait must not be flagged for healing"
+  assert_contains "$line" 'mode=shadow' "the probe must remain shadow-only"
+  assert_contains "$line" 'wait=ext:vendor-release' "the keyed wait identity must be recorded"
+  pass "fm-pipeline.sh: a working crew does not falsify a live keyed wait"
+}
+
+# An open keyed external wait remains live while the crew is gate-parked: a
+# needs-decision on a different key is concurrent activity, not disproof of the
+# wait. The probe must map parked to probe=unknown / rule=- / action=none.
+# Before the fix this fails red: parked shares the stall arm and emits
+# action=would-heal.
+test_parked_does_not_contradict_keyed_wait() {
+  local d crew_state out line rc=0
+  d=$(new_state parked-live)
+  make_crew_repo "$d/worktree" fm/feat-parked
+  make_crew_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parked.meta" "window=fm:fm-feat-parked" "worktree=$d/worktree" "kind=ship" "harness=claude"
+  printf '%s\n' \
+    'paused: [key=vendor-release] holding for the upstream vendor cut' \
+    'needs-decision: [key=gate-question] which rollout order do we take' > "$d/state/feat-parked.status"
+  FM_FAKE_AXI_STATUS=""; FM_FAKE_RUNS_LIST=""; FM_FAKE_BUSY=0
+  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_BUSY
+  arm_idle_record "$d/state" feat-parked
+  crew_state=$(run_real_crew_state "$d" feat-parked)
+  assert_contains "$crew_state" "state: parked" "fixture must report parked through the real crew-state path"
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "probe should succeed for a live keyed wait while the crew is parked"
+  line=$(tail -1 "$d/state/pipeline-events.log")
+  assert_contains "$line" 'probe=unknown' "a concurrent parked state must not contradict a keyed wait"
+  assert_contains "$line" 'rule=-' "a non-contradicting state carries no rule"
+  assert_contains "$line" 'action=none' "a live keyed wait must not be flagged for healing"
+  assert_contains "$line" 'mode=shadow' "the probe must remain shadow-only"
+  assert_contains "$line" 'wait=ext:vendor-release' "the keyed wait identity must be recorded"
+  pass "fm-pipeline.sh: a parked crew does not falsify a live keyed wait"
 }
 
 test_resumed_wait_is_not_reprobed() {
@@ -382,6 +520,8 @@ test_would_heal_without_evidence_is_rejected
 test_append_rejects_malformed_fields
 test_event_log_symlink_is_rejected
 test_stale_wait_is_shadow_only
+test_working_does_not_contradict_keyed_wait
+test_parked_does_not_contradict_keyed_wait
 test_resumed_wait_is_not_reprobed
 test_note_preserves_active_wait
 test_configured_pause_verb_is_supported

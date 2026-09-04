@@ -448,7 +448,12 @@ probe_task() {  # <id>
           probe=ok
         fi
         ;;
-      working|parked|done|blocked|failed)
+      working|parked)
+        probe=unknown
+        rule=-
+        action=none
+        ;;
+      done|blocked|failed)
         probe=stall
         rule=recheck-external
         action=would-heal
