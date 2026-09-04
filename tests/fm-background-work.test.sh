@@ -351,6 +351,44 @@ SH
   pass "list retains one stable registry snapshot across concurrent retirement"
 }
 
+test_registry_lock_contention_returns_disclosed_unknown() {
+  local home progress holder ready result started elapsed i
+  home=$(make_home lock-contention)
+  progress=$(make_progress_command lock-contention-progress 'printf "ready\n"')
+  start_sleeper
+  register_fixture "$home" visible "$STARTED_PID" "$progress" ''
+  ready="$home/lock-held"
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    : > "$3"
+    sleep 10
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/background-work/.registry.lock" "$ready" &
+  holder=$!
+  LIVE_PIDS+=("$holder")
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "fixture did not hold the registry lock"
+  started=$(date +%s)
+  result=$(FM_BACKGROUND_WORK_COLLECTION_BUDGET=2 \
+    FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT=1 list_json "$home") \
+    || fail "lock contention made list fail"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 4 ] || fail "registry lock contention exceeded the collection budget (${elapsed}s)"
+  printf '%s\n' "$result" | jq -e '
+    .collection.status == "unknown"
+      and .collection.reason == "registry-lock-timeout"
+      and .collection.truncated == true
+      and .records[0].id == "(registry)"
+      and .records[0].liveness.status == "unknown"
+      and .records[0].progress.status == "unknown"
+  ' >/dev/null || fail "lock contention was not disclosed as collection-level unknown: $result"
+  pass "registry lock contention returns promptly as a disclosed unknown collection"
+}
+
 test_live_adopted_process_reads_alive_and_progressing
 test_dead_process_remains_listed_as_dead
 test_unchanged_progress_becomes_stalled_while_process_stays_alive
@@ -362,3 +400,4 @@ test_unknown_process_state_is_never_adopted_or_reported_alive
 test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
+test_registry_lock_contention_returns_disclosed_unknown

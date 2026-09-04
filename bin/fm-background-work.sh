@@ -555,7 +555,7 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
 
 list_work() {
   local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false
-  local collection_started collection_deadline remaining
+  local collection_started collection_deadline remaining lock_rc lock_error_document
   local -a records=() ids=() record_files=()
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   collection_started=$(date +%s) || die "cannot start background-work collection deadline"
@@ -564,10 +564,38 @@ list_work() {
   load_runtime_libs
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
   now=$(date +%s) || die "cannot read the current epoch time"
+  lock_error_document=$(jq -n --arg generated "$generated" --arg home "$FM_HOME" \
+    --argjson budget "$COLLECTION_BUDGET" '
+    {schema:"fm-background-work-list.v1",generated:$generated,fm_home:$home,
+     collection:{status:"unknown",reason:"registry-lock-timeout",budget_seconds:$budget,
+       total_records:null,probes_attempted:0,probes_completed:0,truncated:true},
+     records:[{id:"(registry)",description:"Background-work registry unavailable",
+       task:null,pid:null,started_at:null,expected_finish_at:null,
+       liveness:{status:"unknown",reason:"registry-lock-timeout"},
+       progress:{status:"unknown",reason:"registry-lock-timeout",value:null,
+         observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}]}') \
+    || die "cannot encode background-work lock fallback"
   if [ -d "$REGISTRY" ]; then
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
       || die "cannot stage background-work collection"
-    fm_lock_acquire_wait "$REGISTRY/.registry.lock"
+    remaining=$((collection_deadline - $(date +%s) - 1))
+    if [ "$remaining" -le 0 ]; then
+      lock_rc=124
+    elif fm_lock_acquire_wait_bounded "$REGISTRY/.registry.lock" "$remaining"; then
+      lock_rc=0
+    else
+      lock_rc=$?
+    fi
+    if [ "$lock_rc" -ne 0 ]; then
+      rm -rf -- "$stage"
+      if [ "$format" = --json ]; then
+        printf '%s\n' "$lock_error_document"
+      else
+        printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
+        printf '(registry)\t-\tunknown\tunknown\t-\t-\t-\tBackground-work registry unavailable\n'
+      fi
+      return 0
+    fi
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       total=$((total + 1))
