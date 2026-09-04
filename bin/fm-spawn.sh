@@ -1565,6 +1565,10 @@ codex_precreate_root_file() {  # <container> <file>
     return 1
   fi
   if ! fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null; then
+    if ! rm -f -- "$file" || [ -e "$file" ] || [ -L "$file" ]; then
+      echo "error: $file was created but its signal marker could not be published, and the untracked record could not be removed safely; refusing to grant a codex writable root" >&2
+      return 1
+    fi
     echo "error: the signal marker for $file could not be published safely; refusing to grant a codex writable root with an untracked record" >&2
     return 1
   fi
@@ -1840,31 +1844,28 @@ raw_launch_executable() {
     my @words = eval { shellwords($ARGV[0]) };
     exit 2 if $@ || !@words;
     my $index = 0;
-    $index++ while $index < @words && $words[$index] =~ /\A[A-Za-z_][A-Za-z0-9_]*=/;
+    while ($index < @words && $words[$index] =~ /\A([A-Za-z_][A-Za-z0-9_]*)=/) {
+      exit 2 if $1 =~ /\A(?:PATH|CDPATH|PWD|OLDPWD)\z/;
+      $index++;
+    }
     exit 2 if $index >= @words;
     if ($words[$index] eq q{env}) {
       $index++;
       while ($index < @words) {
         my $word = $words[$index];
-        if ($word =~ /\A[A-Za-z_][A-Za-z0-9_]*=/) { $index++; next; }
-        if ($word eq q{--}) { $index++; last; }
-        exit 2 if $word eq q{-S} || $word eq q{--split-string} || $word =~ /\A--split-string=/;
-        if ($word eq q{-u} || $word eq q{--unset} || $word eq q{-C} || $word eq q{--chdir}) {
-          $index += 2;
-          next;
-        }
-        if ($word =~ /\A-u.+/ || $word =~ /\A--unset=/ || $word =~ /\A--chdir=/
-          || $word =~ /\A(?:-i|--ignore-environment|-0|--null|-v|--debug)\z/) {
+        if ($word =~ /\A([A-Za-z_][A-Za-z0-9_]*)=/) {
+          exit 2 if $1 =~ /\A(?:PATH|CDPATH|PWD|OLDPWD)\z/;
           $index++;
           next;
         }
+        if ($word eq q{--}) { $index++; last; }
         exit 2 if $word =~ /\A-/;
         last;
       }
     }
     exit 2 if $index >= @words || $words[$index] eq q{env};
-    exit 2 if $words[$index] =~ m{/(?:env|command|exec|nice|nohup|sudo|time)\z};
-    exit 2 if $words[$index] =~ /\A(?:command|exec|nice|nohup|sudo|time)\z/;
+    exit 2 if $words[$index] =~ m{/(?:bash|csh|dash|deno|env|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z};
+    exit 2 if $words[$index] =~ /\A(?:bash|command|csh|dash|deno|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z/;
     print $words[$index], qq{\n};
   ' -- "$1"
 }

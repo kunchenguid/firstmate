@@ -452,6 +452,20 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
   [ "$(cat "$LAUNCH_LOG")" = "env FM_CURSOR_ALIAS_TEST=1 agent --flag" ] \
     || fail "the raw launch command itself must run unchanged: $(cat "$LAUNCH_LOG")"
 
+  rm -f "$FAKEBIN_DIR/agent"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN_DIR/agent"
+  chmod +x "$FAKEBIN_DIR/agent"
+  ln -s "$tree/share/cursor-agent/versions/v1/cursor-agent" "$tree/bin/agent"
+  for launch in "PATH=$tree/bin agent --flag" "env PATH=$tree/bin agent --flag" "bash -c agent"; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$launch")
+    status=$?
+    expect_code 1 "$status" "a runtime-changing raw launch must refuse before cursor verification can be bypassed"
+    assert_contains "$out" "direct executable" \
+      "the runtime-changing raw launch refusal must explain why classification stopped"
+    [ ! -s "$LAUNCH_LOG" ] || fail "the refused runtime-changing raw launch must not compose a launch"
+  done
+
   # 3. An `agent` that does NOT resolve into cursor's tree is not cursor: the
   # escape hatch still applies and the launch proceeds as an unverified adapter.
   id=profile-agent-impostor-z17

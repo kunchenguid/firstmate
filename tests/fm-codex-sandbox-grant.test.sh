@@ -333,6 +333,8 @@ test_precreation_refuses_unsafe_signal_markers() {
     [ "$(cat "$outside")" = "preserve $label" ] \
       || fail "publishing a $label marker overwrote its symlink target"
     [ -L "$marker" ] || fail "a refused $label marker must remain available for repair"
+    [ ! -e "$HOME_DIR/state/$CASE_ID.$label" ] && [ ! -L "$HOME_DIR/state/$CASE_ID.$label" ] \
+      || fail "a failed $label marker publication left an untracked signal record behind"
     [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
       || fail "an unsafe $label marker must refuse before any launch is composed"
     printf '%s\n' "$out" | grep -q 'could not be published safely' \
