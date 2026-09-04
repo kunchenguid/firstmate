@@ -73,7 +73,18 @@ EOF
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        *"git fm-isolation-check"*)
+          (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$arg") || exit $?
+          ;;
+      esac
+    done
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
