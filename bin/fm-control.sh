@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -808,6 +810,13 @@ do_relaunch() {
   if { [ "$PRIOR_HARNESS" = claude-local ] || [ "$TARGET_HARNESS" = claude-local ]; } \
      && fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     die "task $ID has an active PR poll in state/$ID.check.sh, the single custom-check slot a claude-local eviction watcher also needs; finish or retire that poll before relaunching so neither watcher is silently replaced (the running worker was left in place)"
+  fi
+  if [ "$TARGET_HARNESS" = claude-local ] \
+     && { [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ]; } \
+     && ! { [ "$PRIOR_HARNESS" = claude-local ] \
+            && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+            && fm_custom_check_registered "$STATE" "$ID"; }; then
+    die "task $ID has an occupied custom-check slot in state/$ID.check.sh that cannot be proved to be its incumbent claude-local eviction watcher; retire or repair that check before relaunching so the running worker is not stopped for a replacement that fm-spawn will refuse (the running worker was left in place)"
   fi
   if [ "$TARGET_HARNESS" = claude-local ]; then
     [ "$TARGET_MODEL" != default ] \

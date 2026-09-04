@@ -1660,6 +1660,39 @@ test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded() {
   pass "fm-control relaunch: an unavailable local model refuses before the worker is stopped"
 }
 
+# fm-spawn refuses every occupied custom-check slot unless it can prove the
+# incumbent claude-local watcher owns it. The control path must judge the same
+# condition before it sends /exit, including an unclaimed check script that
+# cannot be proved to be the incumbent watcher: otherwise the replacement
+# refuses only after the healthy worker has stopped.
+test_claude_local_relaunch_refuses_an_occupied_custom_check_before_stop() {
+  local dir state out rc check
+  dir=$(new_case claude-local-custom-check rl52)
+  add_claude_local_task "$dir" rl52 loaded
+  state="$dir/home/state"
+  check="$state/rl52.check.sh"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+printf 'waiting: an unclaimed custom check owns this slot\n'
+SH
+  chmod 0700 "$check"
+
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 \
+    run_control "$dir" rl52 relaunch --note "worker looked stuck"); rc=$?
+  expect_code 1 "$rc" "a claude-local relaunch over another custom check should refuse"$'\n'"$out"
+  case "$out" in
+    *"custom-check slot"*) : ;;
+    *) fail "the refusal did not name the occupied custom-check slot: $out" ;;
+  esac
+  ! grep -qx '/exit' "$dir/fake/literal" \
+    || fail "a refused custom-check relaunch stopped the running worker"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running worker did not survive a custom-check refusal"
+  [ -e "$check" ] \
+    || fail "the occupied custom check was disturbed by a refused relaunch"
+  pass "fm-control relaunch: an occupied custom check refuses before the worker is stopped"
+}
+
 # The same slot the eviction watcher needs is the one an armed PR poll owns.
 # Neither may silently replace the other, so a claude-local relaunch that
 # finds a live poll refuses before the worker is stopped and leaves the poll
@@ -1939,6 +1972,7 @@ test_claude_local_relaunch_abort_retires_the_watcher_beside_a_stale_registration
 }
 
 test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
+test_claude_local_relaunch_refuses_an_occupied_custom_check_before_stop
 test_claude_local_relaunch_refuses_before_stop_when_the_task_ships_no_mistakes
 test_a_retired_polls_leftover_registration_does_not_own_the_slot
 test_claude_local_relaunch_abort_retires_the_watcher_beside_a_stale_registration
