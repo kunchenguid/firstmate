@@ -700,16 +700,16 @@ fm_nm_ledger_epoch() {  # <YYYY-MM-DD HH:MM>
     || true
 }
 
-# The branch's NEWEST ledger row as "<status>|<epoch>|<pr>", or nothing when the
+# The branch's NEWEST ledger row as "<status>|<short-sha>|<epoch>|<pr>", or nothing when the
 # branch has no row. The ledger is newest-first and its newest row for a branch
 # IS that branch's current run, which is the same rule
 # fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
 # holding a TERMINAL run answer needs to know whether a LATER run has since
-# superseded it, which the status word alone cannot say. Deliberately makes no
-# head claim: refusing to keep reporting a superseded failure is safe without
-# one, whereas BINDING a run still needs the strict identity rules above.
+# superseded it, which the status word alone cannot say. The short SHA lets that
+# caller recognize the already-attributed run, but makes no new head claim:
+# BINDING a run still needs the strict identity rules above.
 fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
-  local branch=$1 list=$2 row rest br st stamp pr
+  local branch=$1 list=$2 row rest br st sha stamp pr
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
     row=$(fm_nm_trim "$row")
@@ -718,12 +718,13 @@ fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
     rest=$(fm_nm_trim "${row#* }")
     br=${rest%% *}
     [ "$br" = "$branch" ] || continue
-    # Drop the branch and short-sha columns; the date column comes next.
+    # Drop the branch column; retain the short SHA before parsing the date.
     rest=$(fm_nm_trim "${rest#* }")
+    sha=${rest%% *}
     rest=$(fm_nm_trim "${rest#* }")
     stamp=${rest:0:16}
     pr=$(fm_nm_trim "${rest:16}")
-    printf '%s|%s|%s' "$st" "$(fm_nm_ledger_epoch "$stamp")" "$pr"
+    printf '%s|%s|%s|%s' "$st" "$sha" "$(fm_nm_ledger_epoch "$stamp")" "$pr"
     return 0
   done <<< "$list"
   return 0

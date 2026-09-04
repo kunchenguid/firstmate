@@ -136,8 +136,10 @@
 #      self-declared pause or done in the status log that the ledger's date
 #      proves post-dates the failed run, and finally a later run on this branch
 #      that cannot be bound here (reported as unknown - history, but no proof of
-#      the present). Nothing else does, and with no ordering evidence the failure
-#      stands, so a real failure is never hidden. A terminal reading also
+#      the present). A terminal newest row is treated the same way unless its
+#      short SHA identifies the attributed run itself. Nothing else does, and
+#      with no ordering evidence the failure stands, so a real failure is never
+#      hidden. A terminal reading also
 #      publishes the PR its OWN run opened (`pr=`), or none when it opened none,
 #      so a consumer never lends it an older PR.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
@@ -1364,8 +1366,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
     NEWEST_STATUS=${NEWEST_ROW%%|*}
     NEWEST_REST=${NEWEST_ROW#*|}
+    NEWEST_SHA=${NEWEST_REST%%|*}
+    NEWEST_REST=${NEWEST_REST#*|}
     NEWEST_EPOCH=${NEWEST_REST%%|*}
     NEWEST_PR=${NEWEST_REST#*|}
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    NEWEST_IS_ATTRIBUTED_RUN=0
+    case "$RUN_HEAD" in
+      "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_IS_ATTRIBUTED_RUN=1 ;;
+    esac
     LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
     case "$LEDGER_STATUS" in
       running)
@@ -1375,6 +1384,14 @@ if [ "$HAVE_RUN" = 1 ]; then
         SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
         [ -z "$NEWEST_PR" ] || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}pr=$NEWEST_PR"
         emit "done" run-step "$SUPERSEDED_DETAIL"
+        ;;
+      failed|cancelled)
+        if [ "$NEWEST_IS_ATTRIBUTED_RUN" != 1 ]; then
+          LEDGER_DETAIL="run $LEDGER_STATUS"
+          [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
+          [ -z "$NEWEST_PR" ] || LEDGER_DETAIL="$LEDGER_DETAIL${SEP}pr=$NEWEST_PR"
+          emit failed run-step "$LEDGER_DETAIL"
+        fi
         ;;
     esac
     # map_log_state owns the verb->state mapping, including the configurable
@@ -1394,9 +1411,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
     fi
     case "$NEWEST_STATUS" in
-      ''|failed|cancelled) ;;
+      '') ;;
       *)
-        emit unknown run-step \
+        [ "$NEWEST_IS_ATTRIBUTED_RUN" = 1 ] || emit unknown run-step \
           "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
         ;;
     esac
