@@ -37,8 +37,8 @@ The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The policy prefers holding the very work item a question gates, so the backlog row a finished task's cleanup is about to close is routinely the captain's own call.
 `bin/fm-teardown.sh` therefore asks the read-only `open` subcommand before its automatic close: exit 0 means the row is still an open captain call (not Done, `hold_kind: captain`), 1 means it is not, and 2 means the answer could not be established, which teardown treats as a refusal before any destructive step rather than as permission to close.
-On 0 only the final state transition changes: after cleanup and still under the task's own lock, teardown records one `Deliverable of the finished work: ...` line at the end of the task body and runs `tasks-axi reopen`, so the row returns to Queued with its hold intact and remains on the appropriate Captain's Call or Charted Next decision surface instead of reading as work still under way.
-`bin/fm-backlog-transition-lib.sh` applies the same completion-provenance writer to ordinary close and retained captain-call paths.
+On 0 only the final state transition changes: after cleanup and still under the task's own lock, teardown records one machine-owned `firstmate-completion.v1` JSON record at the end of the task body and runs `tasks-axi reopen`, so the row returns to Queued with its hold intact and remains on the appropriate Captain's Call or Charted Next decision surface instead of reading as work still under way.
+`bin/fm-backlog-transition-lib.sh` applies the same completion-provenance writer to ordinary close and retained captain-call paths, and `bin/fm-fleet-snapshot.sh` tolerates the earlier `Deliverable of the finished work: ...` shape written on this branch.
 The pending-close record teardown already stages before destructive cleanup carries that intent as a `mode=retain` line, so an interrupted cleanup replays the retention at the next session start through the same record, validator, and lock as an ordinary close and never closes the row; an answer that closes the row first preserves the retained completion before replay retires the satisfied record.
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question, and `answer` remains the only act that closes the call.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
@@ -86,7 +86,7 @@ Three accepted limits remain deliberate:
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
-`bin/fm-landed-lib.sh` owns the shared Recently Landed predicate: recorded completion provenance is authoritative when present, while its named legacy fallback handles rows written before provenance existed.
+`bin/fm-landed-lib.sh` owns the shared Recently Landed predicate: machine-owned completion provenance is authoritative when present, while its named legacy fallback handles rows written before provenance existed.
 This lets captain-approved deliveries land regardless of surviving `hold-kind: captain` metadata while recorded non-deliveries remain excluded.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp and completion-provenance marker.
 

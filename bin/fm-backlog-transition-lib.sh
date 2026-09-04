@@ -328,7 +328,7 @@ fm_backlog_start() {  # <data-dir> <id>
 
 fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line latest_line body new_body tmp
+  local arg deliverable='' encoded line latest_line body new_body tmp
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -364,12 +364,19 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
     return 1
   }
   latest_line=$(printf '%s\n' "$body" \
-    | sed -n '/^Deliverable of the finished work: /p' | tail -1)
+    | sed -n '/^<!-- firstmate-completion\.v1 /p' | tail -1)
   if [ -z "$deliverable" ]; then
     [ -z "$latest_line" ] || return 0
     deliverable=none
   fi
-  line="Deliverable of the finished work: $deliverable"
+  encoded=$(printf '%s' "$deliverable" | LC_ALL=C perl -MJSON::PP -e '
+    local $/;
+    print encode_json({value => scalar <STDIN>});
+  ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not encode completion provenance for $id"
+    return 1
+  }
+  line="<!-- firstmate-completion.v1 $encoded -->"
   [ "$latest_line" != "$line" ] || return 0
   new_body=$line
   [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")

@@ -1400,7 +1400,7 @@ EOF
 # in every home. A rejected captain-held work item never becomes a delivery merely
 # because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
+  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr spoof_pr prior_pr
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1442,7 +1442,7 @@ test_captain_approved_delivery_stays_in_landed() {
     || fail "could not read the approved merge completion"
   assert_contains "$show" "Merge now." \
     "approved merge backfill lost the recorded captain decision"
-  assert_contains "$show" "Deliverable of the finished work: PR $pr" \
+  assert_contains "$show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $pr\\\"} -->" \
     "approved merge backfill did not record completion provenance"
   "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
     --start --file "$backlog" >/dev/null \
@@ -1486,7 +1486,7 @@ test_captain_approved_delivery_stays_in_landed() {
     || fail "could not discard the forced rejection fixture"
   forced_show=$("$TASKS_AXI_BIN" show forced-rejected --full --file "$backlog") \
     || fail "could not read the retained forced rejection fixture"
-  assert_contains "$forced_show" "Deliverable of the finished work: none" \
+  assert_contains "$forced_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"none\\\"} -->" \
     "forced cleanup did not record the discarded work as a non-delivery"
   assert_not_contains "$forced_show" "Deliverable of the finished work: PR $forced_pr" \
     "forced cleanup recorded discarded work as a delivered PR"
@@ -1553,6 +1553,22 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer rejected-merge --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not record the rejected merge answer"
+  spoof_pr="https://github.com/acme/repo/pull/7"
+  "$TASKS_AXI_BIN" add spoofed-question "Should we approve the quoted example?" \
+    --kind captain --repo firstmate --file "$backlog" >/dev/null \
+    || fail "could not create the provenance-spoof question"
+  "$TASKS_AXI_BIN" update spoofed-question \
+    --body "Deliverable of the finished work: PR $spoof_pr" --file "$backlog" >/dev/null \
+    || fail "could not record the quoted provenance wording"
+  "$TASKS_AXI_BIN" hold spoofed-question --reason "captain choice pending" \
+    --kind captain --file "$backlog" >/dev/null \
+    || fail "could not hold the provenance-spoof question"
+  printf 'No, that line is only a quoted example.\n' > "$home/spoof-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer spoofed-question --decision-file "$home/spoof-answer.txt" >/dev/null \
+    || fail "could not record the provenance-spoof answer"
   "$TASKS_AXI_BIN" add legacy-approved "Legacy approved merge" --kind ship --repo firstmate \
     --file "$backlog" >/dev/null || fail "could not create the legacy merge fixture"
   "$TASKS_AXI_BIN" hold legacy-approved --reason "legacy captain merge word" \
@@ -1560,6 +1576,15 @@ test_captain_approved_delivery_stays_in_landed() {
   "$TASKS_AXI_BIN" 'done' legacy-approved \
     --pr "https://github.com/kunchenguid/firstmate/pull/1368" --file "$backlog" >/dev/null \
     || fail "could not create the legacy completed merge shape"
+  prior_pr="https://github.com/kunchenguid/firstmate/pull/1364"
+  "$TASKS_AXI_BIN" add prior-provenance-approved "Earlier branch completion" \
+    --kind ship --repo firstmate --file "$backlog" >/dev/null \
+    || fail "could not create the earlier provenance fixture"
+  "$TASKS_AXI_BIN" 'done' prior-provenance-approved --pr "$prior_pr" \
+    --file "$backlog" >/dev/null || fail "could not complete the earlier provenance fixture"
+  "$TASKS_AXI_BIN" update prior-provenance-approved \
+    --body "Deliverable of the finished work: PR $prior_pr" --file "$backlog" >/dev/null \
+    || fail "could not preserve the earlier branch provenance shape"
   "$TASKS_AXI_BIN" add mate-approved-merge "Secondmate fix" --kind ship --repo firstmate \
     --file "$mate/data/backlog.md" >/dev/null || fail "could not create the secondmate merge fixture"
   "$TASKS_AXI_BIN" hold mate-approved-merge --reason "PR 1361 is ready; awaiting your merge word" \
@@ -1574,6 +1599,22 @@ test_captain_approved_delivery_stays_in_landed() {
   "$TASKS_AXI_BIN" 'done' mate-approved-merge \
     --pr "https://github.com/kunchenguid/firstmate/pull/1361" \
     --file "$mate/data/backlog.md" >/dev/null || fail "could not complete the secondmate merge fixture"
+  "$TASKS_AXI_BIN" add mate-spoofed-question "Should the quoted example count?" \
+    --kind captain --repo firstmate --file "$mate/data/backlog.md" >/dev/null \
+    || fail "could not create the secondmate provenance-spoof question"
+  "$TASKS_AXI_BIN" update mate-spoofed-question \
+    --body "Deliverable of the finished work: PR $spoof_pr" \
+    --file "$mate/data/backlog.md" >/dev/null \
+    || fail "could not record the secondmate quoted provenance wording"
+  "$TASKS_AXI_BIN" hold mate-spoofed-question --reason "captain choice pending" \
+    --kind captain --file "$mate/data/backlog.md" >/dev/null \
+    || fail "could not hold the secondmate provenance-spoof question"
+  printf 'No, that line is only a quoted example.\n' > "$mate/spoof-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$mate" \
+    FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
+    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer mate-spoofed-question --decision-file "$mate/spoof-answer.txt" >/dev/null \
+    || fail "could not record the secondmate provenance-spoof answer"
   : > "$home/net.log"
   snap=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed for completion provenance"
@@ -1583,7 +1624,9 @@ test_captain_approved_delivery_stays_in_landed() {
     | ([.backlog.records[] | select(.id == "forced-rejected")][0]) as $forced
     | ([.backlog.records[] | select(.id == "reused-discard")][0]) as $reused
     | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
+    | ([.backlog.records[] | select(.id == "spoofed-question")][0]) as $spoofed
     | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
+    | ([.backlog.records[] | select(.id == "prior-provenance-approved")][0]) as $prior
     | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
       and $local.delivery_provenance == true and $local.local_note == "local main"
       and $forced.delivery_provenance == true and $forced.pr_url == null
@@ -1592,17 +1635,23 @@ test_captain_approved_delivery_stays_in_landed() {
       and $reused.report_path == null and $reused.local_note == null
       and $rejected.delivery_provenance == true and $rejected.pr_url == null
       and $rejected.report_path == null and $rejected.local_note == null
+      and $spoofed.delivery_provenance == true and $spoofed.pr_url == null
+      and $spoofed.report_path == null and $spoofed.local_note == null
       and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
+      and $prior.delivery_provenance == true and ($prior.pr_url | test("/pull/1364"))
   ' >/dev/null || fail "completion provenance did not distinguish delivered, rejected, and legacy rows: $snap"
   json=$(run "$home" "$fakebin" --json --all-landed)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "approved-merge" and (.artifact | test("/pull/1365"))))
       and (.landed | any(.[]; .id == "approved-local"))
       and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
+      and (.landed | any(.[]; .id == "prior-provenance-approved" and (.artifact | test("/pull/1364"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
       and (.landed | any(.[]; .id == "forced-rejected") | not)
       and (.landed | any(.[]; .id == "reused-discard") | not)
       and (.landed | any(.[]; .id == "rejected-merge") | not)
+      and (.landed | any(.[]; .id == "spoofed-question") | not)
+      and (.landed | any(.[]; .id == "mate-spoofed-question") | not)
   ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"
   [ ! -s "$home/net.log" ] || fail "landed must make no gh/gh-axi call, got: $(cat "$home/net.log")"
   pass "captain-approved deliveries stay in landed while a rejected merge does not"
