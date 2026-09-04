@@ -153,7 +153,7 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}
-  local local_full row st br sha day clock pr extra pending_st=''
+  local local_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
@@ -169,6 +169,22 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 0 ;; esac
     case "$pr" in ''|https://*) ;; *) return 0 ;; esac
     [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 0
+    year_num=$((10#${day%%-*}))
+    month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
+    day_num=$((10#${day##*-}))
+    [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || return 0
+    case "$month_num" in
+      1|3|5|7|8|10|12) max_day=31 ;;
+      4|6|9|11) max_day=30 ;;
+      2)
+        if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
+          max_day=29
+        else
+          max_day=28
+        fi
+        ;;
+    esac
+    [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || return 0
     [ "$br" = "$branch" ] || continue
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:

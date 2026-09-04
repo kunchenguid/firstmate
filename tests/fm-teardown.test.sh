@@ -2362,6 +2362,64 @@ EOF
   pass "a malformed ledger row never authorizes a parked-run abort"
 }
 
+test_parked_run_with_impossible_ledger_date_is_never_aborted() {
+  local case_dir rc advanced_short anchor_short
+  case_dir=$(make_case parked-run-impossible-ledger-date)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-impossible-ledger-date"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/task-x1 "$advanced_short" 2026-02-31 07:55)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-02-28 06:36)
+EOF
+)" \
+  FM_FAKE_NM_RUNS_LOG="$case_dir/nm-runs.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-impossible-ledger-date: teardown should still succeed"
+  assert_present "$case_dir/nm-runs.log" \
+    "parked-run-impossible-ledger-date: fixture broke - the ledger fallback never engaged"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-impossible-ledger-date: teardown aborted from an impossible ledger date"
+  pass "an impossible ledger date never authorizes a parked-run abort"
+}
+
+test_terminal_status_with_gate_never_queries_or_aborts_ledger_fallback() {
+  local case_dir rc advanced_short anchor_short terminal_status
+  case_dir=$(make_case parked-run-terminal-status-gate)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-terminal-status-gate"
+  terminal_status=$(parked_axi_status_toon fm/task-x1 "$advanced_short")
+  terminal_status=${terminal_status/status: awaiting_approval/status: completed}
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$terminal_status" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/task-x1 "$advanced_short" 2026-09-03 07:55)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-02 06:36)
+EOF
+)" \
+  FM_FAKE_NM_RUNS_LOG="$case_dir/nm-runs.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-terminal-status-gate: teardown should still succeed"
+  assert_absent "$case_dir/nm-runs.log" \
+    "parked-run-terminal-status-gate: terminal status queried the ledger fallback"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-terminal-status-gate: terminal status with a stale gate aborted"
+  pass "a terminal status with a stale gate never reaches ledger cleanup"
+}
+
 # Counterfactual twin of the unfetched defect above: the SAME parked-run shape
 # with the pipeline's advanced fix head FETCHED into the task copy (objects
 # only - no ref moves) resolves through the strict object-local rule alone,
@@ -3188,6 +3246,8 @@ test_parked_own_run_is_aborted_before_teardown
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted
 test_parked_run_with_malformed_ledger_row_is_never_aborted
+test_parked_run_with_impossible_ledger_date_is_never_aborted
+test_terminal_status_with_gate_never_queries_or_aborts_ledger_fallback
 test_parked_run_advanced_head_locally_fetched_is_still_aborted
 test_parked_advanced_run_without_anchor_is_never_aborted
 test_parked_advanced_run_ancestor_anchor_is_never_aborted
