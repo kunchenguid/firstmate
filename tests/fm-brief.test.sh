@@ -817,6 +817,38 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every scaffold's status protocol must name the language of the signal line.
+# Firstmate reads and acts on these lines, so they sit on the English side of the reader boundary.
+# Leaving the language unstated let workers whose working language was not English transliterate
+# the line into unaccented text instead, so the rule has to be stated in the scaffold itself.
+test_status_lines_declare_english() {
+  local home kind id brief
+  home="$TMP_ROOT/status-language-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-status-language-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "Write every status line in English" "$brief" \
+      "$kind brief did not tell the worker which language to write status lines in"
+    assert_grep "whatever language you are working in" "$brief" \
+      "$kind brief did not cover a worker whose working language is not English"
+  done
+  pass "fm-brief.sh: every scaffold requires English status lines"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -867,4 +899,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_status_lines_declare_english
 test_scout_and_secondmate_scaffold
