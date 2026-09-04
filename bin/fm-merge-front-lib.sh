@@ -349,7 +349,7 @@ fm_merge_front_status() {  # <state> <project-key>
 }
 
 fm_merge_front_promote() {  # <state> <project-key>
-  local state=$1 project=$2 old_task old_url next_task=none next_url= rc
+  local state=$1 project=$2 task url next_task=none next_url= rc
   local provider host path number merged
   fm_merge_front_project_key_valid "$project" || return 2
   if fm_merge_front_paths "$state" "$project" 0; then
@@ -370,26 +370,33 @@ fm_merge_front_promote() {  # <state> <project-key>
     printf 'promoted=none\nfront=none\n'
     return 0
   fi
-  old_task=${FM_MERGE_FRONT_TASKS[0]}
-  old_url=${FM_MERGE_FRONT_URLS[0]}
-  fm_pr_url_parse "$old_url" || {
-    fm_merge_front_unlock
-    return 1
-  }
+  task=${FM_MERGE_FRONT_TASKS[0]}
+  url=${FM_MERGE_FRONT_URLS[0]}
+  fm_merge_front_unlock
+  fm_pr_url_parse "$url" || return 1
   provider=$FM_PR_PROVIDER
   host=$FM_PR_HOST
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
-  merged=$("$_FM_MERGE_FRONT_LIB_DIR/fm-pr-poll.sh" --validated \
-    "$provider" "$old_url" "$host" "$path" "$number" 2>/dev/null) || merged=
+  merged=$(_fm_merge_front_gh "$_FM_MERGE_FRONT_LIB_DIR/fm-pr-poll.sh" --validated \
+    "$provider" "$url" "$host" "$path" "$number" 2>/dev/null) || merged=
   if [ "$merged" != merged ]; then
-    fm_merge_front_unlock
-    printf 'error: merge-front PR is not confirmed merged: %s\n' "$old_url" >&2
+    printf 'error: merge-front PR is not confirmed merged: %s\n' "$url" >&2
     return 1
   fi
-  FM_MERGE_FRONT_TASKS=("${FM_MERGE_FRONT_TASKS[@]:1}")
-  FM_MERGE_FRONT_URLS=("${FM_MERGE_FRONT_URLS[@]:1}")
-  if ! fm_merge_front_file_write "$project"; then
+  _fm_merge_front_lock_acquire || return 1
+  if ! fm_merge_front_file_load "$project"; then
+    fm_merge_front_unlock
+    return 1
+  fi
+  if [ "${#FM_MERGE_FRONT_TASKS[@]}" -eq 0 ] \
+    || [ "${FM_MERGE_FRONT_TASKS[0]}" != "$task" ] \
+    || [ "${FM_MERGE_FRONT_URLS[0]}" != "$url" ]; then
+    fm_merge_front_unlock
+    printf 'error: merge-front PR is no longer the front of project %s\n' "$project" >&2
+    return 1
+  fi
+  if ! _fm_merge_front_drop_locked "$project" "$task" "$url"; then
     fm_merge_front_unlock
     return 1
   fi
@@ -398,7 +405,7 @@ fm_merge_front_promote() {  # <state> <project-key>
     next_url=${FM_MERGE_FRONT_URLS[0]}
   fi
   fm_merge_front_unlock
-  printf 'promoted=%s\t%s\n' "$old_task" "$old_url"
+  printf 'promoted=%s\t%s\n' "$task" "$url"
   if [ "$next_task" = none ]; then
     printf 'front=none\n'
   else
@@ -406,9 +413,12 @@ fm_merge_front_promote() {  # <state> <project-key>
   fi
 }
 
-# Retire the queue entries bound to one task or one PR URL, wherever they sit.
-# Sets FM_MERGE_FRONT_DROPPED_* to the first retired identity and leaves the
-# loaded queue arrays holding the survivors. Returns 3 when nothing matched.
+# Retire the one queue entry bound to exactly this task and this canonical URL.
+# Task IDs and URLs are each unique within a queue, so the pair identifies at
+# most one row: a stale or mismatched identity retires nothing rather than
+# silently dropping some other task's live entry. Sets FM_MERGE_FRONT_DROPPED_*
+# to the retired identity and leaves the loaded arrays holding the survivors.
+# Returns 3 when the pair is not queued.
 _fm_merge_front_drop_locked() {  # <project-key> <task-id> <canonical-url>
   local project=$1 task=$2 url=$3 index=0 removed=0
   local tasks=() urls=()
@@ -416,11 +426,9 @@ _fm_merge_front_drop_locked() {  # <project-key> <task-id> <canonical-url>
   FM_MERGE_FRONT_DROPPED_URL=
   while [ "$index" -lt "${#FM_MERGE_FRONT_TASKS[@]}" ]; do
     if [ "${FM_MERGE_FRONT_TASKS[$index]}" = "$task" ] \
-      || [ "${FM_MERGE_FRONT_URLS[$index]}" = "$url" ]; then
-      if [ "$removed" -eq 0 ]; then
-        FM_MERGE_FRONT_DROPPED_TASK=${FM_MERGE_FRONT_TASKS[$index]}
-        FM_MERGE_FRONT_DROPPED_URL=${FM_MERGE_FRONT_URLS[$index]}
-      fi
+      && [ "${FM_MERGE_FRONT_URLS[$index]}" = "$url" ]; then
+      FM_MERGE_FRONT_DROPPED_TASK=${FM_MERGE_FRONT_TASKS[$index]}
+      FM_MERGE_FRONT_DROPPED_URL=${FM_MERGE_FRONT_URLS[$index]}
       removed=$((removed + 1))
     else
       tasks+=("${FM_MERGE_FRONT_TASKS[$index]}")
@@ -500,9 +508,12 @@ fm_merge_front_remove() {  # <state> <project-key> <task-id> <pr-url>
 }
 
 # Retire an identity from whichever project queue holds it when the task's own
-# project key is no longer derivable. Returns 3 when nothing matched anywhere.
+# project key is no longer derivable. One busy or unreadable queue never aborts
+# the scan: every queue is examined, and the failure only surfaces when no queue
+# yielded the drop. Returns 3 when nothing matched anywhere, 1 when the target
+# could not be safely retired.
 fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url>
-  local state=$1 task=$2 url=$3 file project rc dropped=0
+  local state=$1 task=$2 url=$3 file project rc dropped=0 failed=0
   if fm_merge_front_root_prepare "$state" 0; then
     :
   else
@@ -520,10 +531,12 @@ fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url>
     case "$rc" in
       0) dropped=1 ;;
       3) ;;
-      *) return 1 ;;
+      *) failed=1 ;;
     esac
   done
-  [ "$dropped" -eq 1 ] || return 3
+  [ "$dropped" -eq 0 ] || return 0
+  [ "$failed" -eq 0 ] || return 1
+  return 3
 }
 
 # The one identity-bound retirement entry point for a task leaving the queue -
@@ -659,7 +672,7 @@ fm_merge_front_greptile_kick() {  # <state> <project-key>
   required_json=$(fm_merge_front_checks_json gh pr checks "$number" \
     --repo "$repo_path" --required --json name,state) || return 1
   blocked=$(printf '%s\n' "$required_json" | jq -r \
-    '[.[] | select(((.name | ascii_downcase | contains("greptile")) | not) and .state != "SUCCESS") | "\(.name)=\(.state)"] | join(", ")') || {
+    '[.[] | select(((.name | ascii_downcase | contains("greptile")) | not) and (.state as $satisfied | ["SUCCESS","SKIPPED","NEUTRAL"] | index($satisfied) | not)) | "\(.name)=\(.state)"] | join(", ")') || {
       echo 'error: required check state could not be evaluated' >&2
       return 1
     }

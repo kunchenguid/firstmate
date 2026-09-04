@@ -27,6 +27,9 @@ SH
   chmod +x "$dir/fake-root/bin/fm-guard.sh"
   cat > "$dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+if [ -n "\${FM_TEST_GH_HOOK:-}" ]; then
+  "\$FM_TEST_GH_HOOK" >/dev/null 2>&1
+fi
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -188,6 +191,63 @@ test_same_task_replacement_and_removal_recovery() {
   pass "same-task replacement rebinds in place and removal retires a stuck front"
 }
 
+# Removal is keyed on the exact task and canonical URL pair. A stale or
+# mismatched identity must retire nothing rather than dropping the row that
+# happens to share one half of it.
+test_removal_requires_the_exact_task_and_url_pair() {
+  local dir removed status
+  dir=$(make_home exact-identity)
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/3 >/dev/null \
+    || fail "exact-identity front enqueue failed"
+  run_front "$dir" enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "exact-identity parked enqueue failed"
+
+  removed=$(run_front "$dir" remove project-alpha task-a https://github.com/o/r/pull/2) \
+    || fail "mismatched removal was not reported"
+  assert_contains "$removed" 'removed=none' "a mismatched identity reported a removal"
+  status=$(run_front "$dir" status project-alpha) || fail "mismatched removal status failed"
+  assert_contains "$status" $'front=task-a\thttps://github.com/o/r/pull/3' \
+    "a mismatched removal disturbed the front"
+  assert_contains "$status" $'parked=task-b\thttps://github.com/o/r/pull/2' \
+    "a mismatched removal silently retired another task's live entry"
+
+  removed=$(run_front "$dir" remove project-alpha task-a https://github.com/o/r/pull/3) \
+    || fail "exact removal failed"
+  assert_contains "$removed" $'removed=task-a\thttps://github.com/o/r/pull/3' \
+    "exact removal did not report its own identity"
+  status=$(run_front "$dir" status project-alpha) || fail "exact removal status failed"
+  assert_contains "$status" $'front=task-b\thttps://github.com/o/r/pull/2' \
+    "exact removal did not leave the other entry queued"
+  pass "removal retires only the exact task and URL pair it was given"
+}
+
+# promote runs the same live merge poll the watcher does; holding the queue lock
+# across it would starve enqueue and confirmed-merge retirement behind a slow
+# forge exactly as the Greptile gate would.
+test_promote_leaves_the_queue_usable_during_its_merge_poll() {
+  local dir status
+  dir=$(make_home promote-lock)
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "promote-lock fixture enqueue failed"
+  cat > "$dir/hook.sh" <<SH
+#!/usr/bin/env bash
+FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+  FM_MERGE_FRONT_LOCK_TIMEOUT=2 "$MERGE_FRONT" \
+  enqueue project-alpha task-b https://github.com/o/r/pull/2 >/dev/null 2>&1 \
+  && printf 'concurrent-enqueue=ok\n' > "$dir/hook.out" \
+  || printf 'concurrent-enqueue=blocked\n' > "$dir/hook.out"
+SH
+  chmod +x "$dir/hook.sh"
+  FM_TEST_GH_HOOK="$dir/hook.sh" run_front "$dir" promote project-alpha >/dev/null \
+    || fail "confirmed front promotion failed"
+  assert_grep 'concurrent-enqueue=ok' "$dir/hook.out" \
+    "the queue lock was held across promote's live merge poll"
+  status=$(run_front "$dir" status project-alpha) || fail "post-promote status failed"
+  assert_contains "$status" $'front=task-b\thttps://github.com/o/r/pull/2' \
+    "promotion did not expose the PR enqueued during its poll"
+  pass "promote never holds the queue lock across its live merge poll"
+}
+
 test_pr_check_enqueues_project_front() {
   local dir status key
   dir=$(make_home pr-check)
@@ -321,6 +381,28 @@ test_confirmed_merge_retires_front_without_task_metadata() {
   pass "a merged front is retired even when its task record is already gone"
 }
 
+# One unreadable project queue must not abandon the scan: the target entry lives
+# in another project and can still be safely retired.
+test_retirement_scan_survives_an_unreadable_project_queue() {
+  local dir status
+  dir=$(make_home scan-resilience)
+  write_meta "$dir" task-a
+  run_front "$dir" enqueue aaa task-x https://github.com/o/r/pull/5 >/dev/null \
+    || fail "scan fixture first-project enqueue failed"
+  run_front "$dir" enqueue zzz task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "scan fixture target enqueue failed"
+  printf 'not-a-merge-front-queue\n' > "$dir/home/state/merge-front/aaa.queue"
+  chmod 0600 "$dir/home/state/merge-front/aaa.queue"
+  rm -f "$dir/home/state/task-a.meta"
+
+  run_outcome "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "merged PR could not publish its outcome past an unreadable queue"
+  status=$(run_front "$dir" status zzz) || fail "scan-resilience status failed"
+  assert_contains "$status" 'front=none' \
+    "an unreadable sibling queue aborted the scan before the target was retired"
+  pass "retirement scans every project queue past an unreadable one"
+}
+
 install_github_gate_fake() {  # <dir>
   local dir=$1
   cat > "$dir/fakebin/gh" <<'SH'
@@ -422,6 +504,37 @@ test_greptile_gate_refusals_and_single_action() {
   pass "Greptile kick fails closed at every gate and comments once for the front"
 }
 
+# GitHub's own merge gate accepts a required check that was skipped or neutral,
+# so treating either as blocking would refuse the initial Greptile trigger
+# forever and stall the whole project queue behind that front.
+test_greptile_gate_accepts_skipped_and_neutral_required_checks() {
+  local dir rc comment_count
+  dir=$(make_home greptile-skipped)
+  install_github_gate_fake "$dir"
+  : > "$dir/gh.log"
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "skipped-check fixture enqueue failed"
+
+  FM_TEST_REQUIRED_JSON='[{"name":"CI / e2e","state":"SKIPPED"},{"name":"CI / lint","state":"NEUTRAL"},{"name":"CI","state":"SUCCESS"}]' \
+    FM_TEST_ALL_JSON='[{"name":"CI","state":"SUCCESS"}]' \
+    run_kick "$dir" >/dev/null || fail "a skipped required check blocked the Greptile kick"
+  comment_count=$(grep -c '^\[<pr><comment>' "$dir/gh.log")
+  [ "$comment_count" -eq 1 ] \
+    || fail "satisfied required checks did not yield exactly one kick"
+
+  : > "$dir/gh.log"
+  set +e
+  FM_TEST_REQUIRED_JSON='[{"name":"CI","state":"CANCELLED"}]' \
+    FM_TEST_ALL_JSON='[{"name":"CI","state":"CANCELLED"}]' \
+    run_kick "$dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a cancelled required check received Greptile authority"
+  assert_no_grep '<pr><comment>' "$dir/gh.log" \
+    "a cancelled required check posted a Greptile comment"
+  pass "skipped and neutral required checks satisfy the gate; other states block"
+}
+
 # The gate's GitHub reads must not hold the per-project queue lock: a slow forge
 # would otherwise starve ordinary enqueue and confirmed-merge retirement, whose
 # waits are bounded far below the gate's total GitHub budget.
@@ -483,11 +596,15 @@ SH
 test_queue_order_and_promotion
 test_queue_conflicts_and_paths_fail_closed
 test_same_task_replacement_and_removal_recovery
+test_removal_requires_the_exact_task_and_url_pair
+test_promote_leaves_the_queue_usable_during_its_merge_poll
 test_pr_check_enqueues_project_front
 test_pr_check_registers_any_checkout_basename
 test_pr_check_refuses_bound_url_before_mutating
 test_confirmed_merge_reconciles_exact_identity
 test_confirmed_merge_retires_front_without_task_metadata
+test_retirement_scan_survives_an_unreadable_project_queue
 test_greptile_gate_refusals_and_single_action
+test_greptile_gate_accepts_skipped_and_neutral_required_checks
 test_greptile_kick_leaves_the_queue_usable_during_github_reads
 test_greptile_kick_refuses_when_the_front_changes_mid_gate

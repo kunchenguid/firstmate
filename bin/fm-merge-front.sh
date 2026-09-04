@@ -14,12 +14,17 @@
 # and rebinds a task in place, keeping its queue position, when that same task
 # opens a replacement PR; it refuses only a URL already bound to another task.
 # promote reuses the canonical merge poll to fail closed until the front is
-# confirmed merged, then removes exactly that entry and exposes the next one.
+# confirmed merged, then removes exactly that entry and exposes the next one. It
+# snapshots the front under the lock, releases it for the bounded merge poll, and
+# reacquires it to confirm the same identity is still the front before removing
+# it, so a front that changed meanwhile is refused rather than mis-promoted.
 #
 # remove is the operator recovery path for a queued PR that will never merge -
-# a closed or superseded PR, or a torn-down task. It retires exactly the named
-# identity wherever it sits and advances nothing by itself, so retiring a stuck
-# front simply exposes the next entry and unblocks the project. Teardown and a
+# a closed or superseded PR, or a torn-down task. Every retirement is keyed on
+# the exact task and canonical URL together, never either alone, so at most the
+# one named row is retired and a stale identity retires nothing rather than
+# dropping another task's live entry. It advances nothing by itself, so retiring
+# a stuck front simply exposes the next entry and unblocks the project. Teardown and a
 # confirmed merge whose task metadata is already gone reach the same retirement
 # automatically (bin/fm-teardown.sh, bin/fm-merge-outcome-lib.sh), scanning every
 # project queue when the task's own project key can no longer be derived, so a
@@ -67,7 +72,9 @@
 # meanwhile is refused rather than kicked.
 # It refuses unless the queued PR is the first entry (therefore has no preceding
 # entry), is open against main, has behind_by=0 compared with main, has every
-# non-Greptile required check at SUCCESS, and has no pending Greptile check. Any
+# non-Greptile required check satisfied, and has no pending Greptile check. A
+# required check counts as satisfied at SUCCESS, SKIPPED, or NEUTRAL - the states
+# GitHub's own merge gate accepts - and blocks at every other state. Any
 # unreadable or unrecognised state fails closed. Its sole action is one explicit
 # `gh pr comment <number> --repo <owner/repo> --body "@greptile review"`.
 # Greploop's separate follow-up trigger remains unchanged: a finished Greptile
