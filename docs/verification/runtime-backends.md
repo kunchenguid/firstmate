@@ -343,7 +343,9 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 ok - live composer-matrix guard verified 2 live surface(s)
 ```
 
-The portable matrix separately proves that a lone `┃`, an unidentified half-box, a missing rule, or mismatched top and bottom widths remains `unknown`, while typed content remains `pending`.
+The portable matrix separately proves that a lone `┃`, an identityless Copilot half-box, a missing rule, or mismatched top and bottom widths remains `unknown`, while typed content remains `pending`.
+
+Copilot on Zellij, cmux, and Orca therefore remains launchable and steerable through the durable inbox, but explicit typed delivery confirmation and empty-composer-dependent injection are intentionally unconfirmed there until those backends expose a live Copilot identity probe.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 

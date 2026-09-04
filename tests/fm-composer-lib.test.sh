@@ -357,8 +357,8 @@ test_matrix_opencode_leftbar_signals() {
 test_matrix_copilot_halfbox_identityless_backends() {
   local screen typed
   screen=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀'
-  assert_screen "copilot empty half-box on zellij" empty "$CAPS_STYLED_NOID" "$screen"
-  assert_screen "copilot empty half-box on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  assert_screen "copilot empty half-box on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "copilot empty half-box on cmux/orca" unknown "$CAPS_PLAIN" "$screen"
   typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Build · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   assert_screen "copilot typed half-box on zellij" pending "$CAPS_STYLED_NOID" "$typed"
   assert_screen "copilot typed half-box on cmux/orca" pending "$CAPS_PLAIN" "$typed"
@@ -375,7 +375,7 @@ test_matrix_copilot_halfbox_identityless_backends() {
   typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃ fix login'
   assert_screen "copilot incomplete typed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
   assert_screen "copilot incomplete typed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
-  pass "matrix: identityless backends accept only complete Copilot half-boxes"
+  pass "matrix: identityless Copilot half-boxes stay unknown while typed content stays pending"
 }
 
 test_matrix_grok_titled_bottom_border() {
