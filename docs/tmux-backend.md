@@ -88,7 +88,8 @@ Text left in established structure remains `pending`, text in ambiguous structur
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).
 The verdicts above are delivery-critical only for the local typed plane - harness-native invocations and explicit backend targets - where `fm-send.sh` still never retypes or assumes a confirmed submit for an unconfirmed verdict; its header owns the distinct delivered-unconfirmed exit status and operator response.
 The `--key` path is separate from that typed plane, and the adapter constrains nothing on it: `fm_backend_tmux_send_key` passes the name straight to `tmux send-keys`, so the limit is tmux's own key table rather than the `fm-send.sh` path.
-Arrows, such as the ones needed to move a selection inside a harness confirmation dialog, therefore reach the pane exactly as written; Enter, Escape, and Ctrl-C are the only names this repository's own evidence exercises, and any other name is accepted or rejected by tmux itself.
+Arrows, such as the ones needed to move a selection inside a harness confirmation dialog, therefore reach the pane exactly as written; Enter, Escape, and Ctrl-C are the only names this repository's own evidence exercises, and any other name is resolved by tmux itself.
+That resolution has a third outcome beyond accept and reject: `tmux send-keys` documents that a string it does not recognize as a key is sent as a series of characters, so an unrecognized name is neither taken as a key nor refused but silently typed into the pane, and the composer contents are the only signal that it was.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
