@@ -434,6 +434,106 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+# A logged-in Codex home, from fm-spawn's point of view: a directory holding an
+# auth.json whose contents nothing reads.
+make_codex_home() {
+  local path=$1
+  mkdir -p "$path"
+  : > "$path/auth.json"
+  printf '%s\n' "$path"
+}
+
+test_codex_home_exports_selected_account_into_the_launch() {
+  local rec id out status launch codex_home
+  id=profile-codex-home-z3b
+  rec=$(make_spawn_case profile-codex-home codex "$id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "codex spawn naming a logged-in home should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep "codex_home=$codex_home" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the Codex home this task was dispatched against"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home' env -u CURSOR_AGENT" \
+    "codex launch did not export the selected Codex home into the worker environment"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"'" \
+    "exporting a Codex home changed the rest of the codex launch"
+  pass "a codex profile's Codex home is exported into that worker's launch and recorded"
+}
+
+test_codex_without_home_launches_unchanged() {
+  local rec id out status launch
+  id=profile-codex-nohome-z3c
+  rec=$(make_spawn_case profile-codex-nohome codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
+  status=$?
+  expect_code 0 "$status" "codex spawn without a named home should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "a profile with no home must not pin the worker to any Codex home"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" "codex_home=" \
+    "a profile with no home must not record one"
+  pass "a codex profile without a home launches exactly as before"
+}
+
+test_codex_home_refuses_unusable_paths_before_launch() {
+  local rec id out status label path expect
+  id=profile-codex-home-bad-z3d
+  rec=$(make_spawn_case profile-codex-home-bad codex "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/codex-never-logged-in"
+
+  while IFS='^' read -r label path expect; do
+    [ -n "$label" ] || continue
+    : > "$LAUNCH_LOG"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --codex-home "$CASE_DIR/$path")
+    status=$?
+    expect_code 1 "$status" "$label should refuse the spawn"
+    assert_contains "$out" "$expect" "$label refusal did not name the actionable problem"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$label refusal typed a launch command"
+  done <<'ROWS'
+missing codex home directory^codex-missing^--codex-home directory not found
+codex home with no login^codex-never-logged-in^has no auth.json
+ROWS
+
+  : > "$LAUNCH_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home relative/.codex)
+  status=$?
+  expect_code 1 "$status" "a relative Codex home should refuse the spawn"
+  assert_contains "$out" "--codex-home must be an absolute path" \
+    "relative Codex home refusal did not name the actionable problem"
+  assert_absent "$HOME_DIR/state/$id.meta" "relative Codex home refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "relative Codex home refusal typed a launch command"
+  pass "an unusable Codex home refuses the spawn instead of falling back to the default account"
+}
+
+test_codex_home_is_refused_for_other_harnesses() {
+  local rec id out status codex_home
+  id=profile-claude-home-z3e
+  rec=$(make_spawn_case profile-claude-home claude "$id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a non-codex harness carrying a Codex home should refuse the spawn"
+  assert_contains "$out" "--codex-home applies only to the codex harness" \
+    "non-codex refusal did not explain which axis was misapplied"
+  assert_absent "$HOME_DIR/state/$id.meta" "non-codex Codex home refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-codex Codex home refusal typed a launch command"
+  pass "only the codex harness accepts a Codex home"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -1103,6 +1203,10 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_home_exports_selected_account_into_the_launch
+test_codex_without_home_launches_unchanged
+test_codex_home_refuses_unusable_paths_before_launch
+test_codex_home_is_refused_for_other_harnesses
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

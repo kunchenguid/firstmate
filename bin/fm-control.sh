@@ -39,7 +39,10 @@
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
-#              already recorded for it.
+#              already recorded for it. A Codex home recorded for the task (see
+#              bin/fm-spawn.sh's --codex-home) is carried into a replacement on
+#              the same harness, so the task keeps the account it was dispatched
+#              against; a harness change drops it with the other profile axes.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -616,6 +619,7 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_CODEX_HOME=$(fm_meta_get "$META" codex_home)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -681,6 +685,14 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=$PRIOR_EFFORT
   else
     TARGET_EFFORT=default
+  fi
+  # A recorded Codex home is the ACCOUNT this task was dispatched against, so a
+  # replacement on the same harness stays on it. A harness change leaves it
+  # behind exactly like the model and effort axes.
+  if [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_CODEX_HOME=$PRIOR_CODEX_HOME
+  else
+    TARGET_CODEX_HOME=
   fi
 }
 
@@ -832,6 +844,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ -z "$TARGET_CODEX_HOME" ] || spawn_args+=(--codex-home "$TARGET_CODEX_HOME")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
