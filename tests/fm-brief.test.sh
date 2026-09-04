@@ -868,3 +868,38 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+
+test_scope_rule_is_present() {
+  local id="T-SCOPE"
+  local brief="$BRIEF_HOME/data/$id/brief.md"
+  rm -rf "$BRIEF_HOME/data/$id"
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" sample-project --mode local-only > /dev/null
+
+  assert_grep "The task as briefed is the whole scope." "$brief" \
+    "ship brief missing the bounded scope rule"
+  assert_grep "Work you discover mid-task that is not required to finish" "$brief" \
+    "ship brief missing the adjacent work rule"
+  assert_grep "Report it with a status line and keep going" "$brief" \
+    "ship brief missing the report but don't absorb rule"
+  assert_grep "Corrections genuinely" "$brief" \
+    "ship brief missing the carve-out for necessary corrections"
+
+  pass "ship brief includes the bounded scope rule"
+}
+
+test_scout_scope_rule_is_present() {
+  local id="T-SCOUT-SCOPE"
+  local brief="$BRIEF_HOME/data/$id/brief.md"
+  rm -rf "$BRIEF_HOME/data/$id"
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" sample-project --scout > /dev/null
+
+  assert_grep "The task as briefed is the whole scope." "$brief" \
+    "scout brief missing the bounded scope rule"
+  assert_grep "Work you discover mid-task that is not required to finish" "$brief" \
+    "scout brief missing the adjacent work rule"
+
+  pass "scout brief includes the bounded scope rule"
+}
+
+test_scope_rule_is_present
+test_scout_scope_rule_is_present
