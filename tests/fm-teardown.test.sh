@@ -1909,7 +1909,7 @@ SH
   assert_grep "descendant task child-b has a lifecycle action in flight" "$case_dir/stderr" \
     "descendant-locks: refusal did not name the contended descendant"
   [ ! -e "$home/state/.control-child-a.lock" ] \
-    && [ ! -e "$home/state/.meta-child-a.lock" ] \
+    && [ ! -e "$home/state/.locks/child-a/meta.lock" ] \
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal leaked earlier descendant locks"; }
   [ ! -s "$case_dir/kill.log" ] \
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal killed an endpoint"; }

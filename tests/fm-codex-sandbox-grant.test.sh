@@ -588,7 +588,7 @@ test_grant_survives_an_ampersand_in_the_project_path() {
 }
 
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
-  local rec out roots data_real state_real gitdir
+  local rec out roots data_real state_real gitdir lock_dir
   rec=$(make_case scout); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
@@ -596,26 +596,41 @@ test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
   data_real=$(cd "$HOME_DIR/data" && pwd -P)
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
   gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
-  printf '%s\n' "$roots" | grep -qxF "$data_real/$CASE_ID" \
-    || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
+  lock_dir="$state_real/.locks/$CASE_ID"
+  # A scout runs the captain-hold completion gate, whose lock protocol (the
+  # symlink, mktemp owner directories, .steal lock) lives entirely inside the
+  # task's OWN state/.locks/<id>/ directory (fm_meta_lock_path). The directory is
+  # unnameable in advance - mktemp suffixes and the lock symlink - so the
+  # DIRECTORY is granted, pre-created at spawn because a sandboxed scout cannot
+  # create it (that needs write on state/, the reach this layout removed).
+  [ -d "$lock_dir" ] \
+    || fail "the scout's task-scoped lock directory was not pre-created at spawn: $lock_dir"
   # A scout commits in the same LINKED worktree a ship does, so its git add needs
   # the same out-of-tree common dir. Pinned here because nothing else proves the
   # scout launch EMITS it: the sufficiency test never denies the git dir, and the
   # load-bearing test proves the root is needed, not that it is granted.
   printf '%s\n' "$roots" | grep -qxF "$gitdir" \
     || fail "the linked worktree's git common dir was not granted to the scout: $roots"
-  [ "$(count_roots "$LAUNCH_LOG")" = 3 ] \
-    || fail "expected exactly 3 granted scout roots, got: $roots"
-  # A scout runs the captain-hold completion gate, which creates a mktemp-named
-  # lock owner directory and a lock symlink directly in state/, so it needs write
-  # on the DIRECTORY - a per-file grant cannot serve those unnameable new entries.
-  # That same directory root is what covers its steering inbox, so a scout needs
-  # no separate inbox grant.
+  # The scout gets the same per-task state files and inbox a ship gets, plus its
+  # lock directory and its own data/<id>/ for the report and completion
+  # attestation - exactly six roots, never the shared state/ or data/ directories.
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.status" \
+    || fail "the scout's own status file was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.turn-ended" \
+    || fail "the scout's own turn-ended file was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.inbox" \
+    || fail "the scout's own steering inbox was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$lock_dir" \
+    || fail "a scout cannot pass the completion gate without its state/.locks/<id>/ grant: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$data_real/$CASE_ID" \
+    || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
+  [ "$(count_roots "$LAUNCH_LOG")" = 6 ] \
+    || fail "expected exactly 6 granted scout roots, got: $roots"
   printf '%s\n' "$roots" | grep -qxF "$state_real" \
-    || fail "a scout cannot pass the completion gate without the state directory grant: $roots"
+    && fail "a scout must not receive the shared state/ directory, only its own task paths: $roots"
   printf '%s\n' "$roots" | grep -qxF "$data_real" \
     && fail "a scout must not receive the shared data/ root, only its own data/<id>/: $roots"
-  pass "codex scout: the report, status, and completion-gate paths are all granted, and the shared data/ root is not"
+  pass "codex scout: status, turn-ended, inbox, task-scoped lock dir, own data/<id>/, and the git dir are granted; the shared state/ and data/ directories are not"
 }
 
 test_secondmate_grants_only_the_parent_status_file() {
@@ -700,11 +715,12 @@ deny_outside_roots() {  # <home> <granted roots...>
   done
 }
 
-# The same confinement narrowed to state/: deny write on every directory under it
-# that the grant did NOT name, which is how this fixture expresses "outside the
-# sandbox's writable roots" for a kind whose state grant is per-path rather than
-# the whole directory. Driven off the roots fm-spawn emitted, never a retyped list.
-deny_state_dirs_outside_roots() {  # <canonical state dir> <granted roots...>
+# The same confinement narrowed to one tree (state/ or data/): deny write on
+# every directory under it that the grant did NOT name, which is how this fixture
+# expresses "outside the sandbox's writable roots" for a kind whose grant is
+# per-path rather than the whole directory. Driven off the roots fm-spawn
+# emitted, never a retyped list.
+deny_subdirs_outside_roots() {  # <canonical dir> <granted roots...>
   local state=$1 d granted keep
   shift
   while IFS= read -r d; do
@@ -728,12 +744,14 @@ allow_all() { chmod -R u+w "$1" 2>/dev/null || true; }
 dac_confines() { [ "$(id -u 2>/dev/null || echo 0)" -ne 0 ]; }
 
 test_granted_set_is_sufficient_for_the_whole_contract() {
-  local rec out roots status_file report gitdir
+  local rec out roots status_file report gitdir state_real data_real
   rec=$(make_case sufficiency); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
   roots=$(granted_roots "$LAUNCH_LOG")
   gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  data_real=$(cd "$HOME_DIR/data" && pwd -P)
   status_file="$HOME_DIR/state/$CASE_ID.status"
   report="$HOME_DIR/data/$CASE_ID/report.md"
 
@@ -751,6 +769,14 @@ test_granted_set_is_sufficient_for_the_whole_contract() {
 
   # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
   deny_outside_roots "$HOME_DIR" $roots
+  # The scout grant names only its own task paths inside state/ and data/, so the
+  # confinement must deny those two trees the same way codex would: every
+  # subdirectory the grant did not name - including state/ and data/ themselves -
+  # becomes unwritable, while the granted task paths stay writable.
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_subdirs_outside_roots "$state_real" $roots
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_subdirs_outside_roots "$data_real" $roots
 
   echo "working: setup done" >> "$status_file" \
     || fail "a status append must survive the confinement"
@@ -767,7 +793,15 @@ test_granted_set_is_sufficient_for_the_whole_contract() {
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       "$CAPTAIN_HOLD" complete "$CASE_ID" "${CASE_ID}-call" 2>&1) \
       || fail "the captain-hold completion gate must survive the confinement: $out"
-    pass "granted set is sufficient: status append, report, captain-hold completion gate, and commit all succeed"
+    # The attestation the gate writes must have landed in the granted
+    # data/<id>/captain-review, and `verify` must accept it, both confined.
+    [ -f "$HOME_DIR/data/$CASE_ID/captain-review" ] \
+      || fail "the completion gate did not write its attestation under the granted data/<id>/"
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      "$CAPTAIN_HOLD" verify "$CASE_ID" >/dev/null 2>&1 \
+      || fail "the completion attestation must verify from the granted data/<id>/ while confined"
+    pass "granted set is sufficient: status append, report, captain-hold completion gate and attestation, and commit all succeed"
   else
     pass "granted set is sufficient: status append, report, and commit all succeed (captain-hold gate skipped: tasks-axi not found)"
   fi
@@ -799,12 +833,13 @@ test_each_root_is_load_bearing() {
   fi
   chmod -R u+w "$HOME_DIR/data"
 
-  # The state root: the completion gate's lock owner directory is mktemp-named,
-  # so it needs the DIRECTORY, which is why a per-file grant cannot serve it.
-  chmod a-w "$HOME_DIR/state"
-  if ( cd "$HOME_DIR/state" && mktemp -d ".meta-$CASE_ID.lock.owner.XXXXXX" ) >/dev/null 2>&1; then
+  # The task-scoped lock directory: the completion gate's lock owner directories
+  # are mktemp-named and the lock itself is a symlink, so the gate needs the
+  # DIRECTORY, which is why a per-file grant cannot serve it.
+  chmod a-w "$HOME_DIR/state/.locks/$CASE_ID"
+  if ( cd "$HOME_DIR/state/.locks/$CASE_ID" && mktemp -d "meta.lock.owner.XXXXXX" ) >/dev/null 2>&1; then
     chmod -R u+w "$HOME_DIR/state"
-    fail "the state root is not load-bearing in this fixture; the necessity assertion is vacuous"
+    fail "the lock-directory root is not load-bearing in this fixture; the necessity assertion is vacuous"
   fi
   chmod -R u+w "$HOME_DIR/state"
 
@@ -861,6 +896,58 @@ test_ship_grant_is_sufficient_and_isolates_siblings() {
   pass "ship grant is sufficient (status, turn-ended, commit) and isolates siblings: the shared state directory stays unwritable"
 }
 
+# The scout's completion gate needs a DIRECTORY it can create unnameable entries
+# in (mktemp owner dirs, the lock symlink), and the former grant satisfied that
+# with the whole shared state/ - which let one scout overwrite every OTHER
+# task's status, inbox, and lock records. The corrected grant scopes the gate to
+# the task's own state/.locks/<id>/. Prove the scout contract still runs entirely
+# inside its named roots while every sibling path - status, lock directory, and
+# report - stays out of reach.
+test_scout_grant_is_sufficient_and_isolates_siblings() {
+  local rec out roots state_real data_real
+  rec=$(make_case scout-suff); read_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
+  roots=$(granted_roots "$LAUNCH_LOG")
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  data_real=$(cd "$HOME_DIR/data" && pwd -P)
+
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_outside_roots "$HOME_DIR" $roots
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_subdirs_outside_roots "$state_real" $roots
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_subdirs_outside_roots "$data_real" $roots
+
+  # Own contract paths stay writable: the status append, the report, and a real
+  # meta-lock cycle through the granted task lock directory.
+  echo "working: setup done" >> "$state_real/$CASE_ID.status" \
+    || fail "a scout status append must survive the confinement"
+  printf '# report\n' > "$data_real/$CASE_ID/report.md" \
+    || fail "a scout report must be creatable under its granted data/<id>/"
+  FM_STATE_OVERRIDE="$state_real" bash -c '
+    . "$1"
+    lock=$(fm_meta_lock_path "$2")
+    fm_lock_try_acquire "$lock" || exit 3
+    [ -e "$lock" ] || exit 4
+    fm_lock_release "$lock" || exit 5
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state_real/$CASE_ID.meta" \
+    || fail "the completion gate's meta-lock cycle must run inside the granted state/.locks/<id>/"
+
+  # Isolation: sibling records in all three shared trees stay unwritable. These
+  # are discretionary-write-bit probes, so they only bind off root.
+  if dac_confines; then
+    ( exec 2>/dev/null; echo x > "$state_real/sibling.status" ) \
+      && { allow_all "$HOME_DIR"; fail "the scout grant reached a sibling task's status in state/"; }
+    ( exec 2>/dev/null; mkdir -p "$state_real/.locks/sibling" ) \
+      && { allow_all "$HOME_DIR"; fail "the scout grant reached the shared state/.locks/ tree to create a sibling lock directory"; }
+    ( exec 2>/dev/null; printf '# x\n' > "$data_real/sibling/report.md" ) \
+      && { allow_all "$HOME_DIR"; fail "the scout grant reached a sibling task's report in data/"; }
+  fi
+  allow_all "$HOME_DIR"
+  pass "scout grant is sufficient (status, report, meta-lock cycle) and isolates siblings: shared state/, state/.locks/, and data/ stay unwritable"
+}
+
 # The steering-inbox acknowledgement is part of EVERY brief kind (bin/fm-brief.sh
 # builds one INBOX_SECTION for all of them): the worker acknowledges a handled
 # steer by moving the record into state/<id>.inbox/handled/, and firstmate's
@@ -886,7 +973,7 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
   [ -n "$msg" ] || fail "the steering message was not enqueued"
 
   # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
-  deny_state_dirs_outside_roots "$state_real" $roots
+  deny_subdirs_outside_roots "$state_real" $roots
   mv "$msg" "$inbox/handled/" \
     || { allow_all "$HOME_DIR"; fail "a ship crewmate could not acknowledge a steer under its own grant"; }
   [ -f "$inbox/handled/$(basename "$msg")" ] \
@@ -923,6 +1010,7 @@ test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched
 test_ship_grant_is_sufficient_and_isolates_siblings
+test_scout_grant_is_sufficient_and_isolates_siblings
 test_ship_grant_covers_the_steering_inbox_acknowledgement
 test_granted_set_is_sufficient_for_the_whole_contract
 test_each_root_is_load_bearing

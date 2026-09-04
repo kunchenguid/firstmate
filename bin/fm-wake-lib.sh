@@ -369,8 +369,32 @@ fm_lock_abs_path() {
 }
 
 fm_lock_owner_dir() {
-  local lockdir=$1 lock_abs
-  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  local lockdir=$1 tail='' rest lock_abs parent
+  # Canonicalize through the deepest ancestor that already exists. On a first
+  # acquire the per-task lock directory fm_meta_lock_path nests under state/
+  # (.locks/<id>/) does not exist yet, and fm_lock_abs_path must not fail just
+  # for that - the mkdir below is what creates it.
+  rest=$lockdir
+  while [ ! -d "$rest" ]; do
+    case "$rest" in
+      */*) tail="/${rest##*/}$tail"; rest=${rest%/*} ;;
+      *) return 1 ;;
+    esac
+  done
+  lock_abs=$(fm_lock_abs_path "$rest") || return 1
+  lock_abs="$lock_abs$tail"
+  parent=${lock_abs%/*}
+  if [ ! -d "$parent" ]; then
+    # fm_meta_lock_path nests each task's lock inside a per-task directory. The
+    # state directory itself always exists (the meta inside it does), so the only
+    # components this can create are that .locks tree. Creation on first acquire
+    # keeps every pre-existing home working without a migration; a sandboxed
+    # worker must NEVER rely on it - codex grants it no write on the state
+    # directory - so bin/fm-spawn.sh pre-creates and grants the per-task
+    # directory instead, and the [ -d ] guard above keeps the sandboxed path
+    # from even attempting a denied mkdir once it is there.
+    mkdir -p -- "$parent" 2>/dev/null || return 1
+  fi
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
@@ -1056,7 +1080,16 @@ fm_meta_lock_path() {
   case "$id" in
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
-  printf '%s/.meta-%s.lock\n' "$dir" "$id"
+  # The whole lock protocol - the lock symlink, the mktemp-named owner
+  # directories fm_lock_owner_dir creates beside it, and the .steal lock - lives
+  # beside the lock path, so the per-task DIRECTORY component is what scopes it:
+  # every entry one task's lock protocol ever creates stays inside
+  # <dir>/.locks/<id>/, where a task-scoped grant can cover it. The former flat
+  # "<dir>/.meta-<id>.lock" layout put those artifacts in the shared state
+  # directory itself, which is why a codex scout's completion gate could not run
+  # without a grant on all of state/ - and that grant reached every sibling
+  # task's status, inbox, and watcher records.
+  printf '%s/.locks/%s/meta.lock\n' "$dir" "$id"
 }
 
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,

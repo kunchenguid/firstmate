@@ -1416,17 +1416,26 @@ pi_supports_tui_mode() {
 #     directory rather than a file because the record names are allocated by
 #     firstmate after launch and cannot be named ahead of time; it is still the
 #     task's own path, strictly narrower than state/. The inbox and its handled/
-#     are created here so the root resolves at launch. A scout needs no separate
-#     inbox root: state/ already covers it.
-#   scout: state/ itself (a whole DIRECTORY root), because the captain-hold
-#     completion gate the scout runs creates a mktemp-named lock owner directory
-#     AND a lock symlink directly in state/ (fm_lock_owner_dir / fm_meta_lock_path
-#     in bin/fm-wake-lib.sh); creating a new entry there needs write on the
-#     directory and neither the mktemp suffix nor the symlink can be named ahead
-#     of time. Plus the task's OWN data/<id>/ for the report at data/<id>/report.md
-#     - NOT the shared data/ root (report.md does not exist at launch while the
-#     data/<id>/ dir holding brief.md already does), so every other task's report
-#     and the shared backlog stay out of a mistaken command's reach.
+#     are created here so the root resolves at launch.
+#   scout: the SAME per-task state set a ship crewmate gets - status file,
+#     turn-ended marker (its codex notify hook is armed exactly like a ship's),
+#     steering inbox - plus two DIRECTORY roots a ship never needs:
+#     state/.locks/<id>/ for the completion gate, and its own data/<id>/ for the
+#     report at data/<id>/report.md. The captain-hold gate the scout runs takes
+#     the task's metadata lock, and that whole lock protocol (the lock symlink,
+#     fm_lock_owner_dir's mktemp-named owner directories, the .steal lock) lives
+#     inside state/.locks/<id>/ (fm_meta_lock_path in bin/fm-wake-lib.sh); the
+#     mktemp suffixes and the lock symlink cannot be named ahead of time, so the
+#     DIRECTORY is what gets granted and pre-created here, never files inside
+#     it. The completion attestation itself is written to
+#     data/<origin>/captain-review (bin/fm-captain-hold.sh), so neither the
+#     gate's lock nor its attestation needs any write on the shared state/
+#     directory. The former whole-state/ scout grant is gone on purpose: it made
+#     the gate work, but it let one scout overwrite every OTHER task's status,
+#     inbox, lock, and watcher records. data/<id>/ - not the shared data/ root
+#     (report.md does not exist at launch while the data/<id>/ dir holding
+#     brief.md already does) - keeps every other task's report and the shared
+#     backlog out of a mistaken command's reach.
 #   secondmate: only the parent's state/<id>.status file (see below).
 #   the task worktree's git COMMON dir (ship + scout), which for a pooled worktree
 #     lives inside the primary checkout: without it `git add` is denied, so a codex
@@ -1453,17 +1462,17 @@ pi_supports_tui_mode() {
 # Two DIFFERENT things can be a symlink here, and they are not the same threat.
 # Do not collapse them.
 #   A link planted INSIDE a task's own state or data path, pointing outward, is
-#   HOSTILE and is refused. A codex SCOUT holds state/ wholesale, so one mistaken
-#   command there can leave state/<other-id>.status or state/<other-id>.inbox as a
-#   link; without invariant 1 the NEXT ship or secondmate spawn of that id would
-#   resolve the link and hand its worker the TARGET as a writable root, and would
-#   create through it. Observed: with state/<id>.inbox linked to the home, the
-#   composed launch granted $FM_HOME itself.
+#   HOSTILE and is refused. A codex worker holds write on its own granted state
+#   and data paths, so one mistaken command there can leave a granted path - or
+#   a sibling of it, inside a granted DIRECTORY root such as the task's inbox or
+#   its .locks/<id>/ - as a link; without invariant 1 the NEXT ship or
+#   secondmate spawn of that id would resolve the link and hand its worker the
+#   TARGET as a writable root, and would create through it. Observed: with
+#   state/<id>.inbox linked to the home, the composed launch granted $FM_HOME
+#   itself.
 #   The CONTAINER itself being reached through a link is ordinary operator layout,
 #   NOT an attack, so it is canonicalized and allowed exactly as the worktree and
-#   git common dir already are. A scout's own root IS the state directory, so
-#   refusing the container would refuse the scout kind alone for a directory the
-#   operator deliberately created. That asymmetry is not reachable for $STATE
+#   git common dir already are. That asymmetry is not reachable for $STATE
 #   today - fm_backlog_directory_present already refuses a symlinked state
 #   directory for EVERY spawn, kind and harness alike, long before this function
 #   runs - so this exemption is about keeping the stance coherent rather than
@@ -1634,7 +1643,7 @@ codex_precreate_root_dir() {  # <container> <dir> <create>
 
 codex_writable_roots() {  # <kind> <worktree> <project> <id>; prints one absolute root per line
   local kind=$1 worktree=$2 project=$3 id=$4 wt_real gitdir project_gitdir status_file turnend_file
-  local inbox_dir
+  local inbox_dir meta_lock_dir
   status_file="$STATE/$id.status"
   inbox_dir=$(fm_task_inbox_dir "$STATE" "$id")
   # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
@@ -1652,17 +1661,28 @@ codex_writable_roots() {  # <kind> <worktree> <project> <id>; prints one absolut
     codex_root_real "$STATE" "$inbox_dir" || return 1
     return 0
   fi
+  turnend_file="$STATE/$id.turn-ended"
+  codex_precreate_root_file "$STATE" "$status_file" || return 1
+  codex_precreate_root_file "$STATE" "$turnend_file" || return 1
+  codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
+  codex_root_real "$STATE" "$status_file" || return 1
+  codex_root_real "$STATE" "$turnend_file" || return 1
+  codex_root_real "$STATE" "$inbox_dir" || return 1
   if [ "$kind" = scout ]; then
-    codex_root_real "$STATE" "$STATE" || return 1
+    # The completion gate's whole lock protocol lives inside the task's OWN lock
+    # directory (fm_meta_lock_path in bin/fm-wake-lib.sh). The directory is
+    # pre-created and granted here because a sandboxed scout cannot create it:
+    # that needs write on the shared state directory, which is exactly the
+    # reach this per-task layout removed. fm_lock_owner_dir's [ -d ] guard then
+    # never even attempts a denied mkdir when the gate takes the lock.
+    meta_lock_dir=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
+    meta_lock_dir=${meta_lock_dir%/*}
+    codex_precreate_root_dir "$STATE" "$meta_lock_dir" "$meta_lock_dir" || return 1
+    codex_root_real "$STATE" "$meta_lock_dir" || return 1
+    # The report and the completion attestation (data/<id>/report.md and
+    # data/<id>/captain-review, bin/fm-captain-hold.sh) both land under the
+    # task's own data directory, never the shared data/ root.
     codex_root_real "$DATA" "$DATA/$id" || return 1
-  else
-    turnend_file="$STATE/$id.turn-ended"
-    codex_precreate_root_file "$STATE" "$status_file" || return 1
-    codex_precreate_root_file "$STATE" "$turnend_file" || return 1
-    codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
-    codex_root_real "$STATE" "$status_file" || return 1
-    codex_root_real "$STATE" "$turnend_file" || return 1
-    codex_root_real "$STATE" "$inbox_dir" || return 1
   fi
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
   gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
@@ -1754,7 +1774,14 @@ launch_template() {
     # cannot silently drop a crewmate back to interactive prompting. The
     # remaining triggers are plan/model/server-side; the harness-adapters skill
     # documents the resulting dialog so a degraded worker is recognizable.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # The feedback controls are independent of that permission posture and stay
+    # layered on: CLAUDE_CODE_SEND_FEEDBACK=0 and the settings-level
+    # feedbackDrafts=off keep a fleet worker from queueing or submitting a
+    # /bug or /feedback report on the captain's behalf, so changing the
+    # permission mode did not retire either one.
+    # documents the resulting dialog so a degraded worker is recognizable.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # -s workspace-write -a never replaces --dangerously-bypass-approvals-and-sandbox:
     # the worker runs under codex's OWN filesystem sandbox and never prompts,
     # instead of running with both switched off. workspace-write confines writes
@@ -1890,6 +1917,10 @@ launch_template() {
   esac
 }
 
+# Resolve a raw launch command's leading executable under the conservative
+# grammar above. Prints the resolved WORDS one per line, executable first, so a
+# caller can also inspect the flags that ride the launch; the syntax precheck
+# refuses raw input containing newlines, so the line split is lossless.
 raw_launch_executable() {
   case "$1" in
     *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'*'*|*'?'*|*'['*|*']'*|*'{'*|*'}'*|*'~'*|*$'\n'*|*$'\r'*) return 2 ;;
@@ -1920,7 +1951,7 @@ raw_launch_executable() {
     exit 2 if $index >= @words || $words[$index] eq q{env};
     exit 2 if $words[$index] =~ m{/(?:bash|csh|dash|deno|env|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z};
     exit 2 if $words[$index] =~ /\A(?:bash|command|csh|dash|deno|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z/;
-    print $words[$index], qq{\n};
+    print join(qq{\n}, @words[$index .. $#words]), qq{\n};
   ' -- "$1"
 }
 
@@ -1930,11 +1961,12 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     raw_executable_status=0
-    raw_executable=$(raw_launch_executable "$LAUNCH") || raw_executable_status=$?
+    raw_launch_words=$(raw_launch_executable "$LAUNCH") || raw_executable_status=$?
     if [ "$raw_executable_status" -eq 2 ]; then
       echo "error: raw launch command is not a direct executable or supported bare env wrapper, so its executable cannot be verified for the cursor unattended-launch bar; shell expansion syntax, absolute wrappers, and env --split-string/-S are refused" >&2
       exit 1
     fi
+    raw_executable=${raw_launch_words%%$'\n'*}
     [ -z "$raw_executable" ] || HARNESS=$(basename "$raw_executable")
     # Cursor installs a legacy alias named `agent` alongside cursor-agent, and that
     # basename is far too generic to add to any adapter table by name. But a raw
@@ -1951,6 +1983,31 @@ case "$ARG3" in
         && fm_cursor_verify_executable "$agent_candidate"; then
         HARNESS=cursor-agent
       fi
+    fi
+    # A recognized cursor launch is refused outright when its own flags defeat
+    # the confinement the cursor posture promises. The verified template keeps
+    # --force and --yolo out of the command because either one overrides
+    # --auto-review --sandbox enabled at any flag order (measured, cursor-agent
+    # 2026.08.25), so a raw `cursor-agent --force ...` would launch with the
+    # sandbox off while the record, the grant, and the control plane all treat
+    # the task as cursor-confined. Refusing here names the flags rather than
+    # stripping them: a launch whose meaning the caller edited behind the
+    # posture is not a launch firstmate can vouch for.
+    raw_cursor_family=0
+    if [ -n "$HARNESS" ] && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; then
+      raw_cursor_family=1
+    fi
+    if [ "$raw_cursor_family" -eq 1 ]; then
+      while IFS= read -r raw_word; do
+        case "$raw_word" in
+          --force|--yolo)
+            echo "error: raw cursor launch passes --force/--yolo, which overrides the --auto-review --sandbox enabled confinement at any flag order; a cursor launch must keep the sandbox controls the verified template enforces, so drop the flag or launch the template cursor harness instead" >&2
+            exit 1
+            ;;
+        esac
+      done <<EOF
+$raw_launch_words
+EOF
     fi
     ;;
   '')

@@ -300,7 +300,7 @@ test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock); err="$dir/send.err"
   marker="$dir/meta-lock-held"
-  lock="$dir/home/state/.meta-t1.lock"
+  lock="$dir/home/state/.locks/t1/meta.lock"
   bash -c '
     . "$1"
     fm_lock_acquire_wait "$2"

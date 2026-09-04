@@ -1574,7 +1574,7 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous() {
   dir=$(new_case continuous-meta-lock rl38)
   add_ship_task "$dir" rl38 claude
   printf 'zsh' > "$dir/fake/command"
-  lock="$dir/home/state/.meta-rl38.lock"
+  lock="$dir/home/state/.locks/rl38/meta.lock"
   mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash

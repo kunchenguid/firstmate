@@ -216,11 +216,12 @@ printf 'ok - %s enforces exactly the granted writable roots, and the launch flag
 #
 # The gate is the one contract clause the two halves above do not touch, and it
 # is the clause that fails DIFFERENTLY: it does not just append to a file, it
-# CREATES new entries in state/ (a lock symlink plus a mktemp-named owner
-# directory), which is why a scout's grant must name the state DIRECTORY and not
-# the two per-task files a ship crewmate gets. A run under `codex sandbox` proves
-# the vendor's own policy admits those unnameable new entries, which no portable
-# chmod confinement can establish.
+# CREATES new entries (the lock symlink plus mktemp-named owner directories)
+# inside the task's own state/.locks/<id>/ directory (fm_meta_lock_path), whose
+# names mktemp and the symlink make unnameable ahead of time - which is why the
+# scout's grant must name that DIRECTORY rather than any file in it. A run under
+# `codex sandbox` proves the vendor's own policy admits those unnameable new
+# entries, which no portable chmod confinement can establish.
 
 if ! command -v tasks-axi >/dev/null 2>&1; then
   printf 'not ok - tasks-axi not found; the captain-hold half of this guard refuses to pass unchecked\n' >&2
@@ -241,6 +242,15 @@ hold_probe="$LAB/hold.sh"
 cat > "$hold_probe" <<'SH'
 #!/bin/bash
 # <root> <fm home> <origin id> <call id>
+# The gate's every unnameable write lands in the task's lock directory
+# (state/.locks/<id>/). If that directory is not writable the gate cannot even
+# take its lock - report it denied instead of letting fm_lock_acquire_wait spin
+# forever against a permanently denied directory.
+if ! probe=$(mktemp "$2/state/.locks/$3/.hold-probe.XXXXXX" 2>/dev/null); then
+  printf 'hold:denied the sandbox denies writing the task lock directory\n'
+  exit 0
+fi
+rm -f "$probe"
 if out=$(FM_ROOT_OVERRIDE="$1" FM_HOME="$2" \
     FM_STATE_OVERRIDE="$2/state" FM_DATA_OVERRIDE="$2/data" \
     "$1/bin/fm-captain-hold.sh" complete "$3" "$4" 2>&1); then
@@ -252,7 +262,7 @@ SH
 chmod +x "$hold_probe"
 
 # Ungranted first: the gate must be the thing the bare sandbox breaks, otherwise
-# this half is vacuous and the scout's directory-wide grant is unjustified.
+# this half is vacuous and the scout's task-scoped grant is unjustified.
 out=$(cd "$WT" && codex sandbox -c sandbox_mode='"workspace-write"' \
   -- "$hold_probe" "$ROOT" "$HOME_DIR" "$ID" "$ID-call" 2>/dev/null)
 case "$out" in
@@ -272,7 +282,7 @@ printf 'ok - %s admits the captain-hold completion gate under the granted roots 
 
 # --- 4. The FILE form of a writable root, against the real binary -----------
 #
-# Sections 1-3 all ran on a SCOUT launch, whose three roots are directories. A
+# Sections 1-3 all ran on a SCOUT launch, whose named roots are directories. A
 # ship crewmate's grant differs in kind: its two state roots are single FILES,
 # and codex documents the flag as `--add-dir <DIR>`. That the vendor accepts a
 # non-directory argument AND confines the grant to that one file is the

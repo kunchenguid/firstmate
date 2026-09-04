@@ -111,11 +111,17 @@
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still be durable and no keyed status decision may be open.
-# Metadata compatibility: the attestation keeps the historical
-# `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
-# names no existing task resolves through the legacy `<origin>-decision-<entry>`
-# identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
-# unchanged. An entry that exists as a task id is always that task.
+# Record compatibility: the attestation lives at `data/<origin>/captain-review`
+# in the same two-key shape the meta once carried. It moved out of
+# `state/<origin>.meta` because the codex scout that runs this gate inside
+# codex's sandbox holds no grant on its identity record - and cannot get one:
+# that record does not even exist yet when the sandboxed agent starts. A record
+# file that does not exist yet falls back to reading the historical
+# `decisions_reviewed=1` and `decision_keys=` meta keys, so completions
+# attested before the move verify unchanged, and an inventory entry that
+# names no existing task still resolves through the legacy
+# `<origin>-decision-<entry>` identity written by fm-decision-hold.sh. An
+# entry that exists as a task id is always that task.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -347,6 +353,40 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# The durable record of one origin's completed captain-call inventory review.
+# It lives in the origin's own data/<id>/ directory - the directory a codex
+# scout's writable-root grant already covers for its report - rather than in
+# the identity record the gate may never write through the sandbox. See the
+# record-compatibility note in the header.
+inventory_review_path() {  # <origin-id>
+  printf '%s/%s/captain-review' "$DATA" "$1"
+}
+
+# Read one attestation key for <origin>: the current record first, then the
+# legacy state/<origin>.meta keys written before the record moved.
+inventory_value() {  # <origin-id> <key>
+  local record
+  record=$(inventory_review_path "$1")
+  if [ -f "$record" ]; then
+    meta_value "$record" "$2"
+  else
+    meta_value "$STATE/$1.meta" "$2"
+  fi
+}
+
+# Write the attestation loudly. A record this gate could not write is a
+# completion that did not happen: command_verify would later refuse the
+# origin's teardown with "no completed captain-call inventory", so a silent
+# skip here would trade a clear refusal now for a confusing one at teardown.
+inventory_review_write() {  # <origin-id> <keys>
+  local record dir
+  record=$(inventory_review_path "$1")
+  dir=${record%/*}
+  mkdir -p -- "$dir" 2>/dev/null || fail "could not create $dir for the captain-call inventory review"
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$2" >> "$record" \
+    || fail "could not record the captain-call inventory review at $record"
 }
 
 origin_open_decisions() {  # <origin-id>
@@ -892,7 +932,7 @@ command_complete() {
     done
   fi
   if [ "$has_meta" = 1 ]; then
-    previous=$(meta_value "$meta" decision_keys)
+    previous=$(inventory_value "$origin" decision_keys)
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
@@ -912,8 +952,8 @@ EOF
   fi
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+    if [ "$(inventory_value "$origin" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
+      inventory_review_write "$origin" "$keys"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
@@ -946,9 +986,9 @@ command_verify() {
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
   require_tasks_axi
-  reviewed=$(meta_value "$meta" decisions_reviewed)
+  reviewed=$(inventory_value "$origin" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
-  keys=$(meta_value "$meta" decision_keys)
+  keys=$(inventory_value "$origin" decision_keys)
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue

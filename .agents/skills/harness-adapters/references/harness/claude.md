@@ -12,10 +12,12 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
-| Autonomy | `--permission-mode auto`, so the worker runs under Claude's own classifier rather than `--dangerously-skip-permissions`, which bypassed every check. The spawn also sets `CLAUDE_CODE_DISABLE_FAST_MODE=1`; see "Auto mode" below. |
+| Autonomy | `--permission-mode auto`, so the worker runs under Claude's own classifier rather than `--dangerously-skip-permissions`, which bypassed every check. The spawn also sets `CLAUDE_CODE_DISABLE_FAST_MODE=1`; see "Auto mode" below. It layers `CLAUDE_CODE_SEND_FEEDBACK=0` and a settings file of `{"feedbackDrafts":"off"}` on top, so a fleet worker cannot queue or submit a `/bug` or `/feedback` report on the captain's behalf. |
 
 Fresh-worktree or first-machine launch may show the workspace-trust confirmation.
-That is the only launch surface that still requires a keypress: inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
+Never answer it with a sent key: the dialog's selection cursor sits on `No, exit`, so a sent Enter submits the exit choice and terminates the worker (the verified capture in `../../../docs/verification/runtime-backends.md` shows exactly that default).
+The spawn pre-registers the worktree in the launching user's own Claude trust store through `../../../bin/fm-claude-trust.sh`, so a crewmate should never meet the dialog.
+When one still appears - a Claude secondmate home Claude has never trusted is the known case, because the spawn's pre-registration deliberately skips that kind - treat the worker as blocked and let a human answer the dialog in the pane; no key firstmate sends can accept trust.
 The bypass-permissions confirmation can no longer appear, because Firstmate no longer passes `--dangerously-skip-permissions`.
 Claude's auto-mode entry warning and its auto-mode-unavailable notice are transcript NOTIFICATIONS, not choices, and they need no acknowledgement.
 Never send Enter for either one: the pane is already running, so that keystroke lands in the worker's composer.

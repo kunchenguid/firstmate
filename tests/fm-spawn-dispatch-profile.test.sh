@@ -131,9 +131,9 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  pass "no --model/--effort records defaults and types the claude launch instructions with its feedback controls"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -484,6 +484,39 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
   pass "a raw agent alias is resolved through the verified cursor owner and held to the cursor bar"
 }
 
+# A raw cursor-family launch that carries --force (or its --yolo alias) would
+# disable cursor's own sandbox while every record and control plane still treats
+# the task as cursor-confined (measured on cursor-agent 2026.08.25: --force
+# overrides --auto-review --sandbox enabled at any flag order). The
+# classification must refuse such a launch by name before any cursor bar runs,
+# while the same flag on an unverified NON-cursor raw launch stays on the
+# documented escape hatch.
+test_raw_cursor_launch_refuses_sandbox_defeating_flags() {
+  local rec id out status
+  id=profile-raw-cursor-force-z17
+  rec=$(make_spawn_case profile-raw-cursor-force claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cursor-agent -p --force")
+  status=$?
+  expect_code 1 "$status" "a raw cursor launch passing --force must refuse"
+  assert_contains "$out" "--force/--yolo" \
+    "the --force refusal must name the flag and the confinement it would defeat"
+  assert_contains "$out" "--auto-review --sandbox enabled" \
+    "the --force refusal must name the cursor posture it overrides"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused raw cursor launch must not compose a launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --force")
+  status=$?
+  expect_code 0 "$status" "the same flag on an unverified non-cursor raw launch must stay on the escape hatch"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "the refusal must be scoped to the cursor family, not to the flag itself"
+  pass "a raw cursor launch carrying --force/--yolo is refused by name before any cursor bar runs"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -495,9 +528,11 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
+  assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0" \
+    "claude launch lost the feedback-submission control when threading profile flags"
   pass "claude receives --model and --effort profile flags"
 }
 
@@ -1153,6 +1188,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_agent_alias_resolves_to_the_cursor_bar
+test_raw_cursor_launch_refuses_sandbox_defeating_flags
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
