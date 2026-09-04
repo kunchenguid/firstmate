@@ -171,17 +171,23 @@ cmd_arm() {
 }
 
 cmd_retire() {
-  local artifact=${1-} id state pending
+  local artifact=${1-} id state pending inflight
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || exit 1
   if [ -e "$STATE" ] && state=$(fm_procevent_state_root_resolve "$STATE"); then
     STATE=$state
     pending=$(pending_reply_path "$id")
+    inflight=$(inflight_reply_path "$id")
     if [ -e "$pending" ] || [ -L "$pending" ]; then
       pending_reply_is_private "$pending" \
         || die "retired source left an unsafe pending reply path: $id"
       rm -f -- "$pending" || die "cannot remove retired source reply: $id"
+    fi
+    if [ -e "$inflight" ] || [ -L "$inflight" ]; then
+      pending_reply_is_private "$inflight" \
+        || die "retired source left an unsafe in-flight reply path: $id"
+      rm -f -- "$inflight" || die "cannot remove retired in-flight reply: $id"
     fi
   fi
 }
@@ -190,10 +196,30 @@ pending_reply_path() {  # <source-id>
   printf '%s/%s.pending-reply\n' "$(fm_procevent_registry_dir "$STATE")" "$1"
 }
 
+inflight_reply_path() {  # <source-id>
+  printf '%s/%s.inflight-reply\n' "$(fm_procevent_registry_dir "$STATE")" "$1"
+}
+
 pending_reply_is_private() {  # <path>
   [ -f "$1" ] && [ ! -L "$1" ] \
     && [ "$(fm_pr_file_mode "$1" 2>/dev/null)" = 600 ] \
     && [ "$(fm_pr_file_link_count "$1" 2>/dev/null)" = 1 ]
+}
+
+append_reply_files() {  # <older-path> <newer-path> <output-path>
+  perl -0777 -e '
+    use strict;
+    use warnings;
+    my ($old_path, $new_path) = @ARGV;
+    open my $old, "<", $old_path or exit 1;
+    open my $new, "<", $new_path or exit 1;
+    local $/;
+    my $old_text = <$old>;
+    my $new_text = <$new>;
+    $old_text =~ s/\n+\z//;
+    $new_text =~ s/\A\n+//;
+    print $old_text, "\n\n", $new_text;
+  ' "$1" "$2" > "$3"
 }
 
 cmd_reply() {
@@ -244,19 +270,7 @@ cmd_reply() {
       fm_procevent_source_lock_release "$id"
       die "pending reply is not a private regular file: $id"
     fi
-    if ! perl -0777 -e '
-      use strict;
-      use warnings;
-      my ($old_path, $new_path) = @ARGV;
-      open my $old, "<", $old_path or exit 1;
-      open my $new, "<", $new_path or exit 1;
-      local $/;
-      my $old_text = <$old>;
-      my $new_text = <$new>;
-      $old_text =~ s/\n+\z//;
-      $new_text =~ s/\A\n+//;
-      print $old_text, "\n\n", $new_text;
-    ' "$pending" "$input" > "$staged"; then
+    if ! append_reply_files "$pending" "$input" "$staged"; then
       rm -f -- "$staged"
       fm_procevent_source_lock_release "$id"
       die "cannot append pending reply"
@@ -286,37 +300,90 @@ cmd_reply() {
   printf 'reply staged: %s\n' "$id"
 }
 
+recover_inflight_reply_locked() {  # <source-id> <registry-dir>
+  local id=$1 reg=$2 pending inflight staged
+  pending=$(pending_reply_path "$id")
+  inflight=$(inflight_reply_path "$id")
+  [ -e "$inflight" ] || [ -L "$inflight" ] || return 0
+  pending_reply_is_private "$inflight" \
+    || die "in-flight reply is not a private regular file: $id"
+  if [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
+    mv -- "$inflight" "$pending" || die "cannot recover in-flight reply: $id"
+    return 0
+  fi
+  pending_reply_is_private "$pending" \
+    || die "pending reply is not a private regular file: $id"
+  staged=$(umask 077; mktemp "$reg/.pending-reply.XXXXXX") \
+    || die "cannot stage recovered reply: $id"
+  if ! append_reply_files "$inflight" "$pending" "$staged"; then
+    rm -f -- "$staged"
+    die "cannot append recovered reply: $id"
+  fi
+  chmod 0600 "$staged" || {
+    rm -f -- "$staged"
+    die "cannot protect recovered reply: $id"
+  }
+  mv -f -- "$staged" "$pending" || {
+    rm -f -- "$staged"
+    die "cannot publish recovered reply: $id"
+  }
+  rm -f -- "$inflight" || die "cannot finish in-flight reply recovery: $id"
+}
+
+restore_inflight_reply() {  # <source-id>
+  local id=$1 reg
+  reg=$(fm_procevent_registry_dir "$STATE")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  recover_inflight_reply_locked "$id" "$reg"
+  fm_procevent_source_lock_release "$id"
+}
+
+commit_inflight_reply() {  # <source-id>
+  local id=$1 inflight
+  inflight=$(inflight_reply_path "$id")
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if [ -e "$inflight" ] || [ -L "$inflight" ]; then
+    pending_reply_is_private "$inflight" || {
+      fm_procevent_source_lock_release "$id"
+      die "in-flight reply is not a private regular file: $id"
+    }
+    rm -f -- "$inflight" || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot commit in-flight reply: $id"
+    }
+  fi
+  fm_procevent_source_lock_release "$id"
+}
+
 take_pending_reply() {  # <artifact>
-  local artifact=$1 id reg pending claimed
+  local artifact=$1 id reg pending inflight
   POLL_AGENT_REPLY=
+  POLL_REPLY_SOURCE_ID=
   [ -e "$STATE" ] || return 1
   STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
   reg=$(fm_procevent_registry_dir "$STATE")
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
   id=$(cmd_source_id "$artifact") || return 1
   pending=$(pending_reply_path "$id")
-  [ -e "$pending" ] || [ -L "$pending" ] || return 1
+  inflight=$(inflight_reply_path "$id")
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  recover_inflight_reply_locked "$id" "$reg"
+  if [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
+    fm_procevent_source_lock_release "$id"
+    return 1
+  fi
   if ! pending_reply_is_private "$pending"; then
     fm_procevent_source_lock_release "$id"
     die "pending reply is not a private regular file: $id"
   fi
-  claimed=$(umask 077; mktemp "$reg/.consuming-reply.XXXXXX") || {
-    fm_procevent_source_lock_release "$id"
-    die "cannot claim pending reply"
-  }
-  if ! mv -f -- "$pending" "$claimed"; then
-    rm -f -- "$claimed"
+  if ! mv -- "$pending" "$inflight"; then
     fm_procevent_source_lock_release "$id"
     die "cannot claim pending reply"
   fi
   fm_procevent_source_lock_release "$id"
-  POLL_AGENT_REPLY=$(cat -- "$claimed") || {
-    rm -f -- "$claimed"
-    die "cannot read claimed reply"
-  }
-  rm -f -- "$claimed" || die "cannot consume claimed reply"
+  POLL_AGENT_REPLY=$(cat -- "$inflight") || die "cannot read claimed reply"
   [ -n "$POLL_AGENT_REPLY" ] || die "claimed reply text is empty"
+  POLL_REPLY_SOURCE_ID=$id
   return 0
 }
 
@@ -327,6 +394,7 @@ take_pending_reply() {  # <artifact>
 POLL_RETRY_LIMIT=12
 POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MAX=60
+POLL_REPLY_GRACE_TICKS=100
 
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
 # response must be those two lines with those exact bytes: whitespace variants,
@@ -398,7 +466,7 @@ poll_retry_delay() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response poll_pipe cleanup_command rc filter_rc
-  local poll_pid='' filter_pid='' restart_signal=''
+  local poll_pid='' filter_pid='' restart_signal='' grace_tick reply_claimed
   local -a poll_argv
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
@@ -425,12 +493,22 @@ cmd_poll() {
     # shellcheck disable=SC2064 # Bind this iteration's signal name now.
     trap "forward_poll_signal $signal" "$signal"
   done
-  poll_argv=(poll "$artifact")
-  if take_pending_reply "$artifact"; then
-    poll_argv+=(--agent-reply "$POLL_AGENT_REPLY")
-  fi
   while :; do
     if [ -n "$restart_signal" ]; then
+      case "$restart_signal" in
+        HUP) return 129 ;;
+        INT) return 130 ;;
+        TERM) return 143 ;;
+      esac
+    fi
+    poll_argv=(poll "$artifact")
+    reply_claimed=0
+    if take_pending_reply "$artifact"; then
+      poll_argv+=(--agent-reply "$POLL_AGENT_REPLY")
+      reply_claimed=1
+    fi
+    if [ -n "$restart_signal" ]; then
+      [ "$reply_claimed" -eq 0 ] || restore_inflight_reply "$POLL_REPLY_SOURCE_ID"
       case "$restart_signal" in
         HUP) return 129 ;;
         INT) return 130 ;;
@@ -441,6 +519,20 @@ cmd_poll() {
     poll_pid=$!
     poll_response_filter "$response" < "$poll_pipe" &
     filter_pid=$!
+    if [ "$reply_claimed" -eq 1 ]; then
+      grace_tick=0
+      while [ "$grace_tick" -lt "$POLL_REPLY_GRACE_TICKS" ] \
+        && [ -z "$restart_signal" ] && kill -0 "$poll_pid" 2>/dev/null; do
+        sleep 0.05
+        grace_tick=$((grace_tick + 1))
+      done
+      if [ "$grace_tick" -eq "$POLL_REPLY_GRACE_TICKS" ] \
+        && [ -z "$restart_signal" ] && kill -0 "$poll_pid" 2>/dev/null; then
+        commit_inflight_reply "$POLL_REPLY_SOURCE_ID"
+      else
+        restore_inflight_reply "$POLL_REPLY_SOURCE_ID"
+      fi
+    fi
     wait "$poll_pid"
     rc=$?
     if [ -n "$restart_signal" ]; then
@@ -457,7 +549,6 @@ cmd_poll() {
         TERM) return 143 ;;
       esac
     fi
-    poll_argv=(poll "$artifact")
     case "$filter_rc" in
       0) break ;;
       10)

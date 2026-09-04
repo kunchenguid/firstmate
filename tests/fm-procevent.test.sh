@@ -12,6 +12,7 @@
 # the only durability under test is the runner's own - output that reached the
 # runner is stored before it is announced.
 set -u
+umask 077
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -1407,9 +1408,9 @@ assert_contains "$newline_artifact_out" "cannot contain newlines" "Lavish reject
 pass "the adapter derives physical identity without newline path corruption"
 
 # Host replies are staged through the executable adapter while a fake generic
-# restart boundary keeps the pending file observable before the poll consumes
-# it. The fake Lavish binary records argv as framed data so multiline text is
-# checked as one argument without inspecting implementation source.
+# restart boundary keeps the durable handoff observable. The fake Lavish binary
+# records argv as framed data so multiline text is checked as one argument
+# without inspecting implementation source.
 REPLY_RUNTIME="$TMP_ROOT/reply-runtime"
 REPLY_HOME="$TMP_ROOT/reply-home"
 REPLY_BIN="$TMP_ROOT/reply-bin"
@@ -1435,7 +1436,12 @@ cat > "$REPLY_BIN/lavish-axi" <<'SH'
   done
   printf 'END\n'
 } >> "$REPLY_LOG"
-printf 'session:\n  file: fixture\n  status: waiting\n'
+case "${REPLY_BEHAVIOR:-success}" in
+  block) while :; do sleep 1; done ;;
+  commit) sleep 6; printf 'session:\n  file: fixture\n  status: waiting\n' ;;
+  fail) exit 23 ;;
+  success) printf 'session:\n  file: fixture\n  status: waiting\n' ;;
+esac
 SH
 chmod +x "$REPLY_BIN/lavish-axi"
 REPLY_ART="$TMP_ROOT/reply-artifact.html"
@@ -1452,6 +1458,7 @@ printf '\nSecond change applied.\nWith detail.\n' | \
   FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
     "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" >/dev/null
 pending_reply="$REPLY_HOME/state/procevent/$reply_id.pending-reply"
+inflight_reply="$REPLY_HOME/state/procevent/$reply_id.inflight-reply"
 assert_present "$pending_reply" "reply did not leave one durable pending file"
 if [ "$(uname)" = Darwin ]; then
   pending_reply_mode=$(stat -f %Lp "$pending_reply")
@@ -1471,9 +1478,12 @@ cmp -s "$TMP_ROOT/expected-pending-reply" "$pending_reply" \
 [ "$(wc -l < "$RESTART_LOG" | tr -d ' ')" -eq 2 ] \
   || fail "each reply did not request exactly one nonblocking listener restart"
 
-PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
-  REPLY_LOG="$REPLY_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
-assert_absent "$pending_reply" "poll did not consume the staged reply exactly once"
+mv "$pending_reply" "$inflight_reply"
+REPLY_BEHAVIOR=commit PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+assert_absent "$pending_reply" "poll did not consume the recovered pre-launch reply"
+assert_absent "$inflight_reply" "poll did not commit the recovered pre-launch reply"
 PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   REPLY_LOG="$REPLY_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
 cat > "$TMP_ROOT/expected-reply-argv" <<EOF
@@ -1511,7 +1521,54 @@ FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LO
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" --file "$TMP_ROOT/reply-text" >/dev/null
 assert_contains "$(cat "$pending_reply")" "File-backed acknowledgement." \
   "reply --file did not stage its text"
-pass "Lavish host replies stage privately, append safely, and reach poll argv once"
+
+mv "$pending_reply" "$inflight_reply"
+printf 'Newer acknowledgement.\n' > "$pending_reply"
+chmod 0600 "$pending_reply"
+REPLY_BEHAVIOR=fail PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null 2>&1 || true
+cat > "$TMP_ROOT/expected-recovered-reply" <<'EOF'
+File-backed acknowledgement.
+
+Newer acknowledgement.
+EOF
+cmp -s "$TMP_ROOT/expected-recovered-reply" "$pending_reply" \
+  || fail "stale in-flight recovery did not preserve older and newer replies in order"
+assert_absent "$inflight_reply" "early poll failure did not restore the in-flight reply"
+
+REPLY_BEHAVIOR=block PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null 2>&1 &
+reply_poll_pid=$!
+for _ in $(seq 1 100); do
+  [ -e "$inflight_reply" ] && break
+  sleep 0.02
+done
+assert_present "$inflight_reply" "blocking poll did not claim the pending reply"
+kill -TERM "$reply_poll_pid"
+wait "$reply_poll_pid" 2>/dev/null || true
+assert_present "$pending_reply" "termination inside the grace window lost the reply"
+assert_absent "$inflight_reply" "termination inside the grace window left an in-flight reply"
+
+REPLY_BEHAVIOR=block PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null 2>&1 &
+reply_poll_pid=$!
+for _ in $(seq 1 100); do
+  [ -e "$inflight_reply" ] && break
+  sleep 0.02
+done
+assert_present "$inflight_reply" "delivery-grace poll did not claim the pending reply"
+for _ in $(seq 1 150); do
+  [ ! -e "$inflight_reply" ] && break
+  sleep 0.05
+done
+assert_absent "$inflight_reply" "reply remained in flight after the delivery grace window"
+assert_absent "$pending_reply" "committed reply returned to pending after the grace window"
+kill -TERM "$reply_poll_pid"
+wait "$reply_poll_pid" 2>/dev/null || true
+pass "Lavish host replies survive crashes and early restarts with at-least-once delivery"
 
 # The generic control hook restarts the exact registered generation immediately
 # instead of waiting for a watcher reconcile cycle.

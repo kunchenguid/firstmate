@@ -682,9 +682,11 @@ A long-polling external process is registered as a *source* through its adapter,
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps only the currently published `lavish-axi poll` interface.
 After a board host applies and re-serves one feedback batch, `bin/fm-procevent-lavish.sh reply <artifact.html> <text>` stages a short acknowledgement for that board's existing listener and returns without running a poll in the host's turn.
 The command also accepts multiline text on stdin or through `--file <path>`.
-Each source has one private mode `0600` pending-reply file under `state/procevent/`; a second unconsumed reply appends after one blank line instead of overwriting the first.
-The command requests an identity-checked immediate restart of the exact registered built-in source, and the fresh adapter invocation atomically removes the pending file before launching `lavish-axi poll <artifact.html> --agent-reply <text>`.
-Only that first invocation carries the acknowledgement, so an internal transient retry cannot post it twice.
+Each source has one private mode `0600` pending-reply file and one stable in-flight reply file under `state/procevent/`; a second unconsumed reply appends after one blank line instead of overwriting the first.
+The command requests an identity-checked immediate restart of the exact registered built-in source, and the fresh adapter invocation atomically renames the pending file to the in-flight file before launching `lavish-axi poll <artifact.html> --agent-reply <text>`.
+The adapter removes the in-flight file only after the poll child remains alive for a five-second delivery grace window.
+An exit, launch failure, restart during that window, or stale in-flight file left by a crash restores the acknowledgement to pending, appending it before any newer pending reply.
+This is deliberately at least once: a poll that posted the acknowledgement and then failed inside the grace window can repeat that short acknowledgement, while a known early failure cannot silently lose it.
 The generic restart hook signals only the identity-checked registered-command child, lets the runner drain and durably capture any result bytes that already arrived, and starts the replacement only after the prior generation releases ownership.
 This preserves one owner for the canonical source, avoids waiting for the next watcher cycle, and keeps a captain prompt that reached the old runner on the normal capture path instead of killing that runner mid-drain.
 An already-armed source must be retired and armed once after upgrading to adopt the reply-aware listener command.
