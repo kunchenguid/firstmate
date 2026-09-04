@@ -317,7 +317,7 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
   [ "$kind" = watcher ] || fail "Copilot watcher notification must inject watcher operational context, got '$kind' from: $out"
   body=$(printf '%s' "$message" | "$OPINPUT" body)
   case "$body" in
-    *'Run bin/fm-wake-drain.sh first'*'queued wake or watcher failure'*'Start the next attached asynchronous arm only if supervision remains required.'*) ;;
+    *'Inspect the completed task result for the reason line when needed.'*'Run bin/fm-wake-drain.sh first'*'open decisions and unread status lines'*'exact WAKE_ACK_REQUIRED --ack-through command printed by the drain.'*'Start the next attached asynchronous arm only if supervision remains required.'*) ;;
     *) fail "Copilot watcher notification lost the required recovery protocol: $body" ;;
   esac
 

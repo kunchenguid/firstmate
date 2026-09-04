@@ -93,6 +93,14 @@ chmod +x "$REPO/bin/fm-watch-arm.sh"
 cat > "$REPO/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --ack-through ]; then
+  count=0
+  [ ! -f .wake-ack-count ] || count=$(cat .wake-ack-count)
+  count=$((count + 1))
+  printf '%s' "$count" > .wake-ack-count
+  printf '%s\n' "$*" > .wake-ack-args
+  exit 0
+fi
 count=0
 [ ! -f .wake-drain-count ] || count=$(cat .wake-drain-count)
 count=$((count + 1))
@@ -160,7 +168,7 @@ jq -e '.stopReason == "end_turn" and .stop_hook_active == true' \
   "$REPO/.agent-stop-payload.json" >/dev/null \
   || fail "the final agentStop payload did not report the bounded continuation"
 
-WATCHER_PROMPT='Run exactly `bin/fm-watch-arm.sh` as its own attached asynchronous bash task and then stop. After a later Firstmate watcher wake arrives, run exactly `bin/fm-wake-drain.sh` once with bash and then reply exactly LIVE_WATCH_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh without a Firstmate watcher wake.'
+WATCHER_PROMPT='Run exactly `bin/fm-watch-arm.sh` as its own attached asynchronous bash task and then stop. After a later Firstmate watcher wake arrives, follow that Firstmate watcher wake instruction exactly and then reply exactly LIVE_WATCH_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh unless a Firstmate watcher wake tells you to.'
 WATCHER_OUT=$(cd "$REPO" && copilot -p "$WATCHER_PROMPT" --allow-all --no-ask-user \
   --no-auto-update --no-remote --no-remote-export --add-dir "$REPO" --silent)
 STATUS=$?
@@ -169,10 +177,14 @@ assert_contains "$WATCHER_OUT" "LIVE_WATCH_NOTIFICATION_OK" \
   "the tracked watcher notification did not resume Copilot through the shared follow-up"
 [ "$(cat "$REPO/.wake-drain-count" 2>/dev/null)" = 1 ] \
   || fail "Copilot did not run bin/fm-wake-drain.sh exactly once after the watcher notification"
+[ "$(cat "$REPO/.wake-ack-count" 2>/dev/null)" = 1 ] \
+  || fail "Copilot did not run the exact WAKE_ACK_REQUIRED acknowledgement after the watcher notification"
+[ "$(cat "$REPO/.wake-ack-args" 2>/dev/null)" = '--ack-through live-seq' ] \
+  || fail "Copilot did not use the exact WAKE_ACK_REQUIRED acknowledgement command"
 jq -e '.notification_type == "shell_completed"' "$REPO/.notification-payload.json" >/dev/null \
   || fail "the watcher completion did not emit Copilot's shell_completed notification"
 
-rm -f "$REPO/.wake-drain-count" "$REPO/.notification-payload.json"
+rm -f "$REPO/.wake-drain-count" "$REPO/.wake-ack-count" "$REPO/.wake-ack-args" "$REPO/.notification-payload.json"
 UNRELATED_PROMPT='Run this exact bash command as an attached background task: sleep 1; printf LIVE_BACKGROUND_DONE > background-result. Wait for its completion notification and then reply exactly LIVE_UNRELATED_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh unless a Firstmate watcher wake arrives.'
 UNRELATED_OUT=$(cd "$REPO" && copilot -p "$UNRELATED_PROMPT" --allow-all --no-ask-user \
   --no-auto-update --no-remote --no-remote-export --add-dir "$REPO" --silent)
