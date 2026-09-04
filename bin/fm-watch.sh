@@ -47,7 +47,6 @@
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
-<<<<<<< HEAD
 #                          pause recheck cadence (under afk it is instead handed
 #                          to the daemon as this plain reason, once per
 #                          declaration; busy_turn_bound_check owns that handoff);
