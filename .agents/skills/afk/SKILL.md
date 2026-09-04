@@ -101,6 +101,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Once the pane is genuinely idle with an affirmatively empty composer, delivery therefore occurs within one housekeeping interval (`FM_HOUSEKEEPING_TICK`, default 15s) plus the bounded submit confirmation.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
@@ -111,6 +112,8 @@ If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
+The log, marker, status flash, and active-alert summary name the exact blocking verdict (`busy`, `pending`, `pending-unproven`, `unknown`, a target failure, or the submit verdict).
+The marker also includes the same bounded pane snapshot in readable form and as ANSI-preserving hex, so a rendered-state misclassification is diagnosable without the original pane.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
@@ -179,14 +182,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `FM_COMPOSER_IDLE_RE` overrides the shared idle-placeholder regex, but a match alone never bypasses the classifier's shape-specific position and ANSI de-emphasis safety gates.
   `FM_BUSY_REGEX` overrides the rendered delivery guards plus Grok's isolated task-state fallback.
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
-- **Max-defer escape** - the daemon must never silently wedge. If anything stays
-  buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
-  cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
-  durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
-  composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+- **Max-defer escape** - the daemon must never silently wedge; the full alarm contract, including the exact-blocker verdict and bounded pane evidence, is owned by "Max-defer escape" under "Busy-guard and composer guard" above.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit

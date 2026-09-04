@@ -207,6 +207,17 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# The most recent failed injection attempt carries its exact blocker and one
+# bounded pane snapshot into the max-defer alarm.
+# These stay process-local because the durable wedge marker is written in the
+# same housekeeping pass immediately after the failed retry.
+INJECT_EVIDENCE_LINES_DEFAULT=12
+INJECT_EVIDENCE_BYTES_DEFAULT=4096
+INJECT_LAST_BLOCKER=unknown
+INJECT_LAST_BLOCKER_DETAIL="no failed injection attempt recorded"
+INJECT_LAST_CAPTURE_STYLE=unavailable
+INJECT_LAST_PANE_CAPTURE="<capture unavailable>"
+INJECT_LAST_PANE_CAPTURE_HEX="<capture unavailable>"
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -945,9 +956,11 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 blocker detail
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
+  blocker=${INJECT_LAST_BLOCKER:-unknown}
+  detail=${INJECT_LAST_BLOCKER_DETAIL:-"no failed injection attempt recorded"}
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
     return 0
@@ -957,10 +970,16 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; inject blocked (verdict=$blocker, detail=$detail). Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Blocking verdict: %s\n' "$blocker"
+    printf 'Blocking detail: %s\n' "$detail"
+    printf 'Offending pane capture (%s, ANSI stripped, bounded):\n' "${INJECT_LAST_CAPTURE_STYLE:-unavailable}"
+    printf '%s\n' "${INJECT_LAST_PANE_CAPTURE:-<capture unavailable>}"
+    printf 'Offending pane capture bytes (ANSI-preserving hex, bounded):\n'
+    printf '%s\n' "${INJECT_LAST_PANE_CAPTURE_HEX:-<capture unavailable>}"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
@@ -971,7 +990,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s (blocker=$blocker) - see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -979,7 +998,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered (blocker=$blocker) - see $marker" "$marker"
   fi
 }
 
@@ -1206,9 +1225,68 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+inject_evidence_reset() {
+  INJECT_LAST_BLOCKER=unknown
+  INJECT_LAST_BLOCKER_DETAIL="injection attempt did not reach a classified guard"
+  INJECT_LAST_CAPTURE_STYLE=unavailable
+  INJECT_LAST_PANE_CAPTURE="<capture unavailable>"
+  INJECT_LAST_PANE_CAPTURE_HEX="<capture unavailable>"
+}
+
+# Record the exact failed guard or submit verdict and one bounded snapshot of
+# the pane at the failure point.
+# ANSI-capable captures are retained as hex for byte-level diagnosis and
+# stripped from that same snapshot for the readable marker section.
+inject_evidence_record() {  # <blocker> <detail> <backend> <target>
+  local blocker=$1 detail=$2 backend=$3 target=$4 lines bytes capture style=unavailable
+  lines=$INJECT_EVIDENCE_LINES_DEFAULT
+  bytes=$INJECT_EVIDENCE_BYTES_DEFAULT
+
+  INJECT_LAST_BLOCKER=$blocker
+  INJECT_LAST_BLOCKER_DETAIL=$detail
+  capture=
+  case "$backend" in
+    tmux)
+      if capture=$(tmux capture-pane -e -p -t "$target" -S -"$lines" 2>/dev/null); then
+        capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
+        style=ansi
+      fi
+      ;;
+    herdr)
+      if type fm_backend_herdr_capture_ansi >/dev/null 2>&1 \
+         && capture=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null); then
+        capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
+        style=ansi
+      fi
+      ;;
+  esac
+  if [ "$style" = unavailable ]; then
+    if capture=$(fm_backend_capture "$backend" "$target" "$lines" 2>/dev/null); then
+      capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
+      style=plain
+    else
+      capture=
+    fi
+  fi
+
+  INJECT_LAST_CAPTURE_STYLE=$style
+  if [ "$style" = unavailable ]; then
+    INJECT_LAST_PANE_CAPTURE="<capture unavailable>"
+    INJECT_LAST_PANE_CAPTURE_HEX="<capture unavailable>"
+  elif [ -z "$capture" ]; then
+    INJECT_LAST_PANE_CAPTURE="<empty capture>"
+    INJECT_LAST_PANE_CAPTURE_HEX="<empty capture>"
+  else
+    INJECT_LAST_PANE_CAPTURE=$(printf '%s' "$capture" | fm_composer_strip_ansi \
+      | LC_ALL=C tr '\001-\010\013\014\015-\037\177' '?')
+    INJECT_LAST_PANE_CAPTURE_HEX=$(printf '%s' "$capture" | od -An -tx1 -v | tr -d ' \n')
+  fi
+}
+
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded blocker
   state="${2:-$(_state_root)}"
+  inject_evidence_reset
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
@@ -1227,9 +1305,13 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  if ! fm_backend_target_exists "$backend" "$target"; then
+    inject_evidence_record target-missing "supervisor target does not exist or is unreadable" "$backend" "$target"
+    return 1
+  fi
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
+    inject_evidence_record busy "primary-pane busy guard" "$backend" "$target"
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
@@ -1244,6 +1326,11 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
+    case "$composer" in
+      pending|pending-unproven|unknown) blocker=$composer ;;
+      *) blocker=unknown ;;
+    esac
+    inject_evidence_record "$blocker" "composer-state=${composer:-<empty>}" "$backend" "$target"
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
@@ -1260,6 +1347,11 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
+  case "$verdict" in
+    pending|pending-unproven|unknown) blocker="submit-$verdict" ;;
+    *) blocker=submit-unknown ;;
+  esac
+  inject_evidence_record "$blocker" "submit-verdict=${verdict:-<empty>} after $retries retries" "$backend" "$target"
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
 }

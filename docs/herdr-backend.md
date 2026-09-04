@@ -250,6 +250,7 @@ Identity stays a lazy second read, consulted only when a separator pair could ch
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
+When max-defer raises that alarm, the same Herdr ANSI capture path supplies the marker's bounded readable and byte-level evidence, while a failed ANSI read is labeled as a plain fallback or unavailable rather than fabricating certainty.
 
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.

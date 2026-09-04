@@ -5,6 +5,11 @@ When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_a
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
+The alarm summary names the exact failed guard or submit verdict.
+`state/.subsuper-inject-wedged` also records the verdict detail and a bounded 12-line, 4096-byte snapshot from the failure point in both ANSI-stripped readable text and ANSI-preserving hex.
+This distinguishes a genuinely busy pane from `pending`, `pending-unproven`, `unknown`, an unreadable target, and an unconfirmed submit without requiring the original pane to survive.
+The marker is private operational state and can contain text visible in the captain pane.
+
 ## Channels
 
 `config/wedge-alarm` is local and gitignored.

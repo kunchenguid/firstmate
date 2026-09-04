@@ -93,15 +93,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 _buf=
-# The drawn composer row carries a real agent prompt glyph, matching the
-# production supervisor pane this daemon injects into: under the strict
-# container-proof rule (captain decision blank-row-injection-posture) a bare
-# unidentified row is never a safe injection target, so the fixture must
-# render the shape the classifier positively proves - "❯ " when idle,
-# "❯ <buffer>" while input is pending. The glyph is rendering only; it never
-# enters the buffer, so submitted-content assertions are unchanged.
+# The drawn composer row carries Claude 2.1.226's byte-exact idle shape: the
+# agent prompt glyph followed by U+00A0 NO-BREAK SPACE.
+# This is the production shape that used to read pending under LC_ALL=C and
+# defer every away-mode injection.
+# Typed input still renders as "❯ <buffer>".
+# The glyph and spacing are rendering only; neither enters the buffer, so
+# submitted-content assertions are unchanged.
 redraw() {
-  printf '\r\033[K\xe2\x9d\xaf %s' "$_buf"
+  if [ -n "$_buf" ]; then
+    printf '\r\033[K\xe2\x9d\xaf %s' "$_buf"
+  else
+    printf '\r\033[K\xe2\x9d\xaf\xc2\xa0'
+  fi
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -163,6 +167,7 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
+  LC_ALL=C \
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \

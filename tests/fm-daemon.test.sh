@@ -1919,6 +1919,8 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "buffer lost after a failed max-defer inject (must be preserved)"
+  grep -F 'Blocking verdict: submit-pending' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "stuck submit alarm omitted the exact submit verdict: $(cat "$state/.subsuper-inject-wedged")"
   pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
 }
 
@@ -1955,7 +1957,55 @@ test_max_defer_pending_composer_alarms_without_typing() {
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
+  grep -F 'Blocking verdict: pending' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "pending composer alarm omitted its exact verdict: $(cat "$state/.subsuper-inject-wedged")"
+  grep -F 'human draft' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "pending composer alarm omitted its readable pane capture"
+  grep -F '68756d616e206472616674' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "pending composer alarm omitted its ANSI-preserving hex capture"
   pass "max-defer on a pending composer alarms without typing"
+}
+
+test_max_defer_busy_guard_alarms_with_exact_evidence() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase maxdefer-busy-evidence)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf 'esc to interrupt\n' > "$capture"
+  escalate_add "$state" "blocked: dependency unavailable"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SENT="$sent" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  [ ! -s "$sent" ] || fail "busy-guard max-defer typed into a busy pane"
+  grep -F 'Blocking verdict: busy' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "busy-guard alarm omitted its exact verdict: $(cat "$state/.subsuper-inject-wedged")"
+  grep -F 'esc to interrupt' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "busy-guard alarm omitted its readable pane capture"
+  grep -F '65736320746f20696e74657272757074' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "busy-guard alarm omitted its ANSI-preserving hex capture"
+  pass "max-defer busy guard alarms with the exact verdict and bounded pane evidence"
+}
+
+test_max_defer_unknown_composer_alarms_with_exact_evidence() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase maxdefer-unknown-evidence)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf 'plain shell prompt $\n' > "$capture"
+  escalate_add "$state" "needs-decision: choose recovery"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SENT="$sent" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  [ ! -s "$sent" ] || fail "unknown-composer max-defer typed into an unproven pane"
+  grep -F 'Blocking verdict: unknown' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "unknown-composer alarm omitted its exact verdict: $(cat "$state/.subsuper-inject-wedged")"
+  grep -F 'plain shell prompt $' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "unknown-composer alarm omitted its readable pane capture"
+  grep -F '706c61696e207368656c6c2070726f6d70742024' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "unknown-composer alarm omitted its ANSI-preserving hex capture"
+  pass "max-defer unknown composer alarms with the exact verdict and bounded pane evidence"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -2512,6 +2562,7 @@ test_inject_msg_herdr_busy_guard_defers() {
   state="$dir/state"
   afk_enter "$state"
   (
+    fm_backend_herdr_capture_ansi() { printf 'busy fixture pane'; }
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
     pane_is_busy() { return 0; }
     fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
@@ -2529,6 +2580,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   state="$dir/state"
   afk_enter "$state"
   (
+    fm_backend_herdr_capture_ansi() { printf 'pending fixture pane'; }
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
@@ -2546,6 +2598,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   state="$dir/state"
   afk_enter "$state"
   (
+    fm_backend_herdr_capture_ansi() { printf 'gone fixture pane'; }
     fm_backend_target_exists() { return 1; }
     pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
@@ -2587,6 +2640,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   state="$dir/state"
   afk_enter "$state"
   (
+    fm_backend_herdr_capture_ansi() { printf 'dead shell fixture pane'; }
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
@@ -2604,6 +2658,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   state="$dir/state"
   afk_enter "$state"
   (
+    fm_backend_herdr_capture_ansi() { printf 'future-state fixture pane'; }
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'future-state'; }
@@ -2700,6 +2755,8 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_max_defer_busy_guard_alarms_with_exact_evidence
+test_max_defer_unknown_composer_alarms_with_exact_evidence
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
