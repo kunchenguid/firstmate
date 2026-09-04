@@ -2,7 +2,7 @@
 name: artifact-comment-loop
 description: >-
   Agent-only procedure for keeping the captain's artifact comment loop alive across firstmate restarts.
-  Load before publishing or updating an artifact the captain will comment on, on the session-start "Live artifacts" listing, on any heartbeat wake, and before retiring a finished review surface.
+  Load before publishing or updating an artifact the captain will comment on, on the session-start "Live artifacts" listing, when `bin/fm-artifact.sh due` names an artifact on a heartbeat wake, and before retiring a finished review surface.
 user-invocable: false
 metadata:
   internal: true

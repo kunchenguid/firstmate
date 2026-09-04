@@ -1421,6 +1421,10 @@ EOF
 
 test_live_artifacts_unreadable_registry_is_loud() {
   local rec root home fakebin out
+  if [ "$(id -u)" = "0" ]; then
+    pass "skipped the unreadable-registry digest case: root can read a mode-000 file"
+    return 0
+  fi
   rec=$(new_world artifacts-unreadable)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1442,7 +1446,16 @@ EOF
   assert_contains "$out" "COULD NOT BE READ" "an unreadable registry was not reported as unreadable"
   assert_contains "$out" "may be reaching nobody" "the digest did not say what an unread registry costs"
 
-  pass "a registry that exists but cannot be read is reported loudly, never as an empty section"
+  # An unreadable data/ hides the registry just as completely, and the digest's
+  # own existence test cannot see through it either, so it must be just as loud.
+  chmod 000 "$home/data"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  chmod 755 "$home/data"
+
+  assert_contains "$out" "Live artifacts (data/artifacts.md)" "an unreadable data/ silently dropped the whole subsection"
+  assert_contains "$out" "COULD NOT BE READ" "an unreadable data/ was not reported as unreadable"
+
+  pass "a registry that cannot be read, whether the file or data/ itself, is reported loudly rather than as an empty section"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------

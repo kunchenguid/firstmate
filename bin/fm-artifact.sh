@@ -82,7 +82,8 @@
 # so the directory is recognizable while two artifacts that share a tail still
 # get separate ledgers.
 #
-# A registry that exists but cannot be read is refused by every subcommand,
+# A registry that exists but cannot be read - or a data/ directory that cannot
+# be read, which hides it just as completely - is refused by every subcommand,
 # never answered as an empty registry. Reporting a home that has live artifacts
 # as a home that has none is the same silent loss this record exists to prevent.
 set -eu
@@ -104,12 +105,27 @@ now_epoch() { date +%s; }
 now_date() { date -u +%Y-%m-%d; }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-sha256_of() {  # <string>
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}'
+# The hash tool is resolved ONCE, before any subcommand composes a ledger path.
+# Discovering it is missing later is not survivable: the discovery would happen
+# inside a `$(...)`, where `die` kills only the subshell while the surrounding
+# printf still succeeds, and a caller would receive the bare ledger ROOT as if
+# it were one artifact's directory.
+HASH_CMD=''
+resolve_hash_cmd() {
+  if printf '' | shasum -a 256 >/dev/null 2>&1; then
+    HASH_CMD=shasum
+  elif printf '' | sha256sum >/dev/null 2>&1; then
+    HASH_CMD=sha256sum
+  else
+    die "no working sha256 tool found (need shasum or sha256sum)"
   fi
+}
+
+sha256_of() {  # <string>
+  case "$HASH_CMD" in
+    shasum) printf '%s' "$1" | shasum -a 256 | awk '{print $1}' ;;
+    sha256sum) printf '%s' "$1" | sha256sum | awk '{print $1}' ;;
+  esac
 }
 
 # One URL, one identity. Trailing slashes and surrounding whitespace are the
@@ -127,6 +143,12 @@ require_url() {  # <url>
   local u
   u=$(normalize_url "${1:-}")
   [ -n "$u" ] || die "an artifact URL is required"
+  # Interior whitespace is refused for the same reason a newline is scrubbed out
+  # of a title: a URL carrying one would write a second registry line and forge
+  # a record. A real artifact URL never contains it.
+  case "$u" in
+    *[[:space:]]*) die "an artifact URL may not contain whitespace: $u" ;;
+  esac
   case "$u" in
     http://*|https://*) ;;
     *) die "not an artifact URL: $u" ;;
@@ -141,18 +163,41 @@ key_for() {  # <normalized-url>
   tail=${tail:0:24}
   hash=$(sha256_of "$url")
   hash=${hash:0:8}
-  [ -n "$hash" ] || die "no sha256 tool found (need shasum or sha256sum)"
+  [ -n "$hash" ] || return 1
   printf '%s-%s' "${tail:-artifact}" "$hash"
 }
 
+# Never hands back the ledger ROOT. An empty key would make the root look like
+# one artifact's directory, and `retire` would then delete every artifact's
+# ledger instead of one.
 ledger_dir_for() {  # <normalized-url>
-  printf '%s/%s' "$LEDGER_ROOT" "$(key_for "$1")"
+  local key
+  key=$(key_for "$1") || key=''
+  case "$key" in
+    ''|*/*) printf 'fm-artifact: cannot derive a ledger key for %s\n' "$1" >&2; return 1 ;;
+  esac
+  printf '%s/%s' "$LEDGER_ROOT" "$key"
 }
 
 # Scrub the field separators out of anything that becomes part of a one-line
 # record, so a title with a newline cannot forge a second registry entry.
 one_line() {  # <text>
   printf '%s' "$1" | tr '\n\t' '  '
+}
+
+# The ONE normalization for a thread mark. The mark is caller-supplied - a
+# comment count or a last-comment id - so a space in it is folded rather than
+# refused. Both the path that RECORDS a mark and the path that COMPARES one go
+# through here: if they folded it differently, a handled thread whose mark
+# carried a space would never match again and the backstop would re-surface it
+# on every poll for ever, which is the double-handling this ledger prevents.
+normalize_mark() {  # <mark>
+  local m
+  m=$(one_line "${1:-}")
+  m=${m#"${m%%[![:space:]]*}"}
+  m=${m%"${m##*[![:space:]]}"}
+  m=${m// /_}
+  printf '%s' "${m:--}"
 }
 
 # --- registry reads ---------------------------------------------------------
@@ -162,6 +207,12 @@ one_line() {  # <text>
 # exactly the silent loss this whole record exists to prevent - so every
 # subcommand refuses up front rather than returning a confident empty answer.
 require_readable_registry() {
+  # An unreadable data/ hides the registry just as completely as an unreadable
+  # registry file does, and answering "this home has no artifacts" is the same
+  # silent loss either way.
+  if [ -d "$DATA" ] && [ ! -r "$DATA" ]; then
+    die "the data directory exists but cannot be read: $DATA"
+  fi
   [ -e "$REG" ] || return 0
   [ -f "$REG" ] || die "the artifact registry is not a regular file: $REG"
   [ -r "$REG" ] || die "the artifact registry exists but cannot be read: $REG"
@@ -235,7 +286,7 @@ handled_mark() {  # <normalized-url> <thread-id>
 # --- subcommands ------------------------------------------------------------
 
 cmd_register() {
-  local url title='' note=''
+  local url title='' note='' dir
   url=$(require_url "${1:-}")
   shift || true
   while [ "$#" -gt 0 ]; do
@@ -286,8 +337,9 @@ HEADER
   } >> "$tmp"
   mv -f "$tmp" "$REG"
 
-  mkdir -p "$(ledger_dir_for "$url")"
-  printf '%s' "$url" > "$(ledger_dir_for "$url")/url"
+  dir=$(ledger_dir_for "$url")
+  mkdir -p "$dir"
+  printf '%s' "$url" > "$dir/url"
   printf 'registered %s\n' "$url"
   printf '  Arm its watch now, then record the result with:\n'
   printf '    %s/bin/fm-artifact.sh rearm %s ok\n' "$FM_ROOT" "$url"
@@ -311,7 +363,10 @@ cmd_retire() {
     ' "$REG" > "$tmp"
     mv -f "$tmp" "$REG"
   fi
-  dir=$(ledger_dir_for "$url")
+  dir=$(ledger_dir_for "$url") || die "cannot retire $url: its ledger directory could not be resolved"
+  case "$dir" in
+    "$LEDGER_ROOT"|"$LEDGER_ROOT"/) die "refusing to remove the whole ledger root: $dir" ;;
+  esac
   rm -rf "$dir"
   printf 'retired %s\n' "$url"
 }
@@ -385,9 +440,7 @@ cmd_new() {
     line=${line%"${line##*[![:space:]]}"}
     [ -n "$line" ] || continue
     id=${line%%[[:space:]]*}
-    mark=${line#"$id"}
-    mark=${mark#"${mark%%[![:space:]]*}"}
-    [ -n "$mark" ] || mark=-
+    mark=$(normalize_mark "${line#"$id"}")
     known=$(handled_mark "$url" "$id")
     [ "$known" = "$mark" ] && continue
     printf '%s\t%s\n' "$id" "$mark"
@@ -404,9 +457,7 @@ cmd_handled() {
   id=$(one_line "${2:-}")
   [ -n "$id" ] || die "usage: fm-artifact.sh handled <url> <thread-id> [<mark>]"
   case "$id" in *[[:space:]]*) die "a thread id may not contain whitespace: $id" ;; esac
-  mark=$(one_line "${3:--}")
-  mark=${mark// /_}
-  [ -n "$mark" ] || mark=-
+  mark=$(normalize_mark "${3:--}")
 
   dir=$(ledger_dir_for "$url")
   mkdir -p "$dir"
@@ -424,6 +475,11 @@ cmd_handled() {
 
 case "${1:-}" in
   register|retire|list|digest|rearm|due|new|handled) require_readable_registry ;;
+esac
+
+# Before any ledger path is composed, never after: see resolve_hash_cmd.
+case "${1:-}" in
+  register|retire|digest|rearm|due|new|handled) resolve_hash_cmd ;;
 esac
 
 case "${1:-}" in

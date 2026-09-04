@@ -181,6 +181,56 @@ grep -q '^- https://evil.example' "$HOME_DIR/data/artifacts.md" \
   && fail "a multi-line title must not write its own registry line"
 pass "a title containing a newline cannot forge a second registry record"
 
+# A URL carrying a newline must not be able to forge a second record either.
+BEFORE=$(A list | wc -l | tr -d ' ')
+if A register "$(printf 'https://claude.ai/public/artifacts/ok\n- https://evil.example/y - forged (registered 2026-01-01)')" >/dev/null 2>&1; then
+  fail "register must refuse a URL containing a newline"
+fi
+[ "$(A list | wc -l | tr -d ' ')" = "$BEFORE" ] || fail "a multi-line URL added a record: $(A list)"
+grep -q '^- https://evil.example' "$HOME_DIR/data/artifacts.md" \
+  && fail "a multi-line URL must not write its own registry line"
+pass "a URL containing a newline is refused rather than forging a second registry record"
+
+# --- one normalization for a mark, so both paths agree -----------------------
+
+# A mark may legitimately carry a space ("2 comments"). What must never happen
+# is the recorder and the reporter folding it differently, because then the
+# thread is re-surfaced on every poll for ever.
+USP=https://claude.ai/public/artifacts/spacey-mark
+A register "$USP" --title "Spacey" >/dev/null || fail "register for the mark case failed"
+NEW=$(printf 't1 2 comments\n' | A new "$USP")
+printf '%s\n' "$NEW" | grep -q '^t1' || fail "an unhandled thread must be new: $NEW"
+A handled "$USP" t1 "2 comments" >/dev/null || fail "handled with a spaced mark failed"
+[ -z "$(printf 't1 2 comments\n' | A new "$USP")" ] \
+  || fail "a thread handled at a whitespace-bearing mark was re-surfaced: $(printf 't1 2 comments\n' | A new "$USP")"
+pass "a thread handled at a mark containing a space is not re-surfaced by the backstop"
+
+# --- a missing hash tool refuses, it does not delete every ledger ------------
+
+# `retire` composes a per-artifact ledger path. If the hash behind that path
+# cannot be produced, the path must not collapse to the ledger ROOT, because
+# removing that root destroys every other artifact's handled record.
+NOHASH_HOME="$TMP_ROOT/nohash-home"
+NOHASH_BIN="$TMP_ROOT/nohash-bin"
+mkdir -p "$NOHASH_HOME/data" "$NOHASH_HOME/state" "$NOHASH_BIN"
+for stub in shasum sha256sum; do
+  printf '#!/bin/sh\nexit 1\n' > "$NOHASH_BIN/$stub"
+  chmod +x "$NOHASH_BIN/$stub"
+done
+FM_HOME="$NOHASH_HOME" "$ART" register "$U1" --title "A" >/dev/null || fail "nohash seed A failed"
+FM_HOME="$NOHASH_HOME" "$ART" register "$U2" --title "B" >/dev/null || fail "nohash seed B failed"
+FM_HOME="$NOHASH_HOME" "$ART" handled "$U2" t1 1 >/dev/null || fail "nohash seed ledger failed"
+[ -n "$(find "$NOHASH_HOME/state/artifacts" -name handled -print -quit)" ] \
+  || fail "the seeded handled ledger is missing"
+
+if PATH="$NOHASH_BIN:$PATH" FM_HOME="$NOHASH_HOME" "$ART" retire "$U1" >/dev/null 2>&1; then
+  fail "retire must refuse when no working sha256 tool is available"
+fi
+[ -d "$NOHASH_HOME/state/artifacts" ] || fail "retire deleted the whole ledger root"
+[ -n "$(find "$NOHASH_HOME/state/artifacts" -name handled -print -quit)" ] \
+  || fail "retire destroyed an unrelated artifact's handled ledger"
+pass "a missing sha256 tool makes retire refuse loudly instead of deleting every artifact's ledger"
+
 # --- an unreadable registry is never an empty registry -----------------------
 
 if [ "$(id -u)" = "0" ]; then
@@ -194,7 +244,18 @@ else
     fi
   done
   chmod 644 "$HOME_DIR/data/artifacts.md"
-  pass "a registry that exists but cannot be read is refused, never reported as no artifacts"
+
+  # An unreadable data/ hides the registry just as completely, and answering
+  # "this home has no artifacts" is the same silent loss.
+  chmod 000 "$HOME_DIR/data"
+  for sub in list digest due; do
+    if A "$sub" >/dev/null 2>&1; then
+      chmod 755 "$HOME_DIR/data"
+      fail "$sub reported an unreadable data directory as an answer instead of refusing"
+    fi
+  done
+  chmod 755 "$HOME_DIR/data"
+  pass "a registry hidden behind an unreadable file or an unreadable data/ is refused, never reported as no artifacts"
 fi
 
 echo "# fm-artifact.test.sh: all assertions passed"

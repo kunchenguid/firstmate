@@ -890,12 +890,15 @@ fi
 ARTIFACT_DIGEST=$("$SCRIPT_DIR/fm-artifact.sh" digest 2>/dev/null)
 ARTIFACT_RC=$?
 if [ "$ARTIFACT_RC" -ne 0 ]; then
-  if [ -e "$DATA/artifacts.md" ]; then
+  # An unreadable data/ hides the registry as completely as an unreadable
+  # registry file does, and the -e test cannot see through it either, so it is
+  # named here too rather than letting the whole subsection vanish.
+  if [ -e "$DATA/artifacts.md" ] || { [ -d "$DATA" ] && [ ! -r "$DATA" ]; }; then
     subsection "Live artifacts (data/artifacts.md)"
     printf 'COULD NOT BE READ - bin/fm-artifact.sh digest exited %s.\n' "$ARTIFACT_RC"
-    printf 'This home HAS a live-artifact registry, so watches may be owed and comments on\n'
-    printf 'those artifacts may be reaching nobody. Read it with %s/bin/fm-artifact.sh list\n' "$FM_ROOT"
-    printf 'before treating this section as empty.\n'
+    printf 'This home MAY HAVE a live-artifact registry, so watches may be owed and comments\n'
+    printf 'on those artifacts may be reaching nobody. Read it with\n'
+    printf '%s/bin/fm-artifact.sh list before treating this section as empty.\n' "$FM_ROOT"
   fi
 elif [ -n "$ARTIFACT_DIGEST" ]; then
   subsection "Live artifacts (data/artifacts.md)"
