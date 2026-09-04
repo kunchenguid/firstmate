@@ -734,6 +734,8 @@ LOCK_CONTENTION_OWNER_PID=
   || fail "bounded presentation lock contention did not fall back to a successful flat spawn: $(cat "$TMP_ROOT/lock-contended.err")"
 grep -F "presentation focus lock unavailable; using the ordinary flat layout without projection" "$TMP_ROOT/lock-contended.err" >/dev/null 2>&1 \
   || fail "bounded presentation lock contention did not warn about flat fallback"
+! grep -F "presentation lock namespace" "$TMP_ROOT/lock-contended.err" >/dev/null 2>&1 \
+  || fail "bounded presentation lock contention reported a namespace fault"
 LOCK_CONTENTION_META="$HOME_DIR/state/lock-contended.meta"
 remember_meta_worktree "$LOCK_CONTENTION_META" >/dev/null
 LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut -d= -f2-)
@@ -1160,6 +1162,8 @@ wait "$CROSS_LOCK_PID" || fail "cross-home session lock owner failed"
   || fail "cross-home lock contention did not fall back flat: $(cat "$TMP_ROOT/aflat.err")"
 grep -F "presentation focus lock unavailable; using the ordinary flat layout without projection" "$TMP_ROOT/aflat.err" >/dev/null 2>&1 \
   || fail "cross-home lock contention did not warn about flat fallback"
+! grep -F "presentation lock namespace" "$TMP_ROOT/aflat.err" >/dev/null 2>&1 \
+  || fail "cross-home lock contention reported a namespace fault"
 remember_meta_worktree "$SECOND_HOME_A/state/aflat.meta" >/dev/null
 AFLAT_WSID=$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/aflat.meta" | cut -d= -f2-)
 AFLAT_LABEL=$(lab workspace get "$AFLAT_WSID" | jq -r '.result.workspace.label')

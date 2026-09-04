@@ -2420,7 +2420,8 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
-    fm_backend_herdr_presentation_session_lock_path; do
+    fm_backend_herdr_presentation_session_lock_path \
+    fm_backend_herdr_presentation_lock_namespace_fault; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
       return 1
@@ -2438,7 +2439,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
 }
 
 teardown_herdr_preflight_target() {  # <target> <task-id>
-  local target=$1 task_id=$2 session pane presence lock_path verified_lock_path lock_session held_path attempt
+  local target=$1 task_id=$2 session pane presence lock_path verified_lock_path lock_session held_path attempt namespace_fault
   teardown_herdr_require_prerequisites "$task_id" || return 1
   if ! fm_backend_herdr_parse_target "$target"; then
     echo "error: herdr endpoint $target for $task_id could not be parsed exactly; nothing was changed - repair the endpoint metadata and rerun teardown" >&2
@@ -2455,7 +2456,14 @@ teardown_herdr_preflight_target() {  # <target> <task-id>
       ;;
   esac
   if ! lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
-    echo "error: herdr session presentation lock could not be resolved for $task_id; nothing was changed - rerun teardown once the session is reachable and unambiguous" >&2
+    # Two unrelated faults refuse here, and only one of them can clear on a
+    # rerun; reporting the wrong one is what turned this refusal into an
+    # unbounded retry loop that held cleanup open indefinitely.
+    if namespace_fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
+      echo "error: herdr session presentation lock could not be resolved for $task_id; nothing was changed - $namespace_fault" >&2
+    else
+      echo "error: herdr session presentation lock could not be resolved for $task_id; nothing was changed - rerun teardown once the session is reachable and unambiguous" >&2
+    fi
     return 1
   fi
   if [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ]; then

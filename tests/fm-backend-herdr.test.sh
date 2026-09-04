@@ -2578,8 +2578,8 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
-    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+    "/tmp/firstmate-herdr-presentation-$(id -u)/order-"*.lock) ;;
+    *) fail "session lock path must use this account's machine namespace: $path_a" ;;
   esac
   case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
@@ -2604,6 +2604,109 @@ test_presentation_session_lock_path_is_shared_across_homes() {
       || fail "symlink parent socket paths must resolve one lock: $path_tmp vs $path_private"
   fi
   pass "herdr presentation lock: one path per session/socket across homes"
+}
+
+# A second account on the machine must not be able to claim the lock namespace
+# name and lock this account out of it permanently. The uid is driven apart with
+# a fake `id` rather than a real second account, so the divergence is real for
+# every function that reads it while the case stays unprivileged.
+make_uid_fakebin() {  # <dir> <fakebin> <uid> -> echoes fakebin dir
+  local dir=$1 fb=$2 uid=$3
+  mkdir -p "$fb"
+  cat > "$fb/id" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -u ] && [ \$# -eq 1 ]; then printf '%s\n' '$uid'; exit 0; fi
+exec /usr/bin/id "\$@"
+SH
+  chmod +x "$fb/id"
+  cp "$dir/fakebin/herdr" "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_presentation_lock_namespace_is_per_account() {
+  local dir log resp fb fb_a fb_b path_real path_a path_b resolved resolved_rc n staged
+  dir="$TMP_ROOT/presentation-namespace-per-account"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  for n in 1 2 3; do
+    printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/$n.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  fb_a=$(make_uid_fakebin "$dir" "$dir/fakebin-a" 424241)
+  fb_b=$(make_uid_fakebin "$dir" "$dir/fakebin-b" 424242)
+  path_real=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "the lock namespace must resolve for this account"
+  path_a=$(PATH="$fb_a:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "the lock namespace must resolve for account A"
+  path_b=$(PATH="$fb_b:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "the lock namespace must resolve for account B"
+  [ "$path_a" != "$path_b" ] \
+    || fail "two accounts resolved one lock namespace, so either can lock the other out: $path_a"
+  [ "$path_a" != "$path_real" ] && [ "$path_b" != "$path_real" ] \
+    || fail "a foreign account resolved this account's lock namespace: $path_a $path_b"
+  case "$path_real" in
+    /tmp/firstmate-herdr-presentation) fail "the namespace name is still claimable by any account: $path_real" ;;
+  esac
+  # Another account's namespace present on the machine, at the same mode the
+  # ownership check demands, must be inert for this account rather than
+  # blocking it.
+  for staged in "$path_a" "$path_b"; do
+    mkdir -m 700 "$staged" 2>/dev/null || chmod 700 "$staged" \
+      || fail "could not stage another account's namespace at $staged"
+  done
+  resolved=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT")
+  resolved_rc=$?
+  rmdir "$path_a" "$path_b" 2>/dev/null || true
+  [ "$resolved_rc" -eq 0 ] \
+    || fail "another account's namespace blocked this account's lock resolution"
+  case "$resolved" in "$path_real"/*) ;; *) fail "the resolved lock left this account's namespace: $resolved" ;; esac
+  pass "herdr presentation lock: the namespace name is per account, so no account can claim another's"
+}
+
+test_presentation_lock_namespace_foreign_owner_is_diagnosed() {
+  local dir log resp fb fb_foreign out status fault fault_status owner
+  dir="$TMP_ROOT/presentation-namespace-foreign-owner"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  : > "$dir/sockdir/fmtest.sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # 424243 never owns anything here, so the namespace it resolves is created by
+  # and owned by the real account: exactly the cross-account collision, without
+  # needing a second real account.
+  fb_foreign=$(make_uid_fakebin "$dir" "$dir/fakebin-foreign" 424243)
+  owner=$(id -u)
+  out=$(PATH="$fb_foreign:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a foreign-owned lock namespace must refuse rather than return a path: $out"
+  fault=$(PATH="$fb_foreign:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
+  fault_status=$?
+  [ "$fault_status" -eq 0 ] \
+    || fail "a foreign-owned lock namespace must be reported as a permanent fault, not a retryable one"
+  assert_contains "$fault" "owned by uid $owner" "the fault did not name the owning account: $fault"
+  assert_contains "$fault" "this account is uid 424243" "the fault did not name this account: $fault"
+  assert_contains "$fault" "remove that directory" "the fault did not name the remedy: $fault"
+  rmdir "/tmp/firstmate-herdr-presentation-424243" 2>/dev/null || true
+  pass "herdr presentation lock: a foreign-owned namespace is diagnosed as permanent and names its remedy"
+}
+
+test_presentation_lock_namespace_usable_reports_no_fault() {
+  local dir log resp fb fault status
+  dir="$TMP_ROOT/presentation-namespace-no-fault"; mkdir -p "$dir/responses" "$dir/sockdir"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  fault=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_fault' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "this account's own namespace must not be reported as a permanent fault: $fault"
+  [ -z "$fault" ] || fail "a usable namespace must print no diagnosis: $fault"
+  pass "herdr presentation lock: a usable namespace reports no permanent fault"
 }
 
 test_presentation_session_lock_path_rejects_malformed_socket() {
@@ -4572,6 +4675,9 @@ test_projection_order_anchors_the_parent_by_exact_id
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_lock_namespace_is_per_account
+test_presentation_lock_namespace_foreign_owner_is_diagnosed
+test_presentation_lock_namespace_usable_reports_no_fault
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating

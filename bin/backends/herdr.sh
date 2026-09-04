@@ -649,14 +649,25 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
-# fm_backend_herdr_presentation_session_lock_path: one machine-private lock
-# path per live named Herdr session/socket, shared across every Firstmate home
-# that uses that session.
-# The path is never under any one home's state/ and secondmates never write the
-# primary home. Returns non-zero when the named session's socket cannot be
-# resolved unambiguously.
+# fm_backend_herdr_presentation_lock_namespace: the lock namespace root, whose
+# name carries this account's numeric uid.
+# The uid suffix is what makes the ownership and mode assertions below
+# enforceable: an unsuffixed shared name is claimable by whichever account on
+# the machine creates it first, and every other account's ownership assertion
+# then refuses permanently, with no remedy short of a privileged removal. That
+# refusal blocks teardown, so a task whose work has already landed stays
+# recorded as in flight and its cleanup runs late against a stale target.
+# Per-uid naming removes the collision by construction rather than relaxing the
+# assertions, which remain correct on a name no other account can claim.
+# The directory holds only lock files, so an older unsuffixed directory is left
+# untouched and nothing is migrated out of it.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  local uid
+  uid=$(id -u 2>/dev/null) || return 1
+  case "$uid" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
@@ -682,6 +693,55 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+}
+
+# fm_backend_herdr_presentation_lock_namespace_fault: tell a PERMANENT lock
+# namespace fault apart from an ordinary session-resolution failure.
+# fm_backend_herdr_presentation_session_lock_path refuses for two unrelated
+# reasons: the named session could not be resolved unambiguously, which a later
+# attempt may clear on its own, or the lock namespace itself cannot validate,
+# which no later attempt ever clears. Reporting only the first sends a
+# supervisor into an unbounded retry loop against a condition that cannot
+# change, so every caller that reports such a refusal consults this first.
+# Prints one self-contained fragment naming the exact path, the exact fault,
+# and the remedy that actually clears it, and returns 0 ONLY when a permanent
+# fault exists. A usable or absent namespace prints nothing and returns 1,
+# which is the caller's signal to report the ordinary session-resolution
+# failure instead.
+fm_backend_herdr_presentation_lock_namespace_fault() {
+  local dir expected_uid owner mode
+  expected_uid=$(id -u 2>/dev/null) || expected_uid=
+  dir=$(fm_backend_herdr_presentation_lock_namespace) || dir=
+  if [ -z "$dir" ]; then
+    printf 'this account has no readable numeric user id, so the presentation lock namespace cannot be named; restore a working id command and rerun'
+    return 0
+  fi
+  if [ -L "$dir" ]; then
+    printf 'the presentation lock namespace %s is a symlink, which is never accepted, and no later attempt will clear it; remove that link (the namespace holds only lock files) and rerun' "$dir"
+    return 0
+  fi
+  [ -e "$dir" ] || return 1
+  if [ ! -d "$dir" ]; then
+    printf 'the presentation lock namespace %s exists but is not a directory, and no later attempt will clear it; remove it (the namespace holds only lock files) and rerun' "$dir"
+    return 0
+  fi
+  owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir")
+  if [ -z "$owner" ]; then
+    printf 'the presentation lock namespace %s exists but its ownership could not be read, and no later attempt will clear it; restore access to it (the namespace holds only lock files) and rerun' "$dir"
+    return 0
+  fi
+  if [ "$owner" != "$expected_uid" ]; then
+    printf 'the presentation lock namespace %s is owned by uid %s but this account is uid %s, so its ownership check can never pass and no later attempt will clear it; have uid %s or an administrator remove that directory (it holds only lock files) and rerun' \
+      "$dir" "$owner" "$expected_uid" "$owner"
+    return 0
+  fi
+  mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir")
+  if [ "$mode" != 700 ]; then
+    printf 'the presentation lock namespace %s has mode %s rather than the required 700, and no later attempt will clear it; run chmod 700 %s and rerun' \
+      "$dir" "${mode:-unreadable}" "$dir"
+    return 0
+  fi
+  return 1
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -728,6 +788,14 @@ fm_backend_herdr_presentation_session_socket_path() {  # <session>
   fm_backend_herdr_canonical_socket_path "$socket"
 }
 
+# fm_backend_herdr_presentation_session_lock_path: one machine-private lock
+# path per live named Herdr session/socket, shared across every Firstmate home
+# that this account uses with that session.
+# The path is never under any one home's state/ and secondmates never write the
+# primary home. Returns non-zero when the named session's socket cannot be
+# resolved unambiguously, or when the lock namespace itself cannot be used;
+# fm_backend_herdr_presentation_lock_namespace_fault tells those two apart for
+# any caller that reports the refusal.
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
   local session=$1 socket key dir hash
   [ -n "$session" ] || return 1
@@ -2920,7 +2988,7 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
 fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
-  local lock_path attempt=0 lock_held=0
+  local lock_path attempt=0 lock_held=0 namespace_fault
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
@@ -2938,6 +3006,8 @@ fm_backend_herdr_kill() {  # <target>
   if [ "$lock_held" = 1 ]; then
     fm_backend_herdr_kill_serialized "$session" "$pane"
     fm_lock_release "$lock_path" || true
+  elif namespace_fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
+    echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close - $namespace_fault" >&2
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
