@@ -10,6 +10,55 @@ The governing presentation policy allows genuine original user prompts, genuine 
 Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
+## Codex CLI 0.146.0 feasibility
+
+Codex CLI 0.146.0 does not expose a project-owned presentation seam that can implement Firstmate Calm.
+The exact `rust-v0.146.0` source at commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b` was inspected on 2026-08-06 after reproducing the ordinary Codex captain TUI from the Firstmate checkout.
+The local reproduction used the newer bundled `codex-cli 0.147.0-alpha.1.2` only as a disconfirming comparison; every capability verdict below comes from the exact 0.146.0 tag.
+
+The inspected 0.146.0 configuration schema exposes `hide_agent_reasoning`, `model_reasoning_summary`, `tui.animations`, and `tui.show_tooltips`.
+Those settings can reduce reasoning and decorative activity after configuration is loaded, but none suppresses successful shell, patch, MCP, web-search, image, plan, or collaboration transcript cells.
+The TUI constructs those cells directly in `codex-rs/tui`, after Firstmate's hooks and tools have emitted their events.
+
+The slash-command registry is the compiled `SlashCommand` enum in `codex-rs/tui/src/slash_command.rs`.
+Project skills are invoked through Codex's `$skill` surface, while deprecated custom prompts are home-local `/prompts:name` entries loaded at session start.
+Neither surface can register a project-owned `/calm`, mutate the active TUI renderer, redraw existing transcript cells, or reverse a presentation filter during the same session.
+
+Firstmate's `.codex/hooks.json` can enforce session-start, pre-tool, permission, post-tool, and stop lifecycle behavior, but hook handlers do not receive transcript-cell ownership.
+Suppressing successful script stdout would reduce only Firstmate-owned command text and would not suppress the Codex-owned tool row that encloses it.
+It would also be unsafe as a general policy because failures, hook trust, permission decisions, sandbox denials, watcher failures, captain decisions, and final validation evidence must remain visible.
+
+The qualifying native seam is therefore a Codex-owned, same-session reversible transcript visibility policy.
+It must retain genuine captain prompts, assistant responses, active working state, failures, permission and security events, human decisions, meaningful status changes, and final evidence while allowing completed routine-success cells to render at zero height or in a compact aggregate.
+It must change presentation only: sandboxing, approvals, hooks, tool execution, model context, persisted session events, exports, fleet supervision, wake handling, and audit logs remain unchanged.
+
+Until Codex exposes that seam, a Firstmate `$calm` skill or launch profile would be a partial and misleading substitute because the principal tool-call noise would remain and the configuration-only parts could not be reversed in the same session.
+A custom app-server terminal client could own filtering, but it would also own approval UX, replay, interruption, session management, and security parity, making it a separate Codex frontend rather than a bounded Firstmate integration.
+Patching or vendoring the installed Codex binary is outside the qualifying boundary.
+
+This investigation is tracked by Firstmate's open request [`kunchenguid/firstmate#1411`](https://github.com/kunchenguid/firstmate/issues/1411).
+The qualifying seam described above was filed as a native Codex proposal, [`openai/codex#37227`](https://github.com/openai/codex/issues/37227), which links back to the Firstmate request as its origin.
+
+Reproduction and source-inspection commands:
+
+```sh
+codex --version
+codex features list
+codex --no-alt-screen
+git clone --depth 1 --branch rust-v0.146.0 https://github.com/openai/codex.git codex-0.146.0
+rg -n 'hide_agent_reasoning|model_reasoning_summary|animations|show_tooltips' codex-0.146.0/codex-rs/core/config.schema.json
+sed -n '1,220p' codex-0.146.0/codex-rs/tui/src/slash_command.rs
+rg -n 'new_.*tool|add_to_history|active_cell' codex-0.146.0/codex-rs/tui/src/chatwidget codex-0.146.0/codex-rs/tui/src/history_cell
+```
+
+Observed version output:
+
+```text
+codex-cli 0.147.0-alpha.1.2
+```
+
+The requested 0.146.0 release exists as `rust-v0.146.0`; no 0.146.0 executable was installed on `PATH`, so the version-specific verdict uses its tagged source rather than claiming a live binary reproduction.
+
 ## Compatibility evidence
 
 [`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
@@ -265,7 +314,7 @@ grok 0.2.106 (bde89716f679)
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
-| Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
+| Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control; see the [Codex CLI 0.146.0 feasibility](#codex-cli-01460-feasibility) section above for the later version-specific source inspection. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
