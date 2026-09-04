@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Restart second mates onto a freshly advanced instruction surface, persisting
-# their open records first.
+# Restart second mates onto the current instruction surface and launch-time
+# wiring, persisting their open records first.
 #
 # Usage: fm-secondmate-restart.sh <secondmate-id>... [--help]
 #
@@ -9,8 +9,12 @@
 # verified harness offers a reload, so a re-read steer cannot replace either -
 # it appends a second copy of the mate's own job description with no defined
 # precedence. Replacing the agent is the only mechanism that guarantees the new
-# bytes are the ones read, and it re-resolves the launch-time wiring (harness,
-# model, effort, turn-end hooks) at the same time.
+# bytes are the ones read, and the only one that re-resolves the launch-time
+# wiring - harness, model, effort, turn-end hooks, and every other flag a harness
+# reads once at startup. That second half is why the update pass sends every live
+# mate here, including one already on the target commit: launch-time wiring is
+# not derivable from a git diff, so an unchanged tracked surface does not mean
+# the running agent is already on the current behavior.
 #
 # The cost of that guarantee is the conversation, which is why this command runs
 # in two phases and why the first one is a GATE, not a courtesy:
@@ -49,8 +53,8 @@
 # before the agent is stopped leaves the mate running exactly as it was.
 #
 # Restart candidacy itself belongs to bin/fm-update.sh, which knows which homes
-# advanced and what changed; this command re-checks capability on its own argv
-# rather than trusting a caller's list.
+# the update pass actually left on the target commit; this command re-checks
+# capability on its own argv rather than trusting a caller's list.
 #
 # Environment knobs:
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
@@ -65,7 +69,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,60{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in

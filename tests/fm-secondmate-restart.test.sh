@@ -18,6 +18,10 @@
 #   5. A remote mate restarts by running the SAME local control-plane relaunch on
 #      its host, over the fm-on transport, with the profile resolved from the
 #      PARENT's own pin rather than the remote home's copy of it.
+#   6. End to end with bin/fm-update.sh: a live mate whose home needed no
+#      fast-forward is still named for restart and genuinely restarted, and one
+#      whose runtime cannot prove a restart keeps the honest re-read path with
+#      its agent left running.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -157,6 +161,64 @@ add_local_mate() {
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$smhome" > "$dir/fake/cwd"
+}
+
+# add_repo_backed_mate <case-dir> <id> [harness] [backend-line]
+# Like add_local_mate, but the world is the one /updatefirstmate actually runs
+# against: a bare origin, a firstmate repo clone on its default branch, and the
+# mate's home as a DETACHED worktree of that repo already sitting on origin's tip.
+# That "already current" home is the shape the old classifier skipped entirely.
+add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
+  local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local home="$dir/home" repo="$dir/fmrepo" smhome="$dir/$id-home"
+  if [ ! -d "$repo" ]; then
+    git init -q --bare "$dir/origin.git"
+    git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
+    git clone -q "$dir/origin.git" "$dir/seed" 2>/dev/null
+    mkdir -p "$dir/seed/bin" "$dir/seed/.agents/skills"
+    printf '# agents\n' > "$dir/seed/AGENTS.md"
+    printf 'echo a\n' > "$dir/seed/bin/tool.sh"
+    printf 's1\n' > "$dir/seed/.agents/skills/note.md"
+    # The operational dirs a live home carries are gitignored in a real firstmate
+    # checkout; without that the home would read as dirty and be skipped.
+    printf '/data/\n/state/\n/config/\n/projects/\n/.no-mistakes/\n.fm-secondmate-home\n' \
+      > "$dir/seed/.gitignore"
+    git -C "$dir/seed" add -A
+    git -C "$dir/seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm c1
+    git -C "$dir/seed" push -q origin main
+    git clone -q "$dir/origin.git" "$repo"
+    git -C "$repo" remote set-head origin main >/dev/null 2>&1 || true
+    touch "$home/state/.last-watcher-beat"
+  fi
+  git -C "$repo" worktree add -q --detach "$smhome" main
+  mkdir -p "$smhome/state" "$smhome/data" "$home/data/$id"
+  printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
+  printf '# charter\n' > "$home/data/$id/brief.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=$harness"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    [ -z "$backend" ] || echo "backend=$backend"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" >> "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+}
+
+# run_update_in_case <case-dir>: the real /updatefirstmate mechanics over that world.
+run_update_in_case() {
+  local dir=$1
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
+    FM_ROOT_OVERRIDE="$dir/fmrepo" FM_HOME="$dir/home" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    "$ROOT/bin/fm-update.sh" 2>/dev/null
 }
 
 # arm_answer <case-dir> <id>: make the modelled mate answer the persist request.
@@ -617,6 +679,88 @@ SH
   pass "T14 a result published during reaping is honored"
 }
 
+# --- T15: an already-current mate still restarts, end to end -----------------
+# The SSHHIP regression, driven through BOTH real commands rather than either
+# one's own idea of the other. The mate's home needs no fast-forward at all, so
+# the old instruction-diff classifier left it out of every action set and its
+# agent kept running the launch-time wiring it started with. The update pass must
+# now name it, and the restart pass must then persist its open records and only
+# afterwards replace the agent.
+test_already_current_mate_restarts_end_to_end() {
+  local dir out restart_line ids rc head_before head_after doorbell_line exit_line
+  dir=$(new_case already-current)
+  add_repo_backed_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  head_before=$(git -C "$dir/sm1-home" rev-parse HEAD)
+
+  out=$(run_update_in_case "$dir")
+
+  assert_contains "$out" "secondmate sm1: already current" \
+    "the fixture must model a home that needs no advance"
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  assert_contains "$restart_line" "fm-sm1" \
+    "an already-current live second mate must still be named for restart"
+  assert_contains "$out" "nudge-secondmates: none" \
+    "a mate named for restart must not also be steered"
+
+  ids=${restart_line#restart-secondmates: }
+  # shellcheck disable=SC2086
+  out=$(run_restart "$dir" $ids); rc=$?
+
+  expect_code 0 "$rc" "the mate named by the update pass did not restart"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "an already-current mate must actually be replaced"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
+    "the pass must report the reload it performed"
+  # Persist strictly before replace, read off the pane transcript.
+  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  [ -n "$doorbell_line" ] || fail "the persist request never reached the already-current mate"
+  [ -n "$exit_line" ] || fail "the already-current mate was never stopped, so it was not restarted"
+  [ "$doorbell_line" -lt "$exit_line" ] \
+    || fail "the agent was stopped before it was asked to persist (persist line $doorbell_line, exit line $exit_line)"
+  # Nothing about the home's git state was touched to buy that restart.
+  head_after=$(git -C "$dir/sm1-home" rev-parse HEAD)
+  [ "$head_after" = "$head_before" ] || fail "the already-current home's checkout moved"
+  [ -z "$(git -C "$dir/sm1-home" status --porcelain)" ] \
+    || fail "the restart left the mate's home dirty"
+  pass "T15 an already-current live mate is named by the update pass and genuinely restarted"
+}
+
+# --- T16: an already-current mate that cannot prove a restart stays honest ----
+# Same already-current home, a runtime with no recovery-grade state classifier.
+# Unconditional restart must not become an unconditional CLAIM of one: the update
+# pass routes it to the re-read steer, and the restart pass reports a nudge with
+# the agent still running.
+test_already_current_unprovable_mate_stays_on_the_nudge_path() {
+  local dir out rc restart_line nudge_line before
+  dir=$(new_case already-current-unprovable)
+  # zellij can never establish "the old agent stopped and the replacement came up".
+  add_repo_backed_mate "$dir" sm1 claude zellij
+  arm_answer "$dir" sm1
+  before=$(cat "$dir/fake/command")
+
+  out=$(run_update_in_case "$dir")
+
+  assert_contains "$out" "secondmate sm1: already current" \
+    "the fixture must model a home that needs no advance"
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_not_contains "$restart_line" "sm1" \
+    "a mate whose restart cannot be proven must stay out of the restart set"
+  assert_contains "$nudge_line" "fm-sm1" \
+    "a live mate that cannot be restarted must keep the honest re-read steer"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "an unprovable restart must not report success"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "the fallback must be reported as a nudge"
+  assert_not_contains "$out" "restarted: sm1" "an unprovable mate must never be reported as reloaded"
+  [ "$(cat "$dir/fake/command")" = "$before" ] \
+    || fail "the unprovable mate's agent was stopped anyway"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
+  pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -632,5 +776,7 @@ test_post_stop_failure_is_reported_unreached
 test_relaunches_do_not_block_persist_polling
 test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
+test_already_current_mate_restarts_end_to_end
+test_already_current_unprovable_mate_stays_on_the_nudge_path
 
 echo "# all fm-secondmate-restart tests passed"
