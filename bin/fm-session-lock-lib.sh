@@ -45,6 +45,28 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+fm_harness_interpreter_script_path() {  # <comm> <args>
+  local comm=$1 args=$2 argv0 rest token
+  [ -n "$args" ] || return 1
+  args=${args#"${args%%[![:space:]]*}"}
+  argv0=${args%%[[:space:]]*}
+  case "${comm##*/}:${argv0##*/}" in
+    MainThread:*|*:node|*:node-*|*:node[0-9]*|*:python|*:python[0-9]*|*:python[0-9].[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${args#"$argv0"}
+  while [ -n "$rest" ]; do
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    [ -n "$rest" ] || break
+    token=${rest%%[[:space:]]*}
+    rest=${rest#"$token"}
+    case "$token" in -*) continue ;; esac
+    printf '%s\n' "$token"
+    return 0
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -55,12 +77,13 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python, MainThread) running a harness script
+#      path in its first non-flag script token.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
@@ -85,25 +108,12 @@ fm_harness_process_matches() {  # <comm> <args>
     FM_HARNESS_MATCH_NAME=$name
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
-  case "$comm" in
-    *node*|*python*)
-      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in
-          *claude*) name=claude; FM_HARNESS_IS_CLAUDE=1 ;;
-          *codex*) name=codex ;;
-          *opencode*) name=opencode ;;
-          *grok*) name=grok ;;
-          *" pi-signed "*|pi-signed\ *|*/pi-signed\ *|*/pi-signed) name=pi-signed ;;
-          *" pi "*|pi\ *|*/pi\ *|*/pi) name=pi ;;
-          *" kimi "*|kimi\ *|*/kimi\ *|*/kimi) name=kimi ;;
-        esac
-        [ -n "$name" ] || return 1
-        FM_HARNESS_MATCH_NAME=$name
-        return 0
-      fi
-      ;;
-  esac
+  # Bare interpreter (e.g. node): match the first non-flag script path it runs.
+  if script=$(fm_harness_interpreter_script_path "$comm" "$args") && name=$(fm_harness_path_name "$script"); then
+    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_MATCH_NAME=$name
+    return 0
+  fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
