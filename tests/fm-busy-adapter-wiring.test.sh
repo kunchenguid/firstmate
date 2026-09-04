@@ -360,6 +360,31 @@ test_copilot_hooks_ignore_foreign_sessions() {
   pass "copilot hooks ignore foreign subagent sessions once the parent is latched"
 }
 
+test_copilot_agent_stop_clears_binding_after_turnend_touch_failure() {
+  local rec id=busy-copilot-turnend-fail out state hooks binding
+  rec=$(make_spawn_case copilot-turnend-fail copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  binding="$state/$id.copilot-session"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "parent latch hook failed"
+  rm -f "$state/$id.turn-ended"
+  ln -s "$state/missing/turn-ended" "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"parent"}' || fail "agentStop hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "agentStop must still classify idle when its notification touch fails, got '$out'"
+  assert_absent "$binding" "agentStop must clear the bound parent session even when touch fails"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"next-parent"}' || fail "next parent latch hook failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "the next top-level session must re-open busy state after a failed turn-end touch, got '$out'"
+  assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after a failed turn-end touch"
+  pass "copilot agentStop clears its binding even when turn-end touch fails"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -507,6 +532,7 @@ test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
 test_copilot_hooks_semantic_lifecycle
 test_copilot_hooks_ignore_foreign_sessions
+test_copilot_agent_stop_clears_binding_after_turnend_touch_failure
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

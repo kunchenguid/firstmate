@@ -28,13 +28,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
 detect_own() {
-  local pid=$$ comm args argv0 ancestry=''
+  local pid=$$ comm args ancestry=''
   # Prefer the nearest actual harness process in ancestry before consulting any
   # inherited marker. This keeps a real Claude session authoritative inside a
   # Copilot shell and a real Copilot process authoritative under inherited
@@ -42,9 +42,9 @@ detect_own() {
   # when ancestry cannot prove the host.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      ancestry=cursor
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    if ancestry=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
       break
     fi
     if fm_gemini_pid_is_gemini "$pid" 2>/dev/null; then
@@ -52,31 +52,13 @@ detect_own() {
       break
     fi
     case "$(basename -- "$comm")" in
-      *claude*) ancestry=claude; break ;;
-      *codex*) ancestry=codex; break ;;
-      copilot) ancestry=copilot; break ;;
-      *opencode*) ancestry=opencode; break ;;
-      *grok*) ancestry=grok; break ;;
-      kimi) ancestry=kimi; break ;;
       muse|muse-bin-*) ancestry=muse; break ;;
-      pi-signed) ancestry=pi-signed; break ;;
-      pi) ancestry=pi; break ;;
       node*|python*|MainThread)
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
         if fm_gemini_args_are_gemini "$args"; then
           ancestry=gemini
           break
         fi
-        case "${args%% *}" in
-          copilot|*/copilot) ancestry=copilot; break ;;
-        esac
-        case "$args" in
-          *claude*) ancestry=claude; break ;;
-          *codex*) ancestry=codex; break ;;
-          *opencode*) ancestry=opencode; break ;;
-          *grok*) ancestry=grok; break ;;
-          *" pi "*|*/pi) ancestry=pi; break ;;
-        esac ;;
+        ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     case "$pid" in ''|*[!0-9]*) break ;; esac

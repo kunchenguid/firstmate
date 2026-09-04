@@ -58,24 +58,48 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_MATCH_NAME=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in
+      *claude*) name=claude; FM_HARNESS_IS_CLAUDE=1 ;;
+      *codex*) name=codex ;;
+      copilot) name=copilot ;;
+      *opencode*) name=opencode ;;
+      *grok*) name=grok ;;
+      kimi) name=kimi ;;
+      pi-signed) name=pi-signed ;;
+      pi) name=pi ;;
+    esac
+    [ -n "$name" ] || return 1
+    FM_HARNESS_MATCH_NAME=$name
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_MATCH_NAME=$name
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        case "$args" in
+          *claude*) name=claude; FM_HARNESS_IS_CLAUDE=1 ;;
+          *codex*) name=codex ;;
+          *opencode*) name=opencode ;;
+          *grok*) name=grok ;;
+          *" pi-signed "*|pi-signed\ *|*/pi-signed\ *|*/pi-signed) name=pi-signed ;;
+          *" pi "*|pi\ *|*/pi\ *|*/pi) name=pi ;;
+          *" kimi "*|kimi\ *|*/kimi\ *|*/kimi) name=kimi ;;
+        esac
+        [ -n "$name" ] || return 1
+        FM_HARNESS_MATCH_NAME=$name
         return 0
       fi
       ;;
@@ -84,8 +108,17 @@ fm_harness_process_matches() {  # <comm> <args>
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=cursor
+    return 0
+  fi
   return 1
+}
+
+fm_harness_process_name() {  # <comm> <args>
+  fm_harness_process_matches "$1" "$2" || return 1
+  [ -n "$FM_HARNESS_MATCH_NAME" ] || return 1
+  printf '%s\n' "$FM_HARNESS_MATCH_NAME"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
