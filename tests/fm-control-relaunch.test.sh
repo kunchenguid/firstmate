@@ -647,6 +647,31 @@ test_relaunch_keeps_the_codex_account_until_the_harness_changes() {
   pass "fm-control relaunch: the recorded Codex account carries across a same-harness replacement only"
 }
 
+test_missing_codex_home_refuses_before_stopping_anything() {
+  local dir out rc home
+  dir=$(new_case missingcodexhome rl6c)
+  add_ship_task "$dir" rl6c codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6c.meta"
+  rm -rf "$home"
+
+  out=$(run_control "$dir" rl6c relaunch --note "same account"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded Codex home disappeared should refuse"
+  assert_contains "$out" "--codex-home directory not found: $home" \
+    "the refusal should identify the missing recorded Codex home"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "a missing recorded Codex home must not stop the running worker"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "a missing recorded Codex home must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl6c.control-relaunch" ] \
+    || fail "a missing recorded Codex home must refuse before creating a durable journal"
+  pass "fm-control relaunch: a missing Codex home refuses before the worker is touched"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1571,6 +1596,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_relaunch_keeps_the_codex_account_until_the_harness_changes
+test_missing_codex_home_refuses_before_stopping_anything
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

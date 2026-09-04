@@ -694,6 +694,16 @@ resolve_relaunch_profile() {
   else
     TARGET_CODEX_HOME=
   fi
+  if [ -n "$TARGET_CODEX_HOME" ]; then
+    case "$TARGET_CODEX_HOME" in
+      /*) ;;
+      *) die "--codex-home must be an absolute path, got '$TARGET_CODEX_HOME'; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation" ;;
+    esac
+    [ -d "$TARGET_CODEX_HOME" ] \
+      || die "--codex-home directory not found: $TARGET_CODEX_HOME; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation"
+    [ -f "$TARGET_CODEX_HOME/auth.json" ] \
+      || die "--codex-home has no auth.json: $TARGET_CODEX_HOME (log that account in with CODEX_HOME=$TARGET_CODEX_HOME codex login); refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation"
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
