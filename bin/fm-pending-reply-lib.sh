@@ -68,6 +68,10 @@
 # no other writer into the same status stream - a local mate appending directly,
 # or a remote mate's mirrored line - can take the key over or clear it; see the
 # reserved-key rule in bin/fm-classify-lib.sh.
+# The operator-facing close of that same keyed decision is still
+# fm-send --resolve-key (bin/fm-send.sh header): it must speak the close note
+# owned below (fm_pending_reply_resolved_note), because a bare answered: note is
+# not a reserved-key transition and would leave the decision open.
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
@@ -987,6 +991,31 @@ fm_pending_reply_escalation_key() {  # <corr_id>
   printf 'pending-reply-%s' "$1"
 }
 
+# Close-note body the reserved-key fold accepts as this library's resolution.
+# The fold's guard (bin/fm-classify-lib.sh _fm_decision_key_transition_allowed)
+# requires the note to begin with this namespace's vocabulary token; this is
+# that token plus the stable task/id/via fields both the record close and the
+# operator --resolve-key path write. Optional <extra> is appended after a space.
+fm_pending_reply_resolved_note() {  # <task-id> <corr_id> <via> [extra]
+  printf 'pending-reply-resolved: task=%s pending-reply-id=%s via=%s' "$1" "$2" "$3"
+  if [ -n "${4:-}" ]; then
+    printf ' %s' "$4"
+  fi
+}
+
+# 0 and prints the close note when <key> is in this library's reserved
+# namespace (pending-reply-<corr>). fm-send --resolve-key uses this so an
+# operator close speaks the same vocabulary as fm_pending_reply_close_escalation
+# instead of writing a silent no-op answered: note.
+fm_pending_reply_close_note_for_key() {  # <key> <task-id> <via> [extra]
+  case "$1" in
+    pending-reply-*)
+      fm_pending_reply_resolved_note "$2" "${1#pending-reply-}" "$3" "${4:-}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_pending_reply_escalation_payload() {  # <record-path> <kind>
   local rec=$1 kind=$2 task_id corr summary outcome token
   task_id=$(fm_pending_reply_get "$rec" task_id)
@@ -1057,7 +1086,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now close_line close_rc
+  local open_line open_key open_note now close_line close_rc _task _via
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -1083,9 +1112,9 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
       # wrappers) and does not wake the home that wrote it; the escalation
       # OPEN above stays a plain append because a new blocker must wake.
-      close_line=$(printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s' \
-        "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
-        "$(fm_pending_reply_get "$rec" resolved_via)")
+      _task=$(fm_pending_reply_get "$rec" task_id)
+      _via=$(fm_pending_reply_get "$rec" resolved_via)
+      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
       close_rc=0
       fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
         2>/dev/null || close_rc=$?
