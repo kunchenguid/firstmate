@@ -8,8 +8,9 @@
 # stranding the primary on a feature branch. Three guards cover it:
 #   GUARD 1 (prevention) - the brief asserts isolation before its branch step, and
 #            fm-spawn refuses to launch unless the resolved worktree is isolated.
-#   GUARD 2 (continuous) - fm-spawn puts a task-frozen Git guard first on each new
-#            worker's PATH, so a later Git process cannot target primary.
+#   GUARD 2 (best effort) - fm-spawn puts a task-frozen Git guard first on each
+#            new worker's PATH as a speed bump against later accidental drift;
+#            fm-worker-git-guard.sh's header owns the accepted bypasses.
 #   GUARD 3 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
 #            a feature branch, and stay silent on the default branch or detached.
 # These cases pin: the shared lib's branch classification, the fm-guard banner,
