@@ -35,7 +35,7 @@ code: VALIDATION_ERROR   # exit 2
 Exit 2 with `VALIDATION_ERROR` is positive proof the subcommand does not exist, because the word is parsed as a filename.
 Note that `lavish-axi <anything> --help` exits 0 for any argument, including a nonsense subcommand, so a `--help` exit code can never be used as a capability probe.
 
-The adapter depends on none of this: it uses only the published poll shape above.
+The adapter's polling path depends on none of this: it uses only the published poll shape above.
 
 ## Why an ended Lavish review is terminal
 
@@ -206,3 +206,80 @@ Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
 Both axes are therefore unaffected by construction rather than by assumption: every supported primary harness re-arms from that same exit, and every runtime backend supplies endpoint state only to the pane paths this change does not touch.
 While `state/.afk` exists the watcher stays one-shot as before, because this delivery ends the cycle exactly like the existing check path and leaves classification to the daemon.
+
+## Lavish reviewer links and the browser connection pool
+
+Verified on 2026-09-04 with Lavish 0.1.64, Windows Chrome 152.0.7977.66, and a WSL server listening on IPv4 loopback.
+The reviewer used a fresh Chrome profile with six distinct session keys, one tab per board, on the same HTTP origin.
+CDP recorded six unfinished `GET /events/<key>` responses with `protocol: http/1.1` and `remoteIPAddress: 127.0.0.1`.
+The artifact SDK returned a DOM snapshot, but the subsequent Send request and another tab's reload waited for a free connection.
+The measured Send timing was:
+
+```json
+{"sendStart":60644.562,"sendEnd":60644.665,"receiveHeadersStart":60701.444,"receiveHeadersEnd":60701.485}
+```
+
+These CDP timing fields are milliseconds relative to the request, so nearly all of the delay preceded transmission.
+Closing two fixture tabs released the unchanged pending requests; the prompt returned 200 and the listener captured the queued text.
+This motivates the current hostname mitigation without requiring duplicate reviewer tabs or a broken listener.
+
+A separate server on port 4399 accepted an explicitly allow-listed `scout-one.localhost` host and rejected an unlisted localhost subdomain.
+With six `localhost:4399` fixture streams still open, Windows Chrome opened a seventh session on `scout-one.localhost:4399`, loaded its SDK, and submitted its prompt successfully:
+
+```text
+POST /api/4970fe917f997d57/prompts
+Host: scout-one.localhost:4399
+Origin: http://scout-one.localhost:4399
+Status: 200
+```
+
+```json
+{"status":"queued","pending_prompts":1}
+```
+
+The isolated poll captured the exact submitted text and its DOM snapshot.
+No hosts-file change was required for that Windows Chrome browser.
+This is Chrome evidence; Edge was not verified.
+
+The adapter's `link` command was also exercised through the real Lavish 0.1.64 session listing and real HTTP health probes on an isolated server.
+Two fixture artifacts were served with `--no-open`, only the first artifact's alias was explicitly allowed, and the public commands were repeated unchanged:
+
+```sh
+bin/fm-procevent-lavish.sh link "$first_artifact"
+bin/fm-procevent-lavish.sh link "$second_artifact"
+```
+
+Exact outputs from that fixture:
+
+```text
+http://lavish-a75a2963d7b87591.localhost:4399/session/a75a2963d7b87591
+http://127.0.0.1:4399/session/d795f09774321d4b
+```
+
+Both repeated calls returned the same output, preserved the nondefault port, and left the served sessions and listeners unchanged.
+All fixture sessions and the isolated server were ended after the checks.
+
+The portable executable regression is refreshed with:
+
+```sh
+bin/fm-test-run.sh tests/fm-procevent.test.sh tests/fm-bearings-board.test.sh tests/fm-bearings-board-render.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+It covers both stable key partitions, exact 200-only alias preference, failed probes, quoted listing fields, served ports and queries, missing or ended sessions, and the bearings producer's serve-before-arm ordering with automatic browser opening suppressed.
+It also checks that remote, IPv6, and HTTPS session URLs retain their original authority, avoiding an unverified endpoint or TLS hostname rewrite.
+The command is independent of the primary harness and runtime backend: it reads the CLI session listing and probes HTTP health, without starting an agent, invoking a backend adapter, opening a browser, or consuming feedback.
+The script header owns exact link mechanics; the process-event skill owns the hosting procedure and capacity limit.
+A stable hash partition does not prove that an arbitrary six-board set splits three per address, so the operator's three-board limit remains necessary.
+
+The 2026-09-04 portable run completed with:
+
+```text
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=71135
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=92 local_links=318
+```

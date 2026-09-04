@@ -9,6 +9,7 @@
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
+#   fm-procevent-lavish.sh link <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
@@ -29,6 +30,16 @@
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
+# link       Print the reviewer URL for an already-served artifact, using the
+#            URL in lavish-axi's session listing, never opening or polling it.
+#            For HTTP IPv4 loopback sessions, prefer lavish-<key>.localhost if
+#            a bounded /health probe with that Host returns exactly 200.
+#            Otherwise an even first key digit selects localhost, an odd one
+#            127.0.0.1. This is stable partitioning, not a capacity guarantee:
+#            hosts must keep at most three boards per address. Scheme, port,
+#            and session suffix come from the served URL (an omitted HTTP
+#            port means 80). HTTPS, IPv6, and remote URLs remain unchanged.
+#            No allow-list, server, listener, or browser state is changed.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -79,7 +90,7 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
+# The polling path wraps the published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
@@ -123,7 +134,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u/{ /^#/s/^# \{0,1\}//p; }' "${BASH_SOURCE[0]}"; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -140,6 +151,85 @@ cmd_source_id() {
   else
     printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
   fi
+}
+
+cmd_link() {
+  if [ "$#" -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
+    printf 'Usage: fm-procevent-lavish.sh link <artifact.html>\nPrint the existing session reviewer URL without opening it.\nExample: fm-procevent-lavish.sh link .lavish/review.html\n'
+    return 0
+  fi
+  [ "$#" -eq 1 ] && [ -n "$1" ] || usage
+  case "$1" in -*) usage ;; esac
+  local artifact=$1 id key listing parts url scheme host port suffix alias status probe_host
+  id=$(cmd_source_id "$artifact") || return 1
+  key=${id#lavish-}
+  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  listing=$(lavish-axi) || die "cannot read Lavish sessions; serve the artifact with --no-open first"
+  # Read only the published sessions table, with its declared field order.
+  # Quoted TOON cells use JSON string escapes; a URL must match the canonical
+  # session key exactly, not merely contain a matching filename or key prefix.
+  parts=$(printf '%s\n' "$listing" | perl -MJSON::PP -e '
+    use strict; use warnings;
+    my $key = shift @ARGV;
+    my (@fields, $remaining, @matches);
+    while (my $line = <STDIN>) {
+      if (!@fields) {
+        next unless $line =~ /^sessions\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($remaining, @fields) = ($1, split /,/, $2);
+        next;
+      }
+      last if $remaining == 0;
+      exit 1 unless $line =~ s/^ +//;
+      $remaining--;
+      $line =~ s/\r?\n$//;
+      my @values;
+      while (1) {
+        if ($line =~ s/^("(?:[^"\\]|\\.)*")//) {
+          my $value = eval { decode_json($1) };
+          exit 1 if $@;
+          push @values, $value;
+        } elsif ($line =~ s/^([^,]*)//) {
+          push @values, $1;
+        }
+        last if $line eq "";
+        exit 1 unless $line =~ s/^,//;
+      }
+      exit 1 unless @values == @fields;
+      my %row; @row{@fields} = @values;
+      next unless defined $row{url} && defined $row{status} && $row{status} eq "open";
+      my $url = $row{url};
+      next unless $url =~ m{\A(https?)://([^/?#\s]+)(/session/\Q$key\E(?:[?#][^\s]*)?)\z};
+      my ($scheme, $authority, $suffix) = ($1, $2, $3);
+      next unless $authority =~ /\A(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?\z/;
+      my ($host, $port) = ($1, $2 // ($scheme eq "https" ? 443 : 80));
+      next unless $port > 0 && $port <= 65535;
+      push @matches, join "\t", $url, $scheme, lc($host), $port, $suffix;
+    }
+    exit 1 unless defined $remaining && $remaining == 0 && @matches == 1;
+    print "$matches[0]\n";
+  ' "$key") || die "no unique open session URL found; serve the artifact with --no-open first"
+  IFS=$'\t' read -r url scheme host port suffix <<< "$parts"
+  # Do not turn a remote or TLS endpoint into an unverified local address.
+  case "$scheme:$host" in
+    http:localhost|http:127.0.0.1|http:"lavish-$key.localhost") ;;
+    *) printf '%s\n' "$url"; return 0 ;;
+  esac
+  command -v curl >/dev/null 2>&1 || die "curl is required to check the reviewer hostname"
+  alias="lavish-$key.localhost"
+  probe_host=$host
+  [ "$probe_host" != "$alias" ] || probe_host=127.0.0.1
+  status=$(curl --silent --noproxy '*' --connect-timeout 1 --max-time 2 \
+    --output /dev/null --write-out '%{http_code}' \
+    --header "Host: $alias:$port" "$scheme://$probe_host:$port/health") || status=000
+  if [ "$status" = 200 ]; then
+    host=$alias
+  else
+    case "${key:0:1}" in
+      0|2|4|6|8|a|c|e) host=localhost ;;
+      *) host=127.0.0.1 ;;
+    esac
+  fi
+  printf '%s://%s:%s%s\n' "$scheme" "$host" "$port" "$suffix"
 }
 
 cmd_arm() {
@@ -618,6 +708,7 @@ case "${1-}" in
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
+  link)      shift; cmd_link "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;

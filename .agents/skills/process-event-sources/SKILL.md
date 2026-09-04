@@ -25,11 +25,20 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 ## Arming a source
 
 Use the adapter, not the generic runner, for a real source.
-For a Lavish review artifact firstmate owns (a live investigating scout should host its own loop):
+For a Lavish review artifact, establish its stable path once with `lavish-axi <artifact.html> --no-open` before arming its listener.
+Never open a captain-active session in any browser, including for verification.
+Firstmate-owned reviews use the adapter below; a live investigating scout owns its own supervised loop.
 
 ```sh
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
+
+After the listener is armed, hand the captain the URL from `bin/fm-procevent-lavish.sh link <artifact.html>`.
+The script's header owns hostname selection and its read-only probe mechanics.
+Keep at most three open boards per address when the link uses `localhost` or `127.0.0.1`; deterministic partitioning does not guarantee an equal split for every set of boards.
+If a partition exceeds that limit, use the other already-supported address for an empty or fully drained board tab while preserving its scheme, port and session path.
+Drain each queued tab on its original address before moving it, because changing origins does not carry over its unsent items.
+Verify active reviews through session listings and listener state without fetching a review page or taking over its handoff.
 
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 

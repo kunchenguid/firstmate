@@ -14,6 +14,7 @@ set -u
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 HARNESS="$ROOT/tests/assets/board-render-harness.mjs"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board-render)
+export FM_TEST_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
@@ -22,7 +23,25 @@ make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  '') cat "$FM_HOME/lavish-sessions" ;;
+  poll) exit 0 ;;
+  *)
+    [ "$#" -eq 2 ] && [ "$2" = --no-open ] || exit 65
+    sid=$("$FM_TEST_LAVISH_ADAPTER" source-id "$1")
+    printf 'sessions[1]{file,status,url,pending_prompts}:\n  "%s",open,"http://localhost:4876/session/%s",0\n' \
+      "$1" "${sid#lavish-}" > "$FM_HOME/lavish-sessions"
+    ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '403'
+SH
+  chmod +x "$fakebin/lavish-axi" "$fakebin/curl"
   printf '%s\n' "$home"
 }
 

@@ -25,6 +25,7 @@
 #              bound: <source-id>
 #              armed: <source-id>            (first registration)
 #              already-armed: <source-id>    (registration already present)
+#              review_url: "<url>"         (hand this URL to the reviewer)
 # path       Print the stable board path for this home.
 #
 # Validation is fail-closed: the payload must be valid JSON with
@@ -178,7 +179,7 @@ command_build() {
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-  lavish-axi "$board" || fail "cannot establish the board Lavish session"
+  lavish-axi "$board" --no-open || fail "cannot establish the board Lavish session"
   printf 'served: %s\n' "$board"
 
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
@@ -194,6 +195,10 @@ command_build() {
       || fail "cannot arm the board as a process-event source"
     printf 'armed: %s\n' "$sid"
   fi
+  local review_url
+  review_url=$("$SCRIPT_DIR/fm-procevent-lavish.sh" link "$board") \
+    || fail "cannot resolve the board reviewer URL"
+  printf 'review_url: "%s"\n' "$review_url"
 }
 
 case "${1-}" in

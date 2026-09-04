@@ -1748,6 +1748,94 @@ for adapter in remote-reply when; do
 done
 pass "an adapter with no silence verdict keeps announcing every result"
 
+# --- reviewer links use separate HTTP pools without opening a board --------
+LINK_HOME="$TMP_ROOT/links"
+LINK_BIN=$(fm_fakebin "$LINK_HOME")
+export FM_TEST_LINK_LISTING="$LINK_HOME/sessions"
+export FM_TEST_LINK_PROBE_LOG="$LINK_HOME/probes"
+cat > "$LINK_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 0 ] || exit 65
+cat "$FM_TEST_LINK_LISTING"
+SH
+cat > "$LINK_BIN/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$FM_TEST_LINK_PROBE_LOG"
+printf '%s' "${FM_TEST_LINK_STATUS:-403}"
+exit "${FM_TEST_LINK_CURL_EXIT:-0}"
+SH
+chmod +x "$LINK_BIN/lavish-axi" "$LINK_BIN/curl"
+link_out() { PATH="$LINK_BIN:$PATH" FM_HOME="$LINK_HOME" "$ROOT/bin/fm-procevent-lavish.sh" link "$@"; }
+link_listing() {
+  printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a,\\"quoted\\" file.html","%s",0\n' \
+    "$1" > "$FM_TEST_LINK_LISTING"
+}
+
+LINK_EVEN=0 LINK_ODD=0
+for n in $(seq 1 128); do
+  LINK_ARTIFACT="$LINK_HOME/board-$n.html"
+  printf '<h1>Review</h1>\n' > "$LINK_ARTIFACT"
+  LINK_ID=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_ARTIFACT")
+  LINK_KEY=${LINK_ID#lavish-}
+  case "${LINK_KEY:0:1}" in
+    0|2|4|6|8|a|c|e)
+      [ "$LINK_EVEN" -lt 3 ] || continue
+      LINK_EXPECTED_HOST=localhost; LINK_EVEN=$((LINK_EVEN + 1)) ;;
+    *)
+      [ "$LINK_ODD" -lt 3 ] || continue
+      LINK_EXPECTED_HOST=127.0.0.1; LINK_ODD=$((LINK_ODD + 1)) ;;
+  esac
+  link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
+  LINK_EXPECTED="http://$LINK_EXPECTED_HOST:4876/session/$LINK_KEY?no_gate=1"
+  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link did not partition the key or preserve the served port/query"
+  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link changed on an unchanged rerun"
+  [ "$LINK_EVEN" -ne 3 ] || [ "$LINK_ODD" -ne 3 ] || break
+done
+[ "$LINK_EVEN" -eq 3 ] && [ "$LINK_ODD" -eq 3 ] || fail "link spreading test did not exercise both partitions"
+pass "link stably partitions six selected session keys across both loopback hosts"
+
+: > "$FM_TEST_LINK_PROBE_LOG"
+[ "$(FM_TEST_LINK_STATUS=200 link_out "$LINK_ARTIFACT")" = "http://lavish-$LINK_KEY.localhost:4876/session/$LINK_KEY?no_gate=1" ] \
+  || fail "link did not prefer a positively accepted alias"
+assert_contains "$(cat "$FM_TEST_LINK_PROBE_LOG")" "Host: lavish-$LINK_KEY.localhost:4876" "link did not probe the exact alias Host"
+assert_contains "$(cat "$FM_TEST_LINK_PROBE_LOG")" 'http://localhost:4876/health' "link probed something other than server health"
+assert_not_contains "$(cat "$FM_TEST_LINK_PROBE_LOG")" '/session/' "link fetched a reviewer handoff"
+for status in 204 301 403 500 000; do
+  [ "$(FM_TEST_LINK_STATUS=$status link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] \
+    || fail "link preferred an alias without a 200 response ($status)"
+done
+[ "$(FM_TEST_LINK_STATUS=200 FM_TEST_LINK_CURL_EXIT=7 link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] \
+  || fail "link trusted output from a failed probe"
+pass "link prefers an alias only after a successful 200 health probe"
+
+link_listing "http://lavish-$LINK_KEY.localhost:4876/session/$LINK_KEY"
+: > "$FM_TEST_LINK_PROBE_LOG"
+FM_TEST_LINK_STATUS=200 link_out "$LINK_ARTIFACT" >/dev/null || fail "link could not inspect a previously aliased session"
+assert_contains "$(cat "$FM_TEST_LINK_PROBE_LOG")" 'http://127.0.0.1:4876/health' "alias probe depended on local subdomain DNS resolution"
+link_listing "http://localhost/session/$LINK_KEY"
+[ "$(link_out "$LINK_ARTIFACT")" = "http://$LINK_EXPECTED_HOST:80/session/$LINK_KEY" ] || fail "link invented a nonstandard default HTTP port"
+for url in "https://localhost:7443/session/$LINK_KEY" "http://review.example:4876/session/$LINK_KEY" "http://[::1]:4876/session/$LINK_KEY"; do
+  link_listing "$url"
+  : > "$FM_TEST_LINK_PROBE_LOG"
+  [ "$(link_out "$LINK_ARTIFACT")" = "$url" ] || fail "link rewrote an unverified TLS, IPv6, or remote endpoint"
+  [ ! -s "$FM_TEST_LINK_PROBE_LOG" ] || fail "link probed an out-of-scope endpoint"
+done
+pass "link preserves TLS, IPv6, and remote URLs and derives omitted ports from the URL scheme"
+
+link_out --help >/dev/null || fail "link help failed"
+! link_out "$LINK_ARTIFACT" --unknown >/dev/null 2>&1 || fail "link accepted an unknown argument"
+printf 'sessions[0]:\n' > "$FM_TEST_LINK_LISTING"
+! link_out "$LINK_ARTIFACT" >/dev/null 2>&1 || fail "link fabricated an unserved session URL"
+link_listing "http://localhost:4876/session/$LINK_KEY"
+sed 's/^  open,/  ended,/' "$FM_TEST_LINK_LISTING" > "$FM_TEST_LINK_LISTING.tmp"
+mv "$FM_TEST_LINK_LISTING.tmp" "$FM_TEST_LINK_LISTING"
+! link_out "$LINK_ARTIFACT" >/dev/null 2>&1 || fail "link handed out an ended session"
+link_listing "http://localhost:4876/session/$LINK_KEY"
+sed 's/sessions\[1\]/sessions[2]/' "$FM_TEST_LINK_LISTING" > "$FM_TEST_LINK_LISTING.tmp"
+mv "$FM_TEST_LINK_LISTING.tmp" "$FM_TEST_LINK_LISTING"
+! link_out "$LINK_ARTIFACT" >/dev/null 2>&1 || fail "link accepted an incomplete session listing"
+pass "link rejects missing, ended, incomplete, and invalid requests without serving or polling"
+
 # --- the loss limitation is stated on the public interface ------------------
 # Checked through --help, the operator-facing surface, rather than by reading
 # implementation bytes.

@@ -10,6 +10,7 @@ set -u
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
+export FM_TEST_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -17,7 +18,25 @@ make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  '') cat "$FM_HOME/lavish-sessions" ;;
+  poll) exit 0 ;;
+  *)
+    [ "$#" -eq 2 ] && [ "$2" = --no-open ] || exit 65
+    sid=$("$FM_TEST_LAVISH_ADAPTER" source-id "$1")
+    printf 'sessions[1]{file,status,url,pending_prompts}:\n  "%s",open,"http://localhost:4876/session/%s",0\n' \
+      "$1" "${sid#lavish-}" > "$FM_HOME/lavish-sessions"
+    ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '403'
+SH
+  chmod +x "$fakebin/lavish-axi" "$fakebin/curl"
   printf '%s\n' "$home"
 }
 
@@ -217,6 +236,8 @@ test_build_injects_binds_then_arms() {
   assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
   assert_contains "$out" "bound: " "build did not report the answer binding: $out"
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
+  assert_contains "$out" 'review_url: "http://' "build did not present the reviewer link: $out"
+  assert_contains "$out" ':4876/session/' "build lost the served session port: $out"
   assert_present "$board" "build reported success without a board"
 
   # Round-trip: the payload extracted from the built page is byte-for-byte the
@@ -283,10 +304,11 @@ fi
 exec "$REAL_LAVISH_ADAPTER" "$@"
 SH
   chmod +x "$runtime/bin/fm-procevent-lavish.sh"
+  cp "$home/fakebin/lavish-axi" "$home/fakebin/lavish-axi-base"
   cat > "$home/fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" != poll ]; then
-  exit 0
+  exec "$(dirname "$0")/lavish-axi-base" "$@"
 fi
 cat <<EOF
 session:
