@@ -1190,11 +1190,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
 }
 
 # Detect a correlated report written under the secondmate home (wrong home)
-# without treating it as acknowledgement. parent-replies.status is the remote
-# parent channel, not a stranded self-home file, so it is skipped.
+# without treating it as acknowledgement. A remote route's
+# parent-replies.status is its parent channel, not a stranded self-home file.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
   local rec delivered hits sightings snapshot previous status_file line line_no sighting_id phase changed=0
+  local remote_parent_channel=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 0
@@ -1208,11 +1209,18 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
   case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
   sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
+  # shellcheck source=bin/fm-parent-channel-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+  if fm_parent_channel_destination "$sm_home" "$sm_home/state" >/dev/null 2>&1 \
+    && [ "$FM_PARENT_CHANNEL_ROUTE" = remote ]; then
+    remote_parent_channel=1
+  fi
   for status_file in "$sm_home"/state/*.status; do
     [ -e "$status_file" ] || continue
-    case "$(basename "$status_file")" in
-      parent-replies.status) continue ;;
-    esac
+    if [ "$remote_parent_channel" = 1 ] \
+      && [ "$(basename "$status_file")" = parent-replies.status ]; then
+      continue
+    fi
     line_no=0
     while IFS= read -r line || [ -n "$line" ]; do
       line_no=$((line_no + 1))

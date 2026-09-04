@@ -48,6 +48,11 @@ fi
 VERB=$1
 CORR=$2
 shift 2
+if [ "$DOC_MODE" = 1 ]; then
+  [ $# -ge 1 ] && [ -n "$1" ] || usage
+else
+  [ $# -ge 1 ] && [ -n "$*" ] || usage
+fi
 
 case "$CORR" in
   corr=*) CORR=${CORR#corr=} ;;
@@ -84,7 +89,6 @@ fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
-  [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
@@ -95,9 +99,5 @@ if [ "$DOC_MODE" = 1 ]; then
   fi
 else
   NOTE=$*
-  if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$DESTINATION"
-  else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$DESTINATION"
-  fi
+  printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$DESTINATION"
 fi

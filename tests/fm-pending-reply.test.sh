@@ -1287,6 +1287,8 @@ test_same_basename_self_home_corr_resolves_on_tick() {
 
   fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home"
   fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
+  fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home"
+  fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "same-basename self-home corr must resolve, got $(phase_of "$state" "$corr")"
   [ -n "$(fm_pending_reply_get "$rec" resolved_epoch)" ] \
@@ -1382,7 +1384,7 @@ test_child_status_wrong_home_is_not_copied() {
 }
 
 test_mechanical_helper_writes_parent_channel() {
-  local home state sm_home corr rc
+  local home state sm_home corr empty_corr rc
   home=$(setup_parent mechanical-helper)
   state="$home/state"
   sm_home=$(bind_local_mate "$home" mate)
@@ -1399,6 +1401,14 @@ test_mechanical_helper_writes_parent_channel() {
   fm_pending_reply_try_resolve "$state" "$corr" \
     || fail "a mechanical helper line on the parent channel must resolve"
   [ "$(phase_of "$state" "$corr")" = resolved ] || fail "phase should be resolved"
+  empty_corr=$(fm_pending_reply_create "$home" "$state" mate "answer must not be empty")
+  fm_pending_reply_mark_delivered "$state" "$empty_corr"
+  rc=0
+  FM_HOME="$sm_home" "$REPORT" "done" "$empty_corr" "" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "helper must reject an empty status note"
+  if fm_pending_reply_try_resolve "$state" "$empty_corr"; then
+    fail "an empty helper report must not resolve an expectation"
+  fi
   rc=0
   FM_HOME="$home" "$REPORT" "done" "$corr" "from a main home" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "helper must refuse a main home that has no parent channel"
@@ -1411,6 +1421,12 @@ test_remote_parent_replies_is_not_wrong_home() {
   state="$home/state"
   sm_home="$TMP_ROOT/remote-replies-home-$RANDOM"
   mkdir -p "$sm_home/state"
+  printf '%s\n' mate > "$sm_home/.fm-secondmate-home"
+  cat > "$sm_home/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=remote
+parent_host=remote.example
+EOF
   export FM_PENDING_REPLY_NOW=11300
   corr=$(fm_pending_reply_create "$home" "$state" mate "did the build go green")
   fm_pending_reply_mark_delivered "$state" "$corr"
@@ -1428,6 +1444,32 @@ test_remote_parent_replies_is_not_wrong_home() {
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
     || fail "detect must not acknowledge a remote-channel or child-file sighting"
   pass "remote parent-replies.status is not classified as wrong-home"
+}
+
+test_local_parent_replies_is_wrong_home_evidence() {
+  local home state sm_home corr rec hits sightings
+  home=$(setup_parent local-parent-replies)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" mate)
+  export FM_PENDING_REPLY_NOW=11350
+  corr=$(fm_pending_reply_create "$home" "$state" mate "did the build go green")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  printf 'done [corr=%s]: written to a local alias\n' "$corr" \
+    > "$sm_home/state/parent-replies.status"
+
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+    || fail "wrong-home detect should scan a local parent-replies alias"
+  hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
+  [ "$hits" = 1 ] || fail "local parent-replies.status should count once, got $hits"
+  sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
+  case "$sightings" in
+    "$sm_home/state/parent-replies.status:"*) : ;;
+    *) fail "local parent-replies sighting must retain its readable path" ;;
+  esac
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "local wrong-home evidence must not acknowledge the reply"
+  pass "local parent-replies.status remains wrong-home evidence"
 }
 
 test_failed_send_discards_undelivered_expectation() {
@@ -1489,5 +1531,6 @@ test_same_basename_reply_resolves_after_recovery_failure
 test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
+test_local_parent_replies_is_wrong_home_evidence
 
 printf 'ok - all pending-reply tests passed\n'
