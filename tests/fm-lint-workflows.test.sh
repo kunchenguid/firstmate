@@ -15,6 +15,16 @@ LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
+# True only when a real actionlint at exactly the pinned version is resolvable,
+# mirroring fm-lint-workflows.sh's own gate (bin/fm-lint-workflows.sh version
+# check). The tests below that exercise actionlint's real YAML parsing cannot be
+# faked by a stub, so they run under CI parity and SKIP LOUDLY where the pinned
+# tool is genuinely absent - the same contract fm-lint.test.sh uses for ShellCheck.
+actionlint_ready() {
+  command -v actionlint >/dev/null 2>&1 || return 1
+  [ "$(actionlint -version 2>/dev/null | awk 'NR==1 {print; exit}')" = "$REQUIRED" ]
+}
+
 # Official sha256 values from actionlint_1.7.12_checksums.txt on the v1.7.12
 # release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12). Tests
 # compare installer behavior against these published digests, not script source.
@@ -167,6 +177,10 @@ YAML
 }
 
 test_current_workflows_pass() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): current workflows parse check"
+    return
+  fi
   local out rc
   rc=0
   out=$("$LINT_WF" 2>&1) || rc=$?
@@ -177,6 +191,10 @@ test_current_workflows_pass() {
 }
 
 test_col0_heredoc_fails_with_clear_error() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): column-0 heredoc failure check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-col0)
   mkdir -p "$tmp/.github/workflows"
@@ -192,6 +210,10 @@ test_col0_heredoc_fails_with_clear_error() {
 }
 
 test_valid_fixture_passes() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): valid fixture workflow check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-ok)
   mkdir -p "$tmp/.github/workflows"
@@ -217,6 +239,10 @@ test_empty_workflows_dir_fails() {
 }
 
 test_explicit_broken_path_fails() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): explicit broken path check"
+    return
+  fi
   local tmp broken out rc
   tmp=$(fm_test_tmproot fm-lint-wf-path)
   broken="$tmp/broken.yml"
@@ -230,6 +256,10 @@ test_explicit_broken_path_fails() {
 }
 
 test_non_mapping_root_fails() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): non-mapping YAML root check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-scalar)
   mkdir -p "$tmp/.github/workflows"
@@ -463,6 +493,10 @@ test_installer_rejects_unsupported_platform() {
 # self-broken ci.yml. Copy the lint scripts into a fake repo so the default
 # workflow root is the fixture, not this worktree.
 test_fm_lint_default_path_catches_broken_ci_yml() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): fm-lint.sh default-path broken ci.yml check"
+    return
+  fi
   local tmp fakebin log diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-wf-default)
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"

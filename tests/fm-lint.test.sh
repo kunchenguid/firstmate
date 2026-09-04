@@ -21,6 +21,12 @@ LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
+# fm-lint.sh's default-path run also validates workflows via
+# bin/fm-lint-workflows.sh, so the changed-mode and zero-changed tests below -
+# which exercise ShellCheck file selection, not actionlint - stub a
+# pinned-version actionlint to stay hermetic and run without a real actionlint
+# installed. The pin is read from its owner rather than restated here.
+REQUIRED_ACTIONLINT=$("$ROOT/bin/fm-lint-workflows.sh" --required-version)
 
 # Official GitHub release asset sha256 values for shellcheck v0.11.0 .tar.xz
 # archives (https://github.com/koalaman/shellcheck/releases/tag/v0.11.0). Tests
@@ -265,6 +271,21 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_stub_actionlint <fakebin-dir>: install an actionlint stub that reports
+# the pinned version and passes every workflow. fm-lint.sh's default-path run
+# validates workflows through bin/fm-lint-workflows.sh, so tests that invoke that
+# path to exercise ShellCheck selection would otherwise fail closed on a machine
+# without a real actionlint. This keeps them hermetic and about ShellCheck only.
+fm_lint_stub_actionlint() {
+  local fakebin=$1
+  cat > "$fakebin/actionlint" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = -version ] && { printf '$REQUIRED_ACTIONLINT\n'; exit 0; }
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
 test_fast_mode_disables_extended_analysis() {
   local tmp fakebin log mode_log telemetry fixture out
   tmp=$(fm_test_tmproot fm-lint-fast-mode)
@@ -367,6 +388,9 @@ test_changed_mode_lints_only_the_changed_file() {
   fm_lint_stub_git "$fakebin"
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
+  # fm-lint.sh's default path also validates workflows, so stub actionlint too or
+  # this ShellCheck-selection test fails closed where no real actionlint exists.
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   target="bin/fm-install-shellcheck.sh"
   fm_lint_write_diff_file "$diff_file" "$target" "README.md"
@@ -435,6 +459,11 @@ test_zero_changed_files_exits_clean() {
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  # The version gate resolves ShellCheck even with zero targets, and the default
+  # path then validates workflows; stub both so this stays hermetic without a
+  # real ShellCheck or actionlint installed.
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   : > "$diff_file"
 
