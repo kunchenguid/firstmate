@@ -55,6 +55,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_fake_exit0 "$fb" no-mistakes
   printf '%s\n' "$fb"
 }
 

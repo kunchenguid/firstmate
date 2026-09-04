@@ -176,10 +176,20 @@ fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
-    cat > "$fakebin/$tool" <<'SH'
+    if [ "$tool" = no-mistakes ]; then
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = 'axi run --help' ]; then
+  printf '%s\n' '      --require-ponytail   require Ponytail full for pipeline agents'
+fi
+exit 0
+SH
+    else
+      cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
+    fi
     chmod +x "$fakebin/$tool"
   done
 }
