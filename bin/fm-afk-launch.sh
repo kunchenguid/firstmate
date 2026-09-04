@@ -6,9 +6,15 @@
 # Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
+# tool (claude, grok) run it there directly on most backends and it is fine.
+# claude on the herdr backend is the proven exception, NOT fine: the in-pane
+# background job leaves a footer token that herdr's own claude agent-detection
+# ruleset misreads as "working" for the life of the session, so the away-mode
+# busy guard can never read that pane idle and the daemon can never deliver an
+# escalation into it (data/firstmate-afk-daemon-wedged-investigation/report.md,
+# 2026-08-26). A harness with NO native background mechanism (pi), and claude
+# on herdr per that exception, has to manufacture a terminal, and doing that by
+# SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).

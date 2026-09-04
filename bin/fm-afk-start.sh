@@ -20,13 +20,19 @@
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:
 #   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
-#     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
-#     backend (herdr tab/workspace, tmux detached session) and passes the
-#     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the
-#     daemon's own new pane.
+#     run this directly via that tool on most backends, so the daemon inherits
+#     the captain pane's env and auto-discovers it. EXCEPTION: claude on the
+#     herdr backend must NOT use this path - the in-pane background job leaves
+#     a footer token that herdr's own claude agent-detection ruleset misreads as
+#     "working" for the life of the session, structurally wedging the away-mode
+#     busy guard (data/firstmate-afk-daemon-wedged-investigation/report.md,
+#     2026-08-26; see .agents/skills/afk/SKILL.md for the routing rule).
+#   - Harnesses with NO native background mechanism (e.g. pi), and claude on
+#     herdr per the exception above, run this THROUGH bin/fm-afk-launch.sh,
+#     which creates a non-visible tracked terminal per backend (herdr tab/
+#     workspace, tmux detached session) and passes the captain pane in as
+#     FM_SUPERVISOR_TARGET so injection targets it, not the daemon's own new
+#     pane.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
