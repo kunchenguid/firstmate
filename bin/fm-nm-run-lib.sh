@@ -5,7 +5,7 @@
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
 # strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned exemption defined below. Getting this wrong in either
+# pipeline-owned attribution paths defined below. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
