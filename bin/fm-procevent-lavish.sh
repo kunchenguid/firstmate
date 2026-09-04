@@ -37,6 +37,8 @@
 #            Otherwise a private per-port map beside Lavish's shared user state
 #            assigns the key first come, round-robin to localhost or 127.0.0.1
 #            under a Perl-held OS flock and preserves that choice across homes.
+#            Each allocation prunes keys absent from the validated open-session
+#            listing before it counts the remaining active assignments.
 #            This fallback is bounded to six boards per server until the
 #            event-stream transport fix lands; a seventh prints the accepted
 #            alias path and the three-board-per-address limit. Scheme, port,
@@ -157,13 +159,13 @@ cmd_source_id() {
 }
 
 fallback_host_for_key() (
-  local key=$1 port=$2 alias=$3 shared_state
+  local key=$1 port=$2 alias=$3 open_keys=$4 shared_state
   shared_state=${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}
   [ -d "$shared_state" ] && [ ! -L "$shared_state" ] \
     || die "Lavish user state is not a regular directory: $shared_state"
   perl -MFcntl=:DEFAULT,:flock,:mode -MFile::Temp=tempfile -e '
     use strict; use warnings;
-    my ($state, $port, $key, $alias) = @ARGV;
+    my ($state, $port, $key, $alias, $open_keys) = @ARGV;
     my $map = "$state/firstmate-reviewer-addresses-$port.tsv";
     my $lock = "$state/.firstmate-reviewer-addresses-$port.lock";
     my $nofollow = eval { Fcntl::O_NOFOLLOW() } || 0;
@@ -184,7 +186,14 @@ fallback_host_for_key() (
     $is_private->($lock, $lock_fh)
       or die "error: Lavish reviewer address lock changed while locking\n";
     my $raw = "";
-    my (%assigned, %count);
+    my (%assigned, %count, %open);
+    my @order;
+    for my $open_key (split /,/, $open_keys) {
+      $open_key =~ /\A[0-9a-f]{16}\z/ && !exists $open{$open_key}
+        or die "error: Lavish open-session set is invalid\n";
+      $open{$open_key} = 1;
+    }
+    exists $open{$key} or die "error: current Lavish session is not open\n";
     if (-e $map || -l $map) {
       sysopen(my $map_fh, $map, O_RDONLY | $nofollow)
         or die "error: cannot open the Lavish reviewer address map\n";
@@ -203,31 +212,42 @@ fallback_host_for_key() (
           && !exists $assigned{$field[2]}
           or die "error: Lavish reviewer address map is invalid\n";
         $assigned{$field[2]} = $field[3];
-        $count{$field[3]}++;
+        push @order, $field[2];
       }
     }
+    @order = grep { $open{$_} } @order;
+    for my $stored_key (keys %assigned) {
+      delete $assigned{$stored_key} unless $open{$stored_key};
+    }
+    $count{$_}++ for values %assigned;
     my $host = $assigned{$key};
     if (!defined $host) {
       $host = ($count{"localhost"} // 0) <= ($count{"127.0.0.1"} // 0)
         ? "localhost" : "127.0.0.1";
+      $assigned{$key} = $host;
+      push @order, $key;
+      $count{$host}++;
+    }
+    my $next_raw = join "", map {
+      "v1\t$port\t$_\t$assigned{$_}\n"
+    } @order;
+    if ($next_raw ne $raw) {
       my ($tmp_fh, $tmp) = tempfile(
         ".firstmate-reviewer-addresses-$port.XXXXXX", DIR => $state, UNLINK => 0
       );
-      my $ok = print {$tmp_fh} $raw, "v1\t$port\t$key\t$host\n";
+      my $ok = print {$tmp_fh} $next_raw;
       $ok = chmod(0600, $tmp) && $ok;
       $ok = close($tmp_fh) && $ok;
       if (!$ok || !rename($tmp, $map)) {
         unlink($tmp);
         die "error: cannot update the Lavish reviewer address map\n";
       }
-      $assigned{$key} = $host;
-      $count{$host}++;
     }
     if (($count{$host} // 0) > 3) {
       warn "WARNING: Lavish fallback limit is three boards per address and six per server; enable alias http://$alias:$port/session/$key until the event-stream transport fix lands.\n";
     }
     print "$host\n";
-  ' "$shared_state" "$port" "$key" "$alias"
+  ' "$shared_state" "$port" "$key" "$alias" "$open_keys"
 )
 
 cmd_link() {
@@ -237,7 +257,7 @@ cmd_link() {
   fi
   [ "$#" -eq 1 ] && [ -n "$1" ] || usage
   case "$1" in -*) usage ;; esac
-  local artifact=$1 id key listing parts url scheme host port suffix alias status probe_host
+  local artifact=$1 id key listing parts url scheme host port suffix open_keys alias status probe_host
   id=$(cmd_source_id "$artifact") || return 1
   key=${id#lavish-}
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -248,7 +268,7 @@ cmd_link() {
   parts=$(printf '%s\n' "$listing" | perl -MJSON::PP -e '
     use strict; use warnings;
     my $key = shift @ARGV;
-    my (@fields, $remaining, @matches);
+    my (@fields, $remaining, @matches, @open_sessions);
     while (my $line = <STDIN>) {
       if (!@fields) {
         next unless $line =~ /^sessions\[(\d+)\]\{([^}]*)\}:\s*$/;
@@ -273,19 +293,31 @@ cmd_link() {
       }
       exit 1 unless @values == @fields;
       my %row; @row{@fields} = @values;
-      next unless defined $row{url} && defined $row{status} && $row{status} eq "open";
+      exit 1 unless defined $row{status} && defined $row{url};
+      next unless $row{status} eq "open";
       my $url = $row{url};
-      next unless $url =~ m{\A(https?)://([^/?#\s]+)(/session/\Q$key\E(?:[?#][^\s]*)?)\z};
-      my ($scheme, $authority, $suffix) = ($1, $2, $3);
-      next unless $authority =~ /\A(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?\z/;
+      exit 1 unless $url =~ m{\A(https?)://([^/?#\s]+)(/session/([0-9a-f]{16})(?:[?#][^\s]*)?)\z};
+      my ($scheme, $authority, $suffix, $session_key) = ($1, $2, $3, $4);
+      exit 1 unless $authority =~ /\A(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::([0-9]+))?\z/;
       my ($host, $port) = ($1, $2 // ($scheme eq "https" ? 443 : 80));
-      next unless $port > 0 && $port <= 65535;
-      push @matches, join "\t", $url, $scheme, lc($host), $port, $suffix;
+      exit 1 unless $port > 0 && $port <= 65535;
+      my $record = [$url, $scheme, lc($host), $port, $suffix, $session_key];
+      push @open_sessions, $record;
+      push @matches, $record if $session_key eq $key;
     }
     exit 1 unless defined $remaining && $remaining == 0 && @matches == 1;
-    print "$matches[0]\n";
+    my $target_port = $matches[0]->[3];
+    my %open_keys;
+    for my $record (@open_sessions) {
+      my ($scheme, $host, $port, $session_key) = @{$record}[1, 2, 3, 5];
+      next unless $scheme eq "http" && $port == $target_port;
+      next unless $host eq "localhost" || $host eq "127.0.0.1"
+        || $host eq "lavish-$session_key.localhost";
+      $open_keys{$session_key} = 1;
+    }
+    print join("\t", @{$matches[0]}[0 .. 4], join(",", sort keys %open_keys)), "\n";
   ' "$key") || die "no unique open session URL found; serve the artifact with --no-open first"
-  IFS=$'\t' read -r url scheme host port suffix <<< "$parts"
+  IFS=$'\t' read -r url scheme host port suffix open_keys <<< "$parts"
   # Do not turn a remote or TLS endpoint into an unverified local address.
   case "$scheme:$host" in
     http:localhost|http:127.0.0.1|http:"lavish-$key.localhost") ;;
@@ -301,7 +333,7 @@ cmd_link() {
   if [ "$status" = 200 ]; then
     host=$alias
   else
-    host=$(fallback_host_for_key "$key" "$port" "$alias") || return 1
+    host=$(fallback_host_for_key "$key" "$port" "$alias" "$open_keys") || return 1
   fi
   printf '%s://%s:%s%s\n' "$scheme" "$host" "$port" "$suffix"
 }

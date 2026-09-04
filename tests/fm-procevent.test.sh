@@ -1779,10 +1779,14 @@ link_out_home() {
   PATH="$LINK_BIN:$PATH" FM_HOME="$home" "$ROOT/bin/fm-procevent-lavish.sh" link "$@"
 }
 link_out() { link_out_home "$LINK_HOME" "$@"; }
-link_listing() {
-  printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a,\\"quoted\\" file.html","%s",0\n' \
-    "$1" > "$FM_TEST_LINK_LISTING"
+link_listings() {
+  local url
+  printf 'sessions[%s]{status,file,url,pending_prompts}:\n' "$#" > "$FM_TEST_LINK_LISTING"
+  for url in "$@"; do
+    printf '  open,"a,\\"quoted\\" file.html","%s",0\n' "$url" >> "$FM_TEST_LINK_LISTING"
+  done
 }
+link_listing() { link_listings "$1"; }
 
 LINK_CONCURRENT_A="$LINK_HOME/concurrent-a.html"
 LINK_CONCURRENT_B="$LINK_HOME/concurrent-b.html"
@@ -1794,10 +1798,9 @@ LINK_CONCURRENT_KEY_B=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_CONC
 LINK_CONCURRENT_KEY_B=${LINK_CONCURRENT_KEY_B#lavish-}
 LINK_CONCURRENT_LISTING_A="$LINK_HOME/concurrent-a.sessions"
 LINK_CONCURRENT_LISTING_B="$LINK_HOME/concurrent-b.sessions"
-printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a.html","http://localhost:4875/session/%s",0\n' \
-  "$LINK_CONCURRENT_KEY_A" > "$LINK_CONCURRENT_LISTING_A"
-printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"b.html","http://localhost:4875/session/%s",0\n' \
-  "$LINK_CONCURRENT_KEY_B" > "$LINK_CONCURRENT_LISTING_B"
+printf 'sessions[2]{status,file,url,pending_prompts}:\n  open,"a.html","http://localhost:4875/session/%s",0\n  open,"b.html","http://localhost:4875/session/%s",0\n' \
+  "$LINK_CONCURRENT_KEY_A" "$LINK_CONCURRENT_KEY_B" > "$LINK_CONCURRENT_LISTING_A"
+cp "$LINK_CONCURRENT_LISTING_A" "$LINK_CONCURRENT_LISTING_B"
 FM_TEST_LINK_LISTING="$LINK_CONCURRENT_LISTING_A" \
   link_out_home "$LINK_HOME" "$LINK_CONCURRENT_A" > "$LINK_HOME/concurrent-a.out" &
 LINK_CONCURRENT_PID_A=$!
@@ -1814,6 +1817,7 @@ pass "link serializes cross-home allocation without an external flock command"
 
 LINK_HOSTS=
 LINK_KEYS=
+LINK_OPEN_URLS=()
 LINK_SELECTED=0
 LINK_PARITY=
 for n in $(seq 1 128); do
@@ -1829,7 +1833,8 @@ for n in $(seq 1 128); do
   [ "$LINK_KEY_PARITY" = "$LINK_PARITY" ] || continue
   LINK_SELECTED=$((LINK_SELECTED + 1))
   if [ $((LINK_SELECTED % 2)) -eq 1 ]; then LINK_EXPECTED_HOST=localhost; else LINK_EXPECTED_HOST=127.0.0.1; fi
-  link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
+  LINK_OPEN_URLS+=("http://localhost:4876/session/$LINK_KEY?no_gate=1")
+  link_listings "${LINK_OPEN_URLS[@]}"
   LINK_EXPECTED="http://$LINK_EXPECTED_HOST:4876/session/$LINK_KEY?no_gate=1"
   if [ $((LINK_SELECTED % 2)) -eq 1 ]; then
     LINK_CALL_HOME=$LINK_HOME
@@ -1857,6 +1862,82 @@ LINK_MAP_MODE=$(bash -c \
   || fail "link did not keep its fallback allocation map private"
 pass "link stably balances six colliding session keys across both loopback hosts"
 
+CHURN_ARTIFACTS=()
+CHURN_KEYS=()
+CHURN_URLS=()
+CHURN_HOSTS=()
+churn_is_balanced() {
+  local host localhost_count=0 ip_count=0
+  for host in "${CHURN_HOSTS[@]}"; do
+    case "$host" in
+      localhost) localhost_count=$((localhost_count + 1)) ;;
+      127.0.0.1) ip_count=$((ip_count + 1)) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$localhost_count" -eq 3 ] && [ "$ip_count" -eq 3 ]
+}
+for n in $(seq 1 6); do
+  CHURN_ARTIFACT="$LINK_HOME/churn-$n.html"
+  printf '<h1>Churn</h1>\n' > "$CHURN_ARTIFACT"
+  CHURN_KEY=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$CHURN_ARTIFACT")
+  CHURN_KEY=${CHURN_KEY#lavish-}
+  CHURN_URL="http://localhost:4874/session/$CHURN_KEY"
+  CHURN_ARTIFACTS+=("$CHURN_ARTIFACT")
+  CHURN_KEYS+=("$CHURN_KEY")
+  CHURN_URLS+=("$CHURN_URL")
+  link_listings "${CHURN_URLS[@]}"
+  CHURN_OUT=$(link_out "$CHURN_ARTIFACT")
+  CHURN_HOSTS+=("$(printf '%s\n' "$CHURN_OUT" | sed -E 's#^http://([^:]+):.*#\1#')")
+done
+churn_is_balanced || fail "the lifecycle fixture did not begin with balanced active assignments"
+CHURN_STABLE_ARTIFACT=${CHURN_ARTIFACTS[0]}
+CHURN_STABLE_KEY=${CHURN_KEYS[0]}
+CHURN_STABLE_OUT="http://${CHURN_HOSTS[0]}:4874/session/$CHURN_STABLE_KEY"
+for n in $(seq 1 5); do
+  CHURN_REMOVE=-1
+  for idx in "${!CHURN_HOSTS[@]}"; do
+    if [ "${CHURN_HOSTS[$idx]}" = 127.0.0.1 ]; then CHURN_REMOVE=$idx; break; fi
+  done
+  [ "$CHURN_REMOVE" -ge 0 ] || fail "lifecycle churn lost every 127.0.0.1 assignment"
+  CHURN_NEXT_ARTIFACTS=()
+  CHURN_NEXT_KEYS=()
+  CHURN_NEXT_URLS=()
+  CHURN_NEXT_HOSTS=()
+  for idx in "${!CHURN_HOSTS[@]}"; do
+    [ "$idx" -eq "$CHURN_REMOVE" ] && continue
+    CHURN_NEXT_ARTIFACTS+=("${CHURN_ARTIFACTS[$idx]}")
+    CHURN_NEXT_KEYS+=("${CHURN_KEYS[$idx]}")
+    CHURN_NEXT_URLS+=("${CHURN_URLS[$idx]}")
+    CHURN_NEXT_HOSTS+=("${CHURN_HOSTS[$idx]}")
+  done
+  CHURN_ARTIFACTS=("${CHURN_NEXT_ARTIFACTS[@]}")
+  CHURN_KEYS=("${CHURN_NEXT_KEYS[@]}")
+  CHURN_URLS=("${CHURN_NEXT_URLS[@]}")
+  CHURN_HOSTS=("${CHURN_NEXT_HOSTS[@]}")
+  CHURN_ARTIFACT="$LINK_HOME/churn-replacement-$n.html"
+  printf '<h1>Replacement</h1>\n' > "$CHURN_ARTIFACT"
+  CHURN_KEY=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$CHURN_ARTIFACT")
+  CHURN_KEY=${CHURN_KEY#lavish-}
+  CHURN_URL="http://localhost:4874/session/$CHURN_KEY"
+  CHURN_ARTIFACTS+=("$CHURN_ARTIFACT")
+  CHURN_KEYS+=("$CHURN_KEY")
+  CHURN_URLS+=("$CHURN_URL")
+  link_listings "${CHURN_URLS[@]}"
+  CHURN_OUT=$(link_out "$CHURN_ARTIFACT")
+  CHURN_HOST=$(printf '%s\n' "$CHURN_OUT" | sed -E 's#^http://([^:]+):.*#\1#')
+  [ "$CHURN_HOST" = 127.0.0.1 ] \
+    || fail "an ended-session mapping skewed replacement allocation toward localhost"
+  CHURN_HOSTS+=("$CHURN_HOST")
+  churn_is_balanced || fail "lifecycle churn left the six active sessions imbalanced"
+  [ "$(link_out "$CHURN_STABLE_ARTIFACT")" = "$CHURN_STABLE_OUT" ] \
+    || fail "lifecycle churn changed an assignment for a session that remained open"
+done
+[ "$(awk -F '\t' '$1 == "v1" && $2 == 4874 { print $3 }' "$LAVISH_AXI_STATE_DIR/firstmate-reviewer-addresses-4874.tsv" | sort)" \
+    = "$(printf '%s\n' "${CHURN_KEYS[@]}" | sort)" ] \
+  || fail "lifecycle churn retained ended-session mappings or lost active ones"
+pass "link prunes ended sessions while preserving balanced open assignments"
+
 LINK_SIXTH_ARTIFACT=$LINK_ARTIFACT
 LINK_SIXTH_KEY=$LINK_KEY
 LINK_SIXTH_EXPECTED=$LINK_EXPECTED
@@ -1864,7 +1945,8 @@ LINK_ARTIFACT="$LINK_HOME/board-over-limit.html"
 printf '<h1>Review</h1>\n' > "$LINK_ARTIFACT"
 LINK_ID=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_ARTIFACT")
 LINK_KEY=${LINK_ID#lavish-}
-link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
+LINK_OPEN_URLS+=("http://localhost:4876/session/$LINK_KEY?no_gate=1")
+link_listings "${LINK_OPEN_URLS[@]}"
 LINK_WARNING="$LINK_HOME/link-warning"
 LINK_SEVENTH=$(link_out "$LINK_ARTIFACT" 2> "$LINK_WARNING")
 assert_contains "$(cat "$LINK_WARNING")" 'limit is three boards per address and six per server' "link did not warn at the fallback capacity boundary"
