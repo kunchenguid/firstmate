@@ -917,24 +917,77 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary.
+Reverified 2026-08-11 on Herdr 0.8.0 protocol 19, macOS aarch64, after the guard began pinning its lab pane to a bare rc-less shell; measured 2026-08-10 on Herdr 0.8.0 protocol 19 after the stale-registration fix recorded in the next section extended the guard with the two corroboration cases, 2026-08-08 on Herdr 0.8.0, and first on 2026-08-02 on Herdr 0.7.5, the last two with identical results for the five cases that existed then:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output:
+Observed output on the 2026-08-11 run, exit status 0:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: a registration left behind over a bare shell reads dead, so exit still reconciles the task
+ok - real herdr: a registered agent occupying the pane's terminal still reads alive
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
 ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The guarded teardown's fleet-state tripwire verified the live default session unchanged and removed its record, so the run left no lab residue.
+
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent, and occupying or not occupying the pane's terminal, exercise exactly the gate every lifecycle verb depends on, with no real agent launched.
+The occupant is a SIGINT-ignoring shell loop rather than a harness, which is what lets the same pane pin both the interrupt-survival postcondition and the corroborated `alive` verdict.
+The lab's panes run a bare rc-less shell, pinned through a throwaway `HERDR_CONFIG_PATH` config (`herdr_pin_bare_pane_shell` in `tests/herdr-test-safety.sh`), because the stale-record case asserts the lone-idle-childless-shell proof succeeds and a contributor's own login shell can keep a persistent child that no such pane could ever shed.
+`tests/fm-herdr-session-cleanup-e2e.test.sh` asserts the same proof on a real restored pane and pins its lab the same way; the live-agent fixtures need the proof to fail while an occupant owns the foreground, which the occupancy alone decides, so they are left on the default shell.
+That command is the guard that maintains this record; run it after every Herdr upgrade and after any change to the agent-state classifier rather than trusting the version above.
+
+### Agent status semantics and stale registrations
+
+No Herdr `agent_status` value reports that the agent process has exited, so a registration alone cannot carry a liveness verdict.
+Herdr's own agent skill file states the vocabulary, read on 2026-08-10 from Herdr 0.8.0 protocol 19 on macOS aarch64:
+
+```sh
+herdr --skill | grep -n 'is the same underlying idle state'
+```
+
+Observed output:
+
+```text
+58:`idle` means the agent is ready for input and its tab has been seen in the focused Herdr UI. `done` is the same underlying idle state after unseen background work finishes. Focusing the tab or targeting the pane or agent with a focus command marks it seen. CLI reads do not mark it seen. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently; it does not prove completion.
+```
+
+`done` is therefore idle-plus-unseen, and `unknown` is an unclassifiable present agent; neither is a termination signal.
+Whether Herdr observes the terminal at all is per-agent, checked the same day across the installed harnesses:
+
+```sh
+herdr agent explain <pane> --json | jq -c '{agent,screen_detection_skipped,screen_detection_skip_reason}'
+```
+
+Observed output shapes:
+
+```text
+{"agent":"pi","screen_detection_skipped":true,"screen_detection_skip_reason":"full_lifecycle_hook_authority"}
+{"agent":"claude","screen_detection_skipped":false,"screen_detection_skip_reason":null}
+{"agent":"codex","screen_detection_skipped":false,"screen_detection_skip_reason":null}
+```
+
+An agent with full lifecycle-hook authority is not screen-observed, so its last hook-reported status persists unchanged after the process exits and the pane returns to its shell prompt.
+
+The corroborating signal separates the two cases cleanly.
+Across nine concurrently registered agent panes spanning `claude`, `codex`, and `pi`, and spanning the `working`, `idle`, and `done` statuses, every pane with a running agent reported a `foreground_process_group_id` different from its own `shell_pid`, with the harness binary among `foreground_processes`:
+
+```sh
+herdr pane process-info --pane <pane> \
+  | jq -c '{shell:.result.process_info.shell_pid,
+            fg:.result.process_info.foreground_process_group_id,
+            procs:[.result.process_info.foreground_processes[]|.argv0//.name]}'
+```
+
+Observed invariant: nine of nine live panes had `fg != shell`, including the `done` ones, so `done` never coincided with a pane whose own shell held the foreground.
+`tests/fm-backend-herdr.test.sh` pins both directions of the resulting classifier and the fail-safe behavior of every inconclusive read.
 
 ### Away-mode transport
 

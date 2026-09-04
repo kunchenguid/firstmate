@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # fm-timing-lib.sh - the single owner of the deferred network stage's elapsed-time
-# instrumentation.
+# instrumentation, and of the millisecond clock reading (fm_timing_now_ms) any
+# caller measuring real elapsed time uses.
 #
 # Sourced, never executed.
+#
+# The recording helpers below are the deferred stage's alone. A caller that only
+# needs the clock - bin/fm-control.sh, whose lifecycle waits spend a budget of
+# real seconds rather than counting their own polls - sources this file for
+# fm_timing_now_ms plus fm_timing_step_ms and stays inert, since recording needs
+# FM_TIMING_LOG. Those two go together: the clock this file reads is the
+# settable epoch clock, so a budget is accumulated from steps rather than taken
+# as the difference of two endpoints. fm_timing_step_ms states why.
 #
 # WHY THIS EXISTS. The deferred stage (bin/fm-startup-network.sh) publishes one
 # aggregate started/finished pair, so a run that took a minute could not be
@@ -55,7 +64,9 @@ fm_timing_enabled() {
 # without it - macOS's system bash 3.2, which `env bash` still resolves to on a
 # host with no newer bash on PATH - degrades to whole-second granularity rather
 # than losing the timing entirely. That is a coarser answer to "which host was
-# slow", not a missing one, because the steps being measured are seconds-scale.
+# slow", not a missing one, because the steps being measured are seconds-scale -
+# as are the control plane's lifecycle wait budgets, which stay correct at that
+# granularity and only report the duration they waited more coarsely.
 fm_timing_now_ms() {
   local raw sec frac
   raw=${EPOCHREALTIME:-}
@@ -74,6 +85,54 @@ fm_timing_now_ms() {
   sec=$(date +%s 2>/dev/null || printf '0')
   case "$sec" in ''|*[!0-9]*) sec=0 ;; esac
   printf '%s\n' "$(( sec * 1000 ))"
+}
+
+# Milliseconds between an earlier and a later fm_timing_now_ms reading, with a
+# clock correction in EITHER direction bounded to the interval it landed in.
+#
+# fm_timing_now_ms reads the SETTABLE epoch clock - EPOCHREALTIME and date(1)
+# both follow it - and bash has no portable monotonic source to read instead. So
+# ntp, a manual clock set, or a resume from suspend can move it between two
+# readings by an amount that is not elapsed time at all, in either direction.
+# BACKWARD, the difference between two endpoints is not a duration: it is
+# negative. A caller spending a budget of real seconds that way stops counting
+# down and outlives the budget it was given by however far the clock moved,
+# which for a lifecycle wait means an exit or relaunch that hangs on past its
+# own refusal deadline. FORWARD, the difference is a jump nothing waited
+# through. Added whole to a budget it spends all of it in a single poll, so that
+# same wait refuses having really waited a fraction of what it was given - the
+# same deadline missed from the other side.
+#
+# The fix a caller applies is to accumulate STEPS rather than subtract
+# endpoints: read the clock every poll and add this step of the previous
+# reading, bounded by <max-step-ms>, the longest a single poll of that caller's
+# own loop could plausibly take. A step past that bound is a jump, not elapsed
+# time. A correction then costs at most the single interval it landed in -
+# backward that interval's real time is dropped, forward it is charged the bound
+# in place of the jump, and neither touches the budget already spent - so the
+# accumulated elapsed time never decreases, never outruns the real wait by more
+# than one interval, and the budget always expires.
+#
+# The bound is the CALLER's to supply, because only the caller knows its own
+# poll interval and the work each poll does. A constant guessed in here would be
+# silently wrong for every loop but the one it happened to be written for, and
+# wrong in the direction that under-reports a real wait.
+fm_timing_step_ms() {  # <earlier-reading-ms> <later-reading-ms> <max-step-ms>
+  local earlier=${1:-0} later=${2:-0} max=${3:-} step
+  case "$earlier" in ''|*[!0-9]*) earlier=0 ;; esac
+  case "$later" in ''|*[!0-9]*) later=0 ;; esac
+  step=$(( later - earlier ))
+  [ "$step" -ge 0 ] || step=0
+  # A missing or non-positive bound leaves the step UNBOUNDED rather than
+  # clamping it to zero. Both are caller errors, but their failures are not
+  # equal: an unbounded step restores only the forward defect, while a zero step
+  # would stop the budget advancing at all and hang the wait past the very
+  # deadline this accumulation exists to keep.
+  case "$max" in
+    ''|*[!0-9]*|0) ;;
+    *) [ "$step" -le "$max" ] || step=$max ;;
+  esac
+  printf '%s\n' "$step"
 }
 
 # Ensure FM_TIMING_EPOCH_MS holds the origin every offset is measured from.

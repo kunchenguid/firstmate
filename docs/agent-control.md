@@ -35,6 +35,10 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+Both agent-state waits spend a budget of real elapsed time rather than a count of poll intervals, because a single state read can cost more than one interval, and the refusal reports the duration actually waited beside the budget it was given.
+That budget is accumulated from per-poll steps rather than measured as the difference between the wait's first and last clock reading: the only clock available is the settable epoch clock, so an ntp correction, a manual clock set, or a resume from suspend landing mid-wait would otherwise be counted as time the wait spent.
+Backward, that would make the elapsed time negative and hold the exit or relaunch open past its own refusal deadline until the clock caught back up; forward, it would add a jump nothing waited through and spend the whole budget in a single poll, refusing before the deadline arrived.
+A backward step is discarded and a forward step is capped at the longest a single poll of that wait could plausibly take, so a correction in either direction costs the wait at most the one poll interval it landed in and never the budget already spent.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -97,6 +101,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
+  Both classifiers ground their verdict in the endpoint's real foreground processes; a session provider's own agent registry is corroborated, never trusted alone, because a registration outlives the process it names ([herdr-backend.md](herdr-backend.md) "Restart and liveness behavior").
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.

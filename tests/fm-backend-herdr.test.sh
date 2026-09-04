@@ -819,6 +819,249 @@ test_create_task_husk_replacement_creates_before_closing() {
   pass "fm_backend_herdr_create_task: creates the replacement tab BEFORE closing the husk tab, never the reverse"
 }
 
+# --- stale agent records: a registered record is not a running process ------
+#
+# Herdr keeps an agent's record and its last known agent_status after the
+# agent process exits, and NO herdr agent_status means "exited": `herdr
+# --skill` (0.8.0) defines `done` as "the same underlying idle state after
+# unseen background work finishes", and an agent holding full lifecycle-hook
+# authority is not screen-observed at all (`herdr agent explain <pane> --json`
+# reports screen_detection_skipped with reason full_lifecycle_hook_authority),
+# so its last hook-reported status simply freezes when it exits.
+#
+# Classifying every registered record as `live` therefore wedges the task
+# permanently: relaunch refuses because an agent is "there", exit refuses for
+# the same reason, and teardown independently refuses because the work is not
+# landed. The classifier now corroborates a registered record against the
+# pane's real terminal ownership, and ONLY a positive lone-idle-childless-shell
+# proof may downgrade it. Every other process read - a live foreground owner, a
+# failed read, an unsettled shell - leaves the old verdict untouched, so an
+# inconclusive read still never licenses closing or replacing anything.
+
+# stale_record_responses <dir> <pane> <agent_status> <shell-pid> <mode>:
+# script `pane get` + `agent get` + the corroborating process reads for one
+# fm_backend_herdr_pane_agent_state call on <pane>. <mode> picks the process
+# shape: `idle-shell` (the pane's own shell owns the foreground and is the sole
+# foreground process - the exited-agent shape), `agent-foreground` (a real
+# agent process owns the foreground - the live shape), or `unreadable` (the
+# process read fails outright).
+stale_record_responses() {  # <dir> <pane> <agent_status> <shell-pid> <mode>
+  local resp=$1/responses pane=$2 status=$3 pid=$4 mode=$5
+  mkdir -p "$resp"
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
+  case "$mode" in
+    idle-shell)
+      # Two identical reads: the ownership read, then the proof's own sample.
+      death_process_info_fixture "$pane" "$pid" > "$resp/3.out"
+      death_process_info_fixture "$pane" "$pid" > "$resp/4.out"
+      ;;
+    agent-foreground)
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"node","argv0":"pi"}]}}}\n' \
+        "$pane" "$pid" "$((pid + 1))" "$((pid + 1))" > "$resp/3.out"
+      ;;
+    unreadable)
+      printf '1\n' > "$resp/3.exit"
+      ;;
+  esac
+}
+
+# run_pane_agent_state <dir> <pane> [env-assignment...]: source the adapter
+# against the canned fake and echo the classifier's verdict.
+run_pane_agent_state() {  # <dir> <pane> [VAR=VAL]...
+  local dir=$1 pane=$2 fb; shift 2
+  fb=$(make_herdr_fakebin "$dir")
+  # shellcheck disable=SC2016  # $0/$1 are the inner bash's positional parameters, not caller expansions
+  env PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" "$@" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest "$1"' "$ROOT" "$pane"
+}
+
+test_pane_agent_state_downgrades_a_stale_done_record_over_a_proved_idle_shell() {
+  # The reported defect, exactly: the agent exited, herdr still reports
+  # agent_status `done`, and the pane sits at a plain shell prompt. Before the
+  # corroborating process read this returned `live`, which made both recovery
+  # paths refuse forever.
+  local dir out bgpid
+  dir="$TMP_ROOT/stale-done"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="$dir/ps")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = no-agent ] \
+    || fail "REGRESSION: a \`done\` record over a proved lone idle childless shell must classify as no-agent so exit and relaunch can reconcile the task, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: a stale \`done\` record over a proved lone idle childless shell classifies as no-agent"
+}
+
+test_pane_agent_state_downgrades_a_stale_working_record() {
+  # The trap is not specific to `done`. An agent that dies mid-turn leaves
+  # `working` frozen in the record for exactly the same reason, so the
+  # corroboration must not be keyed to one status value.
+  local dir out bgpid
+  dir="$TMP_ROOT/stale-working"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 working "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="$dir/ps")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = no-agent ] \
+    || fail "a stale \`working\` record over a proved lone idle childless shell must also classify as no-agent, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: the stale-record downgrade covers every status, not just \`done\`"
+}
+
+test_pane_agent_state_downgrades_an_unclassifiable_record_on_positive_proof() {
+  # herdr's own `unknown` "means an agent is present but Herdr cannot classify
+  # it confidently" - which an exited screen-detected agent also decays into.
+  # It stays a refusal by itself, and resolves only on the positive proof.
+  local dir out bgpid
+  dir="$TMP_ROOT/stale-unknown"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 unknown "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="$dir/ps")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = no-agent ] \
+    || fail "an unclassifiable record over a proved lone idle childless shell must classify as no-agent, got '$out'"
+
+  dir="$TMP_ROOT/stale-unknown-noproof"; mkdir -p "$dir/responses"; : > "$dir/log"
+  stale_record_responses "$dir" w1:p2 unknown 4242 unreadable
+  out=$(run_pane_agent_state "$dir" w1:p2)
+  [ "$out" = unknown ] \
+    || fail "an unclassifiable record with no positive proof must stay unknown (a refusal), got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: an unclassifiable record resolves only on the positive proof, never on its own"
+}
+
+test_pane_agent_state_keeps_live_when_a_real_agent_owns_the_foreground() {
+  # The direction that must not regress. Verified against real herdr 0.8.0:
+  # every live agent pane reports foreground_process_group_id != shell_pid with
+  # the harness binary among foreground_processes - including panes whose
+  # agent_status is `done`, which is why `done` alone can never be read as
+  # "exited".
+  local dir out
+  dir="$TMP_ROOT/live-done"; mkdir -p "$dir/responses"; : > "$dir/log"
+  stale_record_responses "$dir" w1:p2 "done" 4242 agent-foreground
+  out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="/nonexistent/ps")
+  [ "$out" = live ] \
+    || fail "a \`done\` record whose pane's foreground is owned by a real agent process must stay live, got '$out'"
+  # A live foreground owner is decisive on the first read: the classifier must
+  # not fall through to the settle-retrying absence proof (which would spend a
+  # bounded sleep on every live-pane classification in the watcher's poll).
+  [ "$(grep -c $'pane\x1fprocess-info' "$dir/log")" -eq 1 ] \
+    || fail "a live foreground owner should settle the verdict on ONE process read, got $(grep -c $'pane\x1fprocess-info' "$dir/log")"
+  pass "fm_backend_herdr_pane_agent_state: a genuinely live agent stays live, proven through its foreground process ownership"
+}
+
+test_pane_agent_state_keeps_live_when_the_process_read_is_inconclusive() {
+  # Fail-safe toward refusal: an unreadable process read, and a shell that owns
+  # the foreground but still has a child (a suspended or backgrounded agent),
+  # must both leave the registered record's verdict exactly as it was.
+  local dir out bgpid
+  dir="$TMP_ROOT/live-unreadable"; mkdir -p "$dir/responses"; : > "$dir/log"
+  stale_record_responses "$dir" w1:p2 "done" 4242 unreadable
+  out=$(run_pane_agent_state "$dir" w1:p2)
+  [ "$out" = live ] \
+    || fail "an unreadable process read must never downgrade a registered record, got '$out'"
+
+  dir="$TMP_ROOT/live-shell-child"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  # Same idle-shell process-info, but the OS process table shows the shell
+  # still has a child, so the lone-idle-childless proof cannot succeed.
+  cat > "$dir/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "-axo pid=,ppid=") printf '1 0\n$bgpid 1\n99998 $bgpid\n' ;;
+  "-p $bgpid -o stat=") printf 'Ss+\n' ;;
+  "-p $bgpid -o comm=") printf -- '-zsh\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  out=$(run_pane_agent_state "$dir" w1:p2 FM_HERDR_PS_BIN="$dir/ps" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=2)
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = live ] \
+    || fail "a shell that still has a child process must not be read as agent-free, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: an unreadable or unsettled process read leaves a registered record live (fail-safe toward refusal)"
+}
+
+test_tab_is_husk_still_refuses_an_inconclusive_read() {
+  # The husk check's safety property, restated against the new corroboration:
+  # it may only ever return true for a POSITIVELY confirmed husk.
+  local dir fb verdict bgpid
+  dir="$TMP_ROOT/husk-inconclusive"; mkdir -p "$dir/responses"; : > "$dir/log"
+  stale_record_responses "$dir" w1:p2 "done" 4242 unreadable
+  fb=$(make_herdr_fakebin "$dir")
+  verdict=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT")
+  [ "$verdict" = refused ] \
+    || fail "tab_is_husk must refuse when the corroborating process read is inconclusive, got '$verdict'"
+
+  dir="$TMP_ROOT/husk-proved"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  fb=$(make_herdr_fakebin "$dir")
+  verdict=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$verdict" = husk ] \
+    || fail "tab_is_husk must accept a POSITIVELY proved agent-free pane, got '$verdict'"
+  pass "fm_backend_herdr_tab_is_husk: still refuses every inconclusive read, and accepts only a positively proved agent-free pane"
+}
+
+test_agent_state_reports_dead_for_a_stale_record_over_a_proved_idle_shell() {
+  # The recovery-grade verdict is what actually unwedges the task:
+  # bin/fm-spawn.sh --relaunch requires `dead`, and bin/fm-control.sh exit
+  # treats `dead` as already-stopped. A live agent must still read `alive`.
+  local dir fb out bgpid
+  dir="$TMP_ROOT/recovery-stale"; mkdir -p "$dir/responses"; : > "$dir/log"
+  sleep 300 & bgpid=$!
+  stale_record_responses "$dir" w1:p2 "done" "$bgpid" idle-shell
+  make_death_lab "$dir" "$bgpid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = dead ] \
+    || fail "REGRESSION: a stale record over a proved lone idle childless shell must read 'dead' so relaunch and exit can proceed, got '$out'"
+
+  dir="$TMP_ROOT/recovery-live"; mkdir -p "$dir/responses"; : > "$dir/log"
+  stale_record_responses "$dir" w1:p2 "done" 4242 agent-foreground
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = alive ] \
+    || fail "a pane whose foreground is owned by a real agent must still read 'alive', got '$out'"
+  pass "fm_backend_herdr_agent_state: a stale record over a proved idle shell recovers as dead, a real agent still reads alive"
+}
+
+test_create_task_refuses_a_duplicate_whose_agent_owns_the_foreground() {
+  # The bias that must survive this fix: never close and replace a tab that
+  # might still hold a live agent. Here the corroborating read POSITIVELY
+  # confirms a live foreground owner, so the refusal is proven, not merely
+  # inherited from an unreadable probe.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/dup-live-proved"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-dup-proved","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"done"}}}\n' > "$resp/4.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup-proved /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse a duplicate whose agent provably owns the pane's foreground"
+  assert_contains "$out" "already exists" "create_task did not report the duplicate label for a proved-live agent"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab for a proved-live duplicate"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "create_task must not close a proved-live agent's pane"
+  pass "fm_backend_herdr_create_task: a duplicate whose agent provably owns the foreground still refuses close-and-replace"
+}
+
 test_create_task_creates_and_parses_ids() {
   local dir log resp fb out
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4517,6 +4760,14 @@ test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
+test_pane_agent_state_downgrades_a_stale_done_record_over_a_proved_idle_shell
+test_pane_agent_state_downgrades_a_stale_working_record
+test_pane_agent_state_downgrades_an_unclassifiable_record_on_positive_proof
+test_pane_agent_state_keeps_live_when_a_real_agent_owns_the_foreground
+test_pane_agent_state_keeps_live_when_the_process_read_is_inconclusive
+test_tab_is_husk_still_refuses_an_inconclusive_read
+test_agent_state_reports_dead_for_a_stale_record_over_a_proved_idle_shell
+test_create_task_refuses_a_duplicate_whose_agent_owns_the_foreground
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor

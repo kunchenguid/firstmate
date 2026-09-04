@@ -268,11 +268,21 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
+A registered agent record is not evidence that the agent process is still running, so a record alone never carries a live verdict.
+No Herdr `agent_status` means "exited": `herdr --skill` defines `done` as the same underlying idle state as `idle` after unseen background work finishes, and `unknown` as an agent Herdr cannot classify confidently rather than a completion signal.
+An agent holding full lifecycle-hook authority is not screen-observed at all, which `herdr agent explain <pane> --json` reports as a skipped screen detection, so its last hook-reported status freezes in place when the process exits.
+The classifier therefore corroborates every registered record against the pane's real terminal ownership before returning `live`.
+A foreground process group owned by anything other than the pane's own shell is a live agent, and only the positive lone-idle-childless-shell proof - the same proof the pane-death close path uses - may downgrade a registered record to `no-agent`.
+Every failed, racy, or unsettled process read leaves the record's previous verdict untouched, so an inconclusive read still refuses rather than licensing a replacement.
+
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+A structurally gone pane becomes `missing`, a restored agent-less shell or a proved-stale record becomes `dead`, a corroborated registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+Tmux has no equivalent stale-record trap because its own classifier already derives every verdict from the pane's foreground processes rather than from a separate registry.
 
 The session-start sweep uses this probe.
+The proved-stale record therefore reaches an unattended path as well as the operator-driven `bin/fm-control.sh <id> exit` and `bin/fm-spawn.sh <id> --relaunch` recoveries: a secondmate whose record is proved stale reads `dead` in that sweep, which closes the endpoint and discards the exited agent's scrollback before respawning the secondmate.
+That outcome is always reported as `BOOTSTRAP_INFO: secondmate <id> relaunched after <cause> (<where>)`, at every verbosity and on both bootstrap passes, because nobody is watching the mutation happen.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
 ## Push events and polling fallback
@@ -325,6 +335,10 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Mid-session secondmate agent-process liveness is not implemented.
+- Retiring a stale agent record needs the pane's own shell to be lone, idle, and childless.
+  A task pane whose shell keeps a persistent helper child - gitstatusd, a zsh-async worker, direnv - cannot satisfy that proof, so an exited agent there stays classified `live` and its task still needs manual reconciliation.
+  This is the safe direction and is bounded by a short settle window, not a hang; a weaker proof would risk replacing a suspended or backgrounded agent.
+  Narrowing the child check to ignore prompt-helper daemons was considered and deliberately rejected: telling a helper daemon apart from a suspended or backgrounded agent is inference, which is exactly what this classifier exists to remove, and a wrong answer there launches a second agent into a pane that still holds a live one.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

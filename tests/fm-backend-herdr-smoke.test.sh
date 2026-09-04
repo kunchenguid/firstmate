@@ -131,6 +131,13 @@ if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
 fi
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
+# The registration alone would leave this case vacuous: the classifier
+# corroborates it against the pane's real terminal ownership, so an unoccupied
+# pane is agent-free no matter what is registered on it, and this case would
+# then pass only while the freshly created shell had not settled yet
+# (tests/herdr-test-safety.sh owns that contract).
+herdr_occupy_pane "$SESSION" "$LIVE_DUP_PANE_ID" \
+  || fail "could not occupy the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
 fi

@@ -1416,6 +1416,11 @@ lab workspace get "$DUP2_WSID" >/dev/null 2>&1 || fail "duplicate-token recovery
 
 lab pane report-agent "$DUP1_PANE" --source fm-projection-e2e --agent test-agent --state idle >/dev/null \
   || fail "could not register the duplicate-live-agent risk fixture"
+# A registration is not a live agent on its own; the classifier corroborates it
+# against real terminal ownership, so the risk fixture must occupy the pane
+# (tests/herdr-test-safety.sh owns that contract).
+herdr_occupy_pane "$HERDR_LAB_SESSION" "$DUP1_PANE" \
+  || fail "could not occupy the duplicate-live-agent risk fixture's pane"
 START=$(log_line_count)
 if fm_backend_herdr_projection_recovery_allows_flat "$HERDR_LAB_SESSION" "$DUP_JOURNAL" duplicate1; then
   fail "a duplicate token match with a registered agent should refuse fallback"

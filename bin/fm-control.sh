@@ -90,6 +90,10 @@
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
+#                                Both agent-state waits are budgets of real
+#                                elapsed time, not counts of poll intervals, so
+#                                a slow state read spends the budget it costs
+#                                and the refusal reports what was really waited.
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
 
@@ -136,12 +140,29 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Sourced for fm_timing_now_ms and fm_timing_step_ms, the one owner of a
+# millisecond clock reading and of the clock-correction guard a budget
+# accumulated from that settable clock needs, so the lifecycle waits below
+# measure a budget instead of counting their own polls.
+# Recording stays off: it is inert unless FM_TIMING_LOG names a file.
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+# The longest a single poll of a lifecycle wait below could plausibly take, and
+# so the most one step of the settable clock may add to a budget before it is
+# read as a correction rather than as elapsed time. A poll is its sleep plus one
+# agent_state read, and that read is NOT bounded by POLL - a backend classifier
+# may sample an endpoint several times before it answers - so the allowance over
+# POLL is generous on purpose. It sits well above any real poll and well under
+# the smallest budget it guards (SETTLE_WAIT), so an ordinary slow poll is never
+# charged as a clock jump and a real jump never costs a whole wait.
+# fm_timing_step_ms owns what the bound means.
+STEP_MAX_MS=$(awk -v p="$POLL" 'BEGIN{printf "%d", p * 1000 + 2000}')
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -323,24 +344,56 @@ busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
 
-# wait_agent_state <wanted...> <timeout>: poll until agent_state prints one of
-# the wanted values. Prints the final observed state; returns 0 on a match.
+# Whole milliseconds rendered as seconds, for a duration a human reads.
+control_seconds() {  # <milliseconds>
+  awk -v ms="$1" 'BEGIN{printf "%.1f", ms / 1000}'
+}
+
+# wait_agent_state <timeout> <wanted...>: poll until agent_state prints one of
+# the wanted values.
+#
+# The timeout is a budget of REAL seconds, measured against the clock rather
+# than by counting polls. One state read is not free and is not bounded by
+# POLL: a backend classifier may sample the endpoint several times before it
+# answers, so a tick count is not a duration. Counting ticks silently spent a
+# multiple of the budget and then reported the budget itself as the time
+# waited, which described a wait that never happened.
+#
+# The budget is ACCUMULATED from per-poll steps, not taken as the difference
+# between the first and last clock reading. fm_timing_now_ms reads the settable
+# epoch clock, so an ntp correction, a manual clock set, or a resume from
+# suspend during a wait can move it EITHER way: backward, an endpoint difference
+# goes negative and the loop stops counting down, holding an exit or relaunch
+# open past its own refusal deadline until the clock catches back up; forward, a
+# jump is added as time nothing waited through and spends the whole budget in a
+# single poll, refusing before the deadline instead. Adding fm_timing_step_ms of
+# the previous reading, bounded by STEP_MAX_MS, costs a correction at most the
+# one poll interval it landed in in either direction, so the budget still
+# expires and still measures the real wait. See fm_timing_step_ms in
+# bin/fm-timing-lib.sh for the bound's contract and for why no monotonic clock
+# is read instead.
+#
+# Prints the final observed state and the real seconds waited, separated by a
+# space; returns 0 on a match.
 wait_agent_state() {  # <timeout> <wanted>...
-  local timeout=$1 state want elapsed=0
+  local timeout=$1 state want mark now elapsed=0
   shift
+  mark=$(fm_timing_now_ms)
   while :; do
     state=$(agent_state)
+    now=$(fm_timing_now_ms)
+    elapsed=$(( elapsed + $(fm_timing_step_ms "$mark" "$now" "$STEP_MAX_MS") ))
+    mark=$now
     for want in "$@"; do
       if [ "$state" = "$want" ]; then
-        printf '%s' "$state"
+        printf '%s %s' "$state" "$(control_seconds "$elapsed")"
         return 0
       fi
     done
-    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t * 1000)}' || break
     sleep "$POLL"
-    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
   done
-  printf '%s' "$state"
+  printf '%s %s' "$state" "$(control_seconds "$elapsed")"
   return 1
 }
 
@@ -447,7 +500,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local state cmd verdict cancel waited interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -487,8 +540,9 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+  waited=$(wait_agent_state "$EXIT_WAIT" dead) || {
+    state=${waited%% *}
+    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within its ${EXIT_WAIT}s budget (waited ${waited#* }s)"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
@@ -784,7 +838,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result waited note_line
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -841,8 +895,8 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+  waited=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+    die "the replacement agent for $ID did not come up within its ${LAUNCH_WAIT}s budget (waited ${waited#* }s, endpoint reads '${waited%% *}')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
