@@ -1127,6 +1127,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now payload parent_status line kind sightings first
+  local delivered task_id meta sm_home remote_host
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1147,6 +1148,17 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     delivery_unknown|recovery_failed|recovery_unknown) ;;
     *) return 1 ;;
   esac
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  meta="$state/${task_id}.meta"
+  if [ -n "$delivered" ] && [ -f "$meta" ]; then
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    sm_home=$(fm_meta_get "$meta" home)
+    if [ -z "$remote_host" ] && [ -n "$sm_home" ]; then
+      fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+      fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
+    fi
+  fi
   # Resolve wins if a late report arrived between completion and this call.
   if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0

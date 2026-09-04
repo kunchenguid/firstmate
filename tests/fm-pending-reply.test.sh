@@ -23,7 +23,8 @@
 #      past the turn, so a mirrored reply is never nagged and a real miss still
 #      gets its one repost
 #  13. A same-basename self-home corr= line is restatement-copied onto the parent
-#      channel and resolves, instead of escalating as a false miss
+#      channel and resolves, including after recovery delivery fails, instead of
+#      escalating as a false miss
 #  14. The mechanical helper writes the parent channel from (verb, corr, note)
 #  15. Remote parent-replies.status is not classified as wrong-home
 set -u
@@ -1306,6 +1307,40 @@ test_same_basename_self_home_corr_resolves_on_tick() {
   pass "same-basename self-home corr= is restated onto the parent channel and resolves"
 }
 
+test_same_basename_reply_resolves_after_recovery_failure() {
+  local home state sm_home corr rec parent_status
+  home=$(setup_parent same-basename-after-recovery-failure)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" mate)
+  export FM_PENDING_REPLY_NOW=11050
+  export FM_PENDING_REPLY_SEND_HOOK=false
+
+  corr=$(fm_pending_reply_create "$home" "$state" mate "status after failed recovery")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "recovery fixture must fail delivery"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
+    || fail "fixture should reach recovery_failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
+  printf 'done [corr=%s]: answer landed after recovery failure\n' "$corr" \
+    > "$sm_home/state/mate.status"
+
+  fm_pending_reply_tick "$state"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "late same-basename reply must resolve before recovery failure escalation"
+  grep -Fq "corr=$corr" "$parent_status" \
+    || fail "late reply must be restated onto the parent channel"
+  if grep -Fq pending-reply-recovery-delivery "$parent_status"; then
+    fail "authorized late reply must prevent recovery delivery escalation"
+  fi
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "same-basename reply resolves at the recovery failure boundary"
+}
+
 test_child_status_wrong_home_is_not_copied() {
   local home state sm_home corr rec hook_log
   home=$(setup_parent child-wrong-home)
@@ -1450,6 +1485,7 @@ test_failed_send_discards_undelivered_expectation
 test_remote_repost_waits_for_the_reply_channel
 test_mirrored_remote_reply_never_triggers_a_repost
 test_same_basename_self_home_corr_resolves_on_tick
+test_same_basename_reply_resolves_after_recovery_failure
 test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
