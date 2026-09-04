@@ -1596,11 +1596,11 @@ test_relaunch_keeps_the_exact_recorded_claude_local_profile
 # A claude-local ship task whose recorded endpoint is a file:// catalog, so the
 # local-model gates run against a real, controllable endpoint. <state> is the
 # catalog's model state (loaded or not-loaded).
-add_claude_local_task() {  # <case-dir> <id> <state>
-  local dir=$1 id=$2 state=$3 meta
+add_claude_local_task() {  # <case-dir> <id> <state> [mode]
+  local dir=$1 id=$2 state=$3 mode=${4:-direct-PR} meta
   meta="$dir/home/state/$id.meta"
   add_ship_task "$dir" "$id" claude-local
-  sed -i.bak -e 's/^model=default$/model=local-coder/' -e 's/^mode=no-mistakes$/mode=direct-PR/' "$meta"
+  sed -i.bak -e 's/^model=default$/model=local-coder/' -e "s/^mode=no-mistakes\$/mode=$mode/" "$meta"
   rm -f "$meta.bak"
   printf 'local_model_endpoint=file://%s/endpoint\n' "$dir" >> "$meta"
   set_local_model_state "$dir" "$state"
@@ -1768,7 +1768,68 @@ test_claude_local_relaunch_refuses_before_stop_when_the_note_overflows_the_brief
   pass "fm-control relaunch: a note that overflows the brief allowance refuses before the worker is stopped"
 }
 
+# fm-spawn refuses claude-local for no-mistakes shipping (its gate 3), and a
+# relaunch reads that mode from the task's own record rather than the command
+# line - so with no pre-stop gate the control plane stops a healthy worker for
+# a launch that is then certain to be refused, leaving no agent at all. The
+# fixture records mode=no-mistakes rather than rewriting it away, so the gate
+# is judged against the state that actually reaches fm-spawn.
+test_claude_local_relaunch_refuses_before_stop_when_the_task_ships_no_mistakes() {
+  local dir out rc brief before
+  dir=$(new_case claude-local-no-mistakes rl46)
+  add_claude_local_task "$dir" rl46 loaded no-mistakes
+  [ "$(meta_field "$dir" rl46 mode)" = no-mistakes ] \
+    || fail "fixture: the task must record mode=no-mistakes"
+  brief="$dir/home/data/rl46/brief.md"
+  before=$(cat "$brief")
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 \
+    run_control "$dir" rl46 relaunch --note "worker looked stuck"); rc=$?
+  expect_code 1 "$rc" "a claude-local relaunch of a no-mistakes task should refuse"$'\n'"$out"
+  case "$out" in
+    *no-mistakes*) : ;;
+    *) fail "the refusal did not name the mode that blocks it: $out" ;;
+  esac
+  case "$out" in
+    *"left in place"*) : ;;
+    *) fail "the refusal did not say the worker was kept: $out" ;;
+  esac
+  ! grep -qx '/exit' "$dir/fake/literal" \
+    || fail "a refused claude-local relaunch stopped the running worker"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running worker did not survive a refused relaunch"
+  [ "$(cat "$brief")" = "$before" ] \
+    || fail "a refused relaunch appended its progress note to the instructions"
+  pass "fm-control relaunch: a no-mistakes task refuses claude-local before the worker is stopped"
+}
+
+# A bare `fm-spawn <id> --relaunch` takes its harness from the task's own
+# durable record, so a crew-dispatch DEFAULT naming claude-local is a config
+# this launch never consulted. Refusing it there would strand every existing
+# claude-local task the moment that default was written. The fresh-spawn side
+# of the same gate stays covered by tests/fm-claude-local-harness.test.sh.
+test_bare_relaunch_is_not_a_claude_local_dispatch_default() {
+  local dir out
+  dir=$(new_case spawn-relaunch-default rl47)
+  add_claude_local_task "$dir" rl47 loaded
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"default":{"harness":"claude-local","model":"local-coder"}}' \
+    > "$dir/home/config/crew-dispatch.json"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl47 --relaunch)
+  case "$out" in
+    *"cannot select claude-local"*)
+      fail "a bare relaunch was refused as a dispatch default: $out" ;;
+  esac
+  assert_contains "$out" "spawned rl47 harness=claude-local" \
+    "the bare relaunch did not launch on the recorded harness"
+  [ "$(meta_field "$dir" rl47 harness)" = claude-local ] \
+    || fail "the bare relaunch did not keep the recorded harness"
+  pass "fm-spawn --relaunch: a claude-local dispatch default cannot refuse a task's own recorded harness"
+}
+
 test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
+test_claude_local_relaunch_refuses_before_stop_when_the_task_ships_no_mistakes
+test_bare_relaunch_is_not_a_claude_local_dispatch_default
 test_claude_local_relaunch_refuses_an_armed_pr_poll_before_stop
 test_claude_local_relaunch_refuses_before_stop_when_the_note_overflows_the_brief
 test_claude_local_relaunch_abort_before_the_worker_exists_retires_the_watcher

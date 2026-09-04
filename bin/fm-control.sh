@@ -799,7 +799,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line local_model_endpoint brief_preview brief_fits_status
+  local exit_result state note_line local_model_endpoint brief_preview brief_fits_status task_mode
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -812,6 +812,9 @@ do_relaunch() {
   if [ "$TARGET_HARNESS" = claude-local ]; then
     [ "$TARGET_MODEL" != default ] \
       || die "claude-local requires an explicit model id and task $ID records none; pass --model <exact-model-id> (list them with: bin/fm-local-model.sh list) rather than stopping the running worker for a launch that must be refused"
+    task_mode=$(fm_meta_get "$META" mode)
+    [ "$task_mode" != no-mistakes ] \
+      || die "task $ID records mode=no-mistakes and claude-local is not verified for no-mistakes shipping work, so relaunching it there would stop the running worker for a launch that must be refused; ship this task on a hosted runtime, or re-spawn it under --mode direct-PR/local-only if the captain has approved the lower rigor (the running worker was left in place)"
     local_model_endpoint=${FM_LOCAL_MODEL_ENDPOINT:-}
     [ -n "$local_model_endpoint" ] || local_model_endpoint=$(fm_meta_get "$META" local_model_endpoint)
     [ -n "$local_model_endpoint" ] || local_model_endpoint=http://127.0.0.1:1234
@@ -839,7 +842,8 @@ do_relaunch() {
   if [ "$TARGET_HARNESS" = claude-local ] && [ -n "$RELAUNCH_BRIEF" ]; then
     brief_preview=$(mktemp "${TMPDIR:-/tmp}/fm-control-brief.XXXXXX") \
       || die "could not stage task $ID's instructions for the claude-local brief check"
-    if ! { cat "$RELAUNCH_BRIEF" && progress_note_block "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$brief_preview"; then
+    if ! { cat "$RELAUNCH_BRIEF" \
+        && { [ -z "$NOTE" ] || progress_note_block "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }; } > "$brief_preview"; then
       rm -f -- "$brief_preview"
       die "could not stage task $ID's instructions for the claude-local brief check"
     fi

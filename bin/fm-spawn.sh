@@ -1573,7 +1573,11 @@ esac
 # These three run BEFORE home, project, and brief resolution, so the caller gets
 # the refusal that explains the boundary rather than an unrelated earlier error.
 if [ "$HARNESS" = claude-local ]; then
-  if [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ] \
+  # A relaunch with no --harness takes its harness from the task's own durable
+  # record, never from config, so the dispatch default it never consulted must
+  # not refuse it. Only a fresh spawn can arrive here carrying a default's
+  # choice as a positional harness.
+  if [ "$RELAUNCH" -eq 0 ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ] \
      && crew_dispatch_default_uses_claude_local "$CONFIG/crew-dispatch.json"; then
     dispatch_harness_required_error "$CONFIG/crew-dispatch.json"
     exit 1
