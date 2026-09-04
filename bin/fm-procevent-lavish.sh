@@ -36,7 +36,7 @@
 #            a bounded /health probe with that Host returns exactly 200.
 #            Otherwise a private per-port map beside Lavish's shared user state
 #            assigns the key first come, round-robin to localhost or 127.0.0.1
-#            under an OS flock and preserves that choice across Firstmate homes.
+#            under a Perl-held OS flock and preserves that choice across homes.
 #            This fallback is bounded to six boards per server until the
 #            event-stream transport fix lands; a seventh prints the accepted
 #            alias path and the three-board-per-address limit. Scheme, port,
@@ -157,67 +157,77 @@ cmd_source_id() {
 }
 
 fallback_host_for_key() (
-  local key=$1 port=$2 alias=$3 shared_state map lock tmp host localhost_count ip_count host_count map_lock_fd
+  local key=$1 port=$2 alias=$3 shared_state
   shared_state=${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}
   [ -d "$shared_state" ] && [ ! -L "$shared_state" ] \
     || die "Lavish user state is not a regular directory: $shared_state"
-  map="$shared_state/firstmate-reviewer-addresses-$port.tsv"
-  lock="$shared_state/.firstmate-reviewer-addresses-$port.lock"
-  command -v flock >/dev/null 2>&1 || die "flock is required to allocate reviewer addresses"
-  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
-    (umask 077; set -C; : > "$lock") 2>/dev/null || [ -e "$lock" ] \
-      || die "cannot create the Lavish reviewer address lock"
-  fi
-  [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(fm_pr_file_mode "$lock")" = 600 ] \
-    && [ "$(fm_pr_file_link_count "$lock")" = 1 ] \
-    || die "Lavish reviewer address lock is not a private regular file"
-  exec {map_lock_fd}<>"$lock" || die "cannot open the Lavish reviewer address lock"
-  flock -x "$map_lock_fd" || die "cannot lock the Lavish reviewer address map"
-  trap 'flock -u "$map_lock_fd" >/dev/null 2>&1 || true; exec {map_lock_fd}>&-' EXIT
-  if [ -e "$map" ]; then
-    [ -f "$map" ] && [ ! -L "$map" ] && [ "$(fm_pr_file_mode "$map")" = 600 ] \
-      && [ "$(fm_pr_file_link_count "$map")" = 1 ] \
-      || die "Lavish reviewer address map is not a private regular file"
-    awk -F '\t' -v port="$port" '
-      NF != 4 || $1 != "v1" || $2 != port || length($3) != 16 ||
-        $3 ~ /[^0-9a-f]/ || ($4 != "localhost" && $4 != "127.0.0.1") ||
-        seen[$2 FS $3]++ { exit 1 }
-    ' "$map" || die "Lavish reviewer address map is invalid"
-    host=$(awk -F '\t' -v port="$port" -v key="$key" \
-      '$1 == "v1" && $2 == port && $3 == key { print $4 }' "$map")
-  else
-    host=
-  fi
-  if [ -z "$host" ]; then
-    localhost_count=$(awk -F '\t' -v port="$port" \
-      '$1 == "v1" && $2 == port && $4 == "localhost" { count++ } END { print count + 0 }' \
-      "$map" 2>/dev/null || printf '0\n')
-    ip_count=$(awk -F '\t' -v port="$port" \
-      '$1 == "v1" && $2 == port && $4 == "127.0.0.1" { count++ } END { print count + 0 }' \
-      "$map" 2>/dev/null || printf '0\n')
-    if [ "$localhost_count" -le "$ip_count" ]; then
-      host=localhost
-    else
-      host=127.0.0.1
-    fi
-    tmp=$(umask 077; mktemp "$shared_state/.firstmate-reviewer-addresses-$port.XXXXXX") \
-      || die "cannot stage the Lavish reviewer address map"
-    if { [ ! -e "$map" ] || cat "$map"; } > "$tmp" \
-      && printf 'v1\t%s\t%s\t%s\n' "$port" "$key" "$host" >> "$tmp" \
-      && chmod 0600 "$tmp" && mv -f -- "$tmp" "$map"; then
-      :
-    else
-      rm -f -- "$tmp"
-      die "cannot update the Lavish reviewer address map"
-    fi
-  fi
-  host_count=$(awk -F '\t' -v port="$port" -v host="$host" \
-    '$1 == "v1" && $2 == port && $4 == host { count++ } END { print count + 0 }' "$map")
-  if [ "$host_count" -gt 3 ]; then
-    printf 'WARNING: Lavish fallback limit is three boards per address and six per server; enable alias http://%s:%s/session/%s until the event-stream transport fix lands.\n' \
-      "$alias" "$port" "$key" >&2
-  fi
-  printf '%s\n' "$host"
+  perl -MFcntl=:DEFAULT,:flock,:mode -MFile::Temp=tempfile -e '
+    use strict; use warnings;
+    my ($state, $port, $key, $alias) = @ARGV;
+    my $map = "$state/firstmate-reviewer-addresses-$port.tsv";
+    my $lock = "$state/.firstmate-reviewer-addresses-$port.lock";
+    my $nofollow = eval { Fcntl::O_NOFOLLOW() } || 0;
+    sysopen(my $lock_fh, $lock, O_RDWR | O_CREAT | $nofollow, 0600)
+      or die "error: cannot open the Lavish reviewer address lock\n";
+    my $is_private = sub {
+      my ($path, $fh) = @_;
+      my @path_stat = lstat($path);
+      my @open_stat = stat($fh);
+      return @path_stat && @open_stat && S_ISREG($open_stat[2])
+        && ($open_stat[2] & 07777) == 0600 && $open_stat[3] == 1
+        && $path_stat[0] == $open_stat[0] && $path_stat[1] == $open_stat[1];
+    };
+    $is_private->($lock, $lock_fh)
+      or die "error: Lavish reviewer address lock is not a private regular file\n";
+    flock($lock_fh, LOCK_EX)
+      or die "error: cannot lock the Lavish reviewer address map\n";
+    $is_private->($lock, $lock_fh)
+      or die "error: Lavish reviewer address lock changed while locking\n";
+    my $raw = "";
+    my (%assigned, %count);
+    if (-e $map || -l $map) {
+      sysopen(my $map_fh, $map, O_RDONLY | $nofollow)
+        or die "error: cannot open the Lavish reviewer address map\n";
+      $is_private->($map, $map_fh)
+        or die "error: Lavish reviewer address map is not a private regular file\n";
+      local $/;
+      $raw = <$map_fh> // "";
+      close($map_fh) or die "error: cannot close the Lavish reviewer address map\n";
+      ($raw eq "" || $raw =~ /\n\z/)
+        or die "error: Lavish reviewer address map is invalid\n";
+      for my $line (split /\n/, $raw) {
+        my @field = split /\t/, $line, -1;
+        @field == 4 && $field[0] eq "v1" && $field[1] eq $port
+          && $field[2] =~ /\A[0-9a-f]{16}\z/
+          && ($field[3] eq "localhost" || $field[3] eq "127.0.0.1")
+          && !exists $assigned{$field[2]}
+          or die "error: Lavish reviewer address map is invalid\n";
+        $assigned{$field[2]} = $field[3];
+        $count{$field[3]}++;
+      }
+    }
+    my $host = $assigned{$key};
+    if (!defined $host) {
+      $host = ($count{"localhost"} // 0) <= ($count{"127.0.0.1"} // 0)
+        ? "localhost" : "127.0.0.1";
+      my ($tmp_fh, $tmp) = tempfile(
+        ".firstmate-reviewer-addresses-$port.XXXXXX", DIR => $state, UNLINK => 0
+      );
+      my $ok = print {$tmp_fh} $raw, "v1\t$port\t$key\t$host\n";
+      $ok = chmod(0600, $tmp) && $ok;
+      $ok = close($tmp_fh) && $ok;
+      if (!$ok || !rename($tmp, $map)) {
+        unlink($tmp);
+        die "error: cannot update the Lavish reviewer address map\n";
+      }
+      $assigned{$key} = $host;
+      $count{$host}++;
+    }
+    if (($count{$host} // 0) > 3) {
+      warn "WARNING: Lavish fallback limit is three boards per address and six per server; enable alias http://$alias:$port/session/$key until the event-stream transport fix lands.\n";
+    }
+    print "$host\n";
+  ' "$shared_state" "$port" "$key" "$alias"
 )
 
 cmd_link() {

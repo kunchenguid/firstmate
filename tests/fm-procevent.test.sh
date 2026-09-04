@@ -1768,7 +1768,11 @@ printf '%s\n' "$@" >> "$FM_TEST_LINK_PROBE_LOG"
 printf '%s' "${FM_TEST_LINK_STATUS:-403}"
 exit "${FM_TEST_LINK_CURL_EXIT:-0}"
 SH
-chmod +x "$LINK_BIN/lavish-axi" "$LINK_BIN/curl"
+cat > "$LINK_BIN/flock" <<'SH'
+#!/usr/bin/env bash
+exit 97
+SH
+chmod +x "$LINK_BIN/lavish-axi" "$LINK_BIN/curl" "$LINK_BIN/flock"
 link_out_home() {
   local home=$1
   shift
@@ -1779,6 +1783,34 @@ link_listing() {
   printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a,\\"quoted\\" file.html","%s",0\n' \
     "$1" > "$FM_TEST_LINK_LISTING"
 }
+
+LINK_CONCURRENT_A="$LINK_HOME/concurrent-a.html"
+LINK_CONCURRENT_B="$LINK_HOME/concurrent-b.html"
+printf '<h1>Review A</h1>\n' > "$LINK_CONCURRENT_A"
+printf '<h1>Review B</h1>\n' > "$LINK_CONCURRENT_B"
+LINK_CONCURRENT_KEY_A=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_CONCURRENT_A")
+LINK_CONCURRENT_KEY_A=${LINK_CONCURRENT_KEY_A#lavish-}
+LINK_CONCURRENT_KEY_B=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINK_CONCURRENT_B")
+LINK_CONCURRENT_KEY_B=${LINK_CONCURRENT_KEY_B#lavish-}
+LINK_CONCURRENT_LISTING_A="$LINK_HOME/concurrent-a.sessions"
+LINK_CONCURRENT_LISTING_B="$LINK_HOME/concurrent-b.sessions"
+printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a.html","http://localhost:4875/session/%s",0\n' \
+  "$LINK_CONCURRENT_KEY_A" > "$LINK_CONCURRENT_LISTING_A"
+printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"b.html","http://localhost:4875/session/%s",0\n' \
+  "$LINK_CONCURRENT_KEY_B" > "$LINK_CONCURRENT_LISTING_B"
+FM_TEST_LINK_LISTING="$LINK_CONCURRENT_LISTING_A" \
+  link_out_home "$LINK_HOME" "$LINK_CONCURRENT_A" > "$LINK_HOME/concurrent-a.out" &
+LINK_CONCURRENT_PID_A=$!
+FM_TEST_LINK_LISTING="$LINK_CONCURRENT_LISTING_B" \
+  link_out_home "$LINK_HOME_TWO" "$LINK_CONCURRENT_B" > "$LINK_HOME/concurrent-b.out" &
+LINK_CONCURRENT_PID_B=$!
+wait "$LINK_CONCURRENT_PID_A" || fail "the first concurrent home could not allocate a reviewer address"
+wait "$LINK_CONCURRENT_PID_B" || fail "the second concurrent home could not allocate a reviewer address"
+LINK_CONCURRENT_HOSTS=$(sed -E 's#^http://([^:]+):.*#\1#' \
+  "$LINK_HOME/concurrent-a.out" "$LINK_HOME/concurrent-b.out" | sort)
+[ "$LINK_CONCURRENT_HOSTS" = $'127.0.0.1\nlocalhost' ] \
+  || fail "concurrent homes did not serialize their shared server allocation"
+pass "link serializes cross-home allocation without an external flock command"
 
 LINK_HOSTS=
 LINK_KEYS=
