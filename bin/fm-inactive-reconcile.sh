@@ -525,7 +525,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
-    outcome_key="inactive-outcome-main-$id-$state"
+    outcome_key="inactive-outcome-main-$id-$state-${fingerprint:0:16}"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
   [ -n "$RECORD_PENDING" ] || return 0

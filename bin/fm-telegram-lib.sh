@@ -70,10 +70,10 @@
 #     patterns. A refused card is dropped loudly, never silently, because a
 #     send that silently drops is worse than one that fails.
 #   - An INTERNAL IDENTIFIER is redacted, not refused. AGENTS.md section 9
-#     forbids task ids, absolute paths, branch names, status labels and harness
-#     names in captain-facing text; refusing on them would silently suppress
-#     genuine failure cards, so fm_telegram_scrub removes them and the card
-#     still goes.
+#     forbids internal identifiers in captain-facing text. The scrubber removes
+#     absolute paths, machine key=value fragments, fm/<name> branch refs, and
+#     verified harness names; refusing on them would silently suppress genuine
+#     failure cards, so the card still goes.
 #
 # Sourced by bin/fm-parent-channel-lib.sh, by bin/fm-telegram-send.sh, and by
 # tests. No side effects on source.
@@ -247,16 +247,20 @@ fm_telegram_looks_like_status_line() {  # <text>
 
 # Fold free text onto one bounded line and remove the internal identifiers
 # AGENTS.md section 9 keeps out of captain-facing text: absolute filesystem
-# paths, and the machine key=value fragments that name a task, a worktree, a
-# branch, a harness, a delivery mode, or an endpoint. A URL survives, because a
-# PR link is the single most useful thing a phone card carries and its own
-# repository name is already the operator's recorded choice.
+# paths; machine key=value fragments that name a task, worktree, branch,
+# harness, delivery mode, or endpoint; fm/<name> branch refs; and the verified
+# harness names claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and
+# muse. A URL survives, because a PR link is the single most useful thing a
+# phone card carries and its own repository name is already the operator's
+# recorded choice.
 fm_telegram_scrub() {  # <text>
   printf '%s' "$1" \
     | LC_ALL=C tr '\t\r\n' '   ' \
     | LC_ALL=C sed -E \
       -e 's#(^|[[:space:]])(child|task|fingerprint|key|mode|yolo|harness|backend|window|worktree|branch|report|pane|session)=[^[:space:]]*#\1#g' \
       -e 's#(^|[[:space:]])/[^[:space:]]*#\1#g' \
+      -e 's#(^|[^[:alnum:]_./:-])fm/[A-Za-z0-9._/-]+#\1#g' \
+      -e 's#(^|[^[:alnum:]_.-])(claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse)([^[:alnum:]_.-]|$)#\1\3#g' \
       -e 's/[[:space:]]+/ /g' \
       -e 's/^ //' -e 's/ $//' \
     | cut -c "1-$FM_TELEGRAM_FIELD_MAX"
@@ -336,6 +340,10 @@ _fm_telegram_key_hash() {  # <key>
   fi
   [ -n "$out" ] || return 1
   printf '%s\n' "${out:0:16}"
+}
+
+fm_telegram_event_digest() {  # <locally-held canonical identity>
+  _fm_telegram_key_hash "$1"
 }
 
 # A card key must be usable as a file-name component, the same rule the parent

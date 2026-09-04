@@ -346,11 +346,11 @@ test_a_credential_value_is_refused_loudly() {
 }
 
 test_internal_identifiers_do_not_reach_a_card() {
-  local dir card
+  local dir card out
   dir=$(make_home scrub)
   report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
     "project=alpha" \
-    "note=stopped in /home/captain/wt/alpha with harness=claude mode=no-mistakes key=child-outcome-t1 branch=fm/task-x" \
+    "note=build failed on branch fm/task-x under claude in /home/captain/wt/alpha with harness=claude mode=no-mistakes key=child-outcome-t1 branch=fm/task-x" \
     >/dev/null 2>&1 || true
   card=$(only_card "$dir")
   grep -Fq '/home/captain' "$card" && fail "a card carried an absolute worktree path"
@@ -358,8 +358,48 @@ test_internal_identifiers_do_not_reach_a_card() {
   grep -Fq 'mode=' "$card" && fail "a card carried a delivery mode"
   grep -Fq 'key=' "$card" && fail "a card carried a decision key"
   grep -Fq 'branch=' "$card" && fail "a card carried a branch name"
-  grep -Fq 'stopped in' "$card" || fail "scrubbing removed the readable part of the note"
+  grep -Fq 'fm/task-x' "$card" && fail "a card carried a bare branch ref"
+  grep -Fq 'claude' "$card" && fail "a card carried a bare harness name"
+  grep -Fq 'build failed on branch' "$card" || fail "scrubbing removed the readable part of the note"
+  out=$(render pr-ready "project=alpha" "url=https://example.test/fm/repo/pull/7") \
+    || fail "a PR URL containing an fm path would not render"
+  grep -Fq 'https://example.test/fm/repo/pull/7' <<< "$out" \
+    || fail "scrubbing ate a PR URL"
   pass "the internal identifiers section 9 forbids do not reach a card"
+}
+
+test_pr_card_identity_tracks_the_canonical_pr() {
+  local dir first_url second_url meta
+  dir=$(make_home pr-identity)
+  first_url=https://github.com/owner/repo/pull/12
+  second_url=https://github.com/owner/repo/pull/13
+  meta="$dir/home/state/t1.meta"
+  fm_write_meta "$meta" "window=firstmate:fm-t1" "endpoint_task_id=t1" \
+    "worktree=$dir/wt" "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  chmod 0600 "$meta"
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" t1 "$first_url" >/dev/null 2>&1 \
+    || fail "registering the first PR failed"
+  [ "$(card_count "$dir")" = 1 ] || fail "the first PR queued no card"
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" t1 "$first_url" >/dev/null 2>&1 \
+    || fail "retrying the same PR failed"
+  [ "$(card_count "$dir")" = 1 ] || fail "an exact PR retry queued another card"
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" t1 "$second_url" >/dev/null 2>&1 \
+    || fail "registering the replacement PR failed"
+  [ "$(card_count "$dir")" = 2 ] || fail "the replacement PR did not queue a distinct card"
+  grep -R -Fq "$first_url" "$dir/home/state/telegram-outbox" \
+    || fail "the first PR card was lost"
+  grep -R -Fq "$second_url" "$dir/home/state/telegram-outbox" \
+    || fail "the replacement PR card was lost"
+  pass "exact PR retries deduplicate while replacement PRs remain distinct"
 }
 
 test_publishers_make_no_network_call() {
@@ -526,6 +566,7 @@ test_all_four_classes_render
 test_a_raw_status_line_cannot_become_a_card
 test_a_credential_value_is_refused_loudly
 test_internal_identifiers_do_not_reach_a_card
+test_pr_card_identity_tracks_the_canonical_pr
 test_publishers_make_no_network_call
 test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
 test_drain_sends_and_never_listens
