@@ -252,6 +252,13 @@ register_work() {
     fm_lock_release "$REGISTRY/.registry.lock"
     die "cannot write background-work progress argv"
   fi
+  if ! BACKGROUND_RECORD_ID_OVERRIDE="$id" \
+    record_json "$stage" "$(date +%s)" "$started_at" budget-only > "$stage/fallback.json" \
+    || ! chmod 600 "$stage/fallback.json"; then
+    rm -rf -- "$stage"
+    fm_lock_release "$REGISTRY/.registry.lock"
+    die "cannot write background-work fallback"
+  fi
   if ! mv -- "$stage" "$record"; then
     rm -rf -- "$stage"
     fm_lock_release "$REGISTRY/.registry.lock"
@@ -264,7 +271,7 @@ register_work() {
 load_record() { # <record-directory>
   local dir=$1 meta="$1/meta"
   RECORD_VALID=0
-  RECORD_ID=${dir##*/}
+  RECORD_ID=${BACKGROUND_RECORD_ID_OVERRIDE:-${dir##*/}}
   RECORD_DESCRIPTION=''
   RECORD_TASK=''
   RECORD_PID=''
@@ -547,8 +554,9 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
 }
 
 list_work() {
-  local format=${1-} generated now records_tmp record document stage id total=0 attempted=0 completed=0 truncated=false
+  local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false source
   local collection_started collection_deadline remaining
+  local -a record_files=()
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   collection_started=$(date +%s) || die "cannot start background-work collection deadline"
   collection_deadline=$((collection_started + COLLECTION_BUDGET))
@@ -556,44 +564,41 @@ list_work() {
   load_runtime_libs
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
   now=$(date +%s) || die "cannot read the current epoch time"
-  records_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-background-work-list.XXXXXX") \
-    || die "cannot stage background-work output"
-  : > "$records_tmp"
   if [ -d "$REGISTRY" ]; then
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
-      || { rm -f -- "$records_tmp"; die "cannot stage background-work collection"; }
+      || die "cannot stage background-work collection"
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       total=$((total + 1))
       [ "$attempted" -ge "$COLLECTION_MAX_PROBES" ] || attempted=$((attempted + 1))
-      id=${record##*/}
-      record_json "$record" "$now" "$generated" budget-only > "$stage/$id.json" \
-        || { rm -rf -- "$stage"; rm -f -- "$records_tmp"; die "cannot encode background-work record: $id"; }
     done
-    remaining=$((collection_deadline - $(date +%s)))
+    remaining=$((collection_deadline - $(date +%s) - 1))
     if [ "$remaining" -gt 0 ]; then
       collect_records "$stage" "$now" "$generated" "$remaining"
     fi
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       id=${record##*/}
-      [ ! -f "$stage/$id.complete" ] || completed=$((completed + 1))
-      cat "$stage/$id.json" >> "$records_tmp" \
-        || { rm -rf -- "$stage"; rm -f -- "$records_tmp"; die "cannot read background-work result: $id"; }
+      source="$record/fallback.json"
+      if [ -f "$stage/$id.complete" ]; then
+        completed=$((completed + 1))
+        source="$stage/$id.json"
+      fi
+      record_files+=("$source")
     done
-    rm -rf -- "$stage"
   fi
   [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] || truncated=true
   remaining=$((collection_deadline - $(date +%s)))
-  [ "$remaining" -gt 0 ] || remaining=1
+  [ "$remaining" -gt 0 ] || { [ -z "${stage:-}" ] || rm -rf -- "$stage"; die "background-work collection budget exhausted before assembly"; }
   document=$(fm_run_timed "$remaining" jq -s --arg generated "$generated" --arg home "$FM_HOME" \
     --argjson budget "$COLLECTION_BUDGET" --argjson total "$total" \
     --argjson attempted "$attempted" --argjson completed "$completed" --argjson truncated "$truncated" \
     '{schema:"fm-background-work-list.v1", generated:$generated, fm_home:$home,
       collection:{budget_seconds:$budget,total_records:$total,probes_attempted:$attempted,
         probes_completed:$completed,truncated:$truncated},records:.}' \
-    "$records_tmp") || { rm -f -- "$records_tmp"; die "cannot encode background-work list"; }
-  rm -f -- "$records_tmp"
+    "${record_files[@]+"${record_files[@]}"}" </dev/null) \
+    || { [ -z "${stage:-}" ] || rm -rf -- "$stage"; die "cannot encode background-work list"; }
+  [ -z "${stage:-}" ] || rm -rf -- "$stage"
   if [ "$format" = --json ]; then
     printf '%s\n' "$document"
   else
@@ -632,7 +637,7 @@ retire_work() {
     [ "$entry" = "$record/.observe.lock" ] && continue
     [ -n "$observe_owner" ] && [ "$entry" = "$observe_owner" ] && continue
     case "${entry##*/}" in
-      meta|progress.argv|observation) ;;
+      meta|progress.argv|observation|fallback.json) ;;
       *)
         fm_lock_release "$record/.observe.lock"
         fm_lock_release "$REGISTRY/.registry.lock"
@@ -640,7 +645,7 @@ retire_work() {
         ;;
     esac
   done
-  rm -f -- "$record/meta" "$record/progress.argv" "$record/observation" \
+  rm -f -- "$record/meta" "$record/progress.argv" "$record/observation" "$record/fallback.json" \
     || { fm_lock_release "$record/.observe.lock"; fm_lock_release "$REGISTRY/.registry.lock"; die "cannot remove background-work record files: $id"; }
   fm_lock_release "$record/.observe.lock"
   rmdir -- "$record" \
