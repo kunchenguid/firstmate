@@ -1386,6 +1386,10 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
+    raw_launch_error='error: raw launch command cannot be classified safely; use --harness codex with --model and --effort as needed'
+    case "$LAUNCH" in
+      *\"*|*\'*|*\\*) echo "$raw_launch_error" >&2; exit 1 ;;
+    esac
     raw_env_prefix=0
     raw_env_unset_value=0
     for word in $LAUNCH; do
@@ -1397,6 +1401,7 @@ case "$ARG3" in
         case "$word" in
           [A-Za-z_]*=*) continue ;;
           -u|--unset) raw_env_unset_value=1; continue ;;
+          -*) echo "$raw_launch_error" >&2; exit 1 ;;
           *) HARNESS=$(basename "$word"); break ;;
         esac
       fi
@@ -1409,6 +1414,10 @@ case "$ARG3" in
           ;;
       esac
     done
+    if [ -z "$HARNESS" ] || [ "$raw_env_unset_value" -eq 1 ]; then
+      echo "$raw_launch_error" >&2
+      exit 1
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
