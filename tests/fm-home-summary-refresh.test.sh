@@ -14,6 +14,7 @@ TMP_ROOT=$(fm_test_tmproot fm-home-summary-refresh)
 HOME_DIR="$TMP_ROOT/mate-home"
 CADENCE_HOME="$TMP_ROOT/cadence-home"
 PARENT_HOME="$TMP_ROOT/parent-home"
+LARGE_HOME="$TMP_ROOT/large-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -157,6 +158,44 @@ jq -S 'del(.generated, .generated_epoch)' "$TMP_ROOT/fresh-summary.json" \
 cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
+
+# A structured backlog above Linux MAX_ARG_STRLEN must remain publishable through
+# both fleet snapshot modes and the real home-summary writer.
+mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
+  "$LARGE_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
+printf 'large\n' > "$LARGE_HOME/.fm-secondmate-home"
+{
+  printf '%s\n' '## In flight' '' '## Queued'
+  i=1
+  while [ "$i" -le 2200 ]; do
+    printf '%s\n' "- [ ] large-task-$i - $(printf 'x%.0s' $(seq 1 70)) (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Done'
+} > "$LARGE_HOME/data/backlog.md"
+[ "$(wc -c < "$LARGE_HOME/data/backlog.md")" -gt 131072 ] \
+  || fail "large backlog fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/large-snapshot.json" \
+  || fail "fleet snapshot json mode failed for a large backlog"
+jq -e '.schema == "fm-fleet-snapshot.v1" and (.backlog.records | length) == 2200' \
+  "$TMP_ROOT/large-snapshot.json" >/dev/null \
+  || fail "large fleet snapshot did not preserve the backlog records"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/large-summary.json" \
+  || fail "secondmate home-summary mode failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json" \
+  >/dev/null || fail "large secondmate home-summary output was not valid"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+  "$LARGE_HOME/state/home-summary.json" >/dev/null \
+  || fail "large secondmate home-summary was not published"
+pass "large backlog snapshots and home-summary publication stay within exec limits"
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
