@@ -616,6 +616,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
       echo "error: --resolve-key '$k' cannot take effect: this key is reserved for its owning library, and this send cannot produce a close note that library's fold will accept. Refusing rather than writing a silent no-op; nothing was sent." >&2
       exit 1
     fi
+    probe_line="resolved [key=$k]: $probe"
+    fm_cap_line_var "$probe_line"
+    probe_key=$(_fm_decision_key "$FM_LINE_CAP_LINE") || probe_key=
+    if [ "$(status_line_verb "$FM_LINE_CAP_LINE")" != resolved ] || [ "$probe_key" != "$k" ]; then
+      echo "error: --resolve-key cannot close a decision key of length ${#k}: its ${#probe_line}-character close record exceeds the $FM_LINE_CAP_DEFAULT-character status-line cap, and truncation would remove the structural key delimiter. Refusing rather than writing an ineffective close; nothing was sent." >&2
+      exit 1
+    fi
   done
 fi
 
@@ -644,7 +651,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
     still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
     case "$still" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
-        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; the close line was not accepted as a transition (reserved keys require the owning library's vocabulary). Close it manually with: $manual_close_cmd - do not resend the answer." >&2
+        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; it may have been reopened concurrently or the fold did not accept the close. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
         return 1
         ;;
     esac

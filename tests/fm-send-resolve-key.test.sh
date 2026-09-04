@@ -634,6 +634,34 @@ test_unclosable_reserved_key_refuses_before_send() {
   pass "fm-send --resolve-key: a reserved key this send cannot close refuses loudly before anything is sent"
 }
 
+test_long_decision_key_refuses_before_send() {
+  local dir fb log home err key rc out
+  dir="$TMP_ROOT/long-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home long-key)
+  key=$(printf 'k%.0s' {1..230})
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=%s]: choose safely\n' "$key" > "$home/state/t1.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key "$key" "answer the long-key decision" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key whose close prefix cannot fit should refuse before sending"
+  assert_contains "$(cat "$err")" "decision key of length 230" "the refusal should report the key-length cause"
+  assert_contains "$(cat "$err")" "220-character status-line cap" "the refusal should report the truncation limit"
+  assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
+  [ ! -s "$log" ] || fail "a refused long-key close still typed text: $(cat "$log")"
+  [ ! -d "$home/state/t1.inbox" ] || fail "a refused long-key close still enqueued an inbox record"
+  if grep -F 'resolved' "$home/state/t1.status" >/dev/null; then
+    fail "a refused long-key close still wrote a malformed resolution: $(cat "$home/state/t1.status")"
+  fi
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null \
+    || fail "the long-key decision disappeared after a refused close: $out"
+  pass "fm-send --resolve-key: an overlong decision key refuses before sending"
+}
+
 test_failed_close_recovery_command_is_shell_safe() {
   local dir fb log home err marker answer rc diagnostic manual out
   dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
@@ -706,5 +734,6 @@ test_flag_misuse_refuses
 test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
+test_long_decision_key_refuses_before_send
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
