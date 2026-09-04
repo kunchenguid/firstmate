@@ -422,6 +422,19 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
+    def delivery_body($lines):
+      [ $lines[]
+        | select(. == "local main" or startswith("Deliverable of the finished work: ")) ]
+      | join(" ");
+    def delivery_links($body):
+      [$body | scan("https?://[^[:space:]);\"<>]+")];
+    def body_local_note($lines):
+      if any($lines[];
+        . == "local main"
+        or (startswith("Deliverable of the finished work: ")
+            and test("(^|[;:][[:space:]]*)local main([[:space:]]*;|$)")))
+      then "local main"
+      else null end;
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -490,9 +503,15 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
     | .records |= map(
-        if (.body_lines | length) > 0 then
-          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
-          | .body_excerpt = ((.body_lines | join(" "))[:240])
+        if .structured then
+          (delivery_body(.body_lines)) as $delivery_body
+          | .pr_url = (.pr_url // ((delivery_links($delivery_body) | map(select(test("/pull/[0-9]+"))) | .[0]) // null))
+          | .report_path = (.report_path // cap($delivery_body; ".*(?<v>data/[^[:space:]);]+/report\\.md).*"))
+          | .local_note = (.local_note // body_local_note(.body_lines))
+          | if (.body_lines | length) > 0 then
+              .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+              | .body_excerpt = ((.body_lines | join(" "))[:240])
+            else . end
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
