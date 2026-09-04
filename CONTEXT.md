@@ -54,7 +54,7 @@ Project or personal data, including evidence, produced by a skill that remains p
 The ignored local location where **Private Outputs** are retained and never synchronized automatically.
 
 **Evidence Import Consent**:
-The captain's one-time authorization through an **Evidence Review Surface** to offer one exact previewed **Evidence Bundle** or batch and its named destination to no-mistakes.
+The captain's one-time authorization through an **Evidence Review Surface** to offer one exact previewed **Evidence Bundle** or batch, its manifest and artifact hashes, its no-mistakes run and reviewed head, and its named destination to no-mistakes.
 
 **Publication Approval**:
 The no-mistakes-owned one-time authorization granted after protected staging, revalidation, and its own exact preview to publish one exact evidence batch to one named pull request destination.
@@ -81,7 +81,7 @@ A local browser page that presents an exact **Evidence Bundle**, side-by-side co
 Structured choices submitted from an **Evidence Review Surface** to resolve a **Privacy Finding**, authorize a local export, grant **Evidence Import Consent**, or grant **Evidence Cleanup Approval**.
 
 **Local Evidence Controller**:
-The trusted non-browser controller shipped with **Visual Evidence** that owns **Local Evidence Store** access, receives **Review Decisions**, revalidates their exact bindings, and applies approved local actions when Firstmate is not the host.
+The trusted non-browser controller shipped with **Visual Evidence** that owns **Local Evidence Store** access, receives **Review Decisions**, revalidates their exact bindings, applies approved local actions, and routes **Evidence Import Consent** to no-mistakes when Firstmate is not the host.
 
 **Complementary Evidence**:
 Visual evidence that supports but does not replace feasible automated assertions.
@@ -181,9 +181,9 @@ Suspected sensitive content identified during a **Privacy Review**.
 - An **Evidence Review Surface** never performs an external action directly.
 - In Firstmate-integrated use, Firstmate receives a **Review Decision** and acts as the host controller.
 - In standalone use, the **Local Evidence Controller** receives the same **Review Decision** through a local-only control channel.
-- The active host controller revalidates manifest hashes, the exact batch, and the destination before routing **Evidence Import Consent** to no-mistakes or performing an approved local export or cleanup.
+- The active trusted host controller revalidates every **Review Decision** binding before acting, including the no-mistakes run, reviewed head, exact batch, manifest and artifact hashes, and pull request destination before routing **Evidence Import Consent** for protected staging.
 - The **Local Evidence Controller** cannot grant **Publication Approval** or mutate a pull request directly.
-- Any change to a file or destination invalidates its **Review Decision** and requires a new preview.
+- Any change to a binding covered by a **Review Decision** invalidates that decision and requires a new preview.
 - Closing an **Evidence Review Surface** without submitting a **Review Decision** authorizes nothing.
 - An **Evidence Bundle** is **Complementary Evidence** when the claimed behavior can be asserted automatically.
 - Machine-verifiable behavior uses automated assertions.
@@ -260,6 +260,8 @@ Suspected sensitive content identified during a **Privacy Review**.
 - Any unresolved **Privacy Finding** prevents publication of the **Evidence Bundle**.
 - Each **Privacy Finding** must be resolved individually by the captain through explicit acceptance, cropping or redacting into a derived artifact, or excluding the artifact from the previewed batch.
 - Resolution of a **Privacy Finding** is bound to the exact previewed **Evidence Bundle**.
+- Explicit acceptance does not require a new preview when the artifact bytes, batch, **Privacy Finding** set, and destination remain unchanged.
+- Derivation, cropping, redaction, exclusion, file change, batch change, **Privacy Finding** set change, or destination change requires a new exact preview and **Review Decision**.
 - A **Private Output** goes to the **Local Evidence Store** by default.
 - No **Private Output** expires automatically.
 - Evidence cleanup previews the exact files and sizes before requesting **Evidence Cleanup Approval**.
@@ -270,10 +272,11 @@ Suspected sensitive content identified during a **Privacy Review**.
 - A local export from the **Local Evidence Store** requires a **Review Decision** for the exact previewed batch and destination folder.
 - GitHub pull request publication requires both **Evidence Import Consent** and a subsequent no-mistakes-owned **Publication Approval**.
 - Version 1 supports a user-chosen local export folder as a **Publication Destination**.
-- Version 1 supports an approved GitHub pull request as a **Publication Destination** only through Firstmate's existing validated publication flow.
-- **Approved Evidence Import** validates the exact manifest hash, artifact hashes, approval identity, and allowed media types.
+- Version 1 supports an approved GitHub pull request as a **Publication Destination** only through the active trusted host controller and no-mistakes' validated publication flow.
+- Firstmate is the active trusted host controller in integrated use, and the **Local Evidence Controller** is the active trusted host controller in standalone use.
+- **Approved Evidence Import** validates every **Evidence Import Consent** binding, the approval identity, and allowed media types.
 - **Approved Evidence Import** contains no Firstmate-specific or **Visual Evidence**-specific behavior.
-- **Evidence Import Consent** authorizes only offering the exact reviewed batch and destination to **Approved Evidence Import**.
+- **Evidence Import Consent** authorizes only offering the exact bindings in its definition to **Approved Evidence Import**.
 - **Evidence Import Consent** does not authorize pull request mutation.
 - No-mistakes protects and revalidates the staged batch, presents its own exact preview, and alone owns the **Publication Approval** that authorizes pull request mutation.
 - Project-controlled manifests or JSON, `--yes`, generic automatic approval, and configuration cannot grant **Evidence Import Consent** or **Publication Approval**.

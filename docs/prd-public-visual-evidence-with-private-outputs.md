@@ -437,19 +437,21 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - [ ] Any unresolved finding blocks local export and **Evidence Import Consent**.
 - [ ] Each finding can be explicitly accepted, cropped, redacted into a derived artifact, or resolved by excluding its artifact.
 - [ ] Originals in the **Local Evidence Store** are never silently altered.
-- [ ] A crop, redaction, exclusion, file change, or destination change produces a new exact preview before authority can be granted.
+- [ ] Explicit acceptance alone does not require a new preview when artifact bytes, batch, finding set, and destination remain unchanged.
+- [ ] A derivation, crop, redaction, exclusion, file change, batch change, finding-set change, or destination change produces a new exact preview before authority can be granted.
 - [ ] Privacy review and derived output are verified in browser using `chrome-devtools-axi`.
 
 **Validation Test:**
 
-- **Setup:** Create a bundle containing one benign screenshot, one screenshot with suspected sensitive content, and their original hashes.
+- **Setup:** Create a bundle containing one benign screenshot, two screenshots with suspected sensitive content, and their original hashes.
 - **Steps:**
   1. Open the privacy review using `chrome-devtools-axi`.
   2. Attempt export and import consent with the finding unresolved.
-  3. Resolve the finding through a redacted derivative.
-  4. Compare original and derived hashes and open the new preview.
-- **Expected Result:** Unresolved publication is blocked, the original remains byte-identical, the derivative has a new identity, and only the newly previewed batch can receive authority.
-- **Failure Indicator:** Original bytes change, unresolved evidence proceeds, or an old decision applies to the derived batch.
+  3. Explicitly accept one finding without changing its artifact bytes, the batch, the finding set, or the destination, and confirm the current exact preview remains valid.
+  4. Resolve the other finding through a redacted derivative.
+  5. Compare original and derived hashes and open the new preview.
+- **Expected Result:** Unresolved publication is blocked, unchanged explicit acceptance preserves the current preview, the original remains byte-identical, the derivative has a new identity, and only the newly previewed changed batch can receive authority.
+- **Failure Indicator:** Original bytes change, unresolved evidence proceeds, unchanged acceptance invalidates the preview, or an old decision applies to the derived batch.
 
 ### US-019: Operate the local Evidence Review Surface
 
@@ -463,7 +465,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - [ ] A **Review Decision** may resolve findings, authorize an exact local export, grant **Evidence Import Consent**, or grant **Evidence Cleanup Approval**.
 - [ ] The page never performs the external action directly.
 - [ ] Firstmate acts as the host controller in integrated use, while the public skill's trusted non-browser **Local Evidence Controller** owns private storage and decision intake in standalone use.
-- [ ] The active host controller revalidates exact hashes, batch, and destination before routing import consent to no-mistakes or performing an approved local action.
+- [ ] The active host controller revalidates exact hashes, batch, and destination before performing an approved local action and also revalidates the no-mistakes run and reviewed head before routing import consent.
 - [ ] The standalone controller retains control state outside the project worktree and cannot grant **Publication Approval** or mutate a pull request directly.
 - [ ] The surface and no-side-effect behavior are verified in browser using `chrome-devtools-axi`.
 
@@ -504,26 +506,27 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 ### US-021: Hand consented evidence to no-mistakes
 
-**Description:** As the captain, I want Firstmate to route one exact consented batch to the owning worker so that no-mistakes can stage it without treating consent as publication authority.
+**Description:** As the captain, I want the active trusted host controller to route one exact consented batch to the owning worker so that no-mistakes can stage it without treating consent as publication authority.
 
 **Acceptance Criteria:**
 
-- [ ] **Evidence Import Consent** identifies the exact reviewed batch, hashes, pull request destination, run, and reviewed head offered to no-mistakes.
-- [ ] Firstmate revalidates the consent before routing it to the owning project worker.
+- [ ] **Evidence Import Consent** identifies the exact reviewed batch, manifest and artifact hashes, pull request destination, no-mistakes run, and reviewed head offered to no-mistakes.
+- [ ] Firstmate performs the host-controller handoff in integrated use, and the **Local Evidence Controller** performs it in standalone use.
+- [ ] The active trusted host controller revalidates every consent binding before routing it to the owning project worker.
 - [ ] The owning worker drives **Approved Evidence Import** through the no-mistakes flow.
 - [ ] The handoff does not authorize or perform pull request mutation.
-- [ ] Changed batch, destination, run, or head bindings refuse the handoff and require a new local preview.
-- [ ] Focused routing, worker-ownership, drift, and no-publication tests pass.
+- [ ] Changed batch, manifest or artifact hash, destination, run, or head bindings refuse the handoff and require a new local preview.
+- [ ] Focused integrated-host, standalone-host, worker-ownership, drift, and no-publication tests pass.
 
 **Validation Test:**
 
-- **Setup:** Prepare one consented bundle and pull request destination plus variants with changed artifact, destination, run, and reviewed-head bindings.
+- **Setup:** Prepare one consented bundle and pull request destination plus variants with changed batch, manifest hash, artifact hash, destination, no-mistakes run, and reviewed-head bindings.
 - **Steps:**
-  1. Route the unchanged consent through Firstmate to the owning worker.
-  2. Inspect no-mistakes staging and pull request state.
-  3. Attempt every changed variant.
-- **Expected Result:** The unchanged batch reaches protected staging without publication, while every changed variant fails before handoff or staging.
-- **Failure Indicator:** Firstmate mutates the pull request, consent becomes publication authority, or a changed binding is accepted.
+  1. Route the unchanged consent through Firstmate in integrated use and through the Local Evidence Controller in standalone use.
+  2. Inspect no-mistakes staging and pull request state for each route.
+  3. Attempt every changed variant through both host controllers.
+- **Expected Result:** Each unchanged route reaches protected staging without publication, while every changed variant fails before handoff or staging.
+- **Failure Indicator:** Either host controller mutates the pull request, consent becomes publication authority, a route omits the owning worker, or a changed binding is accepted.
 
 ### US-022: Clean up only exact approved private outputs
 
@@ -585,7 +588,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-10: Imported evidence must be staged outside the project worktree under no-mistakes-owned run state.
 - FR-11: Protected staging must refuse symlinks, path traversal, mutable substitutions, and non-regular artifacts.
 - FR-12: Staging must verify hashes from its protected copy and finalize atomically without overwriting non-identical state.
-- FR-13: **Evidence Import Consent** must bind one exact reviewed batch and pull request destination before staging becomes publication-eligible.
+- FR-13: **Evidence Import Consent** must bind one exact reviewed batch, manifest and artifact hashes, no-mistakes run, reviewed head, and pull request destination before protected staging.
 - FR-14: Evidence Import Consent must authorize only an offer to no-mistakes and must not authorize pull request mutation.
 - FR-15: No-mistakes must render its own exact preview from protected staging.
 - FR-16: Only a no-mistakes-owned **Publication Approval** after that preview may authorize pull request mutation.
@@ -627,10 +630,10 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-52: Portable bundles must exclude usernames, absolute paths, environment variables, credentials, private values, and unnecessary URL parameters.
 - FR-53: Original bundles and diagnostic appendices must remain private in the ignored **Local Evidence Store** unless exact authority permits an export or publication copy.
 - FR-54: **Privacy Review** must flag suspected sensitive content and block export or import consent while any finding remains unresolved.
-- FR-55: Privacy resolution must preserve originals and require a new exact preview after acceptance, derivation, exclusion, file change, or destination change.
+- FR-55: Privacy resolution must preserve originals; explicit acceptance alone must preserve the current exact preview when bytes, batch, finding set, and destination are unchanged, while derivation, crop, redaction, exclusion, file change, batch change, finding-set change, or destination change must require a new exact preview.
 - FR-56: The **Evidence Review Surface** must render locally, cause no upload or mutation, and provide exact review choices without performing external actions directly.
-- FR-57: The active host controller must revalidate hashes, batch, and destination after a Review Decision and before routing consent or performing an approved local action.
-- FR-57a: Firstmate must be the host controller in integrated use, while the public skill's trusted non-browser Local Evidence Controller must own private storage, decision intake, and approved local actions in standalone use.
+- FR-57: The active trusted host controller must revalidate hashes, batch, and destination after a Review Decision and before performing an approved local action, and must also revalidate the no-mistakes run and reviewed head before routing consent for protected staging.
+- FR-57a: Firstmate must be the host controller in integrated use, while the public skill's trusted non-browser Local Evidence Controller must own private storage, decision intake, approved local actions, and no-mistakes consent routing in standalone use.
 - FR-57b: The Local Evidence Controller must retain control state outside the project worktree and must not grant Publication Approval or mutate a pull request directly.
 - FR-58: Local export must be exact and non-overwriting, with identical replay treated idempotently and differing collisions refused.
 - FR-59: No Private Output may expire or be removed automatically.
@@ -724,7 +727,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Comparison tests always show a **Baseline Revision** distinct from the candidate head, equivalent inputs, and no browser or server state flow between captures, or explicitly refuse the comparison claim.
 - Browser isolation tests show zero access to the ordinary signed-in profile and zero cross-task profile reuse.
 - Local export tests show zero non-identical overwrites and exact idempotence for identical replay.
-- Publication tests show exactly one remote mutation per consumed approval and immutable links in the Managed PR Description.
+- Publication tests show at most one evidence publication and one matching Managed PR Description update per consumed approval, with immutable evidence links and no duplicate of either action on replay.
 - Documentation and packaging checks pass with one public Visual Evidence skill and no vendored upstream implementation.
 - Version 1 release metadata is produced only after all three coordinated deliveries and both approved destinations pass end to end.
 

@@ -15,11 +15,11 @@ The authoritative domain language and approval contract remain in [Firstmate Con
 - Version 1 supports macOS browser capture with screenshot-focused comparison and behavior evidence rather than native desktop capture or video.
 - Evidence is packaged in versioned **Evidence Bundles**, while originals and other **Private Outputs** remain in the ignored **Local Evidence Store** unless an exact authorized copy is exported or published.
 - The public skill includes a trusted non-browser **Local Evidence Controller** so standalone installations own private storage, decision intake, revalidation, export, cleanup, and no-mistakes consent routing without depending on Firstmate.
-- A local review may grant **Evidence Import Consent** for one exact batch and destination, but only no-mistakes may grant **Publication Approval** after protected staging, revalidation, and its own exact preview.
+- A local review may grant **Evidence Import Consent** under the exact bindings defined in [Firstmate Context](../../CONTEXT.md), but only no-mistakes may grant **Publication Approval** after protected staging, revalidation, and its own exact preview.
 - **Approved Evidence Import** is a narrow producer-neutral no-mistakes interface with no Firstmate-specific or **Visual Evidence**-specific behavior.
 - **Visual Evidence** version 1 is held until **Approved Evidence Import** supports approved GitHub pull request publication end to end, even if local export is implemented and tested earlier.
 - Delivery is coordinated as Firstmate **Structural Review** guidance first, no-mistakes **Approved Evidence Import** second, and complete Firstmate **Visual Evidence** version 1 after that prerequisite is available.
-- Firstmate routes project publication to the owning worker and no-mistakes flow rather than mutating project pull requests itself.
+- The active trusted host controller routes exact consent to the owning worker and no-mistakes flow, while Firstmate does not mutate project pull requests itself.
 
 ## Considered Options
 
