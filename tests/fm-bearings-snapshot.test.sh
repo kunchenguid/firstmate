@@ -1400,7 +1400,7 @@ EOF
 # in every home. A rejected captain-held work item never becomes a delivery merely
 # because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show
+  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1425,8 +1425,14 @@ test_captain_approved_delivery_stays_in_landed() {
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer approved-merge --decision-file "$home/merge-answer.txt" >/dev/null \
+    answer approved-merge --release --decision-file "$home/merge-answer.txt" >/dev/null \
     || fail "could not record the approved merge answer"
+  show=$("$TASKS_AXI_BIN" show approved-merge --full --file "$backlog") \
+    || fail "could not read the released approved merge"
+  assert_contains "$show" "state: in_flight" \
+    "merge approval completed the work before the merge landed"
+  assert_contains "$show" "Resolution mode: released" \
+    "merge approval did not use the existing work-release path"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
@@ -1453,7 +1459,7 @@ test_captain_approved_delivery_stays_in_landed() {
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer approved-local --decision-file "$home/local-answer.txt" >/dev/null \
+    answer approved-local --release --decision-file "$home/local-answer.txt" >/dev/null \
     || fail "could not record the local delivery answer"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -1490,6 +1496,51 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer forced-rejected --decision-file "$home/forced-answer.txt" >/dev/null \
     || fail "could not record the forced rejection answer"
+  reused_pr="https://github.com/kunchenguid/firstmate/pull/405"
+  "$TASKS_AXI_BIN" add reused-discard "Reuse one delivery row" --kind ship \
+    --repo firstmate --start --file "$backlog" >/dev/null \
+    || fail "could not create the reused delivery fixture"
+  fm_write_meta "$home/state/reused-discard.meta" \
+    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-one"
+  record_claude_state "$home/state" reused-discard idle
+  printf 'done: first attempt discarded\n' > "$home/state/reused-discard.status"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" reused-discard --force >/dev/null \
+    || fail "could not discard the first reused delivery attempt"
+  "$TASKS_AXI_BIN" reopen reused-discard --file "$backlog" >/dev/null \
+    || fail "could not reopen the reused delivery fixture"
+  "$TASKS_AXI_BIN" start reused-discard --file "$backlog" >/dev/null \
+    || fail "could not start the delivered reused attempt"
+  fm_write_meta "$home/state/reused-discard.meta" \
+    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-two"
+  record_claude_state "$home/state" reused-discard idle
+  printf 'done: second attempt delivered\n' > "$home/state/reused-discard.status"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" reused-discard >/dev/null \
+    || fail "could not complete the delivered reused attempt"
+  "$TASKS_AXI_BIN" reopen reused-discard --file "$backlog" >/dev/null \
+    || fail "could not reopen the delivered reused fixture"
+  "$TASKS_AXI_BIN" start reused-discard --file "$backlog" >/dev/null \
+    || fail "could not start the final discarded attempt"
+  fm_write_meta "$home/state/reused-discard.meta" \
+    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-three"
+  record_claude_state "$home/state" reused-discard idle
+  printf 'done: final attempt discarded\n' > "$home/state/reused-discard.status"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" reused-discard --force >/dev/null \
+    || fail "could not discard the final reused delivery attempt"
   "$TASKS_AXI_BIN" add rejected-merge \
     "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
     --kind ship --repo firstmate --file "$backlog" >/dev/null \
@@ -1530,12 +1581,15 @@ test_captain_approved_delivery_stays_in_landed() {
     ([.backlog.records[] | select(.id == "approved-merge")][0]) as $approved
     | ([.backlog.records[] | select(.id == "approved-local")][0]) as $local
     | ([.backlog.records[] | select(.id == "forced-rejected")][0]) as $forced
+    | ([.backlog.records[] | select(.id == "reused-discard")][0]) as $reused
     | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
     | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
     | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
       and $local.delivery_provenance == true and $local.local_note == "local main"
       and $forced.delivery_provenance == true and $forced.pr_url == null
       and $forced.report_path == null and $forced.local_note == null
+      and $reused.delivery_provenance == true and $reused.pr_url == null
+      and $reused.report_path == null and $reused.local_note == null
       and $rejected.delivery_provenance == true and $rejected.pr_url == null
       and $rejected.report_path == null and $rejected.local_note == null
       and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
@@ -1547,6 +1601,7 @@ test_captain_approved_delivery_stays_in_landed() {
       and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
       and (.landed | any(.[]; .id == "forced-rejected") | not)
+      and (.landed | any(.[]; .id == "reused-discard") | not)
       and (.landed | any(.[]; .id == "rejected-merge") | not)
   ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"
   [ ! -s "$home/net.log" ] || fail "landed must make no gh/gh-axi call, got: $(cat "$home/net.log")"

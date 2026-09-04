@@ -328,7 +328,7 @@ fm_backlog_start() {  # <data-dir> <id>
 
 fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local arg deliverable='' line latest_line body new_body tmp
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -363,34 +363,30 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
     FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
     return 1
   }
+  latest_line=$(printf '%s\n' "$body" \
+    | sed -n '/^Deliverable of the finished work: /p' | tail -1)
   if [ -z "$deliverable" ]; then
-    case $'\n'"$body"$'\n' in
-      *$'\nDeliverable of the finished work: '*) return 0 ;;
-    esac
+    [ -z "$latest_line" ] || return 0
     deliverable=none
   fi
   line="Deliverable of the finished work: $deliverable"
-  case $'\n'"$body"$'\n' in
-    *$'\n'"$line"$'\n'*) ;;
-    *)
-      new_body=$line
-      [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-      tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-completion-body.XXXXXX") || {
-        FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
-        return 1
-      }
-      if ! printf '%s\n' "$new_body" > "$tmp"; then
-        rm -f -- "$tmp"
-        FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
-        return 1
-      fi
-      if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-        rm -f -- "$tmp"
-        return 1
-      fi
-      rm -f -- "$tmp"
-      ;;
-  esac
+  [ "$latest_line" != "$line" ] || return 0
+  new_body=$line
+  [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-completion-body.XXXXXX") || {
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
+    return 1
+  }
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
+    return 1
+  fi
+  if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
@@ -875,6 +871,20 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
   local marker
   marker=$(fm_backlog_close_marker_path "$1" "$2") || return 1
   fm_backlog_close_marker_remove "$marker" "$1"
+}
+
+fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-data-dir>
+  local state=$1 id=$2 data=$3 marker args=()
+  marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  fm_backlog_close_marker_validate "$marker" "$data" "$id" "$state" || return 1
+  [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
+  args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
+    args[1]="local main"
+  fi
+  fm_backlog_record_completion "$FM_BACKLOG_CLOSE_VALIDATED_DATA" "$id" \
+    "${args[@]+"${args[@]}"}"
 }
 
 # Replay one recorded close or retention. Returns 0 when the row is closed (or

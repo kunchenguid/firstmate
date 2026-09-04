@@ -1951,11 +1951,10 @@ test_teardown_never_closes_a_captain_held_task() {
 }
 
 # Retention happens after destructive cleanup, through the same pending record
-# an ordinary close stages first. A cleanup that fails part-way therefore leaves
-# the row exactly as it was, and the next session start finishes the retention
-# instead of closing the captain's question.
+# an ordinary close stages first. A cleanup that fails part-way leaves that
+# record available to an answer and the next session replay.
 test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
-  local home id wt show rc bootstrap
+  local home id wt show rc bootstrap json
   home=$(make_home teardown-held-interrupted)
   id=sample-held-cleanup-failure
   wt="$home/projects/$id"
@@ -1980,7 +1979,7 @@ SH
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" \
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
@@ -1994,23 +1993,37 @@ SH
   assert_not_contains "$show" "Deliverable of the finished work" \
     "the deliverable was recorded before destructive cleanup succeeded"
 
+  printf 'Accept the completed report.\n' > "$home/interrupted-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/interrupted-answer.txt" >/dev/null \
+    || fail "the interrupted captain call could not be answered"
+  assert_present "$home/state/$id.backlog-close" \
+    "the answer discarded the pending cleanup record before replay"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answer erased the interrupted row"
+  assert_contains "$show" "state: done" "the answer did not close the captain call"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the answer lost the completion carried by the pending cleanup record"
+
   fm_fake_exit0 "$home/fakebin" treehouse
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
     || fail "session start could not replay the interrupted retention: $bootstrap"
-  assert_contains "$bootstrap" "kept the captain call for $id open" \
-    "session start did not report the retained captain call"
+  assert_contains "$bootstrap" "the captain had already answered its call" \
+    "session start did not reconcile the answered interrupted call"
   assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
   assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
   show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
-  assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
-  assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
+  assert_contains "$show" "state: done" "session start reopened the answered captain call"
   assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
-  assert_contains "$show" "Deliverable of the finished work: none" \
-    "session start did not preserve the forced non-delivery record"
-  pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "session start did not preserve the pending completed report"
+  json=$(run_bearings "$home") || fail "Bearings failed after interrupted cleanup replay"
+  printf '%s' "$json" | jq -e --arg id "$id" \
+    --arg report "data/$id/report.md" '
+      .landed | any(.id == $id and .artifact == $report)
+    ' >/dev/null || fail "Bearings omitted the report preserved across interrupted cleanup: $json"
+  pass "an answered interrupted cleanup preserves its completed delivery through replay"
 }
 
 # A home whose data directory is relocated keeps one backlog; the predicate and
@@ -2018,7 +2031,7 @@ SH
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
   local home data id show json
   home=$(make_home teardown-relocated-hold)
-  data="$home/team; records"
+  data="$home/ team; records"
   mv "$home/data" "$data"
   id=sample-relocated-hold
   mkdir -p "$home/data" "$data/$id"
@@ -2057,7 +2070,7 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report team; records/$id/report.md" \
+  assert_contains "$show" "Deliverable of the finished work: report  team; records/$id/report.md" \
     "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
@@ -2071,39 +2084,55 @@ EOF
   json=$(FM_DATA_OVERRIDE="$data" run_bearings "$home") \
     || fail "Bearings failed for the relocated completed report"
   printf '%s' "$json" | jq -e --arg id "$id" \
-    --arg report "team; records/$id/report.md" '
+    --arg report " team; records/$id/report.md" '
       .landed | any(.id == $id and .artifact == $report)
     ' >/dev/null || fail "Bearings omitted the relocated completed report: $json"
   pass "cleanup retains and Bearings lands captain calls in relocated data"
 }
 
-test_completion_provenance_survives_zero_done_retention() {
-  local home id archive
+test_merge_approval_releases_before_zero_done_retention() {
+  local home id archive repo wt pr show
   home=$(make_home zero-done-retention)
-  id=sample-zero-retention
+  id=sample-zero-retention-merge
   archive="$home/data/done-archive.md"
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  pr="https://github.com/sample/sample/pull/19"
   printf '%s\n' 'backend = "markdown"' '' '[markdown]' \
     'path = "data/backlog.md"' 'archive = "data/done-archive.md"' \
     'done_keep = 0' > "$home/.tasks.toml"
-  mkdir -p "$home/data/$id"
-  tasks_in "$home" add "$id" "Investigate zero-retention completion" --kind scout \
+  fm_git_worktree "$repo" "$wt" fm/zero-retention-merge
+  tasks_in "$home" add "$id" "Ship zero-retention merge $pr" --kind ship \
     --repo sample --start >/dev/null || fail "could not create the zero-retention fixture"
-  write_origin_meta "$home" "$id"
-  printf 'done: report complete\n' > "$home/state/$id.status"
-  printf '# Zero retention\n\nThe report is complete.\n' > "$home/data/$id/report.md"
-  run_captain "$home" complete "$id" --none >/dev/null \
-    || fail "completion gate failed for the zero-retention fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the zero-retention merge"
+  printf 'Merge the approved change.\n' > "$home/merge-answer.txt"
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not release the approved zero-retention merge"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released merge row disappeared"
+  assert_contains "$show" "state: in_flight" \
+    "merge approval completed the zero-retention row before landing"
+  assert_contains "$show" "Resolution mode: released" \
+    "merge approval did not record the existing release mode"
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
   assert_no_grep "$id" "$home/data/backlog.md" \
     "zero-retention cleanup kept the completed row in the active backlog"
   assert_grep "$id" "$archive" "zero-retention cleanup did not archive the completed row"
-  assert_grep "Deliverable of the finished work: report data/$id/report.md" "$archive" \
+  assert_grep "Deliverable of the finished work: PR $pr" "$archive" \
     "zero-retention archival lost completion provenance"
+  assert_grep "Merge the approved change." "$archive" \
+    "zero-retention archival lost the recorded merge approval"
   assert_absent "$home/state/$id.meta" "zero-retention cleanup retained task metadata"
   assert_absent "$home/state/$id.backlog-close" \
     "zero-retention cleanup retained its pending close record"
-  pass "completion provenance survives zero Done-row retention"
+  pass "merge approval releases before zero-retention cleanup records completion"
 }
 
 # "Cannot tell" is not permission to close. A ship row has no separate
@@ -2175,7 +2204,7 @@ test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog
-test_completion_provenance_survives_zero_done_retention
+test_merge_approval_releases_before_zero_done_retention
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix

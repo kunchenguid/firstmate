@@ -431,8 +431,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       [$values[] | scan("https?://[^[:space:]);\"<>]+")];
     def delivery_report($values):
       (([ $values[]
-          | capture("(?:^|;[[:space:]]*)report[[:space:]]+(?<v>.*/report\\.md)(?:[[:space:]]*;|$)")?
-          | .v | trim ][0]) // null);
+          | capture("(?:^|; )report (?<v>.*/report\\.md)(?:; |$)")?
+          | .v ][0]) // null);
     def body_local_note($values):
       if any($values[]; test("(^|;[[:space:]]*)local main([[:space:]]*;|$)"))
       then "local main"
