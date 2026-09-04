@@ -14,8 +14,9 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/backlog-backend, config/backend, config/claude-config-dir,
+#      config/herdr-presentation-spaces, config/startup-memory-budget, and
+#      config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -56,7 +57,7 @@ set -u
 # everything these cases set up wherever ancestry is silent. Drop the ambient
 # markers so what this suite asserts does not depend on which harness it was
 # launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset CLAUDECODE CLAUDE_CONFIG_DIR PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -1027,7 +1028,7 @@ new_world() {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
-    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/backend\nconfig/claude-config-dir\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
     printf 'config/claude-permission-mode\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
@@ -2628,6 +2629,119 @@ SH
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
 
+test_spawn_claude_config_dir_precedence() {
+  local w sm launchlog launch configured env_root
+
+  w="$TMP_ROOT/spawn-claude-config-file"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  configured="$w/configured root"
+  mkdir -p "$w/home/config" "$configured"
+  printf '%s\n' "$configured" > "$w/home/config/claude-config-dir"
+  make_seeded_home "$sm" sm
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$configured'" \
+    "a Claude launch without an environment override did not use config/claude-config-dir"
+
+  w="$TMP_ROOT/spawn-claude-config-env"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  configured="$w/configured"
+  env_root="$w/environment root"
+  mkdir -p "$w/home/config" "$configured" "$env_root"
+  printf '%s\n' "$configured" > "$w/home/config/claude-config-dir"
+  make_seeded_home "$sm" sm
+  CLAUDE_CONFIG_DIR="$env_root" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$env_root'" \
+    "the spawning environment did not override config/claude-config-dir"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR='$configured'" \
+    "a Claude launch used the config file despite an explicit environment override"
+
+  w="$TMP_ROOT/spawn-claude-config-unset"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  make_seeded_home "$sm" sm
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
+  assert_not_contains "$(cat "$launchlog")" "CLAUDE_CONFIG_DIR=" \
+    "a Claude launch gained a config prefix when neither source was set"
+
+  w="$TMP_ROOT/spawn-non-claude-config"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  env_root="$w/environment"
+  mkdir -p "$w/home/config" "$env_root"
+  printf '%s\n' "$env_root" > "$w/home/config/claude-config-dir"
+  make_seeded_home "$sm" sm
+  CLAUDE_CONFIG_DIR="$env_root" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1
+  assert_not_contains "$(cat "$launchlog")" "CLAUDE_CONFIG_DIR=" \
+    "a non-Claude launch gained the Claude configuration prefix"
+  pass "spawn: Claude configuration root resolves file, environment, unset, and non-Claude cases"
+}
+
+test_spawn_refuses_invalid_claude_config_dir() {
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-claude-config-invalid"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf '%s\n' "$w/missing" > "$w/home/config/claude-config-dir"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude 2>&1); status=$?
+  expect_code 1 "$status" "a configured Claude root that is not a directory must refuse the spawn"
+  assert_contains "$out" "config/claude-config-dir" \
+    "the invalid Claude root refusal did not name config/claude-config-dir"
+  pass "spawn: an invalid configured Claude root refuses with the owning file named"
+}
+
+test_claude_config_dir_inheritance_present_unchanged_and_absent() {
+  local w head out err status instruction configured
+  w=$(new_world claude-config-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  configured="$w/claude-root"
+  mkdir -p "$configured"
+  printf '%s\n' "$configured" > "$w/home/config/claude-config-dir"
+  err="$w/claude-config-inherit.err"
+
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "Claude config root present push should succeed"
+  assert_contains "$out" "claude-config-dir: pushed" \
+    "Claude config root present value should report pushed"
+  [ "$(cat "$w/sm/config/claude-config-dir")" = "$configured" ] \
+    || fail "Claude config root present value was not pushed"
+  instruction=$(reread_instruction_path "$w/sm") || fail "Claude config root reread instruction missing"
+  assert_contains "$(cat "$instruction")" "config/claude-config-dir" \
+    "Claude config root reread instruction did not name the changed file"
+
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "unchanged Claude config root push should succeed"
+  assert_contains "$out" "claude-config-dir: unchanged" \
+    "unchanged Claude config root did not report unchanged"
+  assert_not_contains "$out" "config-reread: sent" \
+    "unchanged Claude config root sent a redundant reread instruction"
+
+  rm -f "$w/home/config/claude-config-dir"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "Claude config root absence push should succeed"
+  assert_contains "$out" "claude-config-dir: pushed - mirrored primary absence" \
+    "Claude config root did not report mirrored primary absence"
+  [ ! -e "$w/sm/config/claude-config-dir" ] \
+    || fail "Claude config root was not removed after primary absence"
+  instruction=$(reread_instruction_path "$w/sm") || fail "Claude config root absence reread instruction missing"
+  assert_contains "$(cat "$instruction")" $'-----BEGIN config/claude-config-dir-----\nABSENT\n-----END config/claude-config-dir-----' \
+    "Claude config root absence reread instruction did not carry ABSENT"
+  pass "config-push: Claude configuration root pushes, stays unchanged, and converges absence"
+}
+
+test_claude_config_dir_inheritance_present_unchanged_and_absent
+test_spawn_claude_config_dir_precedence
+test_spawn_refuses_invalid_claude_config_dir
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens

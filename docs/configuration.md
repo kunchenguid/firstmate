@@ -307,6 +307,14 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Claude configuration root (config/claude-config-dir / CLAUDE_CONFIG_DIR)
+
+`config/claude-config-dir` is an optional local, gitignored, primary-authoritative file containing one absolute path to an existing Claude configuration directory followed by exactly one newline.
+For a Claude spawn, a non-empty `CLAUDE_CONFIG_DIR` already in the spawning environment wins, then a present readable `config/claude-config-dir` supplies the value, and otherwise the launch receives no prefix and Claude uses its default configuration root.
+An invalid readable file refuses the Claude spawn and names the file, while non-Claude spawns never receive this prefix.
+The file is materialized by hand because bootstrap cannot choose an account: run `mkdir -p config && printf '%s\n' "$CLAUDE_CONFIG_DIR" > config/claude-config-dir`, then run `bin/fm-config-push.sh` to converge already-running secondmate homes.
+The inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) propagates the literal file and converges primary absence, so each secondmate's own Claude spawns resolve the same root from its local copy.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.

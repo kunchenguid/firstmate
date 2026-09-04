@@ -179,6 +179,10 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
+#   Every Claude spawn resolves its configuration root once: a non-empty
+#   CLAUDE_CONFIG_DIR from the spawning environment wins, then the active home's
+#   readable config/claude-config-dir supplies one absolute existing directory,
+#   and otherwise Claude receives no prefix and uses its default configuration.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -1932,6 +1936,39 @@ case "$ARG3" in
   }
   ;;
 esac
+
+CLAUDE_CONFIG_ROOT=
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_CONFIG_FILE="$CONFIG/claude-config-dir"
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    CLAUDE_CONFIG_ROOT=$CLAUDE_CONFIG_DIR
+  elif [ -r "$CLAUDE_CONFIG_FILE" ]; then
+    if ! CLAUDE_CONFIG_ROOT=$(
+      {
+        IFS= read -r root || exit 1
+        extra=
+        if IFS= read -r extra || [ -n "$extra" ]; then
+          exit 1
+        fi
+        printf '%s' "$root"
+      } < "$CLAUDE_CONFIG_FILE"
+    ); then
+      echo "error: config/claude-config-dir must contain one absolute path followed by one newline (file: $CLAUDE_CONFIG_FILE)" >&2
+      exit 1
+    fi
+    case "$CLAUDE_CONFIG_ROOT" in
+      /*) ;;
+      *)
+        echo "error: config/claude-config-dir must contain one absolute path followed by one newline (file: $CLAUDE_CONFIG_FILE)" >&2
+        exit 1
+        ;;
+    esac
+    if [ ! -d "$CLAUDE_CONFIG_ROOT" ]; then
+      echo "error: config/claude-config-dir does not name an existing directory: $CLAUDE_CONFIG_ROOT (file: $CLAUDE_CONFIG_FILE)" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -4275,11 +4312,12 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Forward the root resolved above (spawner CLAUDE_CONFIG_DIR, then the home's
+# config/claude-config-dir) onto the claude launch so the crewmate uses the
+# captain-selected credential/config store. Only when set; an unset value is
+# the single-store default and needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_CONFIG_ROOT" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_ROOT") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
