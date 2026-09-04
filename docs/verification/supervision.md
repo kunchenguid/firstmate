@@ -507,7 +507,7 @@ tests/fm-turnend-guard.test.sh
 
 ## Wedge-alarm channels
 
-The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
+The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3, then the herdr channel was captured again on 2026-08-02 on Linux/WSL2 with Herdr 0.7.4.
 Automated suites never execute these real notification commands.
 
 Argv-safe Notification Center command:
@@ -535,5 +535,17 @@ Observed output:
 ```json
 {"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
 ```
+
+The same command was captured again live on 2026-08-02 on Linux/WSL2 with Herdr 0.7.4, during the away-mode delivery-failure incident that motivated `wedge_alarm_via_herdr`'s current result-parsing behavior.
+That capture contradicts the 2026-07-10 result above: it exits 0 but reports `shown:false`.
+
+Observed output:
+
+```json
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+```
+
+`wedge_alarm_via_herdr` (`bin/fm-supervise-daemon.sh`) now parses the JSON result and treats any `shown` other than `true` as a failure, rather than trusting the exit code alone.
+`tests/fm-daemon.test.sh`'s `test_wedge_alarm_herdr_not_shown_is_a_failure` pins this exact `"reason":"disabled"` payload as a fixture.
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.

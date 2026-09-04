@@ -251,7 +251,10 @@ ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
 
-A bare shell prompt is never an empty agent composer.
+Claude renders the space after its bare `❯` glyph as U+00A0 rather than an ASCII space, so the shared classifier normalizes every non-ASCII code point with the Unicode property `White_Space=Yes` (U+00A0 among them) to a plain space and re-trims before judging.
+An idle glyph-only row therefore reads empty under any locale, while unsubmitted text after that separator still reads pending.
+
+A bare shell prompt is never an empty agent composer, with or without such a separator after it.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
 

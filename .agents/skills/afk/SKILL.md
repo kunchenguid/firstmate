@@ -113,6 +113,7 @@ an ERROR in the daemon log, a durable
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+How far that stall travels while the captain is away depends entirely on the configured channel: on a host where none delivers (no macOS `osascript`, herdr reporting `shown:false`), the marker and log are read only on return, so never tell a captain the alarm reached them without checking `docs/wedge-alarm.md` "Hosts with no delivering channel".
 
 ## Submit model
 
@@ -186,7 +187,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  no-op; "Busy-guard and composer guard" above owns how far that alert actually
+  reaches an away captain.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit

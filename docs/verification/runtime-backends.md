@@ -883,6 +883,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
+- Claude renders the space after its bare `❯` as U+00A0 (NO-BREAK SPACE), captured live on 2026-08-02 on Linux/WSL2 with Herdr 0.7.4; that idle row is `empty`, and typed text after the same separator is still `pending`.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.

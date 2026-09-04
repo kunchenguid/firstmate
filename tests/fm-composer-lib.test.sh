@@ -36,6 +36,25 @@ test_bare_shell_glyphs_are_unknown() {
   pass "fm_composer_classify_content: a bare shell prompt glyph (>/\$/%/#) reads unknown, never empty"
 }
 
+test_bare_shell_glyph_with_only_a_separator_is_unknown() {
+  local g out
+  # Same dead-shell row, but the glyph is trailed by a separator: an ASCII
+  # space, or the U+00A0 normalized to one. Neither turns a dead shell into a
+  # safe injection target - only a composer box does.
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "$g ")
+    [ "$out" = unknown ] \
+      || fail "bare shell glyph '$g' plus a space must read unknown, got '$out'"
+    out=$(classify 0 "$g"$'\xc2\xa0')
+    [ "$out" = unknown ] \
+      || fail "bare shell glyph '$g' plus a non-breaking space must read unknown, got '$out'"
+    out=$(classify 1 "$g"$'\xc2\xa0')
+    [ "$out" = empty ] \
+      || fail "a bordered shell glyph '$g' plus a non-breaking space must stay empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: a bare shell glyph trailed only by a separator (space or NBSP) stays unknown"
+}
+
 test_stripped_unbordered_content_uses_plain_content() {
   local plain out
   for plain in '$' 'user@host $'; do
@@ -52,6 +71,38 @@ test_stripped_unbordered_content_uses_plain_content() {
       || fail "a stripped agent glyph '$plain' must remain empty, got '$out'"
   done
   pass "fm_composer_classify_content: stripped unbordered content is unknown except verified agent glyphs"
+}
+
+test_nbsp_only_content_is_judged_by_plain_content() {
+  local out
+  # A ghost-strip that leaves nothing but an NBSP is empty content, not an
+  # empty composer: the dead shell still visible in plain_content decides.
+  out=$(classify 0 $'\xc2\xa0' '' sensitive $'user@host $\xc2\xa0')
+  [ "$out" = unknown ] \
+    || fail "NBSP-only content over a dead-shell plain row must read unknown, got '$out'"
+  out=$(classify 0 $'\xc2\xa0' '' sensitive '❯')
+  [ "$out" = empty ] \
+    || fail "NBSP-only content over a bare agent glyph must read empty, got '$out'"
+  pass "fm_composer_classify_content: NBSP-only content falls through to the plain_content safety check"
+}
+
+test_nbsp_after_glyph_in_plain_content_is_resolved() {
+  local out
+  # The styled dim-glyph variant (task fm-afk-inject-pending, review round 1):
+  # the ghost-stripper removed the whole glyph+NBSP run (content is empty),
+  # but plain_content - the raw, unstripped row - still carries "❯"+NBSP
+  # itself. Before plain_content was also trimmed after normalization, this
+  # exact-matched nothing and fell to unknown (safe but permanently
+  # deferring); it must now resolve to empty.
+  out=$(classify 0 '' '' sensitive $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a dim-rendered agent glyph plus NBSP in plain_content must read empty, got '$out'"
+  # The mirror dead-shell case must still read unknown: the fix must not also
+  # promote a dimmed dead-shell prompt into a safe injection target.
+  out=$(classify 0 '' '' sensitive $'$\xc2\xa0')
+  [ "$out" = unknown ] \
+    || fail "a dim-rendered shell glyph plus NBSP in plain_content must still read unknown, got '$out'"
+  pass "fm_composer_classify_content: an NBSP-trailed glyph inside plain_content now resolves (empty for agent, unknown for shell)"
 }
 
 test_bare_shell_prompt_with_command_is_not_empty() {
@@ -118,6 +169,75 @@ test_idle_placeholder_case_mode_is_explicit() {
   out=$(classify 1 'type a message...' "$idle" insensitive 'type a message...' 1 0)
   [ "$out" = empty ] || fail "an explicitly insensitive plain placeholder should read empty, got '$out'"
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
+}
+
+# --- Non-breaking space after a bare agent glyph is still empty (task
+# fm-afk-inject-pending, the 2026-08-02 two-hour away-mode delivery failure) --
+# Real claude renders the space after a bare "❯" as U+00A0 (NO-BREAK SPACE,
+# UTF-8 C2 A0), not a plain ASCII space (verified live, herdr 0.7.4). Neither
+# bash's [:space:] class nor the literal ' ' glyph-strip patterns recognized
+# it, so a genuinely idle "❯"+NBSP row fell through to `pending` forever.
+
+test_nbsp_after_bare_glyph_is_empty() {
+  local out
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a bare claude glyph followed only by a non-breaking space should read empty, got '$out'"
+  out=$(classify 0 $'\xe2\x80\xba\xc2\xa0')
+  [ "$out" = empty ] \
+    || fail "a bare codex glyph followed only by a non-breaking space should read empty, got '$out'"
+  pass "fm_composer_classify_content: a bare agent glyph followed only by a non-breaking space reads empty"
+}
+
+test_nbsp_after_bare_glyph_with_text_is_pending() {
+  local out
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0land pr 416 now')
+  [ "$out" = pending ] \
+    || fail "real text after an NBSP-rendered glyph should still read pending, got '$out'"
+  pass "fm_composer_classify_content: real text after an NBSP-rendered glyph still reads pending"
+}
+
+# --- Class coverage for the other Unicode space separators -------------------
+# U+00A0 above is the codepoint captured live; the cases below are NOT captured
+# evidence. They pin the rest of the same defect class - U+202F (NARROW NO-BREAK
+# SPACE), U+2007 (FIGURE SPACE) and U+2009 (THIN SPACE) - whose reach is
+# locale-dependent. Under a C/POSIX locale bash's [:space:] class covers no
+# Unicode space separator at all, so all three would reproduce the identical
+# pending-deferral wedge. Under a glibc UTF-8 locale [:space:] already covers
+# U+2009, which therefore read empty before this change; U+00A0, U+202F and
+# U+2007 stay outside the class under either locale. All three are asserted
+# here regardless: the classifier must give the same verdicts whatever locale
+# the daemon runs under.
+
+test_other_unicode_space_separators_after_bare_glyph_are_empty() {
+  local sep out
+  for sep in $'\xe2\x80\xaf' $'\xe2\x80\x87' $'\xe2\x80\x89'; do
+    out=$(classify 0 $'\xe2\x9d\xaf'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bare claude glyph followed only by a Unicode space separator should read empty, got '$out'"
+    out=$(classify 0 $'\xe2\x80\xba'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bare codex glyph followed only by a Unicode space separator should read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: a bare agent glyph followed only by U+202F/U+2007/U+2009 reads empty (class coverage)"
+}
+
+test_other_unicode_space_separators_preserve_the_safety_verdicts() {
+  local sep out
+  for sep in $'\xe2\x80\xaf' $'\xe2\x80\x87' $'\xe2\x80\x89'; do
+    # Real typed text after the separator is still unsubmitted input.
+    out=$(classify 0 $'\xe2\x9d\xaf'"$sep"'land pr 416 now')
+    [ "$out" = pending ] \
+      || fail "real text after a Unicode space separator should still read pending, got '$out'"
+    # A bare dead-shell glyph trailed only by one stays unsafe; bordered stays empty.
+    out=$(classify 0 '$'"$sep")
+    [ "$out" = unknown ] \
+      || fail "a bare shell glyph plus a Unicode space separator must read unknown, got '$out'"
+    out=$(classify 1 '$'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bordered shell glyph plus a Unicode space separator must read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: U+202F/U+2007/U+2009 keep the pending and dead-shell safety verdicts (class coverage)"
 }
 
 # --- Real text is pending ---------------------------------------------------
@@ -604,10 +724,17 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_bare_shell_glyph_with_only_a_separator_is_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_nbsp_only_content_is_judged_by_plain_content
+test_nbsp_after_glyph_in_plain_content_is_resolved
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_nbsp_after_bare_glyph_is_empty
+test_nbsp_after_bare_glyph_with_text_is_pending
+test_other_unicode_space_separators_after_bare_glyph_are_empty
+test_other_unicode_space_separators_preserve_the_safety_verdicts
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

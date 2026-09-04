@@ -207,6 +207,11 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Stdout capture file of the in-flight herdr notifier, registered here for the
+# same reason WEDGE_ALARM_NOTIFIER_PID is: the daemon's shutdown trap can fire
+# while the bounded notifier is still running, and both the process group and
+# its temp file have to be reaped from there.
+WEDGE_ALARM_CAPTURE_FILE=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -800,6 +805,16 @@ wedge_alarm_run_bounded() {
   return "$rc"
 }
 
+# Unlink the registered herdr stdout capture, if any, and deregister it. Safe to
+# call when nothing is registered, and idempotent, so both the normal path and
+# the shutdown trap can call it.
+wedge_alarm_discard_capture() {
+  local capture=${WEDGE_ALARM_CAPTURE_FILE:-}
+  WEDGE_ALARM_CAPTURE_FILE=
+  [ -n "$capture" ] && [ "$capture" != /dev/null ] || return 0
+  rm -f "$capture" 2>/dev/null || true
+}
+
 wedge_alarm_stop_active_notifier() {
   local pid=${WEDGE_ALARM_NOTIFIER_PID:-}
   [ -n "$pid" ] || return 0
@@ -856,8 +871,21 @@ wedge_alarm_via_osascript() {  # <summary>
 
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
+#
+# `herdr notification show` can exit 0 while its own JSON result reports
+# shown=false (verified live on Linux/WSL2, herdr 0.7.4: reason "disabled" -
+# NotificationShowReason also allows rate_limited, no_foreground_client, and
+# busy). A prior version trusted the exit code alone, so a captain who set
+# config/wedge-alarm=herdr on Linux got a silently no-op active alert: the log
+# showed nothing wrong and the captain had no way to learn the channel never
+# delivers on this host short of a live away-mode incident. jq is already a
+# hard dependency of the herdr backend (bin/backends/herdr.sh), so parsing the
+# result here adds no new dependency; when jq is unavailable the exit code is
+# the only signal available and is still trusted, but that fallback now logs
+# that delivery went unverified rather than passing silently for the same
+# reason: an unverified channel must never read as a confirmed one.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc verdict shown reason capture
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -866,9 +894,71 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
+  # The output is captured through a temp file, NOT a command substitution: a
+  # substitution would run wedge_alarm_run_bounded in a subshell, where its
+  # WEDGE_ALARM_NOTIFIER_PID assignment is invisible to the daemon's shutdown
+  # trap and a hung notifier process group would survive TERM/INT.
+  capture=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX" 2>/dev/null) || capture=/dev/null
+  WEDGE_ALARM_CAPTURE_FILE=$capture
   wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request >/dev/null 2>&1 && return 0
-  log "wedge alarm: herdr notification failed"
+    --body "$summary" --sound request > "$capture" 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] || {
+    wedge_alarm_discard_capture
+    log "wedge alarm: herdr notification failed"; return 1; }
+  # Only a parseable result OBJECT proves anything about delivery. Unparseable
+  # output, a missing result, or an absent `shown` field all mean "cannot
+  # verify", which trusts the exit code exactly like the no-jq fallback above
+  # and, like it, records that the delivery went unverified rather than passing
+  # silently; the failure path is reserved for an explicit non-true `shown`.
+  #
+  # `first(inputs | ...)` bounds the extraction to ONE value. Streaming the
+  # whole capture would give an unbounded arity: if herdr ever writes a second
+  # JSON object to stdout (a warning or progress object alongside the result),
+  # `shown` would become a multi-line $'true\ntrue' that matches neither '' nor
+  # 'true' below, turning a genuinely delivered notification into a logged
+  # failure with a garbled multi-line log line.
+  #
+  # `shown` and `reason` are taken from the SAME document in that one pass. Two
+  # independent passes could resolve to two different objects in a multi-object
+  # stream, and log a reason belonging to something other than the result that
+  # actually reported the failure.
+  #
+  # The leading `objects` filters the STREAM before `.result` indexes anything.
+  # Indexing first aborts the whole jq program on the first non-object document
+  # (a bare string or number alongside the result), which would discard a
+  # readable shown=false sitting later in the same stream and report a proven
+  # non-delivery as merely unverified.
+  [ "$capture" != /dev/null ] || {
+    wedge_alarm_discard_capture
+    log "wedge alarm: herdr notification delivery NOT verified - firstmate could not create a temp file under ${TMPDIR:-/tmp} to capture herdr's output, so its JSON result was discarded locally before it could be read; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
+  command -v jq >/dev/null 2>&1 || {
+    wedge_alarm_discard_capture
+    log "wedge alarm: herdr notification delivery NOT verified - jq is unavailable, so herdr's own JSON result went unread; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
+  verdict=$(jq -n -r 'first(inputs | objects | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' \
+    "$capture" 2>/dev/null)
+  wedge_alarm_discard_capture
+  [ -n "$verdict" ] || {
+    log "wedge alarm: herdr notification delivery NOT verified - herdr's output carried no readable result to confirm it; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
+  IFS=$'\t' read -r shown reason <<< "$verdict"
+  [ "$shown" != true ] || return 0
+  [ -n "$reason" ] || reason=unknown
+  # rate_limited, no_foreground_client, and busy are transient - herdr's own
+  # NotificationShowReason enum documents them as conditions that clear on
+  # their own, unlike disabled (a structural host limitation) or an unknown
+  # reason. Naming this channel permanently broken on a single transient miss
+  # would send a captain chasing a channel that was actually fine.
+  case "$reason" in
+    rate_limited|no_foreground_client|busy)
+      log "wedge alarm: herdr notification exited 0 but was not shown this time (reason: $reason, transient) - if this keeps recurring, the channel may not be delivering on this host"
+      ;;
+    *)
+      log "wedge alarm: herdr notification exited 0 but was not shown (reason: $reason); this channel is not delivering on this host - configure a command: channel instead"
+      ;;
+  esac
   return 1
 }
 
@@ -1615,6 +1705,7 @@ fm_super_main() {
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
+    wedge_alarm_discard_capture
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true

@@ -3244,6 +3244,43 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
 
+# Regression coverage for task fm-afk-inject-pending (the 2026-08-02 two-hour
+# away-mode delivery failure, 1523 consecutive deferrals, zero delivered).
+# Root cause, confirmed from bytes captured live off a real idle claude-on-herdr
+# primary composer (herdr 0.7.4): real claude renders the space after a bare
+# "❯" prompt glyph as U+00A0 (NO-BREAK SPACE, UTF-8 C2 A0), not a plain ASCII
+# space - the genuinely idle live row is exactly "❯" + NBSP, no styling at
+# all. Neither bash's [:space:] whitespace class nor the literal ' '
+# glyph-strip patterns in fm_composer_classify_content recognized NBSP, so it
+# survived every trim step and fell through to the final `pending` case -
+# every 15s, for the whole two-hour away-mode session. This is a distinct
+# defect from the dim/truecolor ghost-text gap covered above: no ANSI styling
+# is involved at all, and no synthetic string was written to match the fix -
+# these bytes are the literal capture.
+test_composer_state_claude_nbsp_bare_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x9c\xbb Worked for 4s\n\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n  manual mode on \xc2\xb7 ? for shortcuts\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a genuinely idle claude composer whose bare '❯' row is followed by a non-breaking space (not ASCII) should read empty, got '$out' (regression: this read 'pending' forever, the fm-afk-inject-pending overnight wedge)"
+  pass "fm_backend_herdr_composer_state: claude's non-breaking-space bare prompt row (the NBSP wedge shape) reads empty"
+}
+
+# Same NBSP-rendered prompt row, but with real typed text after it - must
+# still read pending, so the NBSP fix never weakens real-input protection.
+test_composer_state_claude_nbsp_bare_prompt_with_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0land pr 416 now\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text right after an NBSP-rendered claude prompt glyph should still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed text after the NBSP prompt glyph still reads pending (the fix never weakens real-input detection)"
+}
+
 # The exact incident shape: a bordered decorative box (claude's own startup
 # welcome banner) is STILL in the capture window, sitting ABOVE the live,
 # unbordered "❯" prompt. Before the fix, the bordered branch was the ONLY one
@@ -4603,6 +4640,8 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
+test_composer_state_claude_nbsp_bare_prompt_is_empty
+test_composer_state_claude_nbsp_bare_prompt_with_text_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
