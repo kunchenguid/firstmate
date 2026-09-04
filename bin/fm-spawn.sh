@@ -1377,6 +1377,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$CODEX_HOME_SET" -eq 0 ] \
+    && [ "$ARG3" = codex ] \
+    && [ "$RELAUNCH_PRIOR_HARNESS" = codex ]; then
+    CODEX_HOME_ARG=$RELAUNCH_PRIOR_CODEX_HOME
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
