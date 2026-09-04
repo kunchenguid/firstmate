@@ -51,7 +51,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   local home=$1 state=$2 id=$3 url=$4 origin=$5
   local self_rc=0 destination='' line lock status=0
-  local provider host path number
+  local provider host path number project
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -85,6 +85,14 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
     return 0
   fi
 
+  # The outward card rides the same exactly-once guard as the channel line
+  # above, so a re-observed merge cannot produce a second one. It carries the
+  # project and the canonical URL only; a main home has no channel to append to
+  # and still needs the outcome to reach the captain.
+  project=$(grep '^project=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  project=${project%/}
+  fm_telegram_notify "$home" "$state" landed "merged-$id" \
+    "project=${project##*/}" "url=$FM_PR_URL" || true
   if [ -n "$destination" ]; then
     fm_parent_channel_append_once "$destination" "$line" || status=1
   fi

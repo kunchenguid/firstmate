@@ -177,10 +177,19 @@ CAPTAIN_BACKLOG_FILE=$(fm_backlog_file "$DATA" 2>/dev/null) \
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
-publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
-  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+# <title> is passed only when the outcome is a new captain call: it is the
+# human sentence the captain wrote, and it is what the outward card carries.
+# A resolved line sends no card - an answered decision is not an escalation,
+# and card volume is itself a safety property (bin/fm-telegram-lib.sh).
+publish_parent_hold() {  # <task-id> <occurrence> <verb> <note> [<title>]
+  local id=$1 occurrence=$2 verb=$3 note=$4 title=${5:-} rc=0
+  local -a card=()
+  if [ "$verb" = needs-decision ] && [ -n "$title" ]; then
+    card=(decision "captain-hold-$id-$occurrence" "title=$title" "reason=$note")
+  fi
   fm_parent_channel_report "$FM_HOME" "$STATE" \
-    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
+    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" \
+    "${card[@]+"${card[@]}"}" || rc=$?
   case "$rc" in
     0|1) ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
@@ -518,7 +527,8 @@ command_hold() {
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  [ -n "$title" ] || title=$(show_field_value "$show" title)
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$title"
   printf '%s\n' "$id"
 }
 

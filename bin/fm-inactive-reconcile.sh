@@ -328,6 +328,28 @@ home_secondmate_id() {
   fm_parent_channel_home_id "$FM_HOME"
 }
 
+# Queue the outward "work stopped" card for one terminal child outcome.
+#
+# Only a failure is carded. A child that finished successfully already had its
+# captain-facing card sent when its PR was registered, and card volume is a
+# safety property in its own right: a channel that fires too often gets muted,
+# and a muted channel looks like coverage while delivering none
+# (bin/fm-telegram-lib.sh).
+#
+# The card is built from the project and the child's own note, never from the
+# line assembled around them: that line carries the key, mode, and delivery
+# fields AGENTS.md section 9 keeps out of captain-facing text. Queuing is a
+# local write with no network call, so this can never change whether an outcome
+# is reported as delivered.
+notify_child_failed_card() { # <id> <meta> <state> <outcome-key> <note>
+  local id=$1 meta=$2 state=$3 outcome_key=$4 note=${5:-} project
+  [ "$state" = failed ] || return 0
+  project=$(meta_field "$meta" project)
+  project=${project%/}
+  fm_telegram_notify "$FM_HOME" "$STATE" failed "$outcome_key" \
+    "project=${project##*/}" "note=$note" || true
+}
+
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
   local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
@@ -416,6 +438,7 @@ report_child_ledger_locked() { # <id> <meta>
     return 1
   fi
   note=$(clean_field "$(status_line_note "$last")")
+  notify_child_failed_card "$id" "$meta" "$state" "$outcome_key" "$note"
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -506,6 +529,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  notify_child_failed_card "$id" "$meta" "$state" "$outcome_key" \
+    "$(clean_field "$(status_line_note "$last")")"
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1

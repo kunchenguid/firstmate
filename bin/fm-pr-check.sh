@@ -147,7 +147,14 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+# The outward card is built from the two typed facts a phone review needs - the
+# project and the canonical URL just recorded - and never from READY_LINE, whose
+# machine shape and delivery-mode fields are not captain-facing text.
+PR_PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_PROJECT=${PR_PROJECT%/}
+PR_PROJECT=${PR_PROJECT##*/}
+fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" \
+  pr-ready "pr-$ID" "project=$PR_PROJECT" "url=$URL" || READY_RC=$?
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;

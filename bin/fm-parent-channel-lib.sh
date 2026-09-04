@@ -53,11 +53,27 @@
 # A caller that has already recorded the outcome locally must surface a
 # non-zero return rather than treat it as delivered.
 #
+# THE MAIN HOME'S MISSING ROUTE. The channel above is resolved from a parent
+# binding, so in the captain's own main home all five publishers fire, carry the
+# right typed facts, and deliver to nowhere: the design assumed the captain is
+# sitting in that home's chat. bin/fm-telegram-lib.sh supplies the route that
+# assumption leaves out. A publisher that passes typed card fields to
+# fm_parent_channel_report also queues a card for the captain's phone in a home
+# that has opted in, from the same call that records the outcome, so outward
+# delivery never depends on the model either. The card is built from those typed
+# fields and never from the line: the line uses the machine shape this file owns,
+# and AGENTS.md section 9 forbids relaying that to the captain. Queuing a card is
+# a local directory write that cannot fail on network, and it never changes what
+# this function returns, so a Telegram problem can never block work from landing.
+#
 # Sourced by the publishers above and by tests. No side effects on source.
 
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-telegram-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-telegram-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -142,8 +158,20 @@ fm_parent_channel_append_once() {  # <path> <line>
 }
 
 # Publish one parent-facing line from <home>. See the return codes above.
-fm_parent_channel_report() {  # <home> <state> <line>
+#
+# The optional trailing arguments are the outward card: a class, a key that
+# identifies the outcome so a retry cannot produce a second card, and the typed
+# fields the card is rendered from (bin/fm-telegram-lib.sh owns all three). They
+# are deliberately separate from <line>: there is no way to ask for a card built
+# from the line, so a machine-shaped line can never become captain-facing text.
+# The card is queued before the channel is resolved, because a main home has no
+# channel at all and its captain still needs the outcome.
+fm_parent_channel_report() {  # <home> <state> <line> [<card-class> <card-key> <name=value>...]
   local home=$1 state=$2 line=$3 destination rc=0
+  shift 3
+  if [ "$#" -ge 2 ]; then
+    fm_telegram_notify "$home" "$state" "$@" || true
+  fi
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4

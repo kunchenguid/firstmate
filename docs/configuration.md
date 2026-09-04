@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`), and queued outward notification cards under `state/telegram-outbox/` (`bin/fm-telegram-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
@@ -607,6 +607,57 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Telegram notifications (config/telegram-chat-id)
+
+Firstmate already publishes captain-facing outcomes from the scripts that record them rather than from the model ([secondmate-parent-channel.md](secondmate-parent-channel.md)), but that channel is resolved from a secondmate home's parent binding.
+In the captain's own main home every publisher fires and delivers nowhere, because the design assumed the captain is sitting in that home's chat.
+Telegram notifications supply the route that assumption leaves out: a held decision, a PR ready for review, a failure, and a merge arrive on the captain's phone, from the same publishers, with no dependence on the model remembering to send.
+
+This is outward only.
+The bot sends and never listens: the Bot API's `getUpdates` is never called, so nothing arriving at the bot can reach firstmate, answer a decision, or start, stop, or approve anything.
+Notes are still captured at the terminal exactly as before ([voice-relay.md](voice-relay.md)).
+
+Like Relay, it ships inert: configuration presence is the enablement, there is no feature flag to get wrong, and a home that has not opted in behaves byte-identically to one that never heard of the feature - no warning, no error, no degraded mode.
+
+To turn it on:
+
+1. Create a bot with Telegram's BotFather and send it one message from the account that should receive the cards, so the bot may write to that chat.
+2. Store the bot token in a file only you can read, for example `~/.mist-telegram-token` at mode 0600. The home holds only the path; the token itself is read at use time and is never copied into state, a card, a log, or a diagnostic.
+3. Write the numeric destination chat id into `config/telegram-chat-id`.
+4. Write the token file's path into `config/telegram-token-path` if it is not `~/.mist-telegram-token`.
+5. Run `bin/fm-telegram-send.sh arm`, which writes `state/telegram-outbox.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the watcher drains the outbox on its normal cadence. `bin/fm-telegram-send.sh disarm` reverses it and `bin/fm-telegram-send.sh status` reports what is configured, armed, and queued.
+
+All three config items are local and gitignored, and none is inherited by a secondmate home: a secondmate sends cards only when that home was configured for it deliberately.
+
+Cards are queued, never sent inline, and that is a correctness requirement rather than a preference.
+`bin/fm-pr-check.sh` and `bin/fm-teardown.sh` sit on the critical path of landing work, and cleanup already refuses to remove a child while its outcome is undelivered; a blocking HTTPS call under that refusal would let a Telegram outage block work from landing.
+So a publisher only appends to `state/telegram-outbox/`, a local directory write that cannot fail on network, and the armed drain makes the HTTPS calls out of band.
+
+Four cards are sent, one per escalation class in `AGENTS.md` section 9: a decision waiting, a PR ready for review, work that stopped, and work that landed.
+Each is built from the typed fields its publisher already holds and never from a parent-channel or status line, whose machine shape section 9 forbids relaying to the captain.
+A child that finishes successfully sends no card of its own; its card was the PR-ready one its registration already sent.
+Card volume is itself a safety property: a channel that fires too often gets muted, and a muted channel is worse than none because it looks like coverage.
+
+Everything sent to a bot is stored in plaintext on Telegram's servers - bot chats are ordinary cloud chats and Telegram's end-to-end Secret Chats are not available to bots at all - and every card stays in scrollback on every logged-in device.
+Two rules follow, and they are deliberately different:
+
+- A card that would carry a credential value is refused and the refusal is reported locally, because a send that silently drops is worse than one that fails. The check is a positive comparison against the real contents of this home's known credential files: the bot token, plus any file listed one path per line in the optional `config/telegram-secret-files`. Put the machine's other credential dotfiles there.
+- Internal identifiers are removed rather than refused. Absolute paths and the `key=`, `mode=`, `harness=`, `branch=`, `worktree=` fragments section 9 keeps out of captain-facing text are stripped from a card, so a genuine failure still reaches the captain without them. A PR URL survives, because a review card without a link is close to useless on a phone.
+
+Degradation is by construction rather than by error handling, because Telegram is never the system of record.
+A held decision, a registered PR, a failure, and a merge are all durable in the backlog and in state before any card exists, so a card that never arrives leaves the work exactly where it was.
+
+| Failure | Behavior |
+| --- | --- |
+| Network down or Telegram unreachable | Cards stay queued in order, the drain retries next cycle, nothing blocks |
+| Token revoked, or the chat refuses the bot | One rate-limited wake naming the rejection, not one per poll; the cards survive |
+| Token file or chat id absent | Hard no-op: exit 0, no output, nothing written |
+| The drain is not armed | Cards queue and are delivered when it is armed |
+| An hour with nothing delivered | One wake reporting the silence, so a stalled channel cannot masquerade as a quiet one |
+
+[`bin/fm-telegram-lib.sh`](../bin/fm-telegram-lib.sh) owns the card templates, the refusal rules, and the outbox format.
+[`bin/fm-telegram-send.sh`](../bin/fm-telegram-send.sh) owns the drain, its bounds, and arm and disarm.
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.
@@ -830,6 +881,9 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
+FM_TELEGRAM_DRAIN_MAX=10      # outward notification cards sent per drain, capped at 50
+FM_TELEGRAM_TIMEOUT_SECS=8    # seconds bounding one outward notification send, capped at 30
+FM_TELEGRAM_STALE_SECS=3600   # seconds the notification queue may stop moving before that silence is reported; 0 disables
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
