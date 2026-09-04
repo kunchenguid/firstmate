@@ -196,6 +196,32 @@ test_gemini_process_identity_reads_the_script_argument() {
   pass "fm-gemini-lib.sh: identity comes from the script argument, never a bare interpreter"
 }
 
+test_gemini_process_identity_preserves_whitespace_in_script_path() {
+  command -v node >/dev/null 2>&1 || return 0
+  [ -r /proc/self/cmdline ] || return 0
+  local dir="$TMP_ROOT/path with spaces" node_bin pid attempts=0
+  mkdir -p "$dir"
+  node_bin=$(command -v node)
+  ln -s "$node_bin" "$dir/node"
+  cat > "$dir/gemini" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  "$dir/node" "$dir/gemini" &
+  pid=$!
+  while ! fm_gemini_pid_is_gemini "$pid"; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 100 ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "Gemini interpreter and script paths containing spaces must retain process identity"
+    fi
+    sleep 0.01
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "fm-gemini-lib.sh: process argv preserves whitespace in interpreter and Gemini script paths"
+}
+
 test_gemini_control_mechanics_are_the_verified_ones() {
   local out
   fm_control_harness_supported gemini || fail "gemini must be a supported control harness"
@@ -239,6 +265,7 @@ test_gemini_ancestry_matches_only_a_native_command_name
 test_gemini_ancestry_rejects_unrelated_mentions
 test_gemini_node_bundle_is_not_ancestry_detectable
 test_gemini_process_identity_reads_the_script_argument
+test_gemini_process_identity_preserves_whitespace_in_script_path
 test_gemini_control_mechanics_are_the_verified_ones
 test_gemini_is_crewmate_and_scout_only
 test_gemini_wiring_stays_outside_the_worktree

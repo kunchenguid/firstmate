@@ -43,6 +43,31 @@ fm_gemini_path_is_gemini() {  # <path>
   return 1
 }
 
+# True when process $1 has Gemini's structural argv evidence. Linux exposes
+# argv as NUL-delimited fields, which preserves a script path containing spaces
+# that `ps -o args=` necessarily flattens into an ambiguous string.
+fm_gemini_pid_is_gemini() {  # <pid>
+  local pid=$1 token argv0='' index=0
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' token; do
+    if [ "$index" -eq 0 ]; then
+      argv0=$token
+      fm_gemini_path_is_gemini "$argv0" && return 0
+      case "${argv0##*/}" in
+        node|node-*|node[0-9]*|MainThread) ;;
+        *) return 1 ;;
+      esac
+    else
+      case "$token" in
+        -*) ;;
+        *) fm_gemini_path_is_gemini "$token" && return 0; return 1 ;;
+      esac
+    fi
+    index=$((index + 1))
+  done < "/proc/$pid/cmdline"
+  return 1
+}
+
 # True when the whitespace-separated command line $1 is a Gemini process.
 #
 # Accepted: a command whose own argv[0] is gemini (a future natively-named
