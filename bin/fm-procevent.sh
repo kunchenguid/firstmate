@@ -790,6 +790,11 @@ EOF
           # shellcheck disable=SC2064 # Bind this iteration's signal name now.
           trap "forward_registered_signal $registered_trap" "$registered_trap"
         done
+        case "$registered_signal" in
+          HUP) exit 129 ;;
+          INT) exit 130 ;;
+          TERM) exit 143 ;;
+        esac
         "${ARGV[@]}" &
         registered_pid=$!
         wait "$registered_pid"
