@@ -23,7 +23,7 @@ Offer it for short, attended, local work the captain has asked to keep on his ow
 | Mode | `--mode no-mistakes`. |
 | Model | An omitted `--model`; the id is the endpoint's own catalog id and is never guessed. |
 | Endpoint | An endpoint that is not answering, or a model that is not loaded. |
-| Context | A brief beyond the usable headroom. |
+| Context | A brief exceeding the configured share of usable headroom. |
 
 ## Operating facts
 
