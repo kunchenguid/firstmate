@@ -274,6 +274,73 @@ SH
   pass "fm-spawn.sh defaults to Gemini and enforces model and version boundaries"
 }
 
+test_positional_secondmate_adapter_reaches_antigravity_launch() {
+  local case_dir home wt fakebin id launchlog sm out launch
+  case_dir="$TMP_ROOT/secondmate-positional"
+  home="$case_dir/home"
+  wt="$case_dir/wt"
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
+  launchlog="$case_dir/launch.log"
+  id=agy-secondmate
+  fm_test_spawn_home "$home" codex
+  sm="$case_dir/secondmate-home"
+  mkdir -p "$sm/data" "$sm/.agents"
+  ln -s "$ROOT/bin" "$sm/bin"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+  printf '{}\n' > "$sm/.agents/hooks.json"
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '1.1.26\n' ;;
+  models) printf 'gemini-test-low\tGemini Test Low\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  : > "$launchlog"
+  if ! out=$(FM_FAKE_LAUNCH_LOG="$launchlog" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+    "$id" "$sm" antigravity --model gemini-test-low --effort low --secondmate); then
+    fail "positional Antigravity secondmate spawn failed: $out"
+  fi
+  assert_contains "$out" "spawned $id harness=antigravity kind=secondmate" \
+    "positional adapter was not classified as the secondmate harness"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--add-dir '$sm'" \
+    "positional Antigravity secondmate did not launch in its persistent home"
+  assert_not_contains "$launch" "$home/state/$id.antigravity-hooks" \
+    "persistent Antigravity secondmate received a worker hook overlay"
+  pass "fm-spawn.sh accepts Antigravity through the positional secondmate interface"
+}
+
+test_remote_secondmate_preflight_accepts_antigravity() {
+  local case_dir home fakebin id out status
+  case_dir="$TMP_ROOT/remote-secondmate"
+  home="$case_dir/home"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  id=agy-remote
+  fm_test_spawn_home "$home" codex
+  printf -- '- %s - remote Antigravity fixture (host: remote-mac; root: /remote/firstmate; home: /remote/agy; scope: adapter routing; projects: ; added 2026-09-04)\n' \
+    "$id" > "$home/data/secondmates.md"
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+exit 255
+SH
+  chmod +x "$fakebin/fake-ssh"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" "$id" --harness antigravity --secondmate 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 255 ] || fail "remote Antigravity route did not reach readiness, rc=$status: $out"
+  assert_contains "$out" "readiness could not be confirmed" \
+    "remote Antigravity route was rejected before remote readiness"
+  assert_not_contains "$out" "requires a verified harness adapter" \
+    "remote Antigravity route still failed the verified-adapter preflight"
+  pass "fm-spawn.sh accepts Antigravity through the remote secondmate interface"
+}
+
 test_marker_precedence_and_ai_agent_rejection
 test_exact_agy_ancestry_only
 test_control_and_busy_contracts
@@ -282,3 +349,5 @@ test_hook_transport_and_task_lifecycle
 test_native_pretool_deny_transport
 test_spawn_builds_canonical_antigravity_launch
 test_spawn_defaults_to_gemini_and_enforces_verified_boundaries
+test_positional_secondmate_adapter_reaches_antigravity_launch
+test_remote_secondmate_preflight_accepts_antigravity
