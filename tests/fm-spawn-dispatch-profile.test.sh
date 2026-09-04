@@ -477,8 +477,22 @@ test_all_codex_launches_bypass_hook_trust() {
   assert_not_contains "$launch" "--disable hooks" \
     "raw codex launch disabled hooks"
 
+  id=profile-codex-hook-trust-env-raw-z3f
+  rec=$(make_spawn_case profile-codex-hook-trust-env-raw codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env CODEX_HOME=/tmp/isolated -u FOO --unset BAR codex --dangerously-bypass-approvals-and-sandbox")
+  status=$?
+  expect_code 0 "$status" "env-prefixed raw codex spawn should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env CODEX_HOME=/tmp/isolated -u FOO --unset BAR codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" \
+    "env-prefixed raw codex launch omitted the hook-trust bypass"
+  assert_not_contains "$launch" "--disable hooks" \
+    "env-prefixed raw codex launch disabled hooks"
+
   for harness in claude opencode pi grok cursor gemini; do
-    id="profile-hook-trust-negative-$harness-z3f"
+    id="profile-hook-trust-negative-$harness-z3g"
     rec=$(make_spawn_case "profile-hook-trust-negative-$harness" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")

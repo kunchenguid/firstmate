@@ -1386,8 +1386,28 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
+    raw_env_prefix=0
+    raw_env_unset_value=0
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      if [ "$raw_env_unset_value" -eq 1 ]; then
+        raw_env_unset_value=0
+        continue
+      fi
+      if [ "$raw_env_prefix" -eq 1 ]; then
+        case "$word" in
+          [A-Za-z_]*=*) continue ;;
+          -u|--unset) raw_env_unset_value=1; continue ;;
+          *) HARNESS=$(basename "$word"); break ;;
+        esac
+      fi
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        *)
+          HARNESS=$(basename "$word")
+          [ "$HARNESS" != env ] || { raw_env_prefix=1; HARNESS=""; continue; }
+          break
+          ;;
+      esac
     done
     ;;
   '')
