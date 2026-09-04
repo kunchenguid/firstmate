@@ -4,9 +4,13 @@
 # real regular file whose canonical content is the two-line @AGENTS.md pointer
 # that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
-# file present (unless it is already the canonical pointer), converts a correct
+# file present (unless it is already a pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
 # distinct real files or wrong symlinks.
+# A real CLAUDE.md that only includes AGENTS.md is the same convention expressed
+# without the canonical comment line, so it is accepted and left untouched
+# rather than refused; see claude_md_is_pointer_only for exactly what still
+# counts as real content.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
@@ -130,6 +134,39 @@ install_claude_pointer() {
   claude_pointer_content > "$CLAUDE"
 }
 
+# Decide whether a real CLAUDE.md file is the captain's pointer-only convention
+# rather than a second competing memory file. A pointer-only CLAUDE.md carries no
+# knowledge of its own: every line is either blank or an "@AGENTS.md" include, and
+# at least one include is present.
+#
+# The rule tolerates exactly the incidental bytes an editor or a checkout adds
+# without changing meaning: a leading UTF-8 byte-order mark, CRLF line endings, a
+# missing final newline, blank lines, and leading or trailing whitespace on the
+# include line. Everything else - prose, a heading, an HTML comment, a second
+# include of another file - counts as real content and keeps the refusal, because
+# a human wrote it to be read and merging it away would lose it. Erring strict is
+# the safe direction here: the fallback is the existing explicit refusal, which
+# asks a human to reconcile, and never touches either file.
+claude_md_is_pointer_only() {
+  local line first=1 saw_include=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" -eq 1 ]; then
+      first=0
+      line=${line#$'\xef\xbb\xbf'}
+    fi
+    line=${line%$'\r'}
+    # Trim leading and trailing spaces and tabs.
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [ -n "$line" ] || continue
+    case "$line" in
+      "@$AGENTS"|"@./$AGENTS") saw_include=1 ;;
+      *) return 1 ;;
+    esac
+  done < "$CLAUDE"
+  [ "$saw_include" -eq 1 ]
+}
+
 is_correct_claude_symlink() {
   [ -L "$CLAUDE" ] || return 1
   target=$(readlink "$CLAUDE")
@@ -204,7 +241,15 @@ if [ -e "$AGENTS" ]; then
     exit 0
   fi
   if [ -f "$CLAUDE" ]; then
-    if is_canonical_claude_pointer; then
+    # Either form of pointer is the convention, not a conflict: AGENTS.md holds
+    # the content and CLAUDE.md only includes it. Proceed against AGENTS.md and
+    # leave the pointer exactly as the project wrote it.
+    # Both predicates are needed and neither subsumes the other. The canonical
+    # check matches the exact two-line file this script writes, comment line
+    # included; claude_md_is_pointer_only accepts a project that wrote the bare
+    # include itself, and deliberately rejects a comment as real content, so it
+    # would refuse this script's own canonical pointer on its own.
+    if is_canonical_claude_pointer || claude_md_is_pointer_only; then
       ensure_maintenance_section
       if [ "$MAINT_INJECTED" -eq 1 ]; then
         echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
@@ -213,7 +258,7 @@ if [ -e "$AGENTS" ]; then
       fi
       exit 0
     fi
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
+    echo "conflict: both AGENTS.md and CLAUDE.md are real files with their own content in $DIR; reconcile them manually" >&2
     exit 1
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
