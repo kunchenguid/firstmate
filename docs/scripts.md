@@ -20,7 +20,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
-| `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes, naming every live second mate to restart |
+| `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes, classifying every live mate left on the target commit for restart or fallback nudge |
 | `fm-secondmate-restart.sh` | Persist open conversational work, then restart eligible second mates or report the fallback outcome |
 | `fm-secondmate-restart-lib.sh` | Shared second-mate restart capability and persistence-request contract |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
