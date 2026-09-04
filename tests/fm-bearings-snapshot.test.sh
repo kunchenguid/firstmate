@@ -2549,12 +2549,60 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_tracked_background_work_projects_honest_unsupervised_status() {
+  local home fakebin progress_file progress pid json
+  home=$(make_home background-work)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  progress_file="$home/background-progress"
+  printf '10 rows\n' > "$progress_file"
+  progress="$home/read-background-progress"
+  cat > "$progress" <<'SH'
+#!/usr/bin/env bash
+cat "$1"
+SH
+  chmod +x "$progress"
+  sleep 60 &
+  pid=$!
+  FM_HOME="$home" "$ROOT/bin/fm-background-work.sh" register collector \
+    --description "Collecting fixture rows" --task "fixture-investigation" \
+    --pid "$pid" --started-at 2026-09-03T22:25:13Z \
+    --progress "$progress" "$progress_file" >/dev/null \
+    || fail "could not register fixture background work"
+
+  run "$home" "$fakebin" --json >/dev/null \
+    || fail "could not take the first background-work snapshot"
+  printf '11 rows\n' > "$progress_file"
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "could not project progressing background work"
+  printf '%s' "$json" | jq -e '
+    .background_work == [{
+      id:"collector", description:"Collecting fixture rows", task:"fixture-investigation",
+      pid:'"$pid"', started_at:"2026-09-03T22:25:13Z", expected_finish_at:null,
+      liveness:"alive", progress:"progressing", progress_value:"11 rows",
+      reason:"value-changed", supervision:"tracked-only"
+    }]
+  ' >/dev/null || fail "live background work was not projected as progressing and tracked-only: $json"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "could not project dead background work"
+  printf '%s' "$json" | jq -e '
+    .background_work[0]
+    | .id == "collector" and .liveness == "dead" and .progress == "unknown"
+      and .reason == "process-missing" and .supervision == "tracked-only"
+  ' >/dev/null || fail "dead background work disappeared or implied supervision: $json"
+  pass "bearings projects progressing and dead background work without implying supervision"
+}
+
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
+test_tracked_background_work_projects_honest_unsupervised_status
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed

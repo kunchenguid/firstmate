@@ -73,6 +73,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+BACKGROUND_WORK="$SCRIPT_DIR/fm-background-work.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -192,6 +193,9 @@ if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   fi
 else
   SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+fi
+if ! BACKGROUND=$("$BACKGROUND_WORK" list --json); then
+  BACKGROUND='{"schema":"fm-background-work-list.v1","records":[{"id":"(registry)","description":"Background-work visibility unavailable","task":null,"pid":null,"started_at":null,"expected_finish_at":null,"liveness":{"status":"unknown","reason":"collection-failed"},"progress":{"status":"unknown","reason":"collection-failed","value":null}}]}'
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
@@ -321,6 +325,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
+  --argjson background "$BACKGROUND" \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -465,6 +470,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
+      background_work: [ $background.records[] | {
+        id, description, task, pid, started_at, expected_finish_at,
+        liveness:.liveness.status, progress:.progress.status,
+        progress_value:.progress.value,
+        reason:(if .liveness.status == "alive" then .progress.reason else .liveness.reason end),
+        supervision:"tracked-only"
+      } ],
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
