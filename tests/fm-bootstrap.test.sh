@@ -1093,13 +1093,15 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
-test_crew_dispatch_validation() {
-  local label body expect mode case_dir fakebin out n
+# Each row is "<label>^<config body>^<empty|exact|grep>^<expected diagnostic>",
+# read from stdin so several cases can share one bootstrap run shape.
+crew_dispatch_expect_rows() {
+  local prefix=$1 label body expect mode case_dir fakebin out n
   n=0
   while IFS='^' read -r label body mode expect; do
     [ -n "$label" ] || continue
     n=$((n + 1))
-    case_dir="$TMP_ROOT/dispatch-$n"
+    case_dir="$TMP_ROOT/$prefix-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
@@ -1115,7 +1117,11 @@ test_crew_dispatch_validation() {
       grep)
         printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
     esac
-  done <<'ROWS'
+  done
+}
+
+test_crew_dispatch_validation() {
+  crew_dispatch_expect_rows dispatch <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
@@ -1148,6 +1154,30 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_dispatch_codex_home_validation() {
+  local homes work personal never
+  # A logged-in Codex home is a directory holding auth.json. Bootstrap tests only
+  # for that file's presence and never reads it, so an empty file is enough here.
+  homes="$TMP_ROOT/codex-homes"
+  work="$homes/work"
+  personal="$homes/personal"
+  never="$homes/never-logged-in"
+  mkdir -p "$work" "$personal" "$never"
+  : > "$work/auth.json"
+  : > "$personal/auth.json"
+
+  crew_dispatch_expect_rows dispatch-home <<ROWS
+two logged-in codex homes are accepted^{"rules":[{"when":"long runs","use":[{"harness":"codex","model":"gpt-5.5","home":"$work"},{"harness":"codex","model":"gpt-5.5","home":"$personal"}]}]}^empty^
+a default profile home is accepted^{"default":[{"harness":"codex","home":"$work"}]}^empty^
+a home on another harness is flagged^{"rules":[{"when":"x","use":{"harness":"claude","home":"$work"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home is only valid for the codex harness: claude
+a relative home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":".codex"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home must be an absolute path: .codex
+an empty home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile home must be a non-empty string when present
+a missing home directory is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$homes/absent"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home directory not found: $homes/absent
+a home with no login is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$never"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home has no auth.json: $never (log that account in with CODEX_HOME=$never codex login)
+ROWS
+  pass "bootstrap accepts a per-account codex home and reports every unusable one"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1176,3 +1206,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_dispatch_codex_home_validation

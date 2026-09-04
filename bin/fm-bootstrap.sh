@@ -1092,7 +1092,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err
+  local file report line value
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1103,7 +1103,7 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
+  report=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse","rovo","omp"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
@@ -1136,6 +1136,13 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    def home_profiles: configured_profiles | map(select(has("home")));
+    def unusable_homes:
+      home_profiles
+      | map(.home)
+      | map(select(test("^/[^[:cntrl:]]*$") | not))
+      | unique;
+    def validation_errors: [
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -1159,16 +1166,45 @@ crew_dispatch_validate() {
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
+      | (home_profiles | map(select(.harness != "codex")) | map(.harness) | unique) as $non_codex_homes
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (home_profiles | any(((.home | type) != "string") or ((.home | length) == 0))) then "profile home must be a non-empty string when present"
+        elif ($non_codex_homes | length) > 0 then "home is only valid for the codex harness: " + ($non_codex_homes | join(", "))
+        elif (unusable_homes | length) > 0 then "home must be an absolute path: " + (unusable_homes | join(", "))
         else empty
         end
     end
+    ];
+    validation_errors as $errors
+    | if ($errors | length) > 0 then "error:" + $errors[0]
+      else (home_profiles | map(.home) | unique | .[] | "home:" + .)
+      end
   ' "$file" 2>/dev/null || true)
-  if [ -n "$err" ]; then
-    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
-    return 0
-  fi
+  # jq answers everything readable from the file itself; each configured Codex
+  # home then needs the two filesystem facts jq cannot see. auth.json is only
+  # ever tested for presence - its contents are never read.
+  while IFS= read -r line; do
+    case "$line" in
+      error:*)
+        echo "CREW_DISPATCH: invalid config/crew-dispatch.json - ${line#error:}"
+        return 0
+        ;;
+      home:*)
+        value=${line#home:}
+        if [ ! -d "$value" ]; then
+          echo "CREW_DISPATCH: invalid config/crew-dispatch.json - codex home directory not found: $value"
+          return 0
+        fi
+        if [ ! -f "$value/auth.json" ]; then
+          echo "CREW_DISPATCH: invalid config/crew-dispatch.json - codex home has no auth.json: $value (log that account in with CODEX_HOME=$value codex login)"
+          return 0
+        fi
+        ;;
+    esac
+  done <<EOF
+$report
+EOF
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
     def profile($p):
