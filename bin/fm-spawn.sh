@@ -1388,7 +1388,10 @@ case "$ARG3" in
     HARNESS=""
     raw_launch_error='error: raw launch command cannot be classified safely; use --harness codex with --model and --effort as needed'
     case "$LAUNCH" in
-      *\"*|*\'*|*\\*) echo "$raw_launch_error" >&2; exit 1 ;;
+      *\"*|*\'*|*\\*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'*'*|*'?'*|*$'\n'*)
+        echo "$raw_launch_error" >&2
+        exit 1
+        ;;
     esac
     raw_env_prefix=0
     raw_env_unset_value=0
@@ -1448,6 +1451,11 @@ case "$ARG3" in
 esac
 
 if [ "$HARNESS" = codex ]; then
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    case " $LAUNCH " in
+      *' -- '*) echo "$raw_launch_error" >&2; exit 1 ;;
+    esac
+  fi
   case " $LAUNCH " in
     *' --dangerously-bypass-hook-trust '*) ;;
     *) LAUNCH="$LAUNCH --dangerously-bypass-hook-trust" ;;
