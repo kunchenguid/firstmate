@@ -14,6 +14,7 @@ set -u
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 # Keep disposable homes outside the snapshot's fixture repo boundary even when
@@ -74,6 +75,7 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
+  fm_fake_exit0 "$fb" treehouse
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
   printf '%s\n' "$fb"
 }
@@ -390,6 +392,7 @@ test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution() {
   mate="$TMP_ROOT/gnu-stat-home"
   write_domain_alpha_fixture "$home" "$mate"
   fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
   stat_log="$home/stat.log"
   cat > "$fakebin/uname" <<'SH'
 #!/usr/bin/env bash
@@ -1397,41 +1400,66 @@ EOF
 # in every home. A rejected captain-held work item never becomes a delivery merely
 # because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json backlog
+  local home mate fakebin json snap backlog repo wt pr
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
-  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  fakebin=$(make_fakebin "$home")
   backlog="$home/data/backlog.md"
-  "$TASKS_AXI_BIN" add approved-merge "Fix the anchor" --kind ship --repo firstmate \
-    --file "$backlog" >/dev/null || fail "could not create the approved merge fixture"
+  repo="$home/projects/delivery-repo"
+  wt="$home/projects/delivery-wt"
+  pr="https://github.com/kunchenguid/firstmate/pull/1365"
+  fm_git_worktree "$repo" "$wt" fm/approved-delivery
+  touch "$home/state/.last-watcher-beat"
+  "$TASKS_AXI_BIN" add approved-merge "Fix the anchor $pr" --kind ship --repo firstmate \
+    --start --file "$backlog" >/dev/null || fail "could not create the approved merge fixture"
+  fm_write_meta "$home/state/approved-merge.meta" \
+    "window=firstmate:fm-approved-merge" "endpoint_task_id=approved-merge" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$pr" "spawn_gen=approved-merge-fixture"
+  record_claude_state "$home/state" approved-merge idle
+  printf 'done: merge ready\n' > "$home/state/approved-merge.status"
   "$TASKS_AXI_BIN" hold approved-merge --reason "PR 1365 is ready; awaiting your merge word" \
     --kind captain --file "$backlog" >/dev/null || fail "could not hold the approved merge fixture"
-  PATH="$fakebin:$PATH" bash -c '
-    . "$1"
-    . "$2"
-    fm_backlog_retain "$3" approved-merge --pr "$4"
-  ' _ "$ROOT/bin/fm-tasks-axi-lib.sh" "$ROOT/bin/fm-backlog-transition-lib.sh" \
-    "$home/data" "https://github.com/kunchenguid/firstmate/pull/1365" \
-    || fail "could not retain the approved merge deliverable"
   printf 'Merge now.\n' > "$home/merge-answer.txt"
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer approved-merge --decision-file "$home/merge-answer.txt" >/dev/null \
     || fail "could not record the approved merge answer"
-  "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate --file "$backlog" >/dev/null \
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" approved-merge >/dev/null \
+    || fail "could not backfill the approved merge completion"
+  show=$("$TASKS_AXI_BIN" show approved-merge --full --file "$backlog") \
+    || fail "could not read the approved merge completion"
+  assert_contains "$show" "Merge now." \
+    "approved merge backfill lost the recorded captain decision"
+  assert_contains "$show" "Deliverable of the finished work: PR $pr" \
+    "approved merge backfill did not record completion provenance"
+  "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
+    --start --file "$backlog" >/dev/null \
     || fail "could not create the local delivery fixture"
+  fm_write_meta "$home/state/approved-local.meta" \
+    "window=firstmate:fm-approved-local" "endpoint_task_id=approved-local" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=local-only" "spawn_gen=approved-local-fixture"
+  record_claude_state "$home/state" approved-local idle
+  printf 'done: local landing ready\n' > "$home/state/approved-local.status"
   "$TASKS_AXI_BIN" hold approved-local --reason "ready on the local branch; awaiting your word" \
     --kind captain --file "$backlog" >/dev/null || fail "could not hold the local delivery fixture"
-  "$TASKS_AXI_BIN" done approved-local --note "local main" --file "$backlog" >/dev/null \
-    || fail "could not close the local delivery fixture"
   printf 'Land the local branch.\n' > "$home/local-answer.txt"
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer approved-local --decision-file "$home/local-answer.txt" >/dev/null \
     || fail "could not record the local delivery answer"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" approved-local >/dev/null \
+    || fail "could not backfill the local delivery completion"
   "$TASKS_AXI_BIN" add rejected-merge \
     "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
     --kind ship --repo firstmate --file "$backlog" >/dev/null \
@@ -1444,6 +1472,13 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer rejected-merge --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not record the rejected merge answer"
+  "$TASKS_AXI_BIN" add legacy-approved "Legacy approved merge" --kind ship --repo firstmate \
+    --file "$backlog" >/dev/null || fail "could not create the legacy merge fixture"
+  "$TASKS_AXI_BIN" hold legacy-approved --reason "legacy captain merge word" \
+    --kind captain --file "$backlog" >/dev/null || fail "could not hold the legacy merge fixture"
+  "$TASKS_AXI_BIN" done legacy-approved \
+    --pr "https://github.com/kunchenguid/firstmate/pull/1368" --file "$backlog" >/dev/null \
+    || fail "could not create the legacy completed merge shape"
   "$TASKS_AXI_BIN" add mate-approved-merge "Secondmate fix" --kind ship --repo firstmate \
     --file "$mate/data/backlog.md" >/dev/null || fail "could not create the secondmate merge fixture"
   "$TASKS_AXI_BIN" hold mate-approved-merge --reason "PR 1361 is ready; awaiting your merge word" \
@@ -1458,10 +1493,25 @@ test_captain_approved_delivery_stays_in_landed() {
   "$TASKS_AXI_BIN" done mate-approved-merge \
     --pr "https://github.com/kunchenguid/firstmate/pull/1361" \
     --file "$mate/data/backlog.md" >/dev/null || fail "could not complete the secondmate merge fixture"
+  : > "$home/net.log"
+  snap=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed for completion provenance"
+  printf '%s' "$snap" | jq -e '
+    ([.backlog.records[] | select(.id == "approved-merge")][0]) as $approved
+    | ([.backlog.records[] | select(.id == "approved-local")][0]) as $local
+    | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
+    | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
+    | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
+      and $local.delivery_provenance == true and $local.local_note == "local main"
+      and $rejected.delivery_provenance == true and $rejected.pr_url == null
+      and $rejected.report_path == null and $rejected.local_note == null
+      and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
+  ' >/dev/null || fail "completion provenance did not distinguish delivered, rejected, and legacy rows: $snap"
   json=$(run "$home" "$fakebin" --json --all-landed)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "approved-merge" and (.artifact | test("/pull/1365"))))
       and (.landed | any(.[]; .id == "approved-local"))
+      and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
       and (.landed | any(.[]; .id == "rejected-merge") | not)
   ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"

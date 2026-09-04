@@ -13,9 +13,9 @@
 # load-bearing for the pairing.
 #   bin/fm-spawn.sh      meta published => `tasks-axi start`
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
-#                        with the deliverable recorded when the row is still an
-#                        open captain call (bin/fm-captain-hold.sh `open`), so
-#                        cleanup never retires the captain's own question
+#                        with completion provenance recorded on either path, so
+#                        cleanup never retires the captain's own question and a
+#                        new completion never makes readers infer whether it shipped
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
 # cross-home nudge stay defense in depth, not the primary mechanism.
@@ -326,21 +326,7 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
-  shift 2
-  fm_backlog_mutate "$data" "done" "$id" "$@"
-}
-
-# Keep a captain-held row open across the removal of the work record that
-# discovered it: record the finished work's deliverable as one line at the end
-# of the task body (a line already present is left alone) and return the row to
-# Queued, the conventional post-cleanup shape for an open captain call.
-# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
-# written into the body rather than through `tasks-axi update --report`,
-# because that flag rewrites the title of a row that is not Done.
-fm_backlog_retain() {  # <data-dir> <id> [flag...]
+fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -357,51 +343,79 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     esac
     previous_arg=$arg
   done
-  if [ -n "$deliverable" ]; then
-    out=$(fm_backlog_row_show "$data" "$id" --full)
-    command_status=$?
-    if [ "$command_status" -ne 0 ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-      return "$command_status"
-    fi
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-        print $value unless $value eq "-";
-      ') || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
-    line="Deliverable of the finished work: $deliverable"
-    case $'\n'"$body"$'\n' in
-      *$'\n'"$line"$'\n'*) ;;
-      *)
-        new_body=$line
-        [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-        tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        }
-        if ! printf '%s\n' "$new_body" > "$tmp"; then
-          rm -f -- "$tmp"
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        fi
-        if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-          rm -f -- "$tmp"
-          return 1
-        fi
-        rm -f -- "$tmp"
-        ;;
-    esac
+  [ -n "$deliverable" ] || deliverable=none
+  out=$(fm_backlog_row_show "$data" "$id" --full)
+  command_status=$?
+  if [ "$command_status" -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
+      || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
+    return "$command_status"
   fi
-  fm_backlog_mutate "$authorized_data" reopen "$id"
+  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      exit 0 if $shown eq "" || $shown eq "-";
+      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+      print $value unless $value eq "-";
+    ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+    return 1
+  }
+  line="Deliverable of the finished work: $deliverable"
+  case $'\n'"$body"$'\n' in
+    *$'\n'"$line"$'\n'*) ;;
+    *)
+      new_body=$line
+      [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+      tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-completion-body.XXXXXX") || {
+        FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
+        return 1
+      }
+      if ! printf '%s\n' "$new_body" > "$tmp"; then
+        rm -f -- "$tmp"
+        FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
+        return 1
+      fi
+      if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+      fi
+      rm -f -- "$tmp"
+      ;;
+  esac
+}
+
+fm_backlog_done() {  # <data-dir> <id> [flag...]
+  local data=$1 id=$2 arg has_deliverable=0
+  shift 2
+  for arg in "$@"; do
+    case "$arg" in --pr|--report|--note) has_deliverable=1 ;; esac
+  done
+  if [ "$has_deliverable" = 0 ]; then
+    fm_backlog_record_completion "$data" "$id" || return 1
+    fm_backlog_mutate "$data" "done" "$id" "$@"
+  else
+    fm_backlog_mutate "$data" "done" "$id" "$@" || return 1
+    fm_backlog_record_completion "$data" "$id" "$@"
+  fi
+}
+
+# Keep a captain-held row open across the removal of the work record that
+# discovered it: record the finished work's completion as one line at the end
+# of the task body (a line already present is left alone) and return the row to
+# Queued, the conventional post-cleanup shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer closes the call. Completion is
+# written into the body rather than through `tasks-axi update --report`,
+# because that flag rewrites the title of a row that is not Done.
+fm_backlog_retain() {  # <data-dir> <id> [flag...]
+  local data=$1 id=$2
+  shift 2
+  fm_backlog_record_completion "$data" "$id" "$@" || return 1
+  fm_backlog_mutate "$data" reopen "$id"
 }
 
 fm_backlog_canonical_existing() {

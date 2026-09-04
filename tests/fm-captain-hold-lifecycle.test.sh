@@ -2018,7 +2018,7 @@ SH
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
   local home data id show json
   home=$(make_home teardown-relocated-hold)
-  data="$home/records"
+  data="$home/team records"
   mv "$home/data" "$data"
   id=sample-relocated-hold
   mkdir -p "$home/data" "$data/$id"
@@ -2057,7 +2057,7 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report records/$id/report.md" \
+  assert_contains "$show" "Deliverable of the finished work: report team records/$id/report.md" \
     "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
@@ -2071,7 +2071,7 @@ EOF
   json=$(FM_DATA_OVERRIDE="$data" run_bearings "$home") \
     || fail "Bearings failed for the relocated completed report"
   printf '%s' "$json" | jq -e --arg id "$id" \
-    --arg report "records/$id/report.md" '
+    --arg report "team records/$id/report.md" '
       .landed | any(.id == $id and .artifact == $report)
     ' >/dev/null || fail "Bearings omitted the relocated completed report: $json"
   pass "cleanup retains and Bearings lands captain calls in relocated data"
