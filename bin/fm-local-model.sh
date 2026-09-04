@@ -106,36 +106,62 @@ is_loopback_ipv4() {  # <host>
   [ "$o1" = 127 ]
 }
 
-# The host portion of the configured endpoint, with scheme, userinfo, port and
-# path removed. A bracketed IPv6 literal is unwrapped. An endpoint with no
-# authority at all (file:///path) yields the empty string.
-# The authority ends at the FIRST '/', '?' or '#', all three of which terminate
-# it per RFC 3986. Stopping at '/' alone would read the host out of the query
-# or fragment instead: in http://evil.example?@127.0.0.1 the '@' that follows
-# the '?' is query text, not userinfo, and the host every client resolves is
-# evil.example.
+# The host portion of the configured endpoint. Prints the host and returns 0
+# for an endpoint whose authority is a plain host, [IPv6] literal, or either
+# with a numeric port; an endpoint with no authority at all (file:///path)
+# prints the empty string. ANY other shape returns 1 without printing.
+#
+# The authority ends at the FIRST '/', '?', '#' or '\'. RFC 3986 gives the
+# first three; the WHATWG parser Node and undici use for ANTHROPIC_BASE_URL
+# also ends it at a backslash, so in http://evil.example\@127.0.0.1 the host
+# every client resolves is evil.example, not the loopback address after the
+# '@'.
+#
+# Naming the delimiters is not enough on its own, because each one only has to
+# be missed once for a remote host to read as loopback. So this refuses
+# anything it cannot account for rather than stripping userinfo and trusting
+# the remainder: a surviving '@' or '\', or any character outside a plain host
+# or a bracketed IPv6 literal, is a shape no caller here has any reason to
+# configure, and it is rejected instead of parsed.
 endpoint_host() {
-  local rest
+  local rest host port
   rest=${ENDPOINT#*://}
   rest=${rest%%/*}
   rest=${rest%%\?*}
   rest=${rest%%#*}
-  rest=${rest##*@}
+  rest=${rest%%\\*}
+  if [ -z "$rest" ]; then
+    printf '\n'
+    return 0
+  fi
   case "$rest" in
-    \[*\]*) rest=${rest#\[}; printf '%s\n' "${rest%%\]*}" ;;
-    *) printf '%s\n' "${rest%%:*}" ;;
+    \[*\])   host=${rest#\[}; host=${host%\]}; port= ;;
+    \[*\]:*) host=${rest#\[}; host=${host%%\]*}; port=${rest##*\]:} ;;
+    \[*|*\]*) return 1 ;;
+    *:*)     host=${rest%%:*}; port=${rest#*:} ;;
+    *)       host=$rest; port= ;;
   esac
+  case "$rest" in
+    \[*) case "$host" in ''|*[!0-9A-Fa-f:]*) return 1 ;; esac ;;
+    *)   case "$host" in ''|*[!0-9A-Za-z._-]*) return 1 ;; esac ;;
+  esac
+  case "$port" in *[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$host"
 }
 
 # The local-only invariant, enforced once for every command that touches the
 # endpoint. See "Local means loopback" above.
 require_loopback_endpoint() {
-  local host
-  host=$(endpoint_host)
-  case "$host" in
-    ''|localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
-  esac
-  is_loopback_ipv4 "$host" && return 0
+  local host status=0
+  host=$(endpoint_host) || status=$?
+  if [ "$status" -eq 0 ]; then
+    case "$host" in
+      ''|localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    esac
+    is_loopback_ipv4 "$host" && return 0
+  else
+    host='unreadable, not a plain host or host:port'
+  fi
   cat >&2 <<EOF
 error: the local model endpoint '$ENDPOINT' is not on this machine (host: $host).
        claude-local is a LOCAL runtime: the endpoint receives the task brief,

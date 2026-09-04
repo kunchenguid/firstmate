@@ -1835,22 +1835,29 @@ test_bare_relaunch_is_not_a_claude_local_dispatch_default() {
 # and no message at all. The slot is left alone and the arming failure is the
 # loud part.
 test_bare_relaunch_keeps_a_merge_poll_it_did_not_arm() {
-  local dir state out
+  local dir state hooks out
   dir=$(new_case spawn-relaunch-poll rl48)
   add_claude_local_task "$dir" rl48 loaded
   state="$dir/home/state"
   arm_pr_poll "$dir" rl48 https://github.com/my-org/repo/pull/7
   fm_pr_poll_artifacts_valid "$state" rl48 "$ROOT/bin/fm-pr-poll.sh" \
     || fail "the PR poll fixture was not valid before the relaunch"
+  # The claude family's hook file: the running worker's semantic busy and
+  # turn-end source. A relaunch that cannot finish must not have removed it.
+  hooks="$dir/wt/.claude/settings.local.json"
+  mkdir -p "$dir/wt/.claude"
+  printf '{"hooks":"prior incarnation"}\n' > "$hooks"
   printf 'zsh' > "$dir/fake/command"
   out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl48 --relaunch) || true
   fm_pr_poll_artifacts_valid "$state" rl48 "$ROOT/bin/fm-pr-poll.sh" \
     || fail "a bare relaunch deleted the merge poll occupying the check slot: $out"
+  [ "$(cat "$hooks" 2>/dev/null)" = '{"hooks":"prior incarnation"}' ] \
+    || fail "a refused relaunch retired the running worker's hook wiring: $out"
   case "$out" in
     *"could not arm the local-model watcher check"*) : ;;
     *) fail "the occupied check slot was not reported: $out" ;;
   esac
-  pass "fm-spawn --relaunch: a merge poll holding the check slot is left intact, not silently replaced"
+  pass "fm-spawn --relaunch: a merge poll holding the check slot leaves both the poll and the prior wiring intact"
 }
 
 # The other half of the same slot rule: a genuine eviction watcher this adapter

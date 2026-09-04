@@ -936,6 +936,19 @@ spawn_herdr_presentation_order_lock_acquire() {
   return 1
 }
 
+# state/<id>.check.sh is a single slot the local-model eviction watcher and a
+# merge poll both want. True only when it still holds THIS adapter's watcher:
+# an operator who handed the slot over (bin/fm-pr-check.sh names that handover)
+# leaves a poll whose registration is present and whose trust binding is not
+# the watcher's. Retiring that shim would strand <id>.pr-poll and
+# <id>.pr-poll-registration with merge detection silently gone, and arming over
+# it would replace the poll just as silently.
+local_model_check_slot_is_ours() {  # <state> <id>
+  local state=$1 id=$2
+  [ ! -e "$state/$id.pr-poll-registration" ] && [ ! -L "$state/$id.pr-poll-registration" ] || return 1
+  fm_custom_check_registered "$state" "$id"
+}
+
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 original_harness token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
@@ -947,17 +960,7 @@ clear_relaunch_harness_wiring() {
   # no wiring was armed to begin with.
   original_harness=$harness
   harness=$(fm_control_harness_family "$harness") || harness=
-  # state/<id>.check.sh is a single slot the local-model eviction watcher and a
-  # merge poll both want. Retire it only when it still holds THIS adapter's
-  # watcher: an operator who handed the slot over (bin/fm-pr-check.sh names that
-  # handover) leaves a poll whose registration is present and whose trust
-  # binding is not the watcher's, and removing that shim would strand
-  # <id>.pr-poll and <id>.pr-poll-registration with merge detection silently
-  # gone.
-  if [ "$original_harness" = claude-local ] \
-     && [ ! -e "$state/$id.pr-poll-registration" ] \
-     && [ ! -L "$state/$id.pr-poll-registration" ] \
-     && fm_custom_check_registered "$state" "$id"; then
+  if [ "$original_harness" = claude-local ] && local_model_check_slot_is_ours "$state" "$id"; then
     FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-check-unregister.sh" "$id" >/dev/null || return 1
   fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
@@ -2873,6 +2876,18 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$RELAUNCH" -eq 1 ]; then
+  # A check slot this relaunch cannot claim is decided BEFORE any wiring is
+  # retired. Retiring first and discovering the conflict at the arm below would
+  # leave a still-running worker with its hook files already deleted and no
+  # replacement, so the launch that cannot finish is refused while everything
+  # the previous incarnation depends on is still in place.
+  if [ "$HARNESS" = claude-local ] \
+     && { [ -e "$STATE_REAL/$ID.check.sh" ] || [ -L "$STATE_REAL/$ID.check.sh" ]; } \
+     && ! { [ "$RELAUNCH_PRIOR_HARNESS" = claude-local ] \
+            && local_model_check_slot_is_ours "$STATE_REAL" "$ID"; }; then
+    echo "error: could not arm the local-model watcher check for $ID" >&2
+    exit 1
+  fi
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness
