@@ -4247,6 +4247,85 @@ set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   printf '%s' "$status" > "$dir/$key.status"
 }
 
+# make_herdr_schemafake: a herdr stub for the capability probe only - answers
+# `status --json` with an events-capable protocol and `api schema --json` by
+# emitting the contents of $FM_FAKE_SCHEMA_FILE verbatim. The schema file is
+# deliberately large so a naive `printf ... | grep -q` reader that closes the
+# pipe on first match would leave printf writing into a dead pipe (the EPIPE
+# these tests guard against).
+make_herdr_schemafake() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+cmd=${1:-}; sub=${2:-}
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    cat "${FM_FAKE_SCHEMA_FILE:?}" ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# write_big_schema: writes a >64KiB schema to <file> containing exactly the
+# tokens named in $2.. (space-joined) at the very front, followed by ~280KiB of
+# filler. Fronting the tokens makes an early-closing pipe reader (grep -q) match
+# on the first buffer while printf still has hundreds of KiB left to write. The
+# probe runs under `trap '' PIPE` (the disposition of the real watcher where
+# this noise surfaces): with SIGPIPE ignored, printf's blocked write to the
+# closed pipe returns EPIPE and prints `printf: write error: Broken pipe` to
+# stderr, which is exactly the regression these tests pin closed.
+write_big_schema() {  # <file> <token...>
+  local file=$1; shift
+  { printf '%s ' "$@"; yes 'padding-padding-padding-padding-padding-padding' | head -n 5000; } > "$file"
+}
+
+test_events_capable_detects_both_tokens_and_leaves_stderr_clean() {
+  local dir fb schema err rc
+  dir="$TMP_ROOT/ev-cap-both"; mkdir -p "$dir"
+  fb=$(make_herdr_schemafake "$dir")
+  schema="$dir/schema"; err="$dir/err"
+  write_big_schema "$schema" 'events.subscribe' 'pane.agent_status_changed'
+  rc=$(PATH="$fb:$PATH" FM_FAKE_SCHEMA_FILE="$schema" FM_BACKEND_HERDR_EVENT_READER=noop \
+    bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess; echo $?' "$ROOT" 2>"$err" | tail -1)
+  [ "$rc" = 0 ] || fail "events_capable must report capable when both tokens are present, got $rc"
+  ! grep -q 'Broken pipe' "$err" || fail "capability probe emitted 'Broken pipe' on stderr: $(cat "$err")"
+  [ ! -s "$err" ] || fail "capability probe stderr must be clean, got: $(cat "$err")"
+  pass "fm_backend_herdr_events_capable: both tokens present -> capable, with no Broken-pipe stderr noise"
+}
+
+test_events_capable_not_capable_when_subscribe_token_missing() {
+  local dir fb schema err rc
+  dir="$TMP_ROOT/ev-cap-no-sub"; mkdir -p "$dir"
+  fb=$(make_herdr_schemafake "$dir")
+  schema="$dir/schema"; err="$dir/err"
+  write_big_schema "$schema" 'pane.agent_status_changed'
+  rc=$(PATH="$fb:$PATH" FM_FAKE_SCHEMA_FILE="$schema" FM_BACKEND_HERDR_EVENT_READER=noop \
+    bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess; echo $?' "$ROOT" 2>"$err" | tail -1)
+  [ "$rc" = 1 ] || fail "events_capable must report NOT capable when events.subscribe is absent, got $rc"
+  ! grep -q 'Broken pipe' "$err" || fail "capability probe emitted 'Broken pipe' on stderr: $(cat "$err")"
+  pass "fm_backend_herdr_events_capable: missing events.subscribe -> not capable"
+}
+
+test_events_capable_not_capable_when_status_changed_token_missing() {
+  local dir fb schema err rc
+  dir="$TMP_ROOT/ev-cap-no-status"; mkdir -p "$dir"
+  fb=$(make_herdr_schemafake "$dir")
+  schema="$dir/schema"; err="$dir/err"
+  write_big_schema "$schema" 'events.subscribe'
+  rc=$(PATH="$fb:$PATH" FM_FAKE_SCHEMA_FILE="$schema" FM_BACKEND_HERDR_EVENT_READER=noop \
+    bash -c 'trap "" PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess; echo $?' "$ROOT" 2>"$err" | tail -1)
+  [ "$rc" = 1 ] || fail "events_capable must report NOT capable when pane.agent_status_changed is absent, got $rc"
+  ! grep -q 'Broken pipe' "$err" || fail "capability probe emitted 'Broken pipe' on stderr: $(cat "$err")"
+  pass "fm_backend_herdr_events_capable: missing pane.agent_status_changed -> not capable"
+}
+
 test_normalize_event_leaves_from_empty() {
   local rec
   rec=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_normalize_event wG:pQ wG blocked claude' "$ROOT")
@@ -4642,6 +4721,9 @@ test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
+test_events_capable_detects_both_tokens_and_leaves_stderr_clean
+test_events_capable_not_capable_when_subscribe_token_missing
+test_events_capable_not_capable_when_status_changed_token_missing
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_apply_transition_blocked_requires_commit_to_dedupe

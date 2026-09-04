@@ -3184,8 +3184,13 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  # In-memory substring tests, not `printf ... | grep -Fq`: grep -q exits on
+  # first match and closes the pipe while printf is still writing the large
+  # schema, which prints `printf: write error: Broken pipe` to stderr on every
+  # probe. A `case` glob matches the variable directly - no pipe, no reader to
+  # close early, and a literal substring test equivalent to grep -F.
+  case "$schema" in *events.subscribe*) ;; *) return 1 ;; esac
+  case "$schema" in *pane.agent_status_changed*) ;; *) return 1 ;; esac
   return 0
 }
 
