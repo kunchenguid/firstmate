@@ -909,7 +909,9 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
+      # Prefer BASHPID when present; Bash 3.2 lacks it and $$ is identical
+      # across subshells, so fall back to nested shell PPID as contender pid.
+      harness_pid=${BASHPID:-$(sh -c 'echo $PPID')}
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
