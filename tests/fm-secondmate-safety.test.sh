@@ -2637,6 +2637,36 @@ test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
   pass "a fresh remote secondmate spawn refuses while the task set is owned"
 }
 
+test_remote_secondmate_spawn_refuses_codex_home_before_remote_routing() {
+  local home fakebin ssh_log err
+  home="$TMP_ROOT/remote-codex-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/remote-codex-home-fake")
+  ssh_log="$TMP_ROOT/remote-codex-home.ssh"
+  err="$TMP_ROOT/remote-codex-home.err"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- remote-codex - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-02)' \
+    > "$home/data/secondmates.md"
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' "$*" >> "$FM_SSH_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/fake-ssh"
+
+  if FM_HOME="$home" FM_SPAWN_NO_GUARD=1 FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_SSH_LOG="$ssh_log" "$ROOT/bin/fm-spawn.sh" remote-codex --secondmate \
+    --harness codex --codex-home /remote/codex-home >/dev/null 2>"$err"; then
+    fail "a remote secondmate spawn accepted --codex-home"
+  fi
+  assert_contains "$(cat "$err")" "--codex-home is not supported for remote secondmate route 'remote-codex'" \
+    "the refusal should name the unsupported flag and remote route"
+  [ ! -s "$ssh_log" ] || fail "a refused --codex-home spawn still attempted remote routing"
+  [ ! -e "$home/state/remote-codex.meta" ] \
+    || fail "a refused --codex-home spawn still published remote metadata"
+  pass "a remote secondmate spawn refuses --codex-home before remote routing"
+}
+
 test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/child-active-descendant-home"
@@ -3023,6 +3053,7 @@ test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
+test_remote_secondmate_spawn_refuses_codex_home_before_remote_routing
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree
