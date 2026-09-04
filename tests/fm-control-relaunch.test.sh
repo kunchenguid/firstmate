@@ -962,6 +962,27 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_spawn_relaunch_keeps_the_recorded_codex_home() {
+  local dir home out
+  dir=$(new_case spawnhome rl21b)
+  add_ship_task "$dir" rl21b codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21b.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21b --relaunch)
+  assert_contains "$out" "spawned rl21b harness=codex" \
+    "the direct relaunch should report the recorded Codex harness"
+  [ "$(meta_field "$dir" rl21b codex_home)" = "$home" ] \
+    || fail "fm-spawn --relaunch dropped the recorded Codex home from metadata"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$home'" \
+    "the direct relaunch should launch against the recorded Codex home"
+  pass "fm-spawn --relaunch: a Codex task keeps its recorded account home"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1633,6 +1654,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_keeps_the_recorded_codex_home
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
