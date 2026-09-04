@@ -369,6 +369,7 @@ HEADER
 cmd_retire() {
   local url tmp dir
   url=$(require_url "${1:-}")
+  require_registered "$url"
   if [ -f "$REG" ]; then
     tmp=$(mktemp "$REG.XXXXXX")
     drop_matching "$url" "$REGISTRY_DROP_AWK" "$REG" > "$tmp"
@@ -466,7 +467,8 @@ cmd_handled() {
   id=$(one_line "${2:-}")
   [ -n "$id" ] || die "usage: fm-artifact.sh handled <url> <thread-id> [<mark>]"
   case "$id" in *[[:space:]]*) die "a thread id may not contain whitespace: $id" ;; esac
-  mark=$(normalize_mark "${3:--}")
+  shift 2
+  mark=$(normalize_mark "$*")
 
   dir=$(ledger_dir_for "$url")
   mkdir -p "$dir"

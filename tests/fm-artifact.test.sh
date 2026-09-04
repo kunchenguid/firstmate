@@ -161,6 +161,14 @@ printf '%s\n' "$NEW" | grep -q "^t1	3$" \
   || fail "a re-registered artifact must not inherit the retired handled ledger: $NEW"
 pass "re-registering a retired artifact starts with a clean handled ledger"
 
+# A mistyped retirement must not report success while the real surface stays
+# live, re-armed and polled.
+if A retire https://claude.ai/public/artifacts/never-registered >/dev/null 2>&1; then
+  fail "retire must refuse a URL this home never registered"
+fi
+A list | grep -qF "$U2" || fail "a refused retire must leave the registered artifacts alone: $(A list)"
+pass "retiring an unregistered URL is refused rather than reported as a retirement that happened"
+
 # --- input the captain can actually paste ------------------------------------
 
 if A register "not-a-url" >/dev/null 2>&1; then
@@ -204,6 +212,14 @@ A handled "$USP" t1 "2 comments" >/dev/null || fail "handled with a spaced mark 
 [ -z "$(printf 't1 2 comments\n' | A new "$USP")" ] \
   || fail "a thread handled at a whitespace-bearing mark was re-surfaced: $(printf 't1 2 comments\n' | A new "$USP")"
 pass "a thread handled at a mark containing a space is not re-surfaced by the backstop"
+
+# The skill's documented invocation is `handled <url> <thread-id> <mark>`, so an
+# agent writing a multi-word mark unquoted is a reachable call. Recording only
+# the first word would leave that thread reported as new on every poll.
+A handled "$USP" t2 2 comments >/dev/null || fail "handled with an unquoted multi-word mark failed"
+[ -z "$(printf 't2 2 comments\n' | A new "$USP")" ] \
+  || fail "an unquoted multi-word mark was truncated, so the thread was re-surfaced: $(printf 't2 2 comments\n' | A new "$USP")"
+pass "a multi-word mark passed as separate arguments records the whole mark, not just its first word"
 
 # --- a backslash in a record is matched as the bytes on disk -----------------
 

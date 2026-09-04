@@ -93,7 +93,8 @@ Skipping the record entirely is what makes the backstop re-surface an answered c
 The mark records the state you have actually seen, and a mark read before replying is already obsolete by the time the turn ends, because your own reply is the very next thing to land on that thread.
 The mark moves for reasons that are not the captain: your own reply moves it, and so does the host's automatic comment acknowledgement, which is deliberately outside this mechanism and stays in place.
 That is precisely why the read is placed after the reply.
-A mark taken after the reply still cannot swallow a genuine comment: if a real new comment arrives between your reply and the mark read, the mark moves again and the backstop re-surfaces the thread, which is correct because there genuinely is something new.
+A mark taken after the reply still cannot swallow a genuine comment: if the mark moves again after your read, the backstop re-surfaces the thread, and what you find when you look there is what decides whether it is genuinely new.
+When you have read the thread and the only content newer than your last read is your own reply or the host's automatic acknowledgement, record `handled` at the current mark and say nothing to the captain; a comment from the captain is new content and must still surface.
 
 Comparing the mark rather than the thread id alone is deliberate: a follow-up comment on a thread you already answered moves the mark, so it is correctly reported as new.
 
