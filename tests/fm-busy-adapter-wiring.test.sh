@@ -370,6 +370,20 @@ test_gemini_hooks_stale_incarnation_harmless() {
   pass "gemini hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+test_raw_gemini_launch_has_no_semantic_wiring() {
+  local rec id=busy-gm-raw out state
+  rec=$(make_spawn_case gemini-raw gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'gemini --debug')
+  expect_code 0 $? "raw gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw gemini launch must not arm a busy generation"
+  assert_absent "$state/$id.gemini-settings.json" "raw gemini launch must not write hook settings"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw gemini launch must classify unknown, got '$out'"
+  pass "raw gemini launch remains unwired and classifies unknown"
+}
+
 test_gemini_is_refused_as_a_secondmate() {
   local rec id=busy-gm-3 out
   rec=$(make_spawn_case gemini-secondmate gemini "$id")
@@ -409,6 +423,7 @@ test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
+test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists
 

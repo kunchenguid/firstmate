@@ -76,6 +76,8 @@ A bare interpreter, an unrelated node script, and a gemini name appearing later 
 ## Worker busy state and turn end
 
 `../../../../../bin/fm-spawn.sh` writes a firstmate-owned per-task settings file at `state/<id>.gemini-settings.json` with three hooks bound to the minted busy generation, and the launch reaches it through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
+This wiring belongs only to the canonical exact `gemini` adapter template, which receives busy-state wiring, the turn-end hook, and trusted busy state together.
+A raw Gemini-shaped launch is an unverified escape hatch: it receives no busy-state wiring or turn-end hook and therefore has no trusted busy state.
 It is deliberately NOT the worktree's `.gemini/settings.json`: unlike Claude's `settings.local.json`, that path is the PROJECT's own committed settings file, so writing it would clobber a project's configuration and retiring it would delete a tracked file.
 Hook arrays MERGE across Gemini's settings layers rather than overriding, so a project's own hooks still run alongside firstmate's; both were observed firing for one turn.
 `../../../../../bin/fm-teardown.sh` removes the file, so nothing survives into a pooled worktree.
