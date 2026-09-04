@@ -629,10 +629,7 @@ spawn_remote_secondmate() {
   # TRACEPARENT) under this home's frozen decision, then handed to the remote
   # host to export into the agent's pane. Disabled resolves to empty and the
   # remote launch call stays byte-identical to the untraced one.
-  remote_traceparent=
-  if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
-    remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
-  fi
+  remote_traceparent=$(fm_trace_context_resolve "$STATE" "$meta" || true)
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
@@ -3012,11 +3009,7 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
   SPAWN_TRACE_EFFECTIVE=$(fm_trace_context_session_effective "$STATE/.trace-context-effective")
-  if [ "$SPAWN_TRACE_EFFECTIVE" = on ]; then
-    SPAWN_TRACEPARENT=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$STATE/$ID.meta" || true)
-  else
-    SPAWN_TRACEPARENT=
-  fi
+  SPAWN_TRACEPARENT=$(fm_trace_context_resolve "$STATE" "$STATE/$ID.meta" || true)
 fi
 
 META_WINDOW=$T
