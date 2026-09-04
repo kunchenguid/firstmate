@@ -33,6 +33,8 @@ RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
+ACK_REMOVED=0
+PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
@@ -142,6 +144,19 @@ require_branch_eligible_rows() {
     echo "wake drain: no branch-eligible row snapshot at $ELIGIBLE_ROWS_FILE; refusing to guess what this actor may consume" >&2
     return 1
   }
+}
+
+# The highest sequence this actor has already been presented: the branch's
+# grant is exactly its current prompt's rows, and main's claim file is what its
+# last drain printed. Read BEFORE an ack re-claims, so a row that arrived since
+# presentation is never named as "the current wake" the caller may acknowledge
+# unseen. 0 when nothing is on record.
+presented_max_row() { # <rows-file>
+  if rows_file_valid "$1" 2>/dev/null; then
+    awk '$1 ~ /^[0-9]+$/ && $1 > max { max=$1 } END { print max + 0 }' "$1"
+  else
+    printf '0\n'
+  fi
 }
 
 case "${1:-}" in
@@ -594,6 +609,11 @@ reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then
+  if [ "$ACTOR" = branch ]; then
+    PRESENTED_MAX=$(presented_max_row "$ELIGIBLE_ROWS_FILE") || exit 1
+  else
+    PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
+  fi
   if [ "$ACTOR" = main ]; then
     # Preserve main's original whole-cutoff acknowledgement contract: rows may
     # arrive after presentation but before the printed ack runs, and a direct
@@ -649,6 +669,7 @@ if [ -n "$ACK_THROUGH" ]; then
       exit 1
     }
   fi
+  ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
@@ -679,9 +700,27 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  if [ "$RECOVERY_ACK_MOVED" = true ]; then
-    printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
-      "$ACK_THROUGH" >&2
+  if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
+    # Nothing at or below the cutoff was this actor's to consume, while a
+    # presented row above it is still waiting: the caller acknowledged an
+    # earlier wake, not the one it is handling. Say so, and name the exact
+    # command for the current wake, so the remedy is never "drain again" (which
+    # re-presents the same row and invites the same stale acknowledgement).
+    # The generation is the marker's current one; only a retired marker cannot
+    # be named because the next drain opens a fresh generation for it.
+    case "$RECOVERY_MARKER_TOKEN" in
+      pending:*|announced:*)
+        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s after handling it\n' \
+          "$ACK_THROUGH" "$PRESENTED_MAX" "$PRESENTED_MAX" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+        ;;
+      *)
+        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: re-run bin/fm-wake-drain.sh and use the WAKE_ACK_REQUIRED command it prints\n' \
+          "$ACK_THROUGH" "$PRESENTED_MAX" >&2
+        ;;
+    esac
+  elif [ "$RECOVERY_ACK_MOVED" = true ]; then
+    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+      "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
   exit 0
 fi

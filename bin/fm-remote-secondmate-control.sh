@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -37,6 +38,10 @@
 # Retirement closes only this secondmate's panes or workspace and never
 # stops fm-remote or removes a sibling secondmate's workspace or panes.
 #
+# Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
+# control plane here, because from this host the mate is a plain local
+# secondmate. cmd_relaunch below owns why the parent must hand it the profile.
+#
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
 # pane, and fm-spawn validates it (bin/fm-trace-context-lib.sh). Omitting it is
@@ -62,7 +67,7 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -202,6 +207,46 @@ cmd_launch() {
   print_route "$id"
 }
 
+# Restart the second-mate agent this host runs, by executing the ORDINARY local
+# control plane here. From this host's point of view the mate is a plain local
+# secondmate: its endpoint record under the private parent-route state directory
+# was written by a host-local fm-spawn and carries no remote_host= field, so
+# bin/fm-control.sh's remote refusal never fires, and every checkpoint, journal,
+# rollback, and postcondition that plane owns applies unchanged. This verb is the
+# transport hop, not a second implementation.
+#
+# harness/model/effort come from the PARENT and are passed explicitly, because
+# config/secondmate-harness is deliberately not inherited into a secondmate home:
+# the copy on this host is a different home's file, so letting the control plane
+# re-resolve it here would silently drift the mate onto another runtime. `default`
+# explicitly clears an absent parent pin; `-` remains its compatibility spelling.
+cmd_relaunch() {
+  local id=$1 harness=$2 model=$3 effort=$4
+  local -a control_args
+
+  validate_id "$id"
+  validate_home "$id"
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    *) die "unverified remote secondmate harness: $harness" ;;
+  esac
+  case "$effort" in -|default|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
+  remote_endpoint_require "$id"
+  [ "$model" != - ] || model=default
+  [ "$effort" != - ] || effort=default
+  control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
+  # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
+  # the dedicated fm-remote session, and the parent already owns both convergence
+  # legs, so the host-local spawn must not re-sync or re-inherit against this
+  # host's own Firstmate copy.
+  HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 \
+    "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
+}
+
 cmd_send() {
   local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
   validate_id "$id"
@@ -311,7 +356,12 @@ cmd_sync() {
   out=$(cat "$report")
   rm -f "$report"
   case "$FF_STATUS" in
-    updated) printf 'synced: %s\n' "$commit" ;;
+    # instr= names the watched instruction paths this advance changed, with no
+    # spaces so the whole result stays one parseable line. The parent needs it to
+    # decide whether the running agent must reload; an older parent ignores the
+    # suffix, and an older HOST omits it, which a parent must read as unknown
+    # rather than as "nothing changed".
+    updated) printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" ;;
     current) printf 'current: %s\n' "$commit" ;;
     *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
   esac
@@ -364,6 +414,7 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;

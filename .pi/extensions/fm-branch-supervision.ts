@@ -512,6 +512,14 @@ export default function (pi: ExtensionAPI) {
   // so a prompt can prove that it created a durable outcome after claiming its
   // wake rows without relying on provider text or incidental session shape.
   let durableReportRevision = 0;
+  // The task set the wake being handled right now may be reported on, fixed
+  // deterministically from the eligible rows before a signal or stale prompt
+  // opens and cleared when it settles: exactly the tasks those rows resolve
+  // to. fm_branch_report refuses every other task id during such a prompt,
+  // `fleet` included, so a report typed from memory about a task the wake
+  // never named is never stored or delivered. Null outside a wake prompt and
+  // during a heartbeat review, which is not scoped by task.
+  let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -921,6 +929,13 @@ export default function (pi: ExtensionAPI) {
     return presentUnprocessedOutcomes(expectedGeneration);
   }
 
+  function wakeScopeRefusal(task: string): string {
+    if (!wakeTaskScope || wakeTaskScope.tasks.has(task)) return "";
+    const named = [...wakeTaskScope.tasks].sort().join(", ");
+    const rows = wakeTaskScope.rows.join(", ");
+    return `report refused: the wake being handled (row ${rows}) names ${named}, not ${task}; report only that task, never fleet or a task from memory`;
+  }
+
   function createReportTool(toolGeneration: number): ToolDefinition {
     return {
       name: "fm_branch_report",
@@ -956,6 +971,10 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const verdict = verdictRaw as Verdict;
+        const scopeRefusal = wakeScopeRefusal(task);
+        if (scopeRefusal) {
+          return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
+        }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
         if (!actingAsOwner(toolGeneration)) {
@@ -1215,9 +1234,14 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        await session.prompt(
-          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
-        );
+        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        try {
+          await session.prompt(
+            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+          );
+        } finally {
+          wakeTaskScope = null;
+        }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
           const detail = `supervision branch provider failed after construction: ${providerError}`;

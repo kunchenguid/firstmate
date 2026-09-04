@@ -371,6 +371,10 @@ STUB
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
+  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
+    "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
+  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
+    "promoted no-mistakes worker did not receive the structured escalation event"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \
@@ -540,6 +544,9 @@ EOF
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
+  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
+    "$home/data/$id/launch-brief.md" \
+    "migrated launch contract's overlay dropped the self-sufficiency pointer"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
