@@ -63,6 +63,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  card_digest=$(fm_telegram_event_digest "$provider|$host|$path|$number") || card_digest=''
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     line="done [key=merged-$id]: merged $id $FM_PR_URL"
@@ -91,9 +92,10 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   # and still needs the outcome to reach the captain.
   project=$(grep '^project=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   project=${project%/}
-  card_digest=$(fm_telegram_event_digest "$provider|$host|$path|$number") || return 1
-  fm_telegram_notify "$home" "$state" landed "merged-$id-$card_digest" \
-    "project=${project##*/}" "url=$FM_PR_URL" || true
+  if [ -n "$card_digest" ]; then
+    fm_telegram_notify "$home" "$state" landed "merged-$id-$card_digest" \
+      "project=${project##*/}" "url=$FM_PR_URL" || true
+  fi
   if [ -n "$destination" ]; then
     fm_parent_channel_append_once "$destination" "$line" || status=1
   fi

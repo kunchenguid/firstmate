@@ -341,12 +341,12 @@ home_secondmate_id() {
 # fields AGENTS.md section 9 keeps out of captain-facing text. Queuing is a
 # local write with no network call, so this can never change whether an outcome
 # is reported as delivered.
-notify_child_failed_card() { # <id> <meta> <state> <outcome-key> <note>
-  local id=$1 meta=$2 state=$3 outcome_key=$4 note=${5:-} project
+notify_child_failed_card() { # <id> <meta> <state> <card-key> <note>
+  local id=$1 meta=$2 state=$3 card_key=$4 note=${5:-} project
   [ "$state" = failed ] || return 0
   project=$(meta_field "$meta" project)
   project=${project%/}
-  fm_telegram_notify "$FM_HOME" "$STATE" failed "$outcome_key" \
+  fm_telegram_notify "$FM_HOME" "$STATE" failed "$card_key" \
     "project=${project##*/}" "note=$note" || true
 }
 
@@ -493,7 +493,7 @@ report_child() { # <id>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key card_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -525,11 +525,12 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
-    outcome_key="inactive-outcome-main-$id-$state-${fingerprint:0:16}"
+    outcome_key="inactive-outcome-main-$id-$state"
   fi
+  card_key="$outcome_key-${fingerprint:0:16}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
-  notify_child_failed_card "$id" "$meta" "$state" "$outcome_key" \
+  notify_child_failed_card "$id" "$meta" "$state" "$card_key" \
     "$(clean_field "$(status_line_note "$last")")"
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then

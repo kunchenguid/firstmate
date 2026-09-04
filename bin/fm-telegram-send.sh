@@ -129,6 +129,15 @@ clear_error() {
   rm -f -- "$ERROR_FILE" 2>/dev/null || true
 }
 
+telegram_response_ok() {  # <body-file>
+  local response
+  response=$(LC_ALL=C tr -d '[:space:]' < "$1" 2>/dev/null) || return 1
+  case "$response" in
+    '{"ok":true}'|'{"ok":true,'*) return 0 ;;
+  esac
+  return 1
+}
+
 # Queued cards, oldest first. A name that is not a card this script wrote is
 # skipped rather than sent.
 queued_cards() {
@@ -213,7 +222,7 @@ action_check() {
     }
     case "$code" in
       200)
-        if grep -Fq '"ok":true' "$body" 2>/dev/null; then
+        if telegram_response_ok "$body"; then
           fm_telegram_mark_delivered "$STATE" "$(card_key_marker "$card")" || true
           rm -f -- "$card"
           sent=$((sent + 1))

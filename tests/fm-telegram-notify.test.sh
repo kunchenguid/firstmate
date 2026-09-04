@@ -23,6 +23,7 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; 
 SEND="$ROOT/bin/fm-telegram-send.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 RECONCILE="$ROOT/bin/fm-inactive-reconcile.sh"
+MERGE_OUTCOME="$ROOT/bin/fm-merge-outcome-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-telegram)
 BASE_PATH=$PATH
 # A distinctive value so a card that leaked it is unmistakable in an assertion.
@@ -93,6 +94,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload, code = b'{"ok":false}', 500
         elif mode == "notok":
             payload, code = b'{"ok":false,"description":"chat not found"}', 200
+        elif mode == "spaced":
+            payload, code = b'{"ok": true}', 200
         else:
             payload, code = b'{"ok":true,"result":{"message_id":1}}', 200
         self.send_response(code)
@@ -454,6 +457,79 @@ test_cleanup_gate_is_unaffected_by_an_unreachable_telegram() {
   pass "the gate that refuses to remove a child is unaffected by an unreachable Telegram"
 }
 
+test_secondmate_failure_cards_track_incarnations() {
+  local dir parent meta status
+  dir=$(make_home secondmate-incarnations)
+  parent="$dir/parent"
+  meta="$dir/home/state/c1.meta"
+  status="$dir/home/state/c1.status"
+  mkdir -p "$parent/state"
+  printf 'mate\n' > "$dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$dir/home/.fm-secondmate-parent"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: failed - source: fixture\n'
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
+
+  fm_write_meta "$meta" "window=firstmate:fm-c1" "endpoint_task_id=c1" \
+    "worktree=$dir/wt" "project=$dir/project" "kind=ship" "spawn_gen=spawn-one"
+  printf 'working: quiet since\n' > "$status"
+  touch -t 200001010000 "$meta" "$status"
+  timeout 30 env FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    PATH="$dir/fakebin:$BASE_PATH" "$RECONCILE" scan --startup >/dev/null 2>&1 \
+    || fail "the first failed incarnation was not reconciled"
+  [ "$(card_count "$dir")" = 1 ] || fail "the first failed incarnation queued no card"
+
+  timeout 30 env FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    PATH="$dir/fakebin:$BASE_PATH" "$RECONCILE" scan --startup >/dev/null 2>&1 \
+    || fail "retrying the first failed incarnation failed"
+  [ "$(card_count "$dir")" = 1 ] || fail "an exact failed-incarnation retry queued another card"
+
+  rm -f "$meta" "$status" "$dir/home/state/c1.turn-ended"
+  fm_write_meta "$meta" "window=firstmate:fm-c1" "endpoint_task_id=c1" \
+    "worktree=$dir/wt" "project=$dir/project" "kind=ship" "spawn_gen=spawn-two"
+  printf 'working: quiet since\n' > "$status"
+  touch -t 200001010000 "$meta" "$status"
+  timeout 30 env FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_CONFIG_OVERRIDE="$dir/home/config" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    PATH="$dir/fakebin:$BASE_PATH" "$RECONCILE" scan --startup >/dev/null 2>&1 \
+    || fail "the replacement failed incarnation was not reconciled"
+  [ "$(card_count "$dir")" = 2 ] || fail "the replacement failed incarnation queued no distinct card"
+  [ "$(grep -Fc '[key=inactive-outcome-mate-c1-failed]' "$parent/state/mate.status")" = 2 ] \
+    || fail "card identity changes altered the parent-channel key"
+  pass "secondmate failure cards distinguish incarnations without changing channel keys"
+}
+
+test_merge_recording_survives_card_digest_failure() {
+  local dir state out
+  dir=$(make_home merge-digest)
+  state="$dir/home/state"
+  fm_write_meta "$state/t1.meta" "project=$dir/project"
+  out=$(FM_CONFIG_OVERRIDE="$dir/home/config" bash -c '
+    . "$1"
+    fm_telegram_event_digest() { return 1; }
+    fm_merge_outcome_report "$2" "$3" t1 https://github.com/owner/repo/pull/12 self
+    fm_merge_outcome_report "$2" "$3" t1 https://github.com/owner/repo/pull/13 self
+  ' _ "$MERGE_OUTCOME" "$dir/home" "$state" 2>&1) \
+    || fail "merge recording inherited a card digest failure: $out"
+  [ ! -e "$state/t1.pr-poll-merge-notified.lock" ] \
+    || fail "a card digest failure left the merge lock held"
+  [ "$(grep -c 'check: merge landed: t1' "$state/.wake-queue")" = 2 ] \
+    || fail "a card digest failure skipped a merge outcome"
+  [ "$(card_count "$dir")" = 0 ] || fail "a failed card identity queued an unsafe card"
+  pass "card digest failures cannot block or lock merge outcome recording"
+}
+
 test_drain_sends_and_never_listens() {
   local dir base card key
   dir=$(make_home drain)
@@ -483,6 +559,22 @@ test_drain_sends_and_never_listens() {
   [ "$(card_count "$dir")" = 0 ] || fail "a re-published outcome queued a second card"
   stop_api
   pass "a drain sends each card once, asks Telegram for nothing, and never repeats an outcome"
+}
+
+test_whitespace_in_success_response_is_accepted() {
+  local dir base out
+  dir=$(make_home spaced-response)
+  report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  base=$(start_api "$dir")
+  printf 'spaced\n' > "$dir/api.mode"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the spaced success drain failed"
+  [ -z "$out" ] || fail "a spaced success response emitted a configuration wake: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "a spaced success response left the card queued"
+  [ ! -e "$dir/home/state/telegram-send.error" ] \
+    || fail "a spaced success response recorded a false configuration error"
+  stop_api
+  pass "Telegram success responses are accepted independent of whitespace"
 }
 
 test_outage_retries_silently_and_a_rejection_reports_once() {
@@ -569,7 +661,10 @@ test_internal_identifiers_do_not_reach_a_card
 test_pr_card_identity_tracks_the_canonical_pr
 test_publishers_make_no_network_call
 test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
+test_secondmate_failure_cards_track_incarnations
+test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
+test_whitespace_in_success_response_is_accepted
 test_outage_retries_silently_and_a_rejection_reports_once
 test_arm_and_disarm
 
