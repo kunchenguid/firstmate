@@ -148,7 +148,52 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# FM_SPAWN_ENTER_WAIT_SECS overrides the enter-wait bound: with the pane never
+# leaving the project (candidate never settles), the loop exhausts and the
+# failure names the configured bound, proving the override drives the loop.
+test_enter_wait_override_changes_the_bound() {
+  local rec id out status start end elapsed
+  id=enter-wait-override-z3
+  rec=$(make_settle_case enter-wait-override "$id" 0)
+  read_settle_record "$rec"
+
+  start=$(date +%s)
+  # Point the fake pane at the project itself so it never enters a worktree.
+  out=$(FM_SPAWN_ENTER_WAIT_SECS=1 FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_PANE_STALE="$PROJ_DIR" \
+    FM_FAKE_PANE_STALE_READS=0 FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  expect_code 1 "$status" "spawn should fail when the pane never enters a worktree"
+  assert_contains "$out" "within 1s" "failure did not report the overridden enter-wait bound"
+  [ "$elapsed" -le 5 ] || fail "enter-wait=1 loop took ${elapsed}s - the override did not bound the loop"
+  pass "FM_SPAWN_ENTER_WAIT_SECS bounds the treehouse-enter wait loop"
+}
+
+# A non-positive-integer override is refused before any loop runs.
+test_enter_wait_invalid_is_refused() {
+  local rec id out status
+  id=enter-wait-invalid-z4
+  rec=$(make_settle_case enter-wait-invalid "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(FM_SPAWN_ENTER_WAIT_SECS=nope run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse a non-integer enter-wait"
+  assert_contains "$out" "FM_SPAWN_ENTER_WAIT_SECS must be a positive integer" \
+    "spawn did not refuse the invalid enter-wait value"
+  pass "a non-positive-integer FM_SPAWN_ENTER_WAIT_SECS is refused"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_enter_wait_override_changes_the_bound
+test_enter_wait_invalid_is_refused
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -56,7 +56,11 @@
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   session provider only, exactly like herdr/zellij, so it does. For those
+#   treehouse-get backends, FM_SPAWN_ENTER_WAIT_SECS (positive integer, default
+#   60) bounds how long the spawn waits for the pane to enter the pooled
+#   worktree; raise it when recycling a stale pooled slot fetches origin first
+#   and that fetch alone can exceed the default under load. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -2569,8 +2573,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  enter_wait=${FM_SPAWN_ENTER_WAIT_SECS:-60}
+  case "$enter_wait" in
+    ''|*[!0-9]*|0) echo "error: FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '${FM_SPAWN_ENTER_WAIT_SECS:-}'" >&2; exit 1 ;;
+  esac
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$enter_wait"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2589,7 +2597,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${enter_wait}s; inspect window $T" >&2
     exit 1
   fi
 
