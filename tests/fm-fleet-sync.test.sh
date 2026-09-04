@@ -536,6 +536,30 @@ test_malformed_registry_preserves_gone_unmerged_branch() {
   pass "malformed-registry refresh preserves remote-gone unmerged work"
 }
 
+test_missing_mode_annotation_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-missing-mode-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "missing-mode local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-missing-mode-work [+yolo] - test project (added 2026-09-04)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-missing-mode-work: synced" "missing-mode default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "missing-mode remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "missing-mode remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "missing-mode remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "missing-mode default branch did not fast-forward"
+  pass "missing-mode annotation refresh preserves remote-gone unmerged work"
+}
+
 test_remote_backed_prunes_gone_branch() {
   local home clone out
   home=$(new_home)
@@ -851,6 +875,7 @@ test_option_shaped_local_only_preserves_gone_unmerged_branch
 test_external_alias_local_only_preserves_gone_unmerged_branch
 test_absent_registry_preserves_gone_unmerged_branch
 test_malformed_registry_preserves_gone_unmerged_branch
+test_missing_mode_annotation_preserves_gone_unmerged_branch
 test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow

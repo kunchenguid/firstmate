@@ -73,6 +73,10 @@ parsed=$(awk -v n="$NAME" '
     return $(delimiter) == "-" && NF >= delimiter + 3 && $(NF - 1) == "(added" &&
       $NF ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/
   }
+  function supported_mode(candidate) {
+    return candidate == "no-mistakes" || candidate == "direct-PR" ||
+      candidate == "local-only" || candidate == "no-mistakes-prod-only"
+  }
   $1=="-" && $2==n {
     matches++;
     if (matches > 1) next;
@@ -87,8 +91,13 @@ parsed=$(awk -v n="$NAME" '
     }
     valid=0;
     if ($3 == "-") valid=complete_tail(3);
-    else if ($3 ~ /^\[[^][]+\]$/) valid=complete_tail(4);
-    else if ($3 ~ /^\[[^][]+$/ && $4 == "+yolo]") valid=complete_tail(5);
+    else if ($3 ~ /^\[[^][]+\]$/) {
+      explicit_mode=substr($3, 2, length($3) - 2);
+      valid=supported_mode(explicit_mode) && complete_tail(4);
+    } else if ($3 ~ /^\[[^][]+$/ && $4 == "+yolo]") {
+      explicit_mode=substr($3, 2);
+      valid=supported_mode(explicit_mode) && complete_tail(5);
+    }
   }
   END {
     if (matches > 0) print (matches == 1 && valid ? "valid" : "malformed"), mode, yolo;

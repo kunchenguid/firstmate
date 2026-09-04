@@ -411,6 +411,7 @@ test_project_mode_maps_the_conditional_policy() {
 - --raw [local-only] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 - malformedproj [
+- missingmodeproj [+yolo] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -435,6 +436,9 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- legacyproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "strict lookup rejected a complete legacy row (got '$out')"
 
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- yoloproj 2>/dev/null)
+  [ "$out" = "no-mistakes on" ] || fail "strict lookup rejected a supported mode with +yolo (got '$out')"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
   status=$?
   [ "$status" -ne 0 ] || fail "strict lookup accepted a project missing from the registry"
@@ -454,6 +458,11 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "strict lookup accepted a malformed matching row"
   [ -z "$out" ] || fail "strict malformed-row lookup emitted fallback output '$out'"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- missingmodeproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a +yolo-only annotation"
+  [ -z "$out" ] || fail "strict +yolo-only lookup emitted fallback output '$out'"
 
   missing_home="$TMP_ROOT/project-mode/missing-home"
   mkdir -p "$missing_home/data"
