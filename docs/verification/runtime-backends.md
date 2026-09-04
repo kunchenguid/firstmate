@@ -282,8 +282,9 @@ The composer-classification record below observes the same gate from the other s
 
 Verified on 2026-09-04 with codex-cli 0.153.2 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
 Codex 0.153.2 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
-`bin/fm-spawn.sh` passes `--disable hooks` on both interactive Codex launch branches, so effective hooks do not run and require no trust decision.
-The ordinary worker branch retains its independent `notify=` turn-end signal.
+`bin/fm-spawn.sh` passes `--disable hooks` on Codex crewmate and scout launches, so effective hooks do not run and require no trust decision.
+Those worker branches retain their independent `notify=` turn-end signal.
+The Codex secondmate branch instead passes `--dangerously-bypass-hook-trust` and does not disable hooks, preserving the vetted project SessionStart and Stop lifecycle hooks required by a Firstmate primary.
 
 The live guard captures the candidate launch through the real `bin/fm-spawn.sh` executable, then runs it in a trusted scratch worktree with isolated untrusted global and project hook records.
 Its treatment uses the captured command unchanged and proves neither isolated hook executes.
@@ -305,8 +306,9 @@ ok - codex-cli 0.153.2 hooks-disabled fm-spawn launch reached the brief, ran no 
 ok - codex-cli 0.153.2 unsuppressed counterfactual parked at Hooks need review before hooks, brief, or notify
 ```
 
+The live guard remains worker-scoped because an isolated live secondmate case would need to reproduce the full marked-primary home and its startup supervision rather than only exercise the hook-review dialog.
 The portable regression is `tests/fm-spawn-dispatch-profile.test.sh`.
-It drives launch construction through `bin/fm-spawn.sh`, requires hook disabling on ordinary and secondmate Codex launches, preserves the ordinary `notify=` split, and confirms six other harness launch paths remain unchanged.
+It drives launch construction through `bin/fm-spawn.sh`, requires hook disabling without trust bypass on crewmate and scout launches, requires trust bypass without hook disabling on the secondmate launch, preserves the worker-only `notify=` split, and confirms six other harness launch paths remain unchanged.
 
 ## Composer classification matrix
 

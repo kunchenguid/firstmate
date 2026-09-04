@@ -20,7 +20,10 @@ Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
 Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
-Firstmate's interactive launch includes `--disable hooks`, which disables hooks for the invocation and avoids the dialog without trusting or running effective hook sources.
+Firstmate's crewmate and scout launches include `--disable hooks`, which disables hooks for the invocation and avoids the dialog without trusting or running effective hook sources.
+Their turn-end detection rides the launch `notify=` signal, not Codex hooks.
+Firstmate's Codex secondmate launch instead includes `--dangerously-bypass-hook-trust`, because a secondmate is a Firstmate primary whose tracked project hooks provide SessionStart initialization, pre-tool protection, and Stop-based turn-end supervision.
+Only use that bypass for a vetted Firstmate secondmate home whose lifecycle hooks are owned by this repository.
 If an already-parked worker shows this dialog, choose "Continue without trusting" by running these commands in order, then verify that the brief starts processing.
 Replace `TASK_ID` with the recorded task ID.
 
@@ -29,7 +32,6 @@ Replace `TASK_ID` with the recorded task ID.
 ../../../bin/fm-send.sh TASK_ID --key Down
 ../../../bin/fm-send.sh TASK_ID --key Enter
 ```
-Turn-end detection rides the launch `notify=` signal, not Codex hooks.
 
 ## Skill popup
 

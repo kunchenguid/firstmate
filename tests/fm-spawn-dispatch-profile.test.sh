@@ -417,7 +417,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_hook_disabling_is_scoped_to_codex() {
+test_codex_hook_policy_follows_launch_kind() {
   local rec id out status launch sm harness
   id=profile-codex-hook-trust-z3b
   rec=$(make_spawn_case profile-codex-hook-trust codex "$id")
@@ -434,7 +434,21 @@ test_codex_hook_disabling_is_scoped_to_codex() {
   assert_contains "$launch" "notify=" \
     "ordinary codex launch lost its turn-end notify configuration"
 
-  id=profile-codex-hook-trust-secondmate-z3c
+  id=profile-codex-hook-trust-scout-z3c
+  rec=$(make_spawn_case profile-codex-hook-trust-scout codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "scout codex spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--disable hooks" \
+    "scout codex launch omitted invocation-scoped hook disabling"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "scout codex launch trusted effective hook sources"
+  assert_contains "$launch" "notify=" \
+    "scout codex launch lost its turn-end notify configuration"
+
+  id=profile-codex-hook-trust-secondmate-z3d
   rec=$(make_spawn_case profile-codex-hook-trust-secondmate codex "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -443,15 +457,15 @@ test_codex_hook_disabling_is_scoped_to_codex() {
   status=$?
   expect_code 0 "$status" "secondmate codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--disable hooks" \
-    "secondmate codex launch omitted invocation-scoped hook disabling"
-  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "secondmate codex launch trusted effective hook sources"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "secondmate codex launch did not trust its vetted primary lifecycle hooks"
+  assert_not_contains "$launch" "--disable hooks" \
+    "secondmate codex launch disabled its primary lifecycle hooks"
   assert_not_contains "$launch" "notify=" \
     "secondmate codex launch gained the parent worker's turn-end notify configuration"
 
   for harness in claude opencode pi grok cursor gemini; do
-    id="profile-hook-trust-negative-$harness-z3d"
+    id="profile-hook-trust-negative-$harness-z3e"
     rec=$(make_spawn_case "profile-hook-trust-negative-$harness" "$harness" "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -461,7 +475,7 @@ test_codex_hook_disabling_is_scoped_to_codex() {
     assert_not_contains "$launch" "--disable hooks" \
       "$harness launch received Codex-only hook disabling"
   done
-  pass "hooks are disabled on both codex launch branches and unchanged for non-codex launches"
+  pass "codex hook trust follows worker and secondmate lifecycle contracts"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -855,7 +869,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_hook_disabling_is_scoped_to_codex
+test_codex_hook_policy_follows_launch_kind
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
