@@ -273,6 +273,49 @@ test_inert_in_linked_worktree_with_dead_lock() {
   pass "auto-arm: inert in a linked worktree whose session lock names a dead pid"
 }
 
+# The mandatory negative control: a firstmate-of-itself TASK worktree that ran
+# session start holds its own live, self-owned lock, but its parent home's
+# state/<id>.meta names it as a task worktree, so it must never be admitted.
+test_inert_in_task_worktree_recorded_by_parent_home() {
+  local base dir gd gcd out status
+  base="$TMP_ROOT/recorded-base"
+  dir="$TMP_ROOT/recorded-task-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  gd=$(git -C "$dir" rev-parse --git-dir)
+  gcd=$(git -C "$dir" rev-parse --git-common-dir)
+  [ "$gd" != "$gcd" ] || fail "recorded-task fixture must be a linked worktree, got equal git dirs: $gd"
+  mkdir -p "$base/state"
+  printf 'worktree=%s\nkind=ship\n' "$dir" > "$base/state/task-child.meta"
+  grep -qx "worktree=$dir" "$base/state/task-child.meta" || fail "recorded-task fixture: base meta does not name the child worktree"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stay inert in a task worktree its parent home records"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a parent-recorded task worktree holding its own live lock"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a parent-recorded task worktree holding its own live lock"
+  pass "auto-arm: inert in a task worktree its parent home records, even with its own live self-owned lock"
+}
+
+# A linked worktree whose lock names a live pid outside this harness ancestry is
+# not this session's home, whatever that process is.
+test_inert_in_linked_worktree_with_foreign_live_lock() {
+  local base dir out status sleeper
+  base="$TMP_ROOT/foreign-lock-base"
+  dir="$TMP_ROOT/foreign-lock-wt"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  sleep 60 &
+  sleeper=$!
+  printf '%s\n' "$sleeper" > "$dir/state/.lock"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm_unlocked "$dir" 2>/dev/null); status=$?
+  kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null || true
+  expect_code 0 "$status" "hook must stay inert in a linked worktree whose lock names a foreign live pid"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a linked worktree holding a foreign live lock"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a linked worktree holding a foreign live lock"
+  pass "auto-arm: inert in a linked worktree whose session lock names a live pid outside this ancestry"
+}
+
 # A treehouse-leased PRIMARY home is a genuine linked worktree (git-dir !=
 # git-common-dir) with no secondmate marker, its own state/, a live session
 # lock, and in-flight work. The hook must claim it exactly as a plain checkout.
@@ -1210,6 +1253,8 @@ test_fm_lock_status_still_works_with_shared_lib() {
 
 test_inert_in_child_worktree
 test_inert_in_linked_worktree_with_dead_lock
+test_inert_in_task_worktree_recorded_by_parent_home
+test_inert_in_linked_worktree_with_foreign_live_lock
 test_arms_in_linked_worktree_holding_own_live_lock
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming

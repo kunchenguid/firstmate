@@ -25,7 +25,8 @@ A secondmate home runs its own primary Firstmate session, so a genuine `.fm-seco
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
-A linked worktree is still in scope when the effective state directory is its own `state/` and `state/.lock` there is a regular file naming a live pid, because that is a leased primary home whose session already took the helm; a task worktree never holds its own live session lock.
+A linked worktree is still in scope as a leased primary home only when the effective state directory is its own `state/`, no parent home's `state/<id>.meta` records it as a task worktree, and `state/.lock` there is held by this process's own harness ancestry; a task worktree fails the parent-record test even after running session start, and a lock naming any other process fails the ancestry test.
+That admission exists only once the session holds the lock: `bin/fm-sessionstart-run.sh` evaluates scope before the lock is written, so on a fresh start in a leased primary home the SessionStart wrapper still stands down and the agent takes the helm per `AGENTS.md` section 3.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
