@@ -53,6 +53,17 @@ Read `quota-axi auth --json` only when a candidate's credential surface is in qu
 
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
+### Candidates that name a Codex home
+
+A codex candidate may carry `home`, the absolute Codex home it runs against, which is how one fleet dispatches across two logged-in Codex accounts (`docs/configuration.md` owns that schema).
+`quota-axi` reads exactly one Codex home per invocation, so measure such a candidate with `CODEX_HOME=<home> quota-axi` as its own default-TOON snapshot.
+That is the one sanctioned extra snapshot: take it once per DISTINCT home per intake and reuse it for every candidate naming that home, exactly as the shared intake snapshot is reused for everything else.
+A candidate with no `home` keeps using the shared intake snapshot.
+The account row from that home's `quota-axi --full` is the evidence that the home resolves to the account you intended, and is the one use of `--full` this skill sanctions: it establishes identity, never the economics `spendPriority` already computed.
+An unconfirmable account is disclosed uncertainty, while a home whose own credential quota-axi reports as unusable is concrete evidence against that candidate alone and never against the other home's candidates.
+Rank the surviving candidates by `spendPriority` through the same three gates as any other array, and name each candidate's home beside its `harness` and `model` when you account for it.
+`bin/fm-quota-choose.sh` cannot represent per-home candidates, so resolve these yourself rather than passing them to that helper.
+
 ## Three gates, then spendPriority
 
 Apply the three cheap orthogonal gates first.

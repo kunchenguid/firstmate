@@ -646,6 +646,32 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
+test_relaunch_keeps_the_codex_account_until_the_harness_changes() {
+  local dir out rc home
+  dir=$(new_case codexhome rl6b)
+  add_ship_task "$dir" rl6b codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6b.meta"
+
+  out=$(run_control "$dir" rl6b relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl6b codex_home)" = "$home" ] \
+    || fail "a replacement on the same harness should keep the Codex account it was dispatched against"
+  assert_grep "CODEX_HOME='$home'" "$dir/fake/literal" \
+    "the replacement launch should run against the recorded Codex account"
+
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl6b relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl6b codex_home)" ] \
+    || fail "a Codex account must not survive a switch to another harness"
+  pass "fm-control relaunch: the recorded Codex account carries across a same-harness replacement only"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1570,6 +1596,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
+test_relaunch_keeps_the_codex_account_until_the_harness_changes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
