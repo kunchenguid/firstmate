@@ -205,6 +205,35 @@ A handled "$USP" t1 "2 comments" >/dev/null || fail "handled with a spaced mark 
   || fail "a thread handled at a whitespace-bearing mark was re-surfaced: $(printf 't1 2 comments\n' | A new "$USP")"
 pass "a thread handled at a mark containing a space is not re-surfaced by the backstop"
 
+# --- a backslash in a record is matched as the bytes on disk -----------------
+
+# A URL or a thread id may carry a literal backslash. If the rewrite that drops
+# an old record compares different bytes than the ones on disk, the record is
+# never replaced or removed while the caller is told it was, and the artifact
+# stays in the listing and the poll for ever.
+UBS='https://x.example/a\tb'
+A register "$UBS" --title "First" >/dev/null || fail "register with a backslash URL failed"
+A register "$UBS" --title "Second" >/dev/null || fail "re-register with a backslash URL failed"
+[ "$(A list | grep -cF -- "$UBS")" = "1" ] \
+  || fail "a backslash-bearing URL was registered twice: $(A list)"
+A list | grep -qF "Second" || fail "the re-register did not update the title: $(A list)"
+
+A retire "$UBS" >/dev/null || fail "retire with a backslash URL failed"
+A list | grep -qF -- "$UBS" && fail "retire left the backslash-bearing record in the registry: $(A list)"
+A digest | grep -qF -- "$UBS" && fail "a retired backslash-bearing artifact is still re-armed: $(A digest)"
+A due | grep -qF -- "$UBS" && fail "a retired backslash-bearing artifact is still polled: $(A due)"
+pass "a URL containing a backslash is deduped and retired as the literal bytes on disk"
+
+# The same for a thread id: re-handling one must replace its mark, not append a
+# second line whose stale mark then re-surfaces an answered thread for ever.
+UBT=https://x.example/threads
+A register "$UBT" --title "Threads" >/dev/null || fail "register for the thread-id case failed"
+A handled "$UBT" 't\t1' 5 >/dev/null || fail "handled with a backslash thread id failed"
+A handled "$UBT" 't\t1' 6 >/dev/null || fail "re-handled with a backslash thread id failed"
+[ -z "$(printf 't\\t1 6\n' | A new "$UBT")" ] \
+  || fail "a re-handled backslash thread id was re-surfaced: $(printf 't\\t1 6\n' | A new "$UBT")"
+pass "re-handling a thread whose id contains a backslash replaces its mark instead of stacking a stale one"
+
 # --- a missing hash tool refuses, it does not delete every ledger ------------
 
 # `retire` composes a per-artifact ledger path. If the hash behind that path

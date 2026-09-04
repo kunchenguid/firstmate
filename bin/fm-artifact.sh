@@ -200,6 +200,37 @@ normalize_mark() {  # <mark>
   printf '%s' "${m:--}"
 }
 
+# --- record rewrites --------------------------------------------------------
+
+# Every rewrite that drops one record goes through this single boundary. It
+# exists because `awk -v` runs escape processing over the value it assigns, so a
+# URL or a thread id carrying a literal backslash reaches the comparison as
+# different bytes than the ones on disk and silently matches nothing: the record
+# is never replaced or removed, and the caller is told it was. The environment
+# does no such processing, so awk reads the value verbatim.
+# shellcheck disable=SC2016 # awk program text: $2 and ENVIRON are awk syntax, not shell.
+REGISTRY_DROP_AWK='
+  BEGIN { want = ENVIRON["FM_ARTIFACT_WANT"]; skip = 0 }
+  /^- http/ {
+    u = $2
+    sub(/\/+$/, "", u)
+    skip = (u == want) ? 1 : 0
+    if (skip) next
+  }
+  skip && /^[[:space:]]+[a-z]+:/ { next }
+  { skip = 0; print }
+'
+
+# shellcheck disable=SC2016 # awk program text: $1 and ENVIRON are awk syntax, not shell.
+LEDGER_DROP_AWK='
+  BEGIN { want = ENVIRON["FM_ARTIFACT_WANT"] }
+  $1 != want
+'
+
+drop_matching() {  # <want> <awk-program> <file>
+  FM_ARTIFACT_WANT=$1 awk "$2" "$3"
+}
+
 # --- registry reads ---------------------------------------------------------
 
 # A registry that exists but cannot be read is NOT an empty registry. Reading it
@@ -320,17 +351,7 @@ HEADER
   # queueing a second record for the same URL.
   local tmp
   tmp=$(mktemp "$REG.XXXXXX")
-  awk -v want="$url" '
-    BEGIN { skip = 0 }
-    /^- http/ {
-      u = $2
-      sub(/\/+$/, "", u)
-      skip = (u == want) ? 1 : 0
-      if (skip) next
-    }
-    skip && /^[[:space:]]+[a-z]+:/ { next }
-    { skip = 0; print }
-  ' "$REG" > "$tmp"
+  drop_matching "$url" "$REGISTRY_DROP_AWK" "$REG" > "$tmp"
   {
     printf -- '- %s - %s (registered %s)\n' "$url" "$title" "$(now_date)"
     [ -z "$note" ] || printf '  note: %s\n' "$note"
@@ -350,17 +371,7 @@ cmd_retire() {
   url=$(require_url "${1:-}")
   if [ -f "$REG" ]; then
     tmp=$(mktemp "$REG.XXXXXX")
-    awk -v want="$url" '
-      BEGIN { skip = 0 }
-      /^- http/ {
-        u = $2
-        sub(/\/+$/, "", u)
-        skip = (u == want) ? 1 : 0
-        if (skip) next
-      }
-      skip && /^[[:space:]]+[a-z]+:/ { next }
-      { skip = 0; print }
-    ' "$REG" > "$tmp"
+    drop_matching "$url" "$REGISTRY_DROP_AWK" "$REG" > "$tmp"
     mv -f "$tmp" "$REG"
   fi
   dir=$(ledger_dir_for "$url") || die "cannot retire $url: its ledger directory could not be resolved"
@@ -376,9 +387,8 @@ cmd_list() {
 }
 
 cmd_digest() {
-  local url title rearm state at reason any=0
+  local url title rearm state at reason
   while IFS=$'\t' read -r url title; do
-    any=1
     printf -- '- %s\n' "$url"
     [ -z "$title" ] || printf '    %s\n' "$title"
     rearm=$(ledger_field "$url" rearm)
@@ -393,7 +403,6 @@ cmd_digest() {
       fi
     fi
   done < <(read_registry)
-  [ "$any" -eq 1 ] || return 0
 }
 
 cmd_rearm() {
@@ -464,7 +473,7 @@ cmd_handled() {
   printf '%s' "$url" > "$dir/url"
   tmp=$(mktemp "$dir/handled.XXXXXX")
   if [ -f "$dir/handled" ]; then
-    awk -v want="$id" '$1 != want' "$dir/handled" > "$tmp"
+    drop_matching "$id" "$LEDGER_DROP_AWK" "$dir/handled" > "$tmp"
   fi
   printf '%s %s\n' "$id" "$mark" >> "$tmp"
   mv -f "$tmp" "$dir/handled"

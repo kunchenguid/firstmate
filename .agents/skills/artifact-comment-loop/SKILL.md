@@ -76,7 +76,8 @@ printf '%s\n' "<thread-id> <mark>" ... | bin/fm-artifact.sh new <url>
 3. It prints only the threads that have moved since you last handled them, and stays silent when nothing has.
    Silence ends the backstop for that artifact: say nothing to the captain, and do not report the empty poll as progress.
 
-Handle whatever it prints as ordinary comment feedback, then record each one:
+Handle whatever it prints as ordinary comment feedback.
+Reply to the thread first, then re-read that thread and record it with the mark as it stands after your reply, never the mark you read before answering:
 
 ```
 bin/fm-artifact.sh handled <url> <thread-id> <mark>
@@ -85,8 +86,14 @@ bin/fm-artifact.sh handled <url> <thread-id> <mark>
 ## Never handle a comment twice
 
 The ledger is what keeps the live subscription and the backstop from both answering the same comment.
-Whenever you act on a comment - including one that arrived through the live watch, not the backstop - record it with `handled` using the same mark you would have read from the thread.
-Skipping that step is what makes the backstop re-surface an answered comment later.
+Whenever you act on a comment - including one that arrived through the live watch, not the backstop - reply first, then re-read that thread and record it with `handled` using the mark as it stands after your reply.
+Never record the mark you read before answering.
+Skipping the record entirely is what makes the backstop re-surface an answered comment later.
+
+The mark records the state you have actually seen, and a mark read before replying is already obsolete by the time the turn ends, because your own reply is the very next thing to land on that thread.
+The mark moves for reasons that are not the captain: your own reply moves it, and so does the host's automatic comment acknowledgement, which is deliberately outside this mechanism and stays in place.
+That is precisely why the read is placed after the reply.
+A mark taken after the reply still cannot swallow a genuine comment: if a real new comment arrives between your reply and the mark read, the mark moves again and the backstop re-surfaces the thread, which is correct because there genuinely is something new.
 
 Comparing the mark rather than the thread id alone is deliberate: a follow-up comment on a thread you already answered moves the mark, so it is correctly reported as new.
 
