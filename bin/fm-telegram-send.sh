@@ -269,7 +269,7 @@ report_stalled_queue() {  # <oldest-card>
 }
 
 action_check() {
-  local card code body sent=0 oldest='' text
+  local card code body sent=0 oldest='' text secret_rc
   fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1 || exit 0
   command -v curl >/dev/null 2>&1 || { emit_error_once "cannot send: curl is not installed"; exit 0; }
   body=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-body.XXXXXX") || exit 0
@@ -282,11 +282,20 @@ action_check() {
     # the bytes about to leave the machine. A card that fails it here is
     # dropped rather than sent, and the drop is reported: a send that silently
     # drops is worse than one that fails.
-    if ! fm_telegram_refuse_if_secret "$FM_HOME" "$text"; then
-      rm -f -- "$card"
-      emit_error_once "refused a notification that would have carried a credential value"
-      continue
-    fi
+    secret_rc=0
+    fm_telegram_refuse_if_secret "$FM_HOME" "$text" || secret_rc=$?
+    case "$secret_rc" in
+      0) ;;
+      1)
+        rm -f -- "$card"
+        emit_error_once "refused a notification that would have carried a credential value"
+        continue
+        ;;
+      *)
+        emit_error_once "refused notifications because credential file could not be checked: $FM_TELEGRAM_SECRET_ERROR_PATH"
+        exit 0
+        ;;
+    esac
     code=$(post_card "$card" "$body") || {
       # The call did not complete: the network, DNS, or Telegram is unavailable.
       # Cards stay queued in order and the next cycle retries.

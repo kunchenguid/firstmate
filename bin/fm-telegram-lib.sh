@@ -107,6 +107,7 @@ FM_TELEGRAM_SECRET_FILES_MAX=100
 FM_TELEGRAM_CHAT_ID=
 # shellcheck disable=SC2034 # Read by sourcing callers.
 FM_TELEGRAM_TOKEN_FILE=
+FM_TELEGRAM_SECRET_ERROR_PATH=
 
 _fm_telegram_config_dir() {  # <home>
   printf '%s\n' "${FM_CONFIG_OVERRIDE:-$1/config}"
@@ -193,52 +194,77 @@ fm_telegram_enabled() {  # <home>
 # config/telegram-secret-files, which is local and gitignored, because the
 # credential set is a property of the operator's machine and never of this
 # shared template.
-fm_telegram_secret_values() {  # <home>
-  local home=$1 dir list file value candidate files='' bytes count=0
+_fm_telegram_secret_candidate_safe() {  # <text> <candidate>
+  [ "${#2}" -lt "$FM_TELEGRAM_SECRET_MIN" ] && return 0
+  case "$1" in
+    *"$2"*) return 1 ;;
+  esac
+  return 0
+}
+
+fm_telegram_refuse_if_secret() {  # <home> <text>
+  local home=$1 text=$2 dir list file value candidate bare files='' bytes count=0
+  FM_TELEGRAM_SECRET_ERROR_PATH=
   dir=$(_fm_telegram_config_dir "$home")
   list="$dir/telegram-secret-files"
   [ -z "$FM_TELEGRAM_TOKEN_FILE" ] || files=$FM_TELEGRAM_TOKEN_FILE
-  if [ -f "$list" ] && [ ! -L "$list" ]; then
-    bytes=$(LC_ALL=C wc -c < "$list" 2>/dev/null | tr -d '[:space:]') || return 2
-    [ "$bytes" -le "$FM_TELEGRAM_SECRET_LIST_MAX" ] || return 2
-    files="${files}${files:+$'\n'}$(cat "$list" 2>/dev/null)" || return 2
+  if [ -e "$list" ] || [ -L "$list" ]; then
+    if [ ! -f "$list" ] || [ -L "$list" ] || [ ! -r "$list" ]; then
+      FM_TELEGRAM_SECRET_ERROR_PATH=$list
+      return 2
+    fi
+    bytes=$(LC_ALL=C wc -c < "$list" 2>/dev/null | tr -d '[:space:]') || {
+      FM_TELEGRAM_SECRET_ERROR_PATH=$list
+      return 2
+    }
+    if [ "$bytes" -gt "$FM_TELEGRAM_SECRET_LIST_MAX" ]; then
+      FM_TELEGRAM_SECRET_ERROR_PATH=$list
+      return 2
+    fi
+    files="${files}${files:+$'\n'}$(cat "$list" 2>/dev/null)" || {
+      FM_TELEGRAM_SECRET_ERROR_PATH=$list
+      return 2
+    }
   fi
   while IFS= read -r file || [ -n "$file" ]; do
     case "$file" in
       ''|'#'*) continue ;;
     esac
     count=$((count + 1))
-    [ "$count" -le "$FM_TELEGRAM_SECRET_FILES_MAX" ] || return 2
+    if [ "$count" -gt "$FM_TELEGRAM_SECRET_FILES_MAX" ]; then
+      FM_TELEGRAM_SECRET_ERROR_PATH=$list
+      return 2
+    fi
     [ "${file#\~/}" = "$file" ] || file="$HOME/${file#\~/}"
-    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || continue
-    bytes=$(LC_ALL=C wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || return 2
-    [ "$bytes" -le "$FM_TELEGRAM_SECRET_FILE_MAX" ] || return 2
+    if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
+      FM_TELEGRAM_SECRET_ERROR_PATH=$file
+      return 2
+    fi
+    bytes=$(LC_ALL=C wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || {
+      FM_TELEGRAM_SECRET_ERROR_PATH=$file
+      return 2
+    }
+    if [ "$bytes" -gt "$FM_TELEGRAM_SECRET_FILE_MAX" ]; then
+      FM_TELEGRAM_SECRET_ERROR_PATH=$file
+      return 2
+    fi
     while IFS= read -r value || [ -n "$value" ]; do
       value=${value%$'\r'}
-      [ "${#value}" -lt "$FM_TELEGRAM_SECRET_MIN" ] || printf '%s\n' "$value"
+      _fm_telegram_secret_candidate_safe "$text" "$value" || return 1
       case "$value" in
         *=*)
           candidate=${value#*=}
-          [ "${#candidate}" -lt "$FM_TELEGRAM_SECRET_MIN" ] || printf '%s\n' "$candidate"
+          _fm_telegram_secret_candidate_safe "$text" "$candidate" || return 1
+          case "$candidate" in
+            \"*\") bare=${candidate#\"}; bare=${bare%\"} ;;
+            \'*\') bare=${candidate#\'}; bare=${bare%\'} ;;
+            *) bare='' ;;
+          esac
+          [ -z "$bare" ] || _fm_telegram_secret_candidate_safe "$text" "$bare" || return 1
           ;;
       esac
     done < "$file"
   done <<< "$files"
-}
-
-# Refuse <text> when it contains any of this home's credential values. This is
-# a positive check against real values rather than a pattern blocklist, so it
-# cannot be defeated by an unusual token shape and cannot fire on prose that
-# merely looks credential-like. Returns 0 when the text is safe to send.
-fm_telegram_refuse_if_secret() {  # <home> <text>
-  local home=$1 text=$2 value values
-  values=$(fm_telegram_secret_values "$home") || return 2
-  while IFS= read -r value || [ -n "$value" ]; do
-    [ -n "$value" ] || continue
-    case "$text" in
-      *"$value"*) return 1 ;;
-    esac
-  done <<< "$values"
   return 0
 }
 
@@ -484,7 +510,7 @@ fm_telegram_notify() {  # <home> <state> <class> <key> <name=value>...
   case "$secret_rc" in
     0) ;;
     1) _fm_telegram_actionable "for $class was refused: it would have carried a credential value"; return 3 ;;
-    *) _fm_telegram_actionable "for $class was refused: configured credential files could not be checked completely"; return 3 ;;
+    *) _fm_telegram_actionable "for $class was refused: credential file could not be checked: $FM_TELEGRAM_SECRET_ERROR_PATH"; return 3 ;;
   esac
   mkdir -p "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || return 1
   chmod 0700 "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || true

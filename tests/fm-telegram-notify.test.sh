@@ -354,7 +354,7 @@ test_a_credential_value_is_refused_loudly() {
   local dir out rc=0
   dir=$(make_home secret)
   printf '%s\n' "$dir/extra-credential" > "$dir/home/config/telegram-secret-files"
-  printf 'first-secret-api-key-value\nSECOND=second-secret-api-key-value\n' > "$dir/extra-credential"
+  printf 'first-secret-api-key-value\nSECOND=second-secret-api-key-value\nQUOTED="quoted-secret-api-key-value"\n' > "$dir/extra-credential"
   chmod 0600 "$dir/extra-credential"
 
   out=$(report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
@@ -378,11 +378,46 @@ test_a_credential_value_is_refused_loudly() {
   [ "$(card_count "$dir")" = 0 ] \
     || fail "a card carrying only a KEY=value credential value was queued"
 
+  out=$(report "$dir" "failed [key=k2-quoted]: child t1 failed: x" failed k2-quoted \
+    "project=alpha" "note=config said quoted-secret-api-key-value" 2>&1) || rc=$?
+  [ "$(card_count "$dir")" = 0 ] \
+    || fail "a card carrying a bare quoted credential value was queued"
+
   # A refusal is about real values, not about anything that merely looks secret.
   report "$dir" "failed [key=k3]: child t1 failed: x" failed k3 \
     "project=alpha" "note=the token check failed" >/dev/null 2>&1 || true
   [ "$(card_count "$dir")" = 1 ] || fail "an ordinary card was refused as a secret"
   pass "a card carrying a real credential value is refused, and the refusal is loud"
+}
+
+test_unreadable_configured_secret_file_refuses_queue_and_send() {
+  local dir missing card base out
+  dir=$(make_home missing-secret)
+  missing="$dir/missing-credential"
+  printf '%s\n' "$missing" > "$dir/home/config/telegram-secret-files"
+  out=$(report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
+    "project=alpha" "note=the build broke" 2>&1) || true
+  [ "$(card_count "$dir")" = 0 ] || fail "an unchecked credential file allowed a card to queue"
+  case "$out" in
+    *"$missing"*) ;;
+    *) fail "queue-time credential refusal did not name the unreadable path: $out" ;;
+  esac
+
+  printf 'available-secret-api-key-value\n' > "$missing"
+  report "$dir" "failed [key=k2]: child t1 failed: x" failed k2 \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  card=$(only_card "$dir")
+  rm -f "$missing"
+  base=$(start_api "$dir")
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "send-time credential refusal failed"
+  case "$out" in
+    *"$missing"*) ;;
+    *) fail "send-time credential refusal did not name the unreadable path: $out" ;;
+  esac
+  [ -f "$card" ] || fail "an incomplete send-time credential scan discarded the card"
+  [ ! -s "$dir/api.log" ] || fail "an incomplete credential scan sent the queued card"
+  stop_api
+  pass "unreadable configured credential files refuse queueing and sending by exact path"
 }
 
 test_internal_identifiers_do_not_reach_a_card() {
@@ -753,6 +788,7 @@ test_all_four_classes_render
 test_multibyte_fields_remain_valid_utf8_when_truncated
 test_a_raw_status_line_cannot_become_a_card
 test_a_credential_value_is_refused_loudly
+test_unreadable_configured_secret_file_refuses_queue_and_send
 test_internal_identifiers_do_not_reach_a_card
 test_pr_card_identity_tracks_the_canonical_pr
 test_pr_registration_survives_card_digest_failure
