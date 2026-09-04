@@ -556,8 +556,15 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
   wait "$watchdog" 2>/dev/null || true
 }
 
-list_work_impl() {
+write_unknown_fallback() {
+  local path=$1 id=$2 reason=$3
+  printf '{"id":"%s","description":null,"task":null,"pid":null,"started_at":null,"expected_finish_at":null,"liveness":{"status":"unknown","reason":"%s"},"progress":{"status":"unknown","reason":"%s","value":null,"observed_at":null,"last_changed_at":null,"stale_after_seconds":null,"timeout_seconds":null}}\n' \
+    "$id" "$reason" "$reason" > "$path"
+}
+
+list_work() {
   local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false
+  local capture_degraded=0
   local collection_started collection_deadline remaining lock_rc lock_error_document
   local -a records=() ids=() record_files=()
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
@@ -604,10 +611,16 @@ list_work_impl() {
       total=$((total + 1))
       [ "$attempted" -ge "$COLLECTION_MAX_PROBES" ] || attempted=$((attempted + 1))
       id=${record##*/}
-      if ! cp "$record/fallback.json" "$stage/$id.json"; then
-        fm_lock_release "$REGISTRY/.registry.lock"
-        rm -rf -- "$stage"
-        die "cannot capture background-work fallback: $id"
+      if [ -f "$record/fallback.json" ] && [ ! -L "$record/fallback.json" ]; then
+        if ! cp "$record/fallback.json" "$stage/$id.json"; then
+          capture_degraded=$((capture_degraded + 1))
+          write_unknown_fallback "$stage/$id.json" "$id" fallback-unavailable \
+            || { fm_lock_release "$REGISTRY/.registry.lock"; rm -rf -- "$stage"; die "cannot capture background-work identity: $id"; }
+        fi
+      else
+        capture_degraded=$((capture_degraded + 1))
+        write_unknown_fallback "$stage/$id.json" "$id" fallback-unavailable \
+          || { fm_lock_release "$REGISTRY/.registry.lock"; rm -rf -- "$stage"; die "cannot capture background-work identity: $id"; }
       fi
       records+=("$record")
       ids+=("$id")
@@ -624,7 +637,7 @@ list_work_impl() {
       record_files+=("$stage/$id.json")
     done
   fi
-  [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] || truncated=true
+  [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] && [ "$capture_degraded" -eq 0 ] || truncated=true
   remaining=$((collection_deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || { [ -z "${stage:-}" ] || rm -rf -- "$stage"; die "background-work collection budget exhausted before assembly"; }
   document=$(fm_run_timed "$remaining" jq -s --arg generated "$generated" --arg home "$FM_HOME" \
@@ -645,24 +658,6 @@ list_work_impl() {
       (.progress.value // "-"), (.started_at // "-"),
       (.expected_finish_at // "-"), (.description // "-")
     ] | @tsv'
-  fi
-}
-
-list_work() {
-  local format=${1-} output rc
-  case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
-  if output=$(fm_run_timed "$COLLECTION_BUDGET" "$0" _list "$format"); then
-    printf '%s\n' "$output"
-    return 0
-  else
-    rc=$?
-  fi
-  [ "$rc" -eq 124 ] || return "$rc"
-  if [ "$format" = --json ]; then
-    printf '%s\n' '{"schema":"fm-background-work-list.v1","generated":null,"fm_home":null,"collection":{"status":"unknown","reason":"collection-timeout","budget_seconds":null,"total_records":null,"probes_attempted":0,"probes_completed":0,"truncated":true},"records":[{"id":"(registry)","description":"Background-work collection timed out","task":null,"pid":null,"started_at":null,"expected_finish_at":null,"liveness":{"status":"unknown","reason":"collection-timeout"},"progress":{"status":"unknown","reason":"collection-timeout","value":null,"observed_at":null,"last_changed_at":null,"stale_after_seconds":null,"timeout_seconds":null}}]}'
-  else
-    printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
-    printf '(registry)\t-\tunknown\tunknown\t-\t-\t-\tBackground-work collection timed out\n'
   fi
 }
 
@@ -710,7 +705,6 @@ retire_work() {
 }
 
 case "${1-}" in
-  _list) shift; list_work_impl "${1-}" ;;
   register) shift; register_work "$@" ;;
   list) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; list_work "${1-}" ;;
   retire) shift; [ "$#" -eq 1 ] || { usage >&2; exit 2; }; retire_work "$1" ;;

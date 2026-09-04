@@ -389,10 +389,10 @@ test_registry_lock_contention_returns_disclosed_unknown() {
   pass "registry lock contention returns promptly as a disclosed unknown collection"
 }
 
-test_blocked_snapshot_capture_hits_public_deadline() {
+test_blocked_record_with_hanging_probe_remains_visible() {
   local home progress fallback result started elapsed
   home=$(make_home blocked-capture)
-  progress=$(make_progress_command blocked-capture-progress 'printf "ready\n"')
+  progress=$(make_progress_command blocked-capture-progress 'sleep 10; printf "late\n"')
   start_sleeper
   register_fixture "$home" blocked "$STARTED_PID" "$progress" ''
   fallback="$home/state/background-work/blocked/fallback.json"
@@ -401,18 +401,21 @@ test_blocked_snapshot_capture_hits_public_deadline() {
   started=$(date +%s)
   result=$(FM_BACKGROUND_WORK_COLLECTION_BUDGET=2 \
     FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT=1 list_json "$home") \
-    || fail "public collection timeout made list fail"
+    || fail "blocked record collection made list fail"
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 4 ] || fail "blocked snapshot capture escaped the public deadline (${elapsed}s)"
+  [ "$elapsed" -lt 4 ] || fail "blocked record escaped the collection deadline (${elapsed}s)"
   printf '%s\n' "$result" | jq -e '
-    .collection.status == "unknown"
-      and .collection.reason == "collection-timeout"
-      and .collection.truncated == true
-      and .records[0].id == "(registry)"
+    .collection.truncated == true
+      and .collection.total_records == 1
+      and (.records | length) == 1
+      and .records[0].id == "blocked"
       and .records[0].liveness.status == "unknown"
       and .records[0].progress.status == "unknown"
-  ' >/dev/null || fail "public timeout did not disclose collection-level unknown: $result"
-  pass "blocked snapshot capture is bounded by the public collection deadline"
+      and (.records[0].progress.reason == "fallback-unavailable"
+        or .records[0].progress.reason == "timeout"
+        or .records[0].progress.reason == "collection-budget")
+  ' >/dev/null || fail "blocked record was hidden or reported healthy: $result"
+  pass "blocked record remains visible and unknown within the collection deadline"
 }
 
 test_live_adopted_process_reads_alive_and_progressing
@@ -427,4 +430,4 @@ test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
 test_registry_lock_contention_returns_disclosed_unknown
-test_blocked_snapshot_capture_hits_public_deadline
+test_blocked_record_with_hanging_probe_remains_visible
