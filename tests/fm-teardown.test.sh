@@ -83,6 +83,10 @@ make_case() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 # `treehouse return --force <wt>`: succeed silently.
+if [ "${1:-} ${2:-}" = "status --help" ]; then
+  printf '%s\n' 'Usage: treehouse status'
+  exit 0
+fi
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -364,6 +368,7 @@ fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
+  prepare_treehouse_test_double "$case_dir"
 }
 
 # treehouse return fails once with the index.lock signature, then clears the lock
@@ -539,12 +544,33 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+# Give older test doubles an explicit successful legacy help surface. Production
+# treats failed or empty help as unreadable; the one adversarial test that proves
+# that refusal opts out with FM_FAKE_TREEHOUSE_HELP_FAILURE=1.
+prepare_treehouse_test_double() {
+  local case_dir=$1 fake="$1/fakebin/treehouse" impl="$1/fakebin/treehouse.fm-impl"
+  [ "${FM_FAKE_TREEHOUSE_HELP_FAILURE:-0}" != 1 ] || return 0
+  [ -e "$impl" ] && return 0
+  mv "$fake" "$impl"
+  cat > "$fake" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "status --help" ]; then
+  printf '%s\n' 'Usage: treehouse status'
+  exit 0
+fi
+exec '$impl' "\$@"
+SH
+  chmod +x "$fake"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  prepare_treehouse_test_double "$case_dir"
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TREEHOUSE_OPERATION_LOCK="$case_dir/treehouse-operation.lock" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -1437,7 +1463,7 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+[ "\${1:-}" != return ] || printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
@@ -1533,10 +1559,11 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+[ "\${1:-}" != return ] || printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
+  prepare_treehouse_test_double "$case_dir"
 
   teardown_bin=$TEARDOWN
   case "$mode" in
@@ -1561,6 +1588,7 @@ SH
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
+    FM_TREEHOUSE_OPERATION_LOCK="$case_dir/treehouse-operation.lock" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
@@ -1647,7 +1675,7 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
   : > "$log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+[ "\${1:-}" != return ] || printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
@@ -1701,7 +1729,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
@@ -2137,7 +2165,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
@@ -2307,7 +2335,7 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
 
@@ -2533,7 +2561,7 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'returned\n' > "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
 
@@ -2569,8 +2597,10 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
-if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+if [ "\${1:-}" = return ]; then
+  if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
+  if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+fi
 exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -2589,6 +2619,312 @@ EOF
   assert_grep "reap-already-happened" "$case_dir/order.log" \
     "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
+}
+
+add_treehouse_slot_state() {
+  local case_dir=$1 managed=$2 status=$3 return_mode=${4:-success}
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  printf '[{"path":"%s","status":"%s","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]\\n' '$managed' '$status'
+  exit 0
+fi
+if [ "\${1:-}" = return ]; then
+  printf '%s\\n' "\$*" >> '$case_dir/treehouse-return.log'
+  case '$return_mode' in
+    managed-only)
+      [ "\${3:-}" = '$managed' ] && exit 0
+      echo 'error: worktree not managed by treehouse' >&2
+      exit 1
+      ;;
+    refuse)
+      echo 'error: worktree not managed by treehouse' >&2
+      exit 1
+      ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+make_managed_slot_link() {
+  local case_dir=$1 managed
+  managed="$case_dir/managed-treehouse/1/wt"
+  mkdir -p "$(dirname "$managed")"
+  ln -s "$case_dir/wt" "$managed"
+  printf '%s\n' "$managed"
+}
+
+test_physical_record_returns_managed_slot_path() {
+  local case_dir managed rc
+  case_dir=$(make_case physical-record-managed-return)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  managed=$(make_managed_slot_link "$case_dir")
+  add_treehouse_slot_state "$case_dir" "$managed" in-use managed-only
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "physical-path metadata should return the matching managed Treehouse slot"
+  assert_grep "return --force $managed" "$case_dir/treehouse-return.log" \
+    "teardown did not pass Treehouse's managed path to return"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "successful managed-path return did not retire task metadata"
+  pass "physical metadata paths resolve to the managed Treehouse path before return"
+}
+
+test_already_returned_clean_slot_retires_records() {
+  local case_dir managed rc
+  case_dir=$(make_case already-returned-clean)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  managed=$(make_managed_slot_link "$case_dir")
+  add_treehouse_slot_state "$case_dir" "$managed" available refuse
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "an already-returned clean landed slot should retire stale records"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "already-returned slot unexpectedly invoked treehouse return"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "already-returned clean slot left task metadata behind"
+  pass "an already-returned clean landed slot completes record retirement"
+}
+
+test_already_returned_unlanded_slot_still_refuses() {
+  local case_dir managed rc
+  case_dir=$(make_case already-returned-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" unpushed.txt unlanded "unpushed work"
+  managed=$(make_managed_slot_link "$case_dir")
+  add_treehouse_slot_state "$case_dir" "$managed" available refuse
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "an already-returned slot with unlanded work must still refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unlanded refusal retired task metadata"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "unlanded already-returned slot unexpectedly invoked treehouse return"
+  assert_grep "work not on any remote and not landed" "$case_dir/stderr" \
+    "unlanded already-returned slot did not preserve the landed-work refusal"
+  pass "an already-returned slot still refuses genuine unlanded work"
+}
+
+test_rebound_slot_retires_only_stale_task_records() {
+  local case_dir managed rc branch
+  case_dir=$(make_case rebound-different-live-task)
+  write_meta "$case_dir" no-mistakes ship
+  managed=$(make_managed_slot_link "$case_dir")
+  fm_write_meta "$case_dir/state/new-live-task.meta" \
+    "window=firstmate:fm-new-live-task" \
+    "endpoint_task_id=new-live-task" \
+    "worktree=$managed" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s-new-live"
+  printf '%s\n' \
+    'task_id=new-live-task' \
+    'spawn_gen=s-new-live' > "$managed/.fm-treehouse-owner"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-new-live-task'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_command}'*) printf '%s\n' codex ;;
+      *'#{pane_tty}'*) printf '\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  printf 'new worker hook\n' > "$managed/.fm-grok-turnend"
+  add_treehouse_slot_state "$case_dir" "$managed" in-use refuse
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a slot rebound to a different live task should retire only stale records"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "rebound-slot teardown left stale task metadata behind"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "rebound-slot teardown invoked treehouse return"
+  assert_present "$case_dir/state/new-live-task.meta" \
+    "rebound-slot teardown removed the live task's metadata"
+  assert_present "$managed/.fm-grok-turnend" \
+    "rebound-slot teardown removed a live task's worktree hook"
+  branch=$(git -C "$managed" symbolic-ref --short HEAD)
+  [ "$branch" = fm/task-x1 ] \
+    || fail "rebound-slot teardown modified the live worktree branch: $branch"
+  pass "a rebound slot retires only stale task records and never modifies the live worktree"
+}
+
+test_stale_claimant_cannot_bypass_unlanded_refusal() {
+  local case_dir managed rc
+  case_dir=$(make_case stale-claimant-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'spawn_gen=s-task-x1' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" unpushed.txt unlanded "unpushed work"
+  managed=$(make_managed_slot_link "$case_dir")
+  printf '%s\n' \
+    'task_id=task-x1' \
+    'spawn_gen=s-task-x1' > "$managed/.fm-treehouse-owner"
+  fm_write_meta "$case_dir/state/stale-other.meta" \
+    "window=firstmate:fm-stale-other" \
+    "endpoint_task_id=stale-other" \
+    "worktree=$managed" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s-stale"
+  add_treehouse_slot_state "$case_dir" "$managed" in-use managed-only
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "a stale claimant must not bypass the target task's landed-work refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "stale-claimant refusal retired the target task metadata"
+  assert_present "$case_dir/state/stale-other.meta" \
+    "stale-claimant refusal retired the competing metadata"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "stale-claimant refusal invoked treehouse return"
+  assert_grep "work not on any remote and not landed" "$case_dir/stderr" \
+    "stale claimant bypassed the ordinary unlanded-work diagnostic"
+  pass "a stale competing record cannot bypass landed-work protection"
+}
+
+test_missing_worktree_unlanded_branch_refuses() {
+  local case_dir rc
+  case_dir=$(make_case missing-worktree-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" unpushed.txt unlanded "unpushed work"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "status --json" ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "a gone worktree with an unlanded retained branch must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "missing-worktree landed refusal retired task metadata"
+  assert_present "$case_dir/project/.git/refs/heads/fm/task-x1" \
+    "missing-worktree landed refusal removed the retained task branch"
+  assert_grep "retained work not on any remote and not landed" "$case_dir/stderr" \
+    "missing-worktree refusal did not report the retained unlanded work"
+  pass "a missing worktree must still prove its retained task branch landed"
+}
+
+test_failed_treehouse_status_help_refuses_before_mutation() {
+  local case_dir rc branch
+  case_dir=$(make_case failed-status-help)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'live worker hook\n' > "$case_dir/wt/.fm-grok-turnend"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "status --json" ] || [ "\${1:-} \${2:-}" = "status --help" ]; then
+  echo 'treehouse status unavailable' >&2
+  exit 1
+fi
+if [ "\${1:-}" = return ]; then
+  printf '%s\n' "\$*" >> '$case_dir/treehouse-return.log'
+fi
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_TREEHOUSE_HELP_FAILURE=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "failed JSON and help reads must fail closed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed-status refusal retired task metadata"
+  assert_present "$case_dir/wt/.fm-grok-turnend" \
+    "failed-status refusal removed a worktree hook"
+  branch=$(git -C "$case_dir/wt" symbolic-ref --short HEAD)
+  [ "$branch" = fm/task-x1 ] \
+    || fail "failed-status refusal modified the worktree branch: $branch"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "failed-status refusal invoked treehouse return"
+  assert_grep "authoritative slot read failed" "$case_dir/stderr" \
+    "failed-status refusal did not report the authoritative-read failure"
+  pass "a failing Treehouse JSON and help surface refuses before worktree mutation"
+}
+
+test_post_check_rebind_never_mutates_live_worktree() {
+  local case_dir managed rc branch
+  case_dir=$(make_case post-check-rebind)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'spawn_gen=s-task-x1' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  managed=$(make_managed_slot_link "$case_dir")
+  printf '%s\n' \
+    'task_id=task-x1' \
+    'spawn_gen=s-task-x1' > "$managed/.fm-treehouse-owner"
+  add_treehouse_slot_state "$case_dir" "$managed" in-use managed-only
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "axi status" ]; then
+  [ -d "\${FM_TREEHOUSE_OPERATION_LOCK:?}" ] \
+    && printf '%s\n' lock-held > '$case_dir/lock-proof'
+  cat > '$case_dir/state/new-live-task.meta' <<EOF
+window=firstmate:fm-new-live-task
+endpoint_task_id=new-live-task
+worktree=$managed
+project=$case_dir/project
+kind=ship
+mode=no-mistakes
+spawn_gen=s-new-live
+EOF
+  printf '%s\n' 'task_id=new-live-task' 'spawn_gen=s-new-live' > '$managed/.fm-treehouse-owner'
+  printf '%s\n' 'new worker hook' > '$managed/.fm-grok-turnend'
+  exit 0
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-new-live-task'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_command}'*) printf '%s\n' codex ;;
+      *'#{pane_tty}'*) printf '\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes" "$case_dir/fakebin/tmux"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "a post-check live rebind should retire only stale task records"
+  assert_present "$case_dir/lock-proof" \
+    "teardown did not hold the shared Treehouse operation lock across the injected interval"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "post-check rebound teardown left the stale target metadata"
+  assert_present "$case_dir/state/new-live-task.meta" \
+    "post-check rebound teardown removed the live task metadata"
+  assert_present "$managed/.fm-grok-turnend" \
+    "post-check rebound teardown removed the live task hook"
+  assert_absent "$case_dir/treehouse-return.log" \
+    "post-check rebound teardown invoked treehouse return"
+  branch=$(git -C "$managed" symbolic-ref --short HEAD)
+  [ "$branch" = fm/task-x1 ] \
+    || fail "post-check rebound teardown modified the live worktree branch: $branch"
+  pass "a post-check rebind is detected under the shared lock before live-worktree mutation"
 }
 
 test_local_only_fork_remote_allows
@@ -2649,3 +2985,11 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_physical_record_returns_managed_slot_path
+test_already_returned_clean_slot_retires_records
+test_already_returned_unlanded_slot_still_refuses
+test_rebound_slot_retires_only_stale_task_records
+test_stale_claimant_cannot_bypass_unlanded_refusal
+test_missing_worktree_unlanded_branch_refuses
+test_failed_treehouse_status_help_refuses_before_mutation
+test_post_check_rebind_never_mutates_live_worktree

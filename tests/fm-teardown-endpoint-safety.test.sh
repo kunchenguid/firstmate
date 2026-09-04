@@ -28,6 +28,10 @@ SH
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
+case "${1:-}:${2:-}" in
+  status:--json) exit 1 ;;
+  status:--help) printf '%s\n' 'Usage: treehouse status'; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
@@ -183,8 +187,11 @@ test_metadata_lock_serializes_destructive_cleanup() {
 
   : > "$release"
   wait "$holder" || fail "metadata lock holder failed"
-  wait "$teardown_pid"; rc=$?
-  expect_code 0 "$rc" "teardown should complete after the metadata writer releases"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "teardown should complete after the metadata writer releases: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$id.meta" \
     "serialized teardown left a task record that a completed writer could resurrect"
   pass "fm-teardown: destructive cleanup serializes with metadata writers"

@@ -668,6 +668,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  fm_fake_treehouse_legacy "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -1086,9 +1087,11 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
+case "${1:-}:${2:-}" in
+  get:--help) printf '%s\n' 'Usage: treehouse get [--lease]' ;;
+  status:--json) exit 1 ;;
+  status:--help) printf '%s\n' 'Usage: treehouse status' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"

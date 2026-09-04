@@ -211,6 +211,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Every ordinary pooled spawn or relaunch holds the host-user-wide Treehouse
+# operation lock from before allocation or slot adoption through owner-marker
+# and task-metadata publication, so teardown's identity-to-return critical
+# section cannot race a slot reissue.
+# If relaunch aborts before metadata publication, cleanup restores the prior
+# owner marker while that lock is still held, keeping retry and teardown viable.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -287,6 +293,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -694,6 +702,13 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_TREEHOUSE_LOCK=
+SPAWN_TREEHOUSE_LOCK_HELD=0
+RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING=0
+RELAUNCH_TREEHOUSE_OWNER_MARKER=
+RELAUNCH_TREEHOUSE_PRIOR_OWNER_PRESENT=0
+RELAUNCH_TREEHOUSE_PRIOR_OWNER_TASK_ID=
+RELAUNCH_TREEHOUSE_PRIOR_OWNER_SPAWN_GEN=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -719,6 +734,52 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_restore_relaunch_treehouse_owner() {
+  local marker owner_rc=1 current_task='' current_gen=''
+  marker=$RELAUNCH_TREEHOUSE_OWNER_MARKER
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if fm_treehouse_read_owner "$marker"; then
+      owner_rc=0
+      current_task=$FM_TREEHOUSE_OWNER_TASK_ID
+      current_gen=$FM_TREEHOUSE_OWNER_SPAWN_GEN
+    else
+      owner_rc=$?
+      [ "$owner_rc" -ne 1 ] || owner_rc=2
+    fi
+  fi
+
+  if [ "$RELAUNCH_TREEHOUSE_PRIOR_OWNER_PRESENT" = 1 ]; then
+    if [ "$owner_rc" -eq 0 ] \
+       && [ "$current_task" = "$RELAUNCH_TREEHOUSE_PRIOR_OWNER_TASK_ID" ] \
+       && [ "$current_gen" = "$RELAUNCH_TREEHOUSE_PRIOR_OWNER_SPAWN_GEN" ]; then
+      return 0
+    fi
+    if [ "$owner_rc" -eq 0 ] \
+       && { [ "$current_task" != "$ID" ] || [ "$current_gen" != "$SPAWN_GEN" ]; }; then
+      echo "warning: Treehouse owner changed unexpectedly during aborted relaunch of $ID; refusing to overwrite $current_task at generation $current_gen" >&2
+      return 1
+    fi
+    if [ "$owner_rc" -eq 2 ]; then
+      echo "warning: Treehouse owner marker became invalid during aborted relaunch of $ID; refusing to overwrite it" >&2
+      return 1
+    fi
+    fm_treehouse_write_owner \
+      "$WT" \
+      "$RELAUNCH_TREEHOUSE_PRIOR_OWNER_TASK_ID" \
+      "$RELAUNCH_TREEHOUSE_PRIOR_OWNER_SPAWN_GEN"
+    return
+  fi
+
+  [ "$owner_rc" -ne 1 ] || return 0
+  if [ "$owner_rc" -ne 0 ] \
+     || [ "$current_task" != "$ID" ] \
+     || [ "$current_gen" != "$SPAWN_GEN" ]; then
+    echo "warning: Treehouse owner changed unexpectedly during aborted relaunch of $ID; refusing to remove unverified ownership" >&2
+    return 1
+  fi
+  rm -f -- "$marker"
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -727,6 +788,7 @@ spawn_abort_cleanup() {
      && [ ! -e "$SPAWN_META_TMP" ] \
      && [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
+    RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING=0
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
@@ -802,6 +864,18 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
+  fi
+  if [ "$RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING" = 1 ]; then
+    RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING=0
+    if [ "$SPAWN_TREEHOUSE_LOCK_HELD" != 1 ]; then
+      echo "warning: shared Treehouse lock was lost before aborted relaunch ownership could be restored for $ID" >&2
+    elif ! spawn_restore_relaunch_treehouse_owner; then
+      echo "warning: could not restore Treehouse ownership after aborted relaunch of $ID" >&2
+    fi
+  fi
+  if [ "$SPAWN_TREEHOUSE_LOCK_HELD" = 1 ]; then
+    SPAWN_TREEHOUSE_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TREEHOUSE_LOCK" || true
   fi
   if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=0
@@ -2364,6 +2438,15 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_TREEHOUSE_LOCK=$(fm_treehouse_operation_lock_path) || {
+    echo "error: could not resolve the shared Treehouse operation lock; refusing an uncoordinated pool operation" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_TREEHOUSE_LOCK"
+  SPAWN_TREEHOUSE_LOCK_HELD=1
+fi
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2430,6 +2513,63 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if fm_treehouse_lookup_slot "$WT"; then
+    case "$FM_TREEHOUSE_SLOT_STATUS" in
+      in-use|leased) WT=$FM_TREEHOUSE_SLOT_PATH ;;
+      *)
+        echo "error: treehouse get entered '$WT', but its managed slot '$FM_TREEHOUSE_SLOT_PATH' is '$FM_TREEHOUSE_SLOT_STATUS'; refusing to record an unowned pool path" >&2
+        exit 1
+        ;;
+    esac
+  else
+    treehouse_lookup_rc=$?
+    if [ "$treehouse_lookup_rc" -eq 1 ]; then
+      echo "error: treehouse get entered '$WT', but no physically matching managed slot appears in treehouse status; refusing to record an unmanaged pool path" >&2
+      exit 1
+    fi
+    if [ "$treehouse_lookup_rc" -eq 3 ]; then
+      echo "error: Treehouse advertises JSON status but its authoritative slot read failed; refusing to record an unverified pool path" >&2
+      exit 1
+    fi
+    # Compatibility for old Treehouse versions and minimal test doubles that
+    # do not advertise JSON status. Current supported Treehouse versions always
+    # take the managed-path branch above or fail closed above.
+  fi
+
+  if [ "$RELAUNCH" -eq 1 ]; then
+    if [ -n "$FM_TREEHOUSE_SLOT_LEASE_HOLDER" ] \
+       && [ "$FM_TREEHOUSE_SLOT_LEASE_HOLDER" != "$ID" ]; then
+      echo "error: Treehouse slot '$WT' is leased to different task $FM_TREEHOUSE_SLOT_LEASE_HOLDER; refusing to overwrite foreign ownership during relaunch" >&2
+      exit 1
+    fi
+    treehouse_owner_marker="$WT/.fm-treehouse-owner"
+    if [ -e "$treehouse_owner_marker" ] || [ -L "$treehouse_owner_marker" ]; then
+      if fm_treehouse_read_owner "$treehouse_owner_marker"; then
+        treehouse_owner_rc=0
+      else
+        treehouse_owner_rc=$?
+      fi
+      if [ "$treehouse_owner_rc" -ne 0 ]; then
+        echo "error: Treehouse slot owner marker '$treehouse_owner_marker' is unreadable or invalid; refusing to overwrite unverified ownership during relaunch" >&2
+        exit 1
+      fi
+      if [ "$FM_TREEHOUSE_OWNER_TASK_ID" != "$ID" ]; then
+        echo "error: Treehouse slot '$WT' is owned by different task $FM_TREEHOUSE_OWNER_TASK_ID; refusing to overwrite foreign ownership during relaunch" >&2
+        exit 1
+      fi
+      relaunch_prior_spawn_gen=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
+      if [ -z "$relaunch_prior_spawn_gen" ] \
+         || [ "$FM_TREEHOUSE_OWNER_SPAWN_GEN" != "$relaunch_prior_spawn_gen" ]; then
+        echo "error: Treehouse slot '$WT' owner generation does not match task $ID metadata; refusing to overwrite unverified ownership during relaunch" >&2
+        exit 1
+      fi
+      RELAUNCH_TREEHOUSE_PRIOR_OWNER_PRESENT=1
+      RELAUNCH_TREEHOUSE_PRIOR_OWNER_TASK_ID=$FM_TREEHOUSE_OWNER_TASK_ID
+      RELAUNCH_TREEHOUSE_PRIOR_OWNER_SPAWN_GEN=$FM_TREEHOUSE_OWNER_SPAWN_GEN
+    fi
+  fi
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
@@ -2456,6 +2596,18 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  exclude_path '.fm-treehouse-owner'
+  if [ "$RELAUNCH" -eq 1 ]; then
+    RELAUNCH_TREEHOUSE_OWNER_MARKER="$WT/.fm-treehouse-owner"
+    RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING=1
+  fi
+  fm_treehouse_write_owner "$WT" "$ID" "$SPAWN_GEN" || {
+    echo "error: could not bind Treehouse slot '$WT' to task $ID; refusing to launch without rebind protection" >&2
+    exit 1
+  }
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -2790,7 +2942,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2860,6 +3011,7 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  RELAUNCH_TREEHOUSE_OWNER_RESTORE_PENDING=0
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -2872,6 +3024,12 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # publication.
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
+if [ "$SPAWN_TREEHOUSE_LOCK_HELD" = 1 ]; then
+  # The managed path, owner generation, and task record are now one published
+  # identity. A teardown may take the shared lock and act on that proof.
+  SPAWN_TREEHOUSE_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TREEHOUSE_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

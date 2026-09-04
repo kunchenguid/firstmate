@@ -87,7 +87,8 @@ make_home() {  # <name> [relay-on|relay-off]
 EOF
   [ "$relay" = relay-off ] || printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   make_fake_curl "$home" >/dev/null
-  fm_fake_exit0 "$home/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$home/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$home/fakebin"
   printf '%s\n' "$home"
 }
 
@@ -718,7 +719,8 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$child/fakebin"
 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
 
@@ -755,7 +757,8 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
@@ -786,7 +789,8 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   printf 'some_future_field=value\n' >> "$child/.fm-secondmate-parent"
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
@@ -821,7 +825,8 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$durable_parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
@@ -853,7 +858,8 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
       || fail "real secondmate seeding failed for $case_name"
     child=$(cd "$child" && pwd -P)
     make_fake_curl "$child" >/dev/null
-    fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+    fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+    fm_fake_treehouse_legacy "$child/fakebin"
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
       "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
@@ -915,7 +921,8 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse_legacy "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
@@ -1110,6 +1117,15 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   local home rc
   home=$(make_home cleanup-guard)
   seed_commitment "$home" pf-guard req-guard discord main ship-task
+  mkdir -p "$home/projects/sample"
+  git -C "$home/projects/sample" init -q
+  git -C "$home/projects/sample" config user.email test@example.com
+  git -C "$home/projects/sample" config user.name Test
+  printf '%s\n' fixture > "$home/projects/sample/fixture"
+  git -C "$home/projects/sample" add fixture
+  git -C "$home/projects/sample" commit -qm fixture
+  git -C "$home/projects/sample" branch fm/ship-task
+  git -C "$home/projects/sample" update-ref refs/remotes/origin/fm/ship-task HEAD
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/gone" \
@@ -1134,8 +1150,9 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-task >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "cleanup must proceed once the public reply has landed (rc=$rc)"
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-task \
+    > "$home/teardown-landed.out" 2> "$home/teardown-landed.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "cleanup must proceed once the public reply has landed (rc=$rc): $(cat "$home/teardown-landed.err")"
   pass "cleanup refuses while a public reply is owed and proceeds once it has landed"
 }
 

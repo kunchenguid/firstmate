@@ -148,9 +148,11 @@ fm_test_reap_orphans
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
 # shadow real tools with stubs. fm_fake_exit0 drops trivial exit-0 stubs for the
-# named tools into a fakebin dir. fm_fake_version_tool drops a stub for a tool
-# whose installed version bootstrap gates, so a fixture cannot be reported as an
-# unparseable build simply for answering `--version` with nothing.
+# named tools into a fakebin dir. fm_fake_treehouse_legacy provides positive
+# capability evidence for suites that do not exercise JSON pool status.
+# fm_fake_version_tool drops a stub for a tool whose installed version bootstrap
+# gates, so a fixture cannot be reported as an unparseable build simply for
+# answering `--version` with nothing.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
@@ -168,6 +170,18 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+fm_fake_treehouse_legacy() {  # <fakebin>
+  cat > "$1/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  status:--json) exit 1 ;;
+  status:--help) printf '%s\n' 'Usage: treehouse status' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1/treehouse"
 }
 
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>

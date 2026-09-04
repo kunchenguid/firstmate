@@ -100,6 +100,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  fm_fake_treehouse_legacy "$fakebin"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"

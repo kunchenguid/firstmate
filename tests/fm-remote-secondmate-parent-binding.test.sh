@@ -232,6 +232,7 @@ for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done
+fm_fake_treehouse_legacy "$TMP_ROOT/childfake"
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0

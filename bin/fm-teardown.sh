@@ -22,6 +22,17 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Before any ordinary pooled-worktree access, teardown resolves the recorded
+# path against `treehouse status --json`. The status entry supplies the managed
+# path spelling used for return. An available or no-longer-managed slot counts
+# as already returned only after the ordinary landed-work and cleanliness gates
+# pass, including a retained task-branch proof when the worktree is gone. A
+# different task counts as the live rebound owner only when its current endpoint
+# and owner generation agree; stale claims are ignored and ambiguous claims
+# refuse. The host-user-wide Treehouse operation lock spans identity inspection
+# through every worktree mutation and return, while spawn holds the same lock
+# across allocation and owner/meta publication, so a verified slot cannot rebind
+# inside teardown's destructive interval.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -168,6 +179,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -180,6 +193,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+TREEHOUSE_OPERATION_LOCK=
+TREEHOUSE_OPERATION_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -197,6 +212,10 @@ teardown_release_locks() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
+  fi
+  if [ "$TREEHOUSE_OPERATION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TREEHOUSE_OPERATION_LOCK" || true
+    TREEHOUSE_OPERATION_LOCK_HELD=0
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
@@ -435,6 +454,8 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+TEARDOWN_GIT_CONTEXT=$WT
+TEARDOWN_HEAD_REF=HEAD
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -758,13 +779,31 @@ remove_pr_poll_artifacts() {
   fi
 }
 
+retire_task_runtime_records() {
+  remove_grok_turnend_auth "$STATE" "$ID" || return 1
+  remove_kimi_turnend_auth "$STATE" "$ID" || return 1
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  if [ "$TREEHOUSE_SLOT_STATE" != rebound ] && [ -n "$TASK_TMP" ]; then
+    rm -rf "$TASK_TMP"
+  fi
+  remove_pr_poll_artifacts "$STATE" "$ID" || return 1
+  retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || return 1
+  status_retire_presentation_task "$STATE" "$ID" || return 1
+  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+    "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+    "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+    "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+    "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
+    "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  out=$( cd "$TEARDOWN_GIT_CONTEXT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
   printf '%s' "$n"
@@ -789,26 +828,26 @@ pr_number_from_target() {
 
 ensure_commit_object() {
   local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  git -C "$TEARDOWN_GIT_CONTEXT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  git -C "$TEARDOWN_GIT_CONTEXT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$TEARDOWN_GIT_CONTEXT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$TEARDOWN_GIT_CONTEXT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
   local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  git -C "$TEARDOWN_GIT_CONTEXT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --stable 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  current=$(git -C "$TEARDOWN_GIT_CONTEXT" rev-parse --verify "$TEARDOWN_HEAD_REF" 2>/dev/null) || return 1
+  base=$(git -C "$TEARDOWN_GIT_CONTEXT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    git -C "$TEARDOWN_GIT_CONTEXT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
           patch_id_for_commit "$commit"
         done \
@@ -816,7 +855,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$TEARDOWN_GIT_CONTEXT" log --format=%H "$TEARDOWN_HEAD_REF" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -841,7 +880,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  view=$(cd "$TEARDOWN_GIT_CONTEXT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -851,8 +890,8 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
+  current=$(git -C "$TEARDOWN_GIT_CONTEXT" rev-parse --verify "$TEARDOWN_HEAD_REF" 2>/dev/null) || return 1
+  git -C "$TEARDOWN_GIT_CONTEXT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
   unpushed_patches_are_in_pr_head "$head"
 }
 
@@ -866,17 +905,17 @@ pr_is_merged() {
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if git -C "$TEARDOWN_GIT_CONTEXT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$TEARDOWN_GIT_CONTEXT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$TEARDOWN_GIT_CONTEXT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$TEARDOWN_GIT_CONTEXT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$TEARDOWN_GIT_CONTEXT" merge-tree --write-tree "$ref" "$TEARDOWN_HEAD_REF" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -1141,6 +1180,8 @@ validate_worktree_teardown_safety() {
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+  TEARDOWN_GIT_CONTEXT=$WT
+  TEARDOWN_HEAD_REF=HEAD
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -1150,7 +1191,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$|\.fm-treehouse-owner$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1198,6 +1239,309 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+validate_missing_worktree_teardown_safety() {
+  local branch ref unpushed_raw unpushed DEFAULT unmerged_raw unmerged
+  [ "$FORCE" != "--force" ] || return 0
+  case "$KIND" in
+    secondmate|scout) return 0 ;;
+  esac
+  if [ ! -d "$PROJ" ] || ! git -C "$PROJ" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "REFUSED: recorded worktree $WT is gone and project repository $PROJ is not inspectable." >&2
+    echo "Cannot prove that the missing worktree's committed work landed; restore it or get explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  branch="fm/$ID"
+  ref="refs/heads/$branch"
+  git -C "$PROJ" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || {
+    echo "REFUSED: recorded worktree $WT is gone and retained task branch $branch is unavailable." >&2
+    echo "Cannot prove that the missing worktree's committed work landed; restore it or get explicit OK to discard, then --force." >&2
+    return 1
+  }
+  TEARDOWN_GIT_CONTEXT=$PROJ
+  TEARDOWN_HEAD_REF=$ref
+  unpushed_raw=$(git -C "$PROJ" log --oneline "$ref" --not --remotes -- 2>/dev/null) || {
+    echo "REFUSED: cannot inspect retained task branch $branch for commits not on a remote." >&2
+    return 1
+  }
+  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
+  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+    DEFAULT=$(default_branch) || {
+      echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2
+      return 1
+    }
+    unmerged_raw=$(git -C "$PROJ" log --oneline "$ref" --not "$DEFAULT" -- 2>/dev/null) || {
+      echo "REFUSED: cannot inspect retained task branch $branch for commits not on $DEFAULT." >&2
+      return 1
+    }
+    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    if [ -n "$unmerged" ]; then
+      echo "REFUSED: missing local-only worktree $WT has retained work not yet merged into $DEFAULT and not on any remote." >&2
+      printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      return 1
+    fi
+  elif [ -n "$unpushed" ] && ! work_is_landed "$branch"; then
+    echo "REFUSED: missing worktree $WT has retained work not on any remote and not landed." >&2
+    printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+    echo "Push or land the retained branch, restore the worktree, or get explicit OK to discard, then --force." >&2
+    return 1
+  fi
+}
+
+TREEHOUSE_SLOT_STATE=not-applicable
+TREEHOUSE_RETURN_COMPLETED=0
+TREEHOUSE_OWNER_TASK_ID=
+TREEHOUSE_OWNER_SPAWN_GEN=
+TREEHOUSE_CLAIMANT_ID=
+
+treehouse_read_owner_marker() {
+  local marker=$1
+  TREEHOUSE_OWNER_TASK_ID=
+  TREEHOUSE_OWNER_SPAWN_GEN=
+  fm_treehouse_read_owner "$marker" || return $?
+  TREEHOUSE_OWNER_TASK_ID=$FM_TREEHOUSE_OWNER_TASK_ID
+  TREEHOUSE_OWNER_SPAWN_GEN=$FM_TREEHOUSE_OWNER_SPAWN_GEN
+}
+
+treehouse_local_state_dirs() {
+  local registry line home parent_home
+  printf '%s\n' "$STATE"
+  # A local secondmate shares the host's Treehouse pools with its parent and
+  # sibling homes. Search the current home's local routes and, when this is a
+  # child home, the durable parent route plus that parent's local routes. Remote
+  # secondmates cannot own a slot on this host and are deliberately excluded.
+  parent_home=${PARENT_ROUTE_HOME:-}
+  [ -z "$parent_home" ] || printf '%s\n' "$parent_home/state"
+  for registry in "$DATA/secondmates.md" "${parent_home:+$parent_home/data/secondmates.md}"; do
+    [ -n "$registry" ] && [ -f "$registry" ] && [ ! -L "$registry" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in '- '*) ;; *) continue ;; esac
+      secondmate_registry_parse_line "$line" || continue
+      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+      home=$SECONDMATE_REGISTRY_HOME
+      printf '%s\n' "$home/state"
+    done < "$registry"
+  done
+}
+
+treehouse_claim_meta_state() {
+  local candidate=$1 other_id=$2 expected_gen=${3:-} other_wt gen_count gen backend target state
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 2
+  [ "$(fm_meta_get "$candidate" endpoint_task_id)" = "$other_id" ] || return 2
+  other_wt=$(fm_meta_get "$candidate" worktree)
+  [ -n "$other_wt" ] && fm_treehouse_paths_match "$WT" "$other_wt" || return 2
+  if [ -n "$expected_gen" ]; then
+    gen_count=$(grep -c '^spawn_gen=' "$candidate" 2>/dev/null || true)
+    [ "$gen_count" -eq 1 ] || return 2
+    gen=$(fm_meta_get "$candidate" spawn_gen)
+    [ "$gen" = "$expected_gen" ] || return 2
+  fi
+  fm_backend_validate_task_endpoint "$candidate" "$other_id" >/dev/null 2>&1 || return 2
+  backend=$FM_BACKEND_VALIDATED_BACKEND
+  target=$FM_BACKEND_VALIDATED_TARGET
+  state=$(fm_backend_agent_state "$backend" "$target")
+  case "$state" in
+    alive) return 0 ;;
+    dead|missing) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+treehouse_claim_state_for_task() {
+  local other_id=$1 expected_gen=${2:-} dirs state_dir candidate other_wt state
+  TREEHOUSE_CLAIMANT_ID=$other_id
+  dirs=$(treehouse_local_state_dirs)
+  while IFS= read -r state_dir; do
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || continue
+    candidate="$state_dir/$other_id.meta"
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    other_wt=$(fm_meta_get "$candidate" worktree)
+    if [ -z "$other_wt" ] || ! fm_treehouse_paths_match "$WT" "$other_wt"; then
+      continue
+    fi
+    if treehouse_claim_meta_state "$candidate" "$other_id" "$expected_gen"; then
+      return 0
+    else
+      state=$?
+    fi
+    [ "$state" -eq 1 ] && return 1
+    return 2
+  done <<EOF
+$dirs
+EOF
+  return 2
+}
+
+treehouse_other_task_claim_state() {
+  local dirs state_dir candidate other_id other_wt state
+  TREEHOUSE_CLAIMANT_ID=
+  dirs=$(treehouse_local_state_dirs)
+  while IFS= read -r state_dir; do
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || continue
+    for candidate in "$state_dir"/*.meta; do
+      [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+      [ "$candidate" != "$META" ] || continue
+      other_id=$(basename "$candidate" .meta)
+      fm_task_id_path_safe "$other_id" || continue
+      other_wt=$(fm_meta_get "$candidate" worktree)
+      if [ -z "$other_wt" ] || ! fm_treehouse_paths_match "$WT" "$other_wt"; then
+        continue
+      fi
+      TREEHOUSE_CLAIMANT_ID=$other_id
+      if treehouse_claim_meta_state "$candidate" "$other_id"; then
+        return 0
+      else
+        state=$?
+      fi
+      [ "$state" -eq 1 ] && continue
+      return 2
+    done
+  done <<EOF
+$dirs
+EOF
+  return 1
+}
+
+prepare_treehouse_task_slot() {
+  local lookup_rc owner_marker owner_id owner_gen owner_rc claim_rc meta_gen
+  [ "$KIND" != secondmate ] || return 0
+  [ "$BACKEND" != orca ] || return 0
+
+  if fm_treehouse_lookup_slot "$WT"; then
+    WT=$FM_TREEHOUSE_SLOT_PATH
+    case "$FM_TREEHOUSE_SLOT_STATUS" in
+      available)
+        TREEHOUSE_SLOT_STATE=already-returned
+        return 0
+        ;;
+      in-use|leased)
+        ;;
+      *)
+        echo "error: Treehouse reports slot $WT in unknown state '$FM_TREEHOUSE_SLOT_STATUS'; refusing to touch the recorded pool path" >&2
+        return 1
+        ;;
+    esac
+
+    if [ -n "$FM_TREEHOUSE_SLOT_LEASE_HOLDER" ] \
+       && [ "$FM_TREEHOUSE_SLOT_LEASE_HOLDER" != "$ID" ]; then
+      TREEHOUSE_SLOT_STATE=rebound
+      echo "teardown: slot $WT is leased to different task $FM_TREEHOUSE_SLOT_LEASE_HOLDER; retiring only stale records for $ID" >&2
+      return 0
+    fi
+
+    owner_marker="$WT/.fm-treehouse-owner"
+    if [ -e "$owner_marker" ] || [ -L "$owner_marker" ]; then
+      if treehouse_read_owner_marker "$owner_marker"; then
+        owner_rc=0
+      else
+        owner_rc=$?
+      fi
+      if [ "$owner_rc" -ne 0 ]; then
+        echo "error: Treehouse slot owner marker $owner_marker is unreadable or invalid; refusing to touch the recorded pool path" >&2
+        return 1
+      fi
+      owner_id=$TREEHOUSE_OWNER_TASK_ID
+      owner_gen=$TREEHOUSE_OWNER_SPAWN_GEN
+      if [ "$owner_id" != "$ID" ]; then
+        if treehouse_claim_state_for_task "$owner_id" "$owner_gen"; then
+          TREEHOUSE_SLOT_STATE=rebound
+          echo "teardown: slot $WT is occupied by live task $owner_id at owner generation $owner_gen; retiring only stale records for $ID" >&2
+          return 0
+        else
+          claim_rc=$?
+        fi
+        if [ "$claim_rc" -eq 1 ]; then
+          echo "error: Treehouse slot $WT names different owner $owner_id, but that task is not live; refusing ambiguous record retirement or worktree access" >&2
+        else
+          echo "error: Treehouse slot $WT names different owner $owner_id, but its endpoint or owner generation cannot be verified; refusing ambiguous record retirement or worktree access" >&2
+        fi
+        return 1
+      fi
+      meta_gen=$(fm_meta_get "$META" spawn_gen)
+      if [ -z "$meta_gen" ] || [ "$meta_gen" != "$owner_gen" ]; then
+        echo "error: Treehouse slot $WT owner generation does not match task $ID metadata; refusing worktree access" >&2
+        return 1
+      fi
+      if treehouse_other_task_claim_state; then
+        echo "error: Treehouse slot $WT has a live competing task record for $TREEHOUSE_CLAIMANT_ID that contradicts owner $ID; refusing ambiguous record retirement or worktree access" >&2
+        return 1
+      else
+        claim_rc=$?
+      fi
+      if [ "$claim_rc" -eq 2 ]; then
+        echo "error: Treehouse slot $WT has an unverifiable competing task record for $TREEHOUSE_CLAIMANT_ID; refusing ambiguous record retirement or worktree access" >&2
+        return 1
+      fi
+      TREEHOUSE_SLOT_STATE=owned
+      return 0
+    fi
+
+    if treehouse_other_task_claim_state; then
+      echo "error: Treehouse slot $WT has live claimant $TREEHOUSE_CLAIMANT_ID but no owner generation binding; refusing ambiguous record retirement or worktree access" >&2
+      return 1
+    else
+      claim_rc=$?
+    fi
+    if [ "$claim_rc" -eq 2 ]; then
+      echo "error: Treehouse slot $WT has an unverifiable competing task record for $TREEHOUSE_CLAIMANT_ID; refusing ambiguous record retirement or worktree access" >&2
+      return 1
+    fi
+
+    TREEHOUSE_SLOT_STATE=owned-legacy
+    return 0
+  else
+    lookup_rc=$?
+  fi
+  if [ "$lookup_rc" -eq 1 ]; then
+    TREEHOUSE_SLOT_STATE=not-managed
+    return 0
+  fi
+
+  if [ "$lookup_rc" -eq 3 ]; then
+    echo "error: Treehouse advertises JSON status but its authoritative slot read failed; refusing to touch the recorded pool path" >&2
+    return 1
+  fi
+
+  # Compatibility for old Treehouse versions and minimal test doubles that do
+  # not advertise JSON status. Supported production versions take one of the
+  # status-authoritative branches above or fail closed above.
+  TREEHOUSE_SLOT_STATE='status-unavailable'
+}
+
+confirm_completed_treehouse_return_is_safe() {
+  local dirty_raw dirty
+  case "$TREEHOUSE_SLOT_STATE" in
+    already-returned|not-managed) ;;
+    *) return 0 ;;
+  esac
+  if [ -e "$WT" ] || [ -L "$WT" ]; then
+    [ -d "$WT" ] || {
+      echo "REFUSED: recorded Treehouse path $WT exists but is not an inspectable directory." >&2
+      return 1
+    }
+    dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null) || {
+      echo "REFUSED: cannot verify that already-returned Treehouse path $WT is clean." >&2
+      return 1
+    }
+    dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$|\.fm-treehouse-owner$)' | head -1 || true)
+    if [ -n "$dirty" ]; then
+      echo "REFUSED: already-returned Treehouse path $WT is not clean." >&2
+      return 1
+    fi
+  fi
+  TREEHOUSE_RETURN_COMPLETED=1
+  echo "teardown: Treehouse slot $WT is already returned; landed-work and cleanliness checks passed" >&2
+}
+
+complete_rebound_teardown_if_needed() {
+  [ "$TREEHOUSE_SLOT_STATE" = rebound ] || return 0
+  retire_task_runtime_records || return 1
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+  echo "teardown $ID complete (stale records retired; rebound worktree $WT untouched)"
+  backlog_refresh_reminder
+  exit 0
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -2064,6 +2408,10 @@ FMEOF
 
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
+  if [ ! -f "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ]; then
+    echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
+    return 1
+  fi
   if ! fm_backend_source herdr; then
     echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
     return 1
@@ -2278,6 +2626,15 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  TREEHOUSE_OPERATION_LOCK=$(fm_treehouse_operation_lock_path) || {
+    echo "error: could not resolve the shared Treehouse operation lock; refusing to inspect an uncoordinated pool path" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$TREEHOUSE_OPERATION_LOCK"
+  TREEHOUSE_OPERATION_LOCK_HELD=1
+fi
+prepare_treehouse_task_slot || exit 1
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
@@ -2351,6 +2708,8 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+complete_rebound_teardown_if_needed || exit 1
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2361,19 +2720,28 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
+if [ "$FORCE" != "--force" ]; then
+  if [ -d "$WT" ]; then
+    if validate_worktree_teardown_safety; then
+      :
     else
-      exit 1
+      safety_rc=$?
+      if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+        cleanup_stale_lock_for_safety_check "$WT" || exit 1
+        validate_worktree_teardown_safety || exit 1
+      else
+        exit 1
+      fi
     fi
+  else
+    validate_missing_worktree_teardown_safety || exit 1
   fi
 fi
+# Refresh authoritative occupancy after the landed-work inspection while the
+# shared allocation/teardown lock still excludes a Firstmate slot reissue.
+prepare_treehouse_task_slot || exit 1
+complete_rebound_teardown_if_needed || exit 1
+confirm_completed_treehouse_return_is_safe || exit 1
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
@@ -2382,8 +2750,13 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$TREEHOUSE_RETURN_COMPLETED" != 1 ]; then
   conclude_task_no_mistakes_run "$WT"
+  prepare_treehouse_task_slot || exit 1
+  complete_rebound_teardown_if_needed || exit 1
+  confirm_completed_treehouse_return_is_safe || exit 1
+fi
+if [ "$KIND" != secondmate ] && [ "$TREEHOUSE_RETURN_COMPLETED" != 1 ]; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2407,6 +2780,17 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+# Refresh occupancy once more before the first worktree file or branch mutation.
+# The shared Treehouse lock makes this a stable decision for coordinated spawns;
+# the refresh also catches an out-of-protocol owner-marker change and fails closed.
+if [ "$KIND" != secondmate ] \
+   && [ "$BACKEND" != orca ] \
+   && [ "$TREEHOUSE_RETURN_COMPLETED" != 1 ]; then
+  prepare_treehouse_task_slot || exit 1
+  complete_rebound_teardown_if_needed || exit 1
+  confirm_completed_treehouse_return_is_safe || exit 1
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -2426,7 +2810,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ "$TREEHOUSE_RETURN_COMPLETED" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -2529,21 +2913,7 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID" || exit 1
-remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
-  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+retire_task_runtime_records || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

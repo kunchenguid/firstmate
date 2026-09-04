@@ -785,7 +785,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse_legacy "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -855,7 +855,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse_legacy "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -917,6 +917,10 @@ SH
 #!/usr/bin/env bash
 set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}:${2:-}" in
+  status:--json) exit 1 ;;
+  status:--help) printf '%s\n' 'Usage: treehouse status'; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fb/tmux" "$fb/treehouse"

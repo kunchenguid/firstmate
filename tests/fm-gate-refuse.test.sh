@@ -152,7 +152,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_treehouse_legacy "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -290,6 +290,7 @@ make_teardown_case() {
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
     chmod +x "$fakebin/$t"
   done
+  fm_fake_treehouse_legacy "$fakebin"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
