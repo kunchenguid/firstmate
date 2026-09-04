@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort; when the recorded endpoint has vanished entirely, recreate a fresh one in the recorded worktree instead of dead-ending. | The new agent is alive on the recorded or recreated endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -69,9 +69,11 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
+   When the recorded endpoint is positively `missing` - its terminal is gone, not merely unreadable - there is no agent and no terminal to stop, so this step is skipped and the launch owner recreates the endpoint below.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   For a positively `missing` endpoint it instead recreates a fresh endpoint in that same recorded worktree - a flat-layout terminal opened directly in the worktree, so no `treehouse get` runs and no second worktree is allocated - and republishes the record so it points at the new endpoint.
 
-Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
+Switching harness is therefore one ordinary relaunch rather than a separate mechanism, and a vanished terminal no longer strands an otherwise intact task.
 
 ### Failure and rollback
 
@@ -98,8 +100,10 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
-  Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  Only a positively classified state acts: a positively agent-free endpoint is reused, and a positively `missing` one is recreated, while `ambiguous` and `unreadable` refuse rather than guess.
+- Endpoint recreation on a `missing` endpoint is a ship or scout recovery only.
+  A secondmate is a whole home with its own workspace, so a vanished secondmate endpoint is routed to the secondmate recovery path rather than recreated here.
+- `fm-spawn --relaunch` independently reclassifies the endpoint: it recreates only a positively `missing` one and otherwise refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent, act on an unattributed endpoint, or start outside the copy holding the work.
 
 ## Capability matrix
 

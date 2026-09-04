@@ -346,6 +346,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RELAUNCH_RECREATE=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -1159,13 +1160,32 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing)
+      # The recorded endpoint is authoritatively gone (its terminal vanished),
+      # not merely unreadable, so recreate a fresh one in the recorded worktree
+      # rather than dead-ending. fm_backend_agent_state reports `missing` only
+      # from a recovery-grade classifier and only for a positively absent
+      # endpoint; `ambiguous` and `unreadable` are distinct states that refuse
+      # below, so recreation never lands on a live or unattributed endpoint.
+      RELAUNCH_RECREATE=1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ "$RELAUNCH_RECREATE" = 1 ] && [ "$KIND" = secondmate ]; then
+    # A secondmate is a whole home with its own workspace; recreating its
+    # endpoint needs the secondmate recovery path, not this crewmate/scout
+    # recreation. Refuse rather than land the endpoint in the wrong workspace.
+    echo "error: task $ID is a secondmate whose endpoint has vanished; recover it through the secondmate recovery path, not by recreating its endpoint here" >&2
+    exit 1
+  fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -2181,7 +2201,7 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_RECREATE" -ne 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
   # terminal, no second worktree, and every uncommitted change left exactly
@@ -2192,6 +2212,45 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   WT_TARGET=$T
   SES=${T%%:*}
+elif [ "$RELAUNCH_RECREATE" -eq 1 ]; then
+  # The recorded endpoint vanished entirely. Recreate a fresh one in the SAME
+  # recorded worktree (secondmate is refused above, so this is a ship/scout),
+  # then let the record republish below repoint window= at it. Flat layout only:
+  # a disposable presentation workspace, if any, died with the pane. This reuses
+  # the exact container-ensure + create-task calls a fresh crewmate uses,
+  # differing only in the pane cwd - the existing worktree, so no `treehouse
+  # get` is needed and the relaunch worktree check below confirms the recreated
+  # pane is already in it.
+  WT=$RELAUNCH_WT
+  case "$BACKEND" in
+    tmux)
+      SES=$(fm_backend_tmux_container_ensure)
+      T="$SES:$W"
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
+      WT_TARGET="$WID"
+      ;;
+    herdr)
+      HERDR_CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT" launcher-home) || exit 1
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+        echo "error: herdr did not return a tab/pane id for $W" >&2
+        exit 1
+      fi
+      T="$HERDR_SES:$HERDR_PANE_ID"
+      WT_TARGET=$T
+      ;;
+    *)
+      echo "error: endpoint recreation is not supported on backend '$BACKEND'; recover task $ID another way" >&2
+      exit 1
+      ;;
+  esac
 else
 case "$BACKEND" in
   tmux)

@@ -110,7 +110,27 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  new-window)
+    # Model endpoint recreation: register the created window so a later
+    # agent_state read finds it, seed it as an agent-free shell, and echo a
+    # stable window id. Parse only the -n <name> pair; ignore every other flag.
+    shift
+    prev=
+    wname=win
+    for a in "$@"; do
+      [ "$prev" = -n ] && { wname=$a; break; }
+      prev=$a
+    done
+    printf '%s\n' "$wname" >> "$D/windows"
+    printf 'zsh' > "$D/command"
+    printf '@%s\n' "$wname"
+    exit 0 ;;
+  list-windows)
+    if [ -n "${FM_FAKE_LIST_WINDOWS_ERROR:-}" ]; then
+      printf '%s\n' "$FM_FAKE_LIST_WINDOWS_ERROR" >&2
+      exit 1
+    fi
+    [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
 SH
@@ -1494,6 +1514,114 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- 7. endpoint recreation on a vanished pane -------------------------------
+#
+# When a task's terminal vanishes ENTIRELY (positively `missing`: gone from the
+# session inventory, not merely unreadable) while the task record and worktree
+# stay intact, a relaunch recreates a fresh endpoint in the recorded worktree
+# instead of dead-ending. An ambiguous or unreadable endpoint is NOT `missing`
+# and still refuses, so recreation never lands on a live or unattributed one.
+
+test_relaunch_recreates_a_vanished_endpoint() {
+  local dir out rc window_before window_after
+  dir=$(new_case recreate rl42)
+  add_ship_task "$dir" rl42 claude
+  window_before=$(meta_field "$dir" rl42 window)
+  printf 'scratch work\n' > "$dir/wt/uncommitted.txt"
+  # The pane vanished: its window is absent from the session inventory.
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" rl42 relaunch --note "pane vanished, pick the work back up"); rc=$?
+  expect_code 0 "$rc" "a vanished endpoint should be recreated, not dead-ended"$'\n'"$out"
+  assert_contains "$out" "relaunched rl42 harness=claude from=claude" "the outcome should name the transition"
+  window_after=$(meta_field "$dir" rl42 window)
+  [ "$window_after" != "$window_before" ] \
+    || fail "the recreated endpoint must republish a new window handle (was '$window_before')"
+  case "$window_after" in
+    *:fm-rl42) ;;
+    *) fail "the recreated endpoint should keep the task window name, got '$window_after'" ;;
+  esac
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] \
+    || fail "the recorded worktree must be reused, never reallocated or discarded"
+  [ -f "$dir/wt/uncommitted.txt" ] || fail "uncommitted work must survive endpoint recreation"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "there is no agent to stop when the pane has vanished, so no exit command should be sent"
+  [ "$(journal_field "$dir" rl42 phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  pass "fm-control relaunch: a vanished endpoint is recreated in the recorded worktree"
+}
+
+test_relaunch_refuses_to_recreate_an_unreadable_endpoint() {
+  local dir out rc before
+  dir=$(new_case unreadable rl43)
+  add_ship_task "$dir" rl43 claude
+  before=$(cat "$dir/home/state/rl43.meta")
+  # An inventory read that fails without a definitive missing-session signal is
+  # `unreadable`, not `missing` - that is the parallel unknown-state fix's
+  # territory, so recreation must refuse here.
+  out=$(FM_FAKE_LIST_WINDOWS_ERROR='protocol version mismatch' \
+    run_control "$dir" rl43 relaunch --note "do not recreate over an ambiguous endpoint"); rc=$?
+  expect_code 1 "$rc" "an unreadable endpoint must refuse recreation"$'\n'"$out"
+  assert_contains "$out" "rather than a positively classified state" \
+    "the refusal should name the unattributed endpoint"
+  [ "$(cat "$dir/home/state/rl43.meta")" = "$before" ] \
+    || fail "a refused recreation must leave the durable record untouched"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "a refused recreation must launch no replacement"
+  pass "fm-control relaunch: an unreadable endpoint refuses recreation instead of guessing"
+}
+
+test_spawn_relaunch_recreates_a_vanished_endpoint() {
+  local dir out rc window_before window_after
+  dir=$(new_case spawnrecreate rl44)
+  add_ship_task "$dir" rl44 claude
+  window_before=$(meta_field "$dir" rl44 window)
+  : > "$dir/fake/windows"
+  out=$(run_spawn "$dir" rl44 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "fm-spawn --relaunch should recreate a vanished endpoint"$'\n'"$out"
+  assert_contains "$out" "spawned rl44 harness=claude" "the launch should report the recreated endpoint"
+  window_after=$(meta_field "$dir" rl44 window)
+  [ "$window_after" != "$window_before" ] \
+    || fail "fm-spawn should republish a new window handle for the recreated endpoint"
+  case "$window_after" in
+    *:fm-rl44) ;;
+    *) fail "the recreated endpoint should keep the task window name, got '$window_after'" ;;
+  esac
+  pass "fm-spawn --relaunch: recreates a positively-missing endpoint in the recorded worktree"
+}
+
+test_spawn_relaunch_refuses_to_recreate_a_secondmate_endpoint() {
+  local dir home out rc
+  dir=$(new_case smrecreate sm8)
+  home="$dir/home"
+  mkdir -p "$home/data/sm8"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  # The secondmate's endpoint has vanished from the inventory.
+  : > "$dir/fake/windows"
+  out=$(run_spawn "$dir" sm8 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a secondmate endpoint recreation should be refused here"$'\n'"$out"
+  assert_contains "$out" "secondmate recovery path" \
+    "the refusal should route to the secondmate recovery path"
+  pass "fm-spawn --relaunch: a vanished secondmate endpoint is routed to secondmate recovery, not recreated here"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1545,3 +1673,7 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_recreates_a_vanished_endpoint
+test_relaunch_refuses_to_recreate_an_unreadable_endpoint
+test_spawn_relaunch_recreates_a_vanished_endpoint
+test_spawn_relaunch_refuses_to_recreate_a_secondmate_endpoint

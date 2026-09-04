@@ -34,7 +34,13 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. An explicit `default` model or effort clears that
+#              of this verb. When the recorded endpoint has vanished ENTIRELY
+#              (positively `missing`: its terminal is gone, not merely
+#              unreadable), the stop step is skipped and the launch owner
+#              recreates a fresh endpoint in the recorded worktree instead of
+#              dead-ending, so a lost pane no longer strands an intact task. An
+#              ambiguous or unreadable endpoint is not `missing` and still
+#              refuses. An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
@@ -511,6 +517,7 @@ BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
+RELAUNCH_ENDPOINT_MISSING=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
 PRIOR_HARNESS=$HARNESS
@@ -822,7 +829,17 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$(agent_state)" = missing ]; then
+    # The recorded endpoint vanished entirely: no agent and no terminal remain
+    # to stop, so skip the stop step and let the launch owner recreate a fresh
+    # endpoint in the recorded worktree. Only a positively `missing` endpoint
+    # takes this path; an ambiguous or unreadable one is NOT `missing` and still
+    # goes through do_exit, which refuses to act on an unattributed endpoint.
+    RELAUNCH_ENDPOINT_MISSING=1
+    exit_result="endpoint-missing"
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -839,6 +856,17 @@ do_relaunch() {
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+
+  if [ "$RELAUNCH_ENDPOINT_MISSING" = 1 ]; then
+    # The launch owner recreated the vanished endpoint and republished the
+    # record, so the endpoint this plane verifies against has changed (a herdr
+    # pane id is unique per pane, and a recreated tmux window can land in a
+    # different session). Refresh it from the republished record before proving
+    # the replacement came up.
+    fm_backend_validate_task_endpoint "$META" "$ID" \
+      || die "$ID was relaunched onto a recreated endpoint whose record is unreadable"
+    T=$FM_BACKEND_VALIDATED_TARGET
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
