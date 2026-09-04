@@ -793,6 +793,11 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_relaunch_recreate_cleanup_disarm() {
+  TMUX_RECREATE_ABORT_CLEANUP=0
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -801,6 +806,7 @@ spawn_abort_cleanup() {
      && [ ! -e "$SPAWN_META_TMP" ] \
      && [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
+    spawn_relaunch_recreate_cleanup_disarm
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
@@ -3226,8 +3232,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
   if [ "$RELAUNCH_RECREATE" -eq 1 ]; then
-    TMUX_RECREATE_ABORT_CLEANUP=0
-    HERDR_PROJECTION_ABORT_CLEANUP=0
+    spawn_relaunch_recreate_cleanup_disarm
   fi
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
