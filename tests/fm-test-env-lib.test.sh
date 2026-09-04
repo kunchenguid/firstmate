@@ -238,12 +238,13 @@ SH
 }
 
 test_probe_rejects_a_pre_isolation_write() {
-  local dir probe_root probe written
+  local dir probe_root probe written marker
   dir=$(fm_test_tmproot fm-test-env-lib)
   probe_root="$dir/repo"
   make_probe_root "$probe_root"
   probe="$probe_root/tests/pre-isolation-write.test.sh"
   written="$probe_root/live-home-sentinel/pre-isolation-write.test.sh/FM_HOME/touched"
+  marker="$probe_root/pre-isolation-write.test.sh.reached-owner"
   cat > "$probe" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -255,6 +256,7 @@ SH
   probe_suite_reaches_owner "$probe_root" "$probe" \
     && fail "the probe accepted a fleet-home write before isolation"
   assert_present "$written" "the decoy did not write through its inherited FM_HOME pointer"
+  assert_present "$marker" "the decoy did not invoke the owner after writing through FM_HOME"
   pass "the probe rejects a fleet-home write before isolation"
 }
 
