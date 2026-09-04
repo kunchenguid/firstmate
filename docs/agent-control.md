@@ -72,14 +72,16 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    When the recorded endpoint is positively `missing` - its terminal is gone, not merely unreadable - there is no agent and no terminal to stop, so this step is skipped and the launch owner recreates the endpoint below.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    For a positively `missing` endpoint it instead recreates a fresh endpoint in that same recorded worktree - a flat-layout terminal opened directly in the worktree, so no `treehouse get` runs and no second worktree is allocated - and republishes the record so it points at the new endpoint.
+   A Herdr recreation with an existing presentation journal first reconciles that journal under the named-session presentation lock and refuses if any token-matched pane is live or unreadable; [`herdr-backend.md`](herdr-backend.md#presentation-spaces) owns the projection recovery and safe flat-fallback contract.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism, and a vanished terminal no longer strands an otherwise intact task.
 
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
-- A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A launch failure **after** the agent is stopped but before metadata publication restores the prior durable record, removes an endpoint created by this attempt, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
+  A recreated endpoint is kept with that published record rather than removed from underneath its new durable identity.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
 ## Fail-closed boundaries
@@ -123,5 +125,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, endpoint recreation, publication-boundary cleanup, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

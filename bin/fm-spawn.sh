@@ -24,21 +24,24 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
-#   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
+#   --relaunch launches a replacement agent for an EXISTING task in that
+#   task's own recorded worktree. It reuses a positively agent-free endpoint;
+#   for a ship or scout whose endpoint is positively missing, it recreates an
+#   endpoint on tmux or herdr and republishes that identity. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
 #   owns the checkpoint, the progress note, stopping the previous agent, and the
 #   transaction; call fm-control rather than this flag directly unless you are
 #   deliberately re-launching an already-stopped task. Every identity axis -
-#   backend, kind, project or home, worktree, endpoint - comes from the task's
-#   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
+#   backend, kind, project or home, and worktree - comes from the task's
+#   validated state/<id>.meta, while only a recreated endpoint receives a new
+#   identity, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   agent-free or missing on a backend with a recovery-grade agent-state
+#   classifier (tmux or herdr), refuses missing secondmate endpoints, verifies
+#   the reused or recreated endpoint is in the recorded worktree, and clears
+#   the previous harness's per-task wiring before arming the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
