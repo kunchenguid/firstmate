@@ -190,7 +190,7 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   assert_contains "$out" 'budget_status=over-budget' "report did not surface an over-budget total"
 
   outside="$TMP_ROOT/accounting-outside"
-  printf 'outside\n' > "$outside"
+  mkdir -p "$outside"
   rm -f "$home/data/captain.md"
   ln -s "$outside" "$home/data/captain.md"
   set +e
@@ -200,8 +200,133 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
   assert_contains "$out" 'memory file is not an ordinary regular file' \
     "accounting failure did not identify the unsafe memory file"
-  [ "$(<"$outside")" = outside ] || fail "accounting failure changed a symlink target"
+  [ -d "$outside" ] || fail "accounting failure changed a symlink target"
   pass "budget accounting sums the three startup files and reports safe failures"
+}
+
+# Runs the accounting command under a wall-clock bound where one is available,
+# so a hanging read (a FIFO) or an unbounded walk (a symlink cycle) fails the
+# test instead of wedging the suite.
+run_report_bounded() {
+  local home=$1
+  if command -v timeout >/dev/null 2>&1; then
+    FM_HOME="$home" timeout 20 "$BUDGET" report 2>&1
+    return $?
+  fi
+  FM_HOME="$home" "$BUDGET" report 2>&1
+}
+
+expect_report_failure() {
+  local home=$1 expected=$2 label=$3 out rc
+  set +e
+  out=$(run_report_bounded "$home")
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "$label should fail the accounting command"
+  assert_contains "$out" "$expected" "$label did not name its own reason"
+  assert_not_contains "$out" 'total_estimated_tokens=' \
+    "$label reported a total despite an unusable memory file"
+}
+
+test_memory_measurement_follows_symlinks_and_refuses_unusable_targets() {
+  local home target out regular_line
+  home="$TMP_ROOT/symlink-home"
+  mkdir -p "$home/config" "$home/data" "$TMP_ROOT/symlink-outside"
+  printf '9000\n' > "$home/config/startup-memory-budget"
+  printf 'learn\n' > "$home/data/learnings.md"
+
+  # A plain regular file must account byte for byte exactly as before.
+  target="$TMP_ROOT/symlink-outside/captain.md"
+  printf 'captain memory here\n' > "$target"
+  cp "$target" "$home/data/captain.md"
+  out=$(run_report_bounded "$home") || fail "regular memory file failed the accounting command"
+  regular_line='file=data/captain.md bytes=20 estimated_tokens=7 status=present'
+  assert_contains "$out" "$regular_line" "regular memory file was not accounted byte for byte"
+  assert_contains "$out" 'file=data/learnings.md bytes=6 estimated_tokens=2 status=present' \
+    "regular-file run did not account the remaining memory files"
+  assert_contains "$out" 'total_estimated_tokens=9' "regular-file run did not total its files"
+
+  # A symlink to that same regular file must produce the identical accounting:
+  # a session loads the target's bytes, so the budget must count them.
+  rm -f "$home/data/captain.md"
+  ln -s "$target" "$home/data/captain.md"
+  out=$(run_report_bounded "$home") || fail "symlinked memory file was refused instead of measured"
+  assert_contains "$out" "$regular_line" \
+    "symlinked memory file was not measured as its target's exact bytes"
+  assert_contains "$out" 'total_estimated_tokens=9' \
+    "symlinked memory file did not contribute to the accounted total"
+  [ "$(<"$target")" = 'captain memory here' ] || fail "measuring through a symlink changed its target"
+
+  # A relative link, the shape an in-vault home actually uses, resolves too.
+  rm -f "$home/data/captain.md"
+  ln -s ../../symlink-outside/captain.md "$home/data/captain.md"
+  out=$(run_report_bounded "$home") || fail "relative symlinked memory file was refused"
+  assert_contains "$out" "$regular_line" "relative symlinked memory file measured the wrong bytes"
+
+  # A chain of links to a regular file is still a regular file to read.
+  rm -f "$home/data/captain.md"
+  ln -s "$target" "$TMP_ROOT/symlink-outside/hop.md"
+  ln -s "$TMP_ROOT/symlink-outside/hop.md" "$home/data/captain.md"
+  out=$(run_report_bounded "$home") || fail "symlink chain to a regular file was refused"
+  assert_contains "$out" "$regular_line" "symlink chain measured the wrong bytes"
+
+  # A broken link is an error with its own reason, never a present zero-byte
+  # file and never the generic not-a-regular-file sentence.
+  rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/symlink-outside/no-such-file.md" "$home/data/captain.md"
+  expect_report_failure "$home" 'memory file is a broken symlink' 'a broken memory symlink'
+  set +e
+  out=$(run_report_bounded "$home")
+  set -e
+  assert_not_contains "$out" 'file=data/captain.md bytes=0' \
+    "a broken memory symlink was reported as an empty present file"
+  assert_not_contains "$out" 'status=absent' \
+    "a broken memory symlink was reported as an absent file"
+
+  # Special and directory targets keep being refused: [ -f ] follows the link
+  # and holds only for a regular target.
+  rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/symlink-outside" "$home/data/captain.md"
+  expect_report_failure "$home" 'memory file is not an ordinary regular file' \
+    'a memory symlink to a directory'
+
+  rm -f "$home/data/captain.md"
+  mkfifo "$TMP_ROOT/symlink-outside/fifo" 2>/dev/null \
+    || fail "could not create the FIFO this case needs"
+  ln -s "$TMP_ROOT/symlink-outside/fifo" "$home/data/captain.md"
+  expect_report_failure "$home" 'memory file is not an ordinary regular file' \
+    'a memory symlink to a FIFO'
+  rm -f "$TMP_ROOT/symlink-outside/fifo"
+
+  # A cycle bounces with its own reason rather than hanging or leaking a shell
+  # error about too many levels of symbolic links.
+  rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/symlink-outside/loop-b.md" "$TMP_ROOT/symlink-outside/loop-a.md"
+  ln -s "$TMP_ROOT/symlink-outside/loop-a.md" "$TMP_ROOT/symlink-outside/loop-b.md"
+  ln -s "$TMP_ROOT/symlink-outside/loop-a.md" "$home/data/captain.md"
+  expect_report_failure "$home" 'memory file symlink does not resolve, its chain loops' \
+    'a looping memory symlink'
+  set +e
+  out=$(run_report_bounded "$home")
+  set -e
+  assert_not_contains "$out" 'Too many levels' \
+    "a looping memory symlink leaked a raw system error"
+  assert_not_contains "$out" 'zbyt wiele' \
+    "a looping memory symlink leaked a raw localized system error"
+
+  # A self-referential link is the same refusal, not an infinite walk.
+  rm -f "$home/data/captain.md"
+  ln -s captain.md "$home/data/captain.md"
+  expect_report_failure "$home" 'memory file symlink does not resolve, its chain loops' \
+    'a self-referential memory symlink'
+
+  # An absent path is still plain absence, not an error.
+  rm -f "$home/data/captain.md"
+  out=$(run_report_bounded "$home") || fail "an absent memory file failed the accounting command"
+  assert_contains "$out" 'file=data/captain.md bytes=0 estimated_tokens=0 status=absent' \
+    "an absent memory file stopped being reported as absent"
+  assert_contains "$out" 'total_estimated_tokens=2' "absent accounting did not total the present files"
+  pass "memory accounting measures symlinked files and names broken, special, and looping targets"
 }
 
 new_propagation_world() {
@@ -328,6 +453,7 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
 test_primary_bootstrap_materializes_visible_default
 test_safe_parser_rejects_ambiguous_and_unsafe_values
 test_budget_accounting_reports_all_three_files_and_safe_failure
+test_memory_measurement_follows_symlinks_and_refuses_unusable_targets
 test_primary_budget_converges_with_exact_reread_and_safe_failures
 
 echo '# all fm-startup-memory-budget tests passed'
