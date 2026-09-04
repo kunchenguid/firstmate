@@ -202,7 +202,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 Before each new ship or scout starts, `fm-spawn.sh` freezes `fm-worker-git-guard.sh` and its task binding under the task temp root, then places that copy first on the worker's initial `PATH`.
-The guard fails closed when its binding is unavailable and refuses accidental PATH-resolved Git operations that drift into the primary checkout, while ordinary Git in the assigned or another disposable worktree remains available.
+The guard fails closed when its binding is unavailable and refuses accidental PATH-resolved Git operations that drift into the primary checkout outside the assigned worktree, while ordinary Git in that worktree or an unrelated disposable repository remains available.
 It is intentionally a best-effort speed bump rather than a security boundary or complete Git command-line parser; the guard header owns its accepted routing bypasses and same-task-id `/tmp` cleanup-lifetime gap.
 Every generated ship and scout brief requires the worker to run `git fm-isolation-check` before task work and to use a disposable fixture repository for tests that mutate Git refs.
 `tests/fm-worker-git-guard.test.sh` owns the portable behavior coverage, including the legitimate nested-worktree case.

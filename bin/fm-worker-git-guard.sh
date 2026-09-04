@@ -3,7 +3,7 @@
 #
 # The copy is placed first on PATH before a ship or scout worker launches.
 # Ordinary descendants that preserve PATH pass through one task-frozen guard, including Git started by a test subprocess.
-# The guard catches the incident class: an accidental PATH-resolved Git invocation whose working directory resolves inside the project's primary checkout.
+# The guard catches the incident class: an accidental PATH-resolved Git invocation whose working directory resolves inside the project's primary checkout but outside its assigned worktree.
 # It also rejects the basic explicit -C, --work-tree, --git-dir, GIT_WORK_TREE, GIT_DIR, and GIT_COMMON_DIR forms it can classify cheaply.
 #
 # The adjacent git.conf is written by fm-spawn with exactly five
