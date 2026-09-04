@@ -18,8 +18,9 @@
 # user message clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
-# catch-up or when afk is re-entered.
+# state/.subsuper-escalations (or its .flushing snapshot if a flush was cut
+# short) and are flushed on the next "while you were out" catch-up or when afk
+# is re-entered.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
 # current daemon injection as the typed away-supervisor kind after the stable
@@ -689,20 +690,57 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+# Put an unflushed snapshot back in front of the live buffer, oldest first, so
+# a failed or interrupted flush loses nothing and keeps append order. The
+# snapshot's .since sidecar carries the oldest first-append epoch, so it wins
+# over any sidecar a newer append created while the snapshot was out.
+escalate_restore_snapshot() {  # <state>
+  local state=$1 buf pending merged
+  buf="$state/.subsuper-escalations"
+  pending="${buf}.flushing"
+  if [ -s "$pending" ]; then
+    if [ -s "$buf" ]; then
+      merged=$(mktemp "${buf}.merge.XXXXXX") || return 1
+      cat "$pending" "$buf" > "$merged" || { rm -f "$merged"; return 1; }
+      mv -f "$merged" "$buf" || { rm -f "$merged"; return 1; }
+      rm -f "$pending"
+    else
+      mv -f "$pending" "$buf" || return 1
+    fi
+    [ ! -e "${pending}.since" ] || mv -f "${pending}.since" "${buf}.since"
+  else
+    rm -f "$pending" "${pending}.since"
+  fi
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
+# The flush injects from a rotated-aside snapshot, never the live buffer: a
+# line appended while the submit is under way lands in a fresh buffer file and
+# survives, instead of being clobbered by a post-inject truncation. A verified
+# submit retires exactly the snapshot; a failed one restores it in front.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf pending n msg
   buf="$state/.subsuper-escalations"
+  pending="${buf}.flushing"
+  # Adopt a snapshot orphaned by an interrupted earlier flush first: its lines
+  # were never confirmed delivered, so they rejoin the buffer ahead of newer ones.
+  escalate_restore_snapshot "$state" || return 1
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  mv "$buf" "$pending" || return 1
+  [ ! -e "${buf}.since" ] || mv -f "${buf}.since" "${pending}.since"
+  n=$(wc -l < "$pending" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$pending" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    rm -f "$pending" "${pending}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  fi
+  escalate_restore_snapshot "$state" || true
   return 1
 }
 

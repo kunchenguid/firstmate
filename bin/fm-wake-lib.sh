@@ -768,6 +768,26 @@ _fm_recovery_marker_reopen_announced() {
   fm_lock_release "$lock"
 }
 
+# A stale watch-lock recovery reopens the downtime episode only when the
+# durable record still owes a presentation: a pending marker or a queued row.
+# A fully acknowledged episode with an empty queue is retired work, and
+# republishing it would trap every later recovery - a daemon-managed one-shot
+# watcher chain in particular - in a resurface loop; any later append or close
+# publishes downtime itself (docs/watcher-continuity.md "Recovery episode
+# acknowledgement"). An unreadable marker falls through to publishing, the
+# safe side.
+_fm_recovery_publish_downtime_unless_retired() {  # <marker>
+  local marker=$1
+  if fm_recovery_marker_snapshot "$marker"; then
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      acked:*)
+        [ -s "$FM_WAKE_QUEUE" ] || return 0
+        ;;
+    esac
+  fi
+  _fm_recovery_marker_publish "$marker" downtime
+}
+
 fm_recovery_transition() {
   local marker=$1 action=$2 target=${3:-} value=${4:-}
   case "$action" in
@@ -907,7 +927,7 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+    && ! _fm_recovery_publish_downtime_unless_retired "$STATE/.watcher-down"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=

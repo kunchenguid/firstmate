@@ -1403,6 +1403,112 @@ test_escalate_batch_age_uses_first_append() {
   pass "batch flush measures max-delay from the first append, not the last"
 }
 
+# Live incident 2026-08-15/16: the same escalation digest was injected once per
+# housekeeping tick because buffered lines outlived their own flush. A verified
+# submit must retire exactly the flushed snapshot; a failed submit must preserve
+# every line and the first-append sidecar.
+test_escalate_flush_truncates_on_success_preserves_on_failure() {
+  local dir state
+  dir=$(make_supercase flush-truncate)
+  state="$dir/state"
+  afk_enter "$state"
+  escalate_add "$state" "event A: done: PR 1"
+  escalate_add "$state" "event B: done: PR 2"
+  (
+    inject_msg() { return 0; }
+    escalate_flush "$state"
+  ) || fail "flush with a confirmed submit reported failure"
+  [ -s "$state/.subsuper-escalations" ] && fail "buffer survived its own confirmed flush"
+  [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar survived a confirmed flush"
+  [ -e "$state/.subsuper-escalations.flushing" ] && fail "confirmed flush left its snapshot behind"
+  escalate_add "$state" "event C: blocked: x"
+  escalate_add "$state" "event D: failed: y"
+  (
+    inject_msg() { return 1; }
+    escalate_flush "$state"
+  ) && fail "flush with an unconfirmed submit reported success"
+  [ "$(cat "$state/.subsuper-escalations")" = "event C: blocked: x
+event D: failed: y" ] || fail "failed submit did not preserve the buffered lines in order"
+  [ -e "$state/.subsuper-escalations.since" ] || fail "failed submit dropped the first-append sidecar"
+  [ -e "$state/.subsuper-escalations.flushing" ] && fail "failed flush left its snapshot instead of restoring it"
+  pass "confirmed flush retires the buffer; unconfirmed flush preserves it"
+}
+
+# A line appended while the submit is under way (e.g. by the shutdown trap's
+# own flush interleaving with housekeeping) must survive a confirmed flush
+# instead of being clobbered by the post-inject truncation.
+test_escalate_flush_preserves_mid_flight_append() {
+  local dir state sent
+  dir=$(make_supercase flush-mid-flight)
+  state="$dir/state"
+  sent="$dir/injected.log"; : > "$sent"
+  afk_enter "$state"
+  escalate_add "$state" "event A: done: PR 1"
+  (
+    inject_msg() {
+      printf '%s\n' "$1" >> "$sent"
+      escalate_add "$state" "event MID: blocked: appeared mid-flush"
+      return 0
+    }
+    escalate_flush "$state"
+  ) || fail "confirmed flush reported failure"
+  grep -F 'event A: done: PR 1' "$sent" >/dev/null || fail "digest missing the pre-flush line"
+  grep -F 'event MID' "$sent" >/dev/null && fail "mid-flight line leaked into the already-built digest"
+  [ "$(cat "$state/.subsuper-escalations")" = "event MID: blocked: appeared mid-flush" ] \
+    || fail "line appended during the flush was clobbered by the truncation"
+  [ -e "$state/.subsuper-escalations.since" ] || fail "mid-flight append lost its first-append sidecar"
+  pass "a line appended during a confirmed flush survives it"
+}
+
+# A snapshot orphaned by a crash between rotation and confirmation rejoins the
+# buffer ahead of newer lines, so nothing silently disappears.
+test_escalate_flush_adopts_orphaned_snapshot() {
+  local dir state sent
+  dir=$(make_supercase flush-orphan)
+  state="$dir/state"
+  sent="$dir/injected.log"; : > "$sent"
+  afk_enter "$state"
+  printf 'event OLD: done: PR 0\n' > "$state/.subsuper-escalations.flushing"
+  escalate_add "$state" "event NEW: done: PR 1"
+  (
+    inject_msg() { printf '%s\n' "$1" >> "$sent"; return 0; }
+    escalate_flush "$state"
+  ) || fail "flush over an orphaned snapshot failed"
+  grep -F 'event OLD: done: PR 0 | event NEW: done: PR 1' "$sent" >/dev/null \
+    || fail "orphaned snapshot lines did not rejoin ahead of newer lines"
+  [ -s "$state/.subsuper-escalations" ] && fail "buffer not cleared after adopting the snapshot"
+  [ -e "$state/.subsuper-escalations.flushing" ] && fail "snapshot not retired after the confirmed flush"
+  pass "an orphaned flush snapshot rejoins the buffer and is delivered once"
+}
+
+# Live incident 2026-08-15/16 (proof of root cause): a terminal "done: PR ...
+# checks green" appeared to be re-escalated by the catch-all scan even though
+# the seen marker held that exact line. This test pins that the scan path DOES
+# honor the marker byte-for-byte - the repeats came from stale-buffer
+# re-injection (the flush defect above) driven by the per-cycle
+# rearm-resurface loop (tests/fm-watcher-lock.test.sh), not from the scan.
+test_scan_honors_seen_marker_for_terminal_pr() {
+  local dir state key line
+  dir=$(make_supercase scan-seen-terminal)
+  state="$dir/state"
+  line='done: PR https://github.com/x/y/pull/12 checks green'
+  printf '%s\n' "$line" > "$state/seen-t12.status"
+  key=$(printf '%s' "seen-t12" | tr ':/.' '___')
+  seen_through "$state" seen-t12
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    && fail "catch-all scan re-escalated a terminal already recorded in the seen marker"
+  rm -f "$state/.subsuper-seen-status-$key"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F "$line" "$state/.subsuper-escalations" >/dev/null \
+    || fail "catch-all scan skipped a terminal the seen marker does not cover"
+  [ "$(status_seen_offset "$state" seen-t12)" = "$(log_size "$state/seen-t12.status")" ] \
+    || fail "catch-all scan escalated without refreshing the seen marker"
+  pass "catch-all scan honors the exact seen-status marker for a terminal PR line"
+}
+
 test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
@@ -2652,6 +2758,10 @@ test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
+test_escalate_flush_truncates_on_success_preserves_on_failure
+test_escalate_flush_preserves_mid_flight_append
+test_escalate_flush_adopts_orphaned_snapshot
+test_scan_honors_seen_marker_for_terminal_pr
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self

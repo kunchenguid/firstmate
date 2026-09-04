@@ -1397,10 +1397,13 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+# A recovered stale lock alone does not force a recovery presentation: the
+# durable record decides. The steal path has already reopened the downtime
+# episode for a pending marker or a queued row, so the arm-check below returns
+# recover for every genuine gap, while a fully acknowledged episode with an
+# empty queue has nothing unpresented and settles into an ordinary live wait
+# (docs/watcher-continuity.md "Recovery episode acknowledgement").
 WATCHER_RECOVERY_PENDING=0
-if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
