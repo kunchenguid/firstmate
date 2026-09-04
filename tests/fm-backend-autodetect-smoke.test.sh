@@ -108,6 +108,16 @@ git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.inval
 git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
 git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 
+# A raw launch command must name a direct executable.  Keep the spawn-path
+# assertion below focused on Herdr auto-detection rather than using a shell
+# wrapper that the Cursor unattended guard correctly refuses to classify.
+LAUNCH_COMMAND="$TMP_ROOT/autodetect-command"
+cat > "$LAUNCH_COMMAND" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' autodetect-smoke-ok
+SH
+chmod +x "$LAUNCH_COMMAND"
+
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
@@ -115,7 +125,7 @@ env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
   FM_SPAWN_NO_GUARD=1 \
-  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" "sh -c 'echo autodetect-smoke-ok'" --mode no-mistakes --yolo off \
+  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" "$LAUNCH_COMMAND --run" --mode no-mistakes --yolo off \
   >"$OUT_FILE" 2>"$ERR_FILE"
 status=$?
 [ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
