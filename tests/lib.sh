@@ -96,6 +96,17 @@ fm_test_cleanup() {
   fi
 }
 
+# fm_test_register_cleanup <path>: register a path that is NOT inside a
+# registered temp root - a machine-global name a case has to stage where
+# production looks for it - so the EXIT/INT/TERM traps below remove it too. It
+# writes to the same $$-keyed registry file fm_test_tmproot uses, so a call from
+# inside a command substitution still reaches the real shell's cleanup.
+fm_test_register_cleanup() {  # <path>
+  local path=$1
+  [ -n "$path" ] || return 1
+  printf '%s\n' "$path" >> "$FM_TEST_CLEANUP_REGISTRY"
+}
+
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root tmp_base
   tmp_base=${TMPDIR:-/tmp}
@@ -235,6 +246,59 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+# fm_test_fake_uid <slot>: a numeric account id no account on this machine
+# holds, unique to this process and to the slot.
+# A case that drives the per-account presentation lock namespace stages a real
+# directory under the machine-global /tmp, because that is where the namespace
+# lives by design and no private TMP_ROOT can stand in for it. Carrying this
+# process id in the id keeps two concurrent runs of one suite on different
+# names, so neither run can rmdir or chmod the other's staging out from under
+# it. Slots must be a single digit: the id is "9" plus this pid plus the slot,
+# and a pid never has a leading zero, so no two (pid, slot) pairs collide.
+fm_test_fake_uid() {  # <single-digit-slot>
+  printf '9%s%s' "$$" "$1"
+}
+
+# fm_test_uid_stat_shim <bin-dir> <path-glob> <uid|mode:octal> [...]: write a
+# `stat` shim into <bin-dir> that reports a chosen owner uid, or a chosen mode
+# when the value is written mode:<octal>, for the paths matching a glob, and
+# delegates every other call to the real stat.
+# Code that reads an account id back from the owner of an entry it creates
+# itself cannot be moved by the environment or by an `id` on PATH, which is the
+# point of doing it that way. Changing what the filesystem reports about those
+# entries is what remains, and it keeps the divergence real for every function
+# that reads an owner while the case stays unprivileged: a second real account,
+# or a chown to one, is the only alternative and neither is available in a test.
+# Faking the mode matters for a foreign-owner case specifically: a directory
+# another account owns at mode 700 denies this account entirely, and the only
+# unprivileged way to reproduce both halves is a directory whose real mode
+# refuses this account while the reported mode is the 700 the check demands.
+fm_test_uid_stat_shim() {
+  local sb=$1 real glob value
+  local uid_rules=() mode_rules=() rule
+  shift
+  real=$(command -v stat) || fail "the uid stat shim needs a real stat on PATH"
+  mkdir -p "$sb"
+  while [ "$#" -ge 2 ]; do
+    glob=$1; value=$2; shift 2
+    rule=$(printf '    %s) printf "%%s\\n" "%s"; exit 0 ;;' "$glob" "${value#mode:}")
+    case "$value" in
+      mode:*) mode_rules+=("$rule") ;;
+      *) uid_rules+=("$rule") ;;
+    esac
+  done
+  # shellcheck disable=SC2016 # Deliberate: $#/$2/$3 must reach the generated shim verbatim and expand when it runs, not here.
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'if [ "$#" -eq 3 ]; then' '  case "$2" in'
+    printf '%s\n' "    '%u')" '      case "$3" in'
+    [ "${#uid_rules[@]}" -eq 0 ] || printf '  %s\n' "${uid_rules[@]}"
+    printf '%s\n' '      esac' '      ;;' "    '%Lp' | '%a')" '      case "$3" in'
+    [ "${#mode_rules[@]}" -eq 0 ] || printf '  %s\n' "${mode_rules[@]}"
+    printf '%s\n' '      esac' '      ;;' '  esac' 'fi' "exec $real \"\$@\""
+  } > "$sb/stat"
+  chmod +x "$sb/stat"
 }
 
 # --- deterministic git identity and fixtures --------------------------------

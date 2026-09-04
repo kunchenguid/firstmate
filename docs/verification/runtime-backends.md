@@ -878,6 +878,21 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
+Both fixtures were re-run on 2026-08-21 after the presentation lock namespace became per account, as described under "Presentation spaces" in [herdr-backend.md](../herdr-backend.md).
+The run exercised an unprivileged foreign owner, an uncreatable namespace, an untrustworthy account id, an inherited account id, and another account's namespace left untouched.
+
+Observed output:
+
+```text
+ok - herdr presentation lock: the namespace name is per account, so no account can claim another's
+ok - herdr presentation lock: a foreign-owned namespace is diagnosed as permanent and names its remedy
+ok - herdr presentation lock: an absent namespace that cannot be created is diagnosed as permanent
+ok - herdr presentation lock: an inherited account id can neither move the namespace nor refuse this account out of it
+ok - herdr teardown separates an unusable lock namespace from an unreachable session
+ok - herdr teardown reports an uncreatable lock namespace as permanent rather than retryable
+ok - herdr teardown completes without ever touching the old shared presentation lock namespace
+```
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:

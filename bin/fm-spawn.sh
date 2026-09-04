@@ -819,7 +819,7 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
+      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
   fi
@@ -903,7 +903,8 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# One bounded lock per live Herdr session/socket, shared across all homes.
+# One bounded lock per live Herdr session/socket, shared across all of this
+# account's homes; the namespace is per-uid, so another account never shares it.
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
@@ -2242,7 +2243,9 @@ case "$BACKEND" in
           exit 1
         }
         spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+          # A contended lock clears on its own; an unusable lock namespace never
+          # does, so this refusal names which one it hit.
+          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
           exit 1
         }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
@@ -2346,7 +2349,7 @@ case "$BACKEND" in
             fi
           fi
         else
-          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
+          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
         fi
       fi
     fi

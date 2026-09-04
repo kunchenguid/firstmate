@@ -221,7 +221,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
   presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
     fm_lock_release "$task_lock" || true
-    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
+    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable$(fm_backend_herdr_presentation_lock_refusal_suffix)"
     return 0
   }
   if ! fm_lock_try_acquire "$presentation_lock"; then

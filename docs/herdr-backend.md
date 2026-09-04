@@ -106,6 +106,17 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
+That lock lives in a namespace whose name carries the account's own numeric user id, read back from the owner of a directory the process creates under `/tmp` for that purpose and removes again, and it is shared by every Firstmate home of one account because no other account's Firstmate ever creates or uses that name.
+Reading the id from something the process created itself is what makes two processes of one account always serialize against each other: no `id` lookup is consulted and no account id supplied through the environment is believed, and an id that belongs to no account here would name a namespace the real account owns and could never pass the ownership check.
+That guarantee does not extend to `PATH`, because the id is still read through the PATH-resolved `mktemp` and `stat`, so a process given a hostile `PATH` can be moved onto a namespace of someone else's choosing; the environment route is closed and the `PATH` route is not.
+A namespace whose reported owner differs from this account while it is still mode 700 and this account can nonetheless create entries inside it is reported as an untrustworthy account id rather than as a foreign one, because a mode 700 directory that admits this account answers to it and no removal or rerun clears that.
+A second local account can still deliberately create that name, and the refusal then names the owning user id and the remedy instead of misdirecting a retry.
+Renaming the namespace also opens a rollout window, and mutual exclusion is NOT preserved across revisions inside it.
+Two worktrees of one account running differing revisions resolve different namespaces for the same session key, so both acquire and both order at once: the older revision uses `/tmp/firstmate-herdr-presentation` and this one uses the per-uid name, and neither sees the other's lock file.
+Acquiring the old shared name as well would close that window by reinstating the cross-account block this change exists to remove, which is a worse trade than the window itself, so it is deliberately not done.
+The window closes once every worktree of the account runs this revision.
+When the namespace cannot be used for any other reason, including being absent because it cannot be created at all, every refusal that resolves the namespace names the exact fault and the remedy that clears it, and says plainly that rerunning will not clear it, because that fault is permanent while an unreachable session is not.
+A later warning that the lock was lost or is not held is a different case and carries no namespace diagnostic, because it is only reachable once the namespace already resolved and the lock was acquired, so a namespace fault has already refused before that point.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
