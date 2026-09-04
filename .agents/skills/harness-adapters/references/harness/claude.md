@@ -21,12 +21,15 @@ A ship or scout spawn therefore pre-registers the worktree before launch, and th
 `../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
 
 Never try to answer the trust dialog with a key.
-Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
+The observed rendering starts on `No, exit`, so a sent Enter ends the session instead of accepting.
 A visible trust dialog means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys.
 
 The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
-Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
+An operator accepts it once per machine instead, and it stays accepted, so answering it from a worker pane is never the normal path.
+Firstmate's own key vocabulary is Enter, Escape, and C-c, but `--key` is not limited to it: `fm_send_normalize_key` rewrites only the Escape spellings and passes every other name through, so what a selection-moving arrow can reach depends on the backend rather than on Firstmate.
+`Down` is verified on tmux alone, which hands the name straight to `tmux send-keys`; cmux and herdr forward an unmapped name verbatim, so the accepted spelling is that backend's own; zellij rejects unverified names the way it rejects `Escape` in place of `Esc`; and Orca refuses every key but Enter and Ctrl-C, so a dialog there has to be answered from the pane.
+Each backend guide under `../../../docs/` owns its own key vocabulary and what is verified there, so confirm the name before spending gate time on it.
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 
 Inspect within about 20 seconds, and inspect again after each confirmation, because clearing one gate can reveal the next.
