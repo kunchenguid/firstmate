@@ -2127,6 +2127,8 @@ def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any], m
 def apply_captured_patch(scratch: pathlib.Path, patch: pathlib.Path) -> None:
     prepared_patch = scratch / ".git" / "captured-score.patch"
     patch_bytes = patch.read_bytes()
+    if len(patch_bytes) == 0:
+        return
     prepared_patch.write_bytes(patch_bytes + (b"\n" if patch_bytes and not patch_bytes.endswith(b"\n") else b""))
     applied = run(["git", "apply", "--binary", str(prepared_patch)], cwd=scratch, check=False)
     if applied.returncode != 0:

@@ -1064,6 +1064,44 @@ jq -e 'select(.run_id=="smoke-tamper") | .machine == "duplicate" and .machine_ev
   || fail "post-hoc scoring trusted candidate-modified detector execution surfaces"
 pass "post-hoc scoring enforces the pinned detector after candidate tampering"
 
+clone_score_bundle() {  # <source-run-id> <dest-run-id>
+  local src=$1 dest=$2
+  mkdir -p "$WORKSPACE/bundles/$dest"
+  cp -R "$WORKSPACE/bundles/$src/." "$WORKSPACE/bundles/$dest/"
+  jq --arg id "$dest" '.run_id=$id | .git.history_diffs=[]' \
+    "$WORKSPACE/bundles/$dest/manifest.json" >"$TMP_ROOT/$dest.manifest.json"
+  mv "$TMP_ROOT/$dest.manifest.json" "$WORKSPACE/bundles/$dest/manifest.json"
+}
+
+clone_score_bundle smoke-cursor valid-capture
+PATH="$FAKEBIN:$PATH" "$BENCH" score --workspace "$WORKSPACE" --run-id valid-capture \
+  --semantic-file "$TMP_ROOT/cursor-semantic.json" >/dev/null
+jq -e 'select(.run_id=="valid-capture")' "$WORKSPACE/verdicts.jsonl" >/dev/null \
+  || fail "a valid nonempty capture did not record a score verdict"
+
+clone_score_bundle smoke-cursor malformed-capture
+printf 'xxxxxxxxxxxxxxxxxxxx' > "$WORKSPACE/bundles/malformed-capture/final.diff"
+[ "$(wc -c < "$WORKSPACE/bundles/malformed-capture/final.diff" | tr -d ' ')" -eq 20 ] \
+  || fail "malformed-capture fixture was not a nonempty 20-byte blob"
+if PATH="$FAKEBIN:$PATH" "$BENCH" score --workspace "$WORKSPACE" --run-id malformed-capture \
+  --semantic-file "$TMP_ROOT/cursor-semantic.json" \
+  >"$TMP_ROOT/malformed-capture.out" 2>"$TMP_ROOT/malformed-capture.err"; then
+  fail "score accepted a malformed nonempty capture"
+fi
+assert_grep "cannot reconstruct captured tree for scoring" "$TMP_ROOT/malformed-capture.err" \
+  "malformed nonempty capture left the git apply path"
+
+clone_score_bundle smoke-cursor empty-capture
+: > "$WORKSPACE/bundles/empty-capture/final.diff"
+[ "$(wc -c < "$WORKSPACE/bundles/empty-capture/final.diff" | tr -d ' ')" -eq 0 ] \
+  || fail "empty-capture fixture was not zero bytes"
+PATH="$FAKEBIN:$PATH" "$BENCH" score --workspace "$WORKSPACE" --run-id empty-capture \
+  --semantic-file "$TMP_ROOT/cursor-semantic.json" >/dev/null
+jq -e 'select(.run_id=="empty-capture") | .machine == "clean"' \
+  "$WORKSPACE/verdicts.jsonl" >/dev/null \
+  || fail "zero-byte captured final.diff did not score as a pristine tree"
+pass "post-hoc scoring treats a zero-byte capture as a pristine tree"
+
 PATH="$FAKEBIN:$PATH" "$BENCH" run --workspace "$WORKSPACE" --run-id smoke-hook-tamper \
     --arm guard-off --harness cursor-agent --model fake-cursor-hook-tamper --prompt-file "$SMOKE_PROMPT" \
     --helper-family smoke --stage smoke --load-file "$TMP_ROOT/load" --max-load 8 --timeout 30 >/dev/null
@@ -1157,7 +1195,7 @@ for scoreboard in "$TMP_ROOT/scoreboard.md" "$TMP_ROOT/scoreboard.html"; do
     fail "fresh-workspace scoreboard claimed a recovery ledger it did not receive"
   fi
 done
-[ "$(wc -l <"$WORKSPACE/verdicts.jsonl" | tr -d ' ')" -eq 18 ] \
+[ "$(wc -l <"$WORKSPACE/verdicts.jsonl" | tr -d ' ')" -eq 20 ] \
   || fail "verdict ledger is not separate and append-only"
 pass "separate verdicts generate all seven tables without hand-entered aggregates"
 
