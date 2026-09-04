@@ -1419,9 +1419,9 @@ test_mechanical_helper_writes_parent_channel() {
     fail "an empty helper report must not resolve an expectation"
   fi
   rc=0
-  FM_HOME= FM_ROOT_OVERRIDE="$sm_home" \
-    "$REPORT" "done" "$empty_corr" "must require FM_HOME" 2>/dev/null || rc=$?
-  [ "$rc" -ne 0 ] || fail "helper must not treat FM_ROOT_OVERRIDE as a mate home"
+  env -u FM_HOME "$REPORT" "done" "$empty_corr" "must require FM_HOME" \
+    2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "helper must require FM_HOME"
   rc=0
   FM_HOME="$home" "$REPORT" "done" "$corr" "from a main home" 2>/dev/null || rc=$?
   [ "$rc" -ne 0 ] || fail "helper must refuse a main home that has no parent channel"

@@ -1222,7 +1222,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
 # parent-replies.status is its parent channel, not a stranded self-home file.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec delivered hits first sightings snapshot previous status_file line line_no sighting_id phase changed=0
+  local rec delivered hits first sightings snapshot previous status_file line line_no sighting_base sighting_id phase changed=0
   local remote_parent_channel=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -1252,11 +1252,13 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
       && [ "$(basename "$status_file")" = parent-replies.status ]; then
       continue
     fi
+    sighting_base=$(fm_pending_reply_sighting_encode "$status_file" 0) || continue
+    sighting_base=${sighting_base%:0}
     line_no=0
     while IFS= read -r line || [ -n "$line" ]; do
       line_no=$((line_no + 1))
       fm_pending_reply_line_resolves "$line" "$corr" || continue
-      sighting_id=$(fm_pending_reply_sighting_encode "$status_file" "$line_no") || continue
+      sighting_id="$sighting_base:$line_no"
       [ -n "$first" ] || first=$sighting_id
       case ",$sightings," in
         *",$sighting_id,"*) continue ;;
