@@ -353,6 +353,22 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_help_states_relocation_not_removal() {
+  local out
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --help 2>&1) \
+    || fail "fm-ensure-agents-md.sh --help failed"
+  assert_contains "$out" "relocated, never removed" \
+    "--help does not state that content is relocated, never removed"
+  assert_contains "$out" "appends the canonical" \
+    "--help does not surface the promotion side effect of appending the self-governance section"
+  assert_contains "$out" "when it is not already present" \
+    "--help does not state that the section is appended only when absent"
+  assert_contains "$out" "CLAUDE.md shrinks" \
+    "--help does not surface the root-file side effect that CLAUDE.md shrinks to the pointer"
+  pass "fm-ensure-agents-md.sh: --help states content is relocated, never removed"
+}
+
+test_help_states_relocation_not_removal
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
