@@ -11,6 +11,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export FM_ROOT
+FM_HOME="${FM_HOME:-$FM_ROOT}"
+export FM_HOME
 LIA_SCRIPT="$FM_ROOT/projects/lia/scripts/boot.py"
 if [ ! -f "$LIA_SCRIPT" ] && [ -f "${HOME:-}/.lia/boot.py" ]; then
   LIA_SCRIPT="${HOME:-}/.lia/boot.py"
@@ -39,10 +41,25 @@ if [ -n "$BOOT_OUTPUT" ]; then
 fi
 
 if [ "$RC" -eq 0 ]; then
-  if printf '%s\n' "$BOOT_OUTPUT" | grep -q 'COLD_BOOT'; then
-    if [ -x "$SCRIPT_DIR/fm-send.sh" ]; then
-      "$SCRIPT_DIR/fm-send.sh" lia "Lia, đài chỉ huy vào ca trực. Giữ vững vị trí, sẵn sàng nhận lệnh của Captain." || true
-    fi
+  GREETINGS=(
+    "Welcome to the bridge, Lia. Engine room standing by."
+    "Welcome aboard, Lia. Systems nominal, Jala online."
+    "Good to have the bridge online, Lia. Standing by for directives."
+    "Welcome back, Lia. IPC link active, ready."
+    "Welcome back, Lia. Good to have you on the bridge again."
+    "The bridge is yours, Lia. Engine room is primed and ready."
+    "Welcome on deck, Lia. Fleet is under way, awaiting your helm."
+    "Welcome back, Lia. Core systems synchronized, Jala standing by."
+    "Welcome aboard, Lia. Ship is ready, let's get to work."
+    "Lia, welcome. Systems shipshape, standing by."
+  )
+  RANDOM_IDX=$(( RANDOM % ${#GREETINGS[@]} ))
+  GREETING="${GREETINGS[$RANDOM_IDX]}"
+
+  if command -v herdr >/dev/null 2>&1; then
+    herdr agent prompt lia "$GREETING" >/dev/null 2>&1 || true
+  elif [ -x "$SCRIPT_DIR/fm-send.sh" ]; then
+    "$SCRIPT_DIR/fm-send.sh" lia "$GREETING" || true
   fi
 fi
 

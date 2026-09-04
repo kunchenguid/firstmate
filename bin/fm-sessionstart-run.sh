@@ -133,13 +133,16 @@ case "$SOURCE" in
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" 1 || true
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" 2 || true
     else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" 1 || true
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" 2 || true
     fi
     ;;
   *)
-    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" 1 || true
+    "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" 2 || true
     ;;
 esac
 exit 0
