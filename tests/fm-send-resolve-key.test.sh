@@ -634,6 +634,35 @@ test_unclosable_reserved_key_refuses_before_send() {
   pass "fm-send --resolve-key: a reserved key this send cannot close refuses loudly before anything is sent"
 }
 
+test_failed_close_recovery_command_is_shell_safe() {
+  local dir fb log home err marker answer rc diagnostic manual out
+  dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home "manual close")
+  marker="$dir/injected"
+  answer="ok'; touch $marker; echo '"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=quote-safety]: choose safely\n' > "$home/state/t1.status"
+  chmod 0400 "$home/state/t1.status"
+
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key quote-safety "$answer" >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$home/state/t1.status"
+  [ "$rc" -ne 0 ] || fail "a delivered answer with a failed close append should fail loudly"
+  diagnostic=$(cat "$err")
+  assert_contains "$diagnostic" "Close it manually with:" "the close failure should provide recovery guidance"
+  manual=${diagnostic#*Close it manually with: }
+  manual=${manual% - do not resend the answer.}
+  bash -c "$manual" || fail "the generated manual close command should execute successfully"
+  [ ! -e "$marker" ] || fail "the generated manual close command executed answer text as shell code"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the generated manual close command did not close the decision: $out"
+  fi
+  pass "fm-send --resolve-key: failed-close recovery commands safely quote operator text and paths"
+}
+
 test_remote_reserved_pending_reply_key_closes_locally() {
   local dir fb log home ssh_log rc out key corr
   dir="$TMP_ROOT/remote-reserved"; mkdir -p "$dir"
@@ -677,4 +706,5 @@ test_flag_misuse_refuses
 test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
+test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally

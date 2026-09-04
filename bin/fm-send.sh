@@ -628,22 +628,23 @@ fi
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line close_note append_rc still
+  local note=$1 k line close_note append_rc still manual_close_cmd
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     close_note=$(fm_send_resolve_close_note "$k" "$note")
     line="resolved [key=$k]: $close_note"
     fm_cap_line_var "$line"
+    printf -v manual_close_cmd "printf '%%s\\n' %q >> %q" "$FM_LINE_CAP_LINE" "$RESOLVE_STATUS_FILE"
     append_rc=0
     fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
     if [ "$append_rc" -eq 2 ]; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: $close_note' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
       return 1
     fi
     still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
     case "$still" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
-        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; the close line was not accepted as a transition (reserved keys require the owning library's vocabulary). Close it manually with: echo 'resolved [key=$k]: $close_note' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; the close line was not accepted as a transition (reserved keys require the owning library's vocabulary). Close it manually with: $manual_close_cmd - do not resend the answer." >&2
         return 1
         ;;
     esac
