@@ -147,18 +147,26 @@
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
 # blocked: record in the target task's state/<id>.status. fm-send itself
-# appends the closing "resolved [key=<key>]: answered: <capped excerpt>" line
-# to that status file, so the captain-facing OPEN DECISIONS record closes at
-# answer time and never depends on the busy worker writing a matching resolved
-# line. On the inbox plane the close happens at ENQUEUE time, because enqueue
-# is durable delivery to the task's record; the worker reading the answer late
-# is covered by the acknowledgement re-ring ladder. On the typed plane it
-# still waits for the confirmed submit. The close is a LOCAL append for every
-# target kind - crewmate, scout, local secondmate, and remote secondmate alike
-# - because the open-decision ledger fm-wake-drain folds lives in this home's
-# own state dir (a remote mate's escalations reach it through the
-# parent-replies ingest); only the answer message crosses the backend or
-# remote transport.
+# appends the closing resolved line to that status file, so the captain-facing
+# OPEN DECISIONS record closes at answer time and never depends on the busy
+# worker writing a matching resolved line. Ordinary keys close with
+# "resolved [key=<key>]: answered: <capped excerpt>". A reserved key
+# (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
+# closed with the owning library's vocabulary note
+# (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
+# the fold actually drops it; a bare answered: note is not a reserved-key
+# transition and is never written for those keys. If this send cannot produce
+# a note the guard will accept, it refuses before sending and names the key
+# rather than exiting 0 on a silent no-op. After a delivered close it also
+# re-folds and fails loudly if the named key is still open. On the inbox plane
+# the close happens at ENQUEUE time, because enqueue is durable delivery to
+# the task's record; the worker reading the answer late is covered by the
+# acknowledgement re-ring ladder. On the typed plane it still waits for the
+# confirmed submit. The close is a LOCAL append for every target kind -
+# crewmate, scout, local secondmate, and remote secondmate alike - because the
+# open-decision ledger fm-wake-drain folds lives in this home's own state dir
+# (a remote mate's escalations reach it through the parent-replies ingest);
+# only the answer message crosses the backend or remote transport.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -545,6 +553,18 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   return 1
 }
 
+# Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
+# A pending-reply-* key uses the owning library's vocabulary so the reserved-key
+# fold actually closes it (fm_pending_reply_close_note_for_key).
+fm_send_resolve_close_note() {  # <key> <excerpt>
+  local k=$1 excerpt=$2 owned
+  if owned=$(fm_pending_reply_close_note_for_key "$k" "$RESOLVE_TASK_ID" operator-resolve-key "$excerpt"); then
+    printf '%s' "$owned"
+    return 0
+  fi
+  printf 'answered: %s' "$excerpt"
+}
+
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
   printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
     || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
@@ -587,6 +607,16 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
+  # Refuse before send when a named status-log key cannot actually close: a
+  # reserved key with an answered: note is a silent no-op in the fold.
+  resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_STATUS_KEYS; do
+    probe=$(fm_send_resolve_close_note "$k" "$resolve_excerpt")
+    if ! _fm_decision_key_transition_allowed "$k" "$probe"; then
+      echo "error: --resolve-key '$k' cannot take effect: this key is reserved for its owning library, and this send cannot produce a close note that library's fold will accept. Refusing rather than writing a silent no-op; nothing was sent." >&2
+      exit 1
+    fi
+  done
 fi
 
 # Close each answered decision in this home's ledger, only after the answer is
@@ -598,17 +628,25 @@ fi
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line append_rc
+  local note=$1 k line close_note append_rc still
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
-    line="resolved [key=$k]: answered: $note"
+    close_note=$(fm_send_resolve_close_note "$k" "$note")
+    line="resolved [key=$k]: $close_note"
     fm_cap_line_var "$line"
     append_rc=0
     fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
     if [ "$append_rc" -eq 2 ]; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: $close_note' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi
+    still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+    case "$still" in
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; the close line was not accepted as a transition (reserved keys require the owning library's vocabulary). Close it manually with: echo 'resolved [key=$k]: $close_note' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+        return 1
+        ;;
+    esac
   done
 }
 
