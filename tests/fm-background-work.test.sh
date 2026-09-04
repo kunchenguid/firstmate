@@ -389,6 +389,32 @@ test_registry_lock_contention_returns_disclosed_unknown() {
   pass "registry lock contention returns promptly as a disclosed unknown collection"
 }
 
+test_blocked_snapshot_capture_hits_public_deadline() {
+  local home progress fallback result started elapsed
+  home=$(make_home blocked-capture)
+  progress=$(make_progress_command blocked-capture-progress 'printf "ready\n"')
+  start_sleeper
+  register_fixture "$home" blocked "$STARTED_PID" "$progress" ''
+  fallback="$home/state/background-work/blocked/fallback.json"
+  rm -f "$fallback"
+  mkfifo "$fallback"
+  started=$(date +%s)
+  result=$(FM_BACKGROUND_WORK_COLLECTION_BUDGET=2 \
+    FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT=1 list_json "$home") \
+    || fail "public collection timeout made list fail"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 4 ] || fail "blocked snapshot capture escaped the public deadline (${elapsed}s)"
+  printf '%s\n' "$result" | jq -e '
+    .collection.status == "unknown"
+      and .collection.reason == "collection-timeout"
+      and .collection.truncated == true
+      and .records[0].id == "(registry)"
+      and .records[0].liveness.status == "unknown"
+      and .records[0].progress.status == "unknown"
+  ' >/dev/null || fail "public timeout did not disclose collection-level unknown: $result"
+  pass "blocked snapshot capture is bounded by the public collection deadline"
+}
+
 test_live_adopted_process_reads_alive_and_progressing
 test_dead_process_remains_listed_as_dead
 test_unchanged_progress_becomes_stalled_while_process_stays_alive
@@ -401,3 +427,4 @@ test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
 test_registry_lock_contention_returns_disclosed_unknown
+test_blocked_snapshot_capture_hits_public_deadline

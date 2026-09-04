@@ -42,6 +42,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -553,7 +556,7 @@ collect_records() { # <output-directory> <now-epoch> <now-iso> <remaining-second
   wait "$watchdog" 2>/dev/null || true
 }
 
-list_work() {
+list_work_impl() {
   local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false
   local collection_started collection_deadline remaining lock_rc lock_error_document
   local -a records=() ids=() record_files=()
@@ -645,6 +648,24 @@ list_work() {
   fi
 }
 
+list_work() {
+  local format=${1-} output rc
+  case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
+  if output=$(fm_run_timed "$COLLECTION_BUDGET" "$0" _list "$format"); then
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 124 ] || return "$rc"
+  if [ "$format" = --json ]; then
+    printf '%s\n' '{"schema":"fm-background-work-list.v1","generated":null,"fm_home":null,"collection":{"status":"unknown","reason":"collection-timeout","budget_seconds":null,"total_records":null,"probes_attempted":0,"probes_completed":0,"truncated":true},"records":[{"id":"(registry)","description":"Background-work collection timed out","task":null,"pid":null,"started_at":null,"expected_finish_at":null,"liveness":{"status":"unknown","reason":"collection-timeout"},"progress":{"status":"unknown","reason":"collection-timeout","value":null,"observed_at":null,"last_changed_at":null,"stale_after_seconds":null,"timeout_seconds":null}}]}'
+  else
+    printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
+    printf '(registry)\t-\tunknown\tunknown\t-\t-\t-\tBackground-work collection timed out\n'
+  fi
+}
+
 retire_work() {
   local id=${1-} record entry observe_owner
   valid_id "$id" || die "invalid background-work id: $id"
@@ -689,6 +710,7 @@ retire_work() {
 }
 
 case "${1-}" in
+  _list) shift; list_work_impl "${1-}" ;;
   register) shift; register_work "$@" ;;
   list) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; list_work "${1-}" ;;
   retire) shift; [ "$#" -eq 1 ] || { usage >&2; exit 2; }; retire_work "$1" ;;
