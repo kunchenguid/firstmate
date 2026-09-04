@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 "$ENTER_WAIT")` loop after
+# `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -30,6 +31,7 @@ make_settle_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
@@ -159,14 +161,7 @@ test_enter_wait_override_changes_the_bound() {
 
   start=$(date +%s)
   # Point the fake pane at the project itself so it never enters a worktree.
-  out=$(FM_SPAWN_ENTER_WAIT_SECS=1 FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_PANE_STALE="$PROJ_DIR" \
-    FM_FAKE_PANE_STALE_READS=0 FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_SPAWN_ENTER_WAIT_SECS=1 WT_DIR="$PROJ_DIR" STALE_DIR="$PROJ_DIR" run_settle_spawn "$id")
   status=$?
   end=$(date +%s)
   elapsed=$((end - start))
@@ -176,19 +171,26 @@ test_enter_wait_override_changes_the_bound() {
   pass "FM_SPAWN_ENTER_WAIT_SECS bounds the treehouse-enter wait loop"
 }
 
-# A non-positive-integer override is refused before any loop runs.
+# A non-positive-integer override (including all-digit zero like 00) is refused
+# before the endpoint window exists or treehouse get is sent.
 test_enter_wait_invalid_is_refused() {
-  local rec id out status
-  id=enter-wait-invalid-z4
-  rec=$(make_settle_case enter-wait-invalid "$id" 0)
-  read_settle_record "$rec"
+  local rec id out status bad tmux_log
+  for bad in nope 00; do
+    id="enter-wait-invalid-$bad-z4"
+    rec=$(make_settle_case "enter-wait-invalid-$bad" "$id" 0)
+    read_settle_record "$rec"
+    tmux_log="$HOME_DIR/tmux-calls.log"
+    : > "$tmux_log"
 
-  out=$(FM_SPAWN_ENTER_WAIT_SECS=nope run_settle_spawn "$id")
-  status=$?
-  expect_code 1 "$status" "spawn should refuse a non-integer enter-wait"
-  assert_contains "$out" "FM_SPAWN_ENTER_WAIT_SECS must be a positive integer" \
-    "spawn did not refuse the invalid enter-wait value"
-  pass "a non-positive-integer FM_SPAWN_ENTER_WAIT_SECS is refused"
+    out=$(FM_SPAWN_ENTER_WAIT_SECS="$bad" FM_FAKE_TMUX_LOG="$tmux_log" run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "spawn should refuse enter-wait '$bad'"
+    assert_contains "$out" "FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '$bad'" \
+      "spawn did not refuse enter-wait '$bad'"
+    assert_no_grep "new-window" "$tmux_log" "enter-wait '$bad' was refused only after creating the endpoint window"
+    assert_no_grep "treehouse get" "$tmux_log" "enter-wait '$bad' was refused only after sending treehouse get"
+  done
+  pass "a non-positive-integer FM_SPAWN_ENTER_WAIT_SECS is refused before any endpoint exists"
 }
 
 test_single_stale_first_read_is_not_accepted

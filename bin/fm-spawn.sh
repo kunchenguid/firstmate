@@ -333,6 +333,9 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+ENTER_WAIT=${FM_SPAWN_ENTER_WAIT_SECS:-60}
+case "$ENTER_WAIT" in ''|*[!0-9]*) echo "error: FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '${FM_SPAWN_ENTER_WAIT_SECS:-}'" >&2; exit 1 ;; esac
+[ "$ENTER_WAIT" -gt 0 ] || { echo "error: FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '${FM_SPAWN_ENTER_WAIT_SECS:-}'" >&2; exit 1; }
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -2573,12 +2576,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  enter_wait=${FM_SPAWN_ENTER_WAIT_SECS:-60}
-  case "$enter_wait" in
-    ''|*[!0-9]*|0) echo "error: FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '${FM_SPAWN_ENTER_WAIT_SECS:-}'" >&2; exit 1 ;;
-  esac
   candidate=""
-  for _ in $(seq 1 "$enter_wait"); do
+  for _ in $(seq 1 "$ENTER_WAIT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2597,7 +2596,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within ${enter_wait}s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${ENTER_WAIT}s; inspect window $T" >&2
     exit 1
   fi
 
