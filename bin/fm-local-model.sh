@@ -11,7 +11,9 @@
 #        fm-local-model.sh check <model>
 #        fm-local-model.sh brief-fits <model> <brief-path>
 #
-# Endpoint: $FM_LOCAL_MODEL_ENDPOINT, default http://127.0.0.1:1234.
+# Endpoint: $FM_LOCAL_MODEL_ENDPOINT, default http://127.0.0.1:1234. Its host
+#           must be a loopback address (127.0.0.0/8, ::1, localhost) or an empty
+#           authority; a remote host is refused (see "Local means loopback").
 # Ceiling:  $FM_LOCAL_MODEL_MAX_CONTEXT, default 131072 tokens (see "Why a
 #           ceiling" below). A value of 0 or a non-integer is refused rather
 #           than silently treated as unbounded.
@@ -21,7 +23,7 @@
 #
 # Exit codes are the contract every caller reads:
 #   0  ok
-#   2  usage error
+#   2  usage error, including an endpoint whose host is not loopback
 #   3  endpoint unreachable (server off, wrong port, or not answering)
 #   4  model absent from the endpoint's catalog, or present but not loaded
 #   5  the endpoint answered but its catalog could not be parsed
@@ -60,6 +62,16 @@
 # that baseline, not the window. `headroom` computes it and `brief-fits` spends
 # a bounded share of it; a window with no headroom is refused outright with the
 # one action that fixes it, rather than accepted and then silently compacted.
+#
+# LOCAL MEANS LOOPBACK
+# The captain's constraint is LOCAL work. Every caller bakes this endpoint into
+# a worker launch as ANTHROPIC_BASE_URL, so the endpoint decides where the task
+# brief, the file contents the worker reads, and its whole tool transcript are
+# sent. A hostname pointing off the machine would make "local model" a name for
+# shipping the repository to a third party, silently and without error. This
+# script resolves the endpoint for every caller, so this is where the invariant
+# is enforced: the host must be loopback, or an empty authority (a file:// URL,
+# which reaches no host at all).
 set -u
 
 ENDPOINT=${FM_LOCAL_MODEL_ENDPOINT:-http://127.0.0.1:1234}
@@ -76,6 +88,56 @@ ceiling() {
   esac
   [ "$c" -gt 0 ] || { echo "error: FM_LOCAL_MODEL_MAX_CONTEXT must be greater than zero" >&2; exit 2; }
   printf '%s\n' "$c"
+}
+
+# True when the argument is a dotted-quad address in 127.0.0.0/8. Every octet
+# is checked so a hostname that merely starts with "127." - 127.evil.example -
+# can never pass as loopback.
+is_loopback_ipv4() {  # <host>
+  local ip=$1 rest o1 o2 o3 o4 part
+  case "$ip" in *.*.*.*) ;; *) return 1 ;; esac
+  o1=${ip%%.*}; rest=${ip#*.}
+  o2=${rest%%.*}; rest=${rest#*.}
+  o3=${rest%%.*}; o4=${rest#*.}
+  for part in "$o1" "$o2" "$o3" "$o4"; do
+    case "$part" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$part" -le 255 ] || return 1
+  done
+  [ "$o1" = 127 ]
+}
+
+# The host portion of the configured endpoint, with scheme, userinfo, port and
+# path removed. A bracketed IPv6 literal is unwrapped. An endpoint with no
+# authority at all (file:///path) yields the empty string.
+endpoint_host() {
+  local rest
+  rest=${ENDPOINT#*://}
+  rest=${rest%%/*}
+  rest=${rest##*@}
+  case "$rest" in
+    \[*\]*) rest=${rest#\[}; printf '%s\n' "${rest%%\]*}" ;;
+    *) printf '%s\n' "${rest%%:*}" ;;
+  esac
+}
+
+# The local-only invariant, enforced once for every command that touches the
+# endpoint. See "Local means loopback" above.
+require_loopback_endpoint() {
+  local host
+  host=$(endpoint_host)
+  case "$host" in
+    ''|localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
+  esac
+  is_loopback_ipv4 "$host" && return 0
+  cat >&2 <<EOF
+error: the local model endpoint '$ENDPOINT' is not on this machine (host: $host).
+       claude-local is a LOCAL runtime: the endpoint receives the task brief,
+       every file the worker reads, and its whole tool transcript, so it may only
+       be a loopback address - 127.0.0.0/8, ::1, or localhost.
+       Point FM_LOCAL_MODEL_ENDPOINT at a loopback address (default
+       http://127.0.0.1:1234), or run this task on a hosted runtime.
+EOF
+  exit 2
 }
 
 # Fetch the endpoint catalog. Prints the raw body on success; exit 3 when the
@@ -188,7 +250,7 @@ cmd_preflight() {  # <model>
     cat >&2 <<EOF
 error: the local model endpoint at $ENDPOINT is not answering.
        Start the server (LM Studio Developer tab, or 'lms server start') and retry.
-       Set FM_LOCAL_MODEL_ENDPOINT to point at a different host or port.
+       Set FM_LOCAL_MODEL_ENDPOINT to a different loopback port if it serves elsewhere.
 EOF
     exit 3
   fi
@@ -297,6 +359,11 @@ EOF
 
 [ "$#" -ge 1 ] || die_usage
 CMD=$1; shift
+# Every command below reads the endpoint, so the local-only invariant is checked
+# once here rather than inside catalog(): `check` swallows catalog failures to
+# print its own wake line, and a misconfigured endpoint must not be reported to
+# the operator as a server that stopped answering.
+require_loopback_endpoint
 case "$CMD" in
   probe)          [ "$#" -eq 0 ] || die_usage; cmd_probe ;;
   list)           [ "$#" -eq 0 ] || die_usage; cmd_list ;;

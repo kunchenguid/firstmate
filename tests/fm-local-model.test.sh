@@ -23,6 +23,9 @@
 #   4. The boundary that actually bites is the HEADROOM above the harness's own
 #      prompt, measured at ~60k tokens on 2026-09-01. An oversized brief - and a
 #      window with no headroom at all - is REFUSED, not silently degraded.
+#   5. LOCAL means loopback. The endpoint becomes the worker's
+#      ANTHROPIC_BASE_URL, so a remote host is refused before any request is
+#      made rather than quietly shipping the brief and transcript off the box.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -335,6 +338,73 @@ test_bad_ceiling_is_refused() {
   pass "a malformed ceiling is refused, and an absent one falls back to a real bound"
 }
 
+# The endpoint becomes the worker's ANTHROPIC_BASE_URL, so it decides where the
+# brief, every file the worker reads, and its whole tool transcript are sent. A
+# remote host would make "local model" a name for shipping the repository off
+# the machine, silently and with no error at all, so it is refused before any
+# request is made. The two halves are asserted together because a guard that
+# refused everything would pass the refusal half alone: a loopback endpoint must
+# still reach the network, and a loopback host that merely LOOKS like one
+# (127.0.0.1.evil.example) must not.
+test_remote_endpoint_is_refused() {
+  local url out status bad
+  url=$(endpoint loopback loaded 65536)
+
+  # Accepted: the empty-authority file:// fixture the rest of this suite uses,
+  # and a real loopback HOST in the authority, both fetched by the real curl.
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" model-state local-coder) \
+    || fail "an empty-authority endpoint was refused"
+  [ "$out" = loaded ] || fail "expected 'loaded' from the local endpoint, got '$out'"
+  out=$(FM_LOCAL_MODEL_ENDPOINT="file://localhost$TMP_ROOT/loopback" \
+    "$LOCAL_MODEL" model-state local-coder) \
+    || fail "a localhost endpoint was refused"
+  [ "$out" = loaded ] || fail "expected 'loaded' from the localhost endpoint, got '$out'"
+
+  # A loopback ADDRESS reaches the network: with nothing listening it must fail
+  # as unreachable (3), never as a refused configuration (2).
+  FM_LOCAL_MODEL_ENDPOINT=http://127.0.0.1:1 FM_LOCAL_MODEL_TIMEOUT=2 \
+    "$LOCAL_MODEL" probe >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] || fail "a loopback address must reach the endpoint check, got exit $status"
+
+  for bad in http://remote-host.example:1234 http://127.0.0.1.evil.example:1234 \
+    'http://[2001:db8::1]:1234' http://127.0.0.1@evil.example:1234 file://evil.example/catalog; do
+    FM_LOCAL_MODEL_ENDPOINT="$bad" FM_LOCAL_MODEL_TIMEOUT=2 \
+      "$LOCAL_MODEL" model-state local-coder >/dev/null 2>&1
+    status=$?
+    [ "$status" -eq 2 ] || fail "endpoint '$bad' must be refused with exit 2, got $status"
+  done
+
+  # The refusal has to be actionable on its own: it names the endpoint, the
+  # variable that sets it, and what is allowed instead.
+  out=$(FM_LOCAL_MODEL_ENDPOINT=http://remote-host.example:1234 \
+    "$LOCAL_MODEL" preflight local-coder 2>&1)
+  case "$out" in
+    *"http://remote-host.example:1234"*) : ;;
+    *) fail "the remote-endpoint refusal did not name the endpoint: $out" ;;
+  esac
+  case "$out" in
+    *FM_LOCAL_MODEL_ENDPOINT*) : ;;
+    *) fail "the remote-endpoint refusal did not name the variable: $out" ;;
+  esac
+  case "$out" in
+    *127.0.0.0/8*) : ;;
+    *) fail "the remote-endpoint refusal did not say what is allowed: $out" ;;
+  esac
+
+  # The watcher poll shares the same boundary. A remote endpoint must be a
+  # refusal there too, never a wake line blaming a server that stopped
+  # answering - that would send the operator to restart LM Studio when the real
+  # fault is the endpoint they configured.
+  out=$(FM_LOCAL_MODEL_ENDPOINT=http://remote-host.example:1234 \
+    "$LOCAL_MODEL" check local-coder 2>/dev/null)
+  status=$?
+  [ "$status" -eq 2 ] || fail "the watcher check must refuse a remote endpoint, got exit $status"
+  [ -z "$out" ] || fail "the watcher check misreported a remote endpoint as a wake: $out"
+
+  pass "the endpoint is confined to loopback, and a loopback endpoint still reaches the network"
+}
+
 test_loaded_model_and_budget
 test_evicted_model_is_loud
 test_absent_model_names_the_gap
@@ -345,3 +415,4 @@ test_oversized_brief_is_refused
 test_no_headroom_is_refused_with_the_fix
 test_wrong_shaped_catalog_is_not_reported_as_eviction
 test_bad_ceiling_is_refused
+test_remote_endpoint_is_refused

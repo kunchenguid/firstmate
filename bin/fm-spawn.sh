@@ -1347,7 +1347,7 @@ launch_template() {
     # Claude Code names it as the control for an unrecognized model's real
     # window, and without it Claude Code assumes 200k and auto-compacts against
     # a window the local server does not have (verified 2026-09-01).
-    claude-local) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ANTHROPIC_BASE_URL=__LOCALENDPOINT__ ANTHROPIC_AUTH_TOKEN=__LOCALTOKEN__ ANTHROPIC_MODEL=__LOCALMODEL__ ANTHROPIC_SMALL_FAST_MODEL=__LOCALMODEL__ CLAUDE_CODE_MAX_CONTEXT_TOKENS=__LOCALCTX__ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --dangerously-skip-permissions "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude-local) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 ANTHROPIC_BASE_URL=__LOCALENDPOINT__ ANTHROPIC_AUTH_TOKEN=__LOCALTOKEN__ ANTHROPIC_MODEL=__LOCALMODEL__ ANTHROPIC_SMALL_FAST_MODEL=__LOCALMODEL__ CLAUDE_CODE_MAX_CONTEXT_TOKENS=__LOCALCTX__ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'

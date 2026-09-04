@@ -400,6 +400,52 @@ test_dispatch_rule_and_explicit_harness_can_select_it() {
   pass "matched dispatch rules and explicit harnesses can select claude-local"
 }
 
+# claude-local launches the same `claude` binary as the claude adapter, so it
+# inherits that adapter's fleet obligations too. The feedback-draft suppressors
+# are the ones that bite here: an unattended crewmate must not be able to offer
+# or create a Claude feedback draft. The launch command typed into the pane is
+# the generated interface this asserts, alongside the endpoint pin that makes it
+# claude-local at all - so a template that dropped either is caught here.
+test_launch_carries_the_bounded_local_context() {
+  local home fakebin endpoint case_dir project worktree id launch_log launch status
+  read -r home fakebin endpoint case_dir <<<"$(make_world launch-template)"
+  id="cl-launch-x1"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  launch_log="$case_dir/launch.log"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/$id"
+
+  status=0
+  FM_FAKE_PANE_PATH="$worktree" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    run_spawn "$home" "$fakebin" "$endpoint" "$id" "$project" \
+    --scout --harness claude-local --model local-coder || status=$?
+  [ "$status" -eq 0 ] || fail "the claude-local spawn did not launch: $(cat "$RUN_OUT")"
+  launch=$(cat "$launch_log")
+
+  case "$launch" in
+    *"CLAUDE_CODE_SEND_FEEDBACK=0"*) : ;;
+    *) fail "the claude-local launch did not suppress feedback sending: $launch" ;;
+  esac
+  case "$launch" in
+    *"--settings '{\"feedbackDrafts\":\"off\"}'"*) : ;;
+    *) fail "the claude-local launch did not turn feedback drafts off: $launch" ;;
+  esac
+  # The endpoint is quoted and the temp path may be symlink-resolved, so this
+  # pins the base URL to the fixture's own catalog directory rather than to a
+  # byte-identical path.
+  case "$launch" in
+    *"ANTHROPIC_BASE_URL='file://"*"/launch-template/endpoint'"*) : ;;
+    *) fail "the claude-local launch was not pinned to the local endpoint: $launch" ;;
+  esac
+  case "$launch" in
+    *"CLAUDE_CODE_MAX_CONTEXT_TOKENS="*) : ;;
+    *) fail "the claude-local launch did not bound the context window: $launch" ;;
+  esac
+
+  pass "the claude-local launch suppresses feedback drafts and stays pinned to the local endpoint"
+}
+
 # A tmux and ps pair that answers the endpoint's agent-state classifier with
 # exactly one verdict per FM_FAKE_AGENT value: `alive` shows the window with a
 # claude foreground process, `missing` reports the session gone, and
@@ -601,6 +647,7 @@ test_spawn_arms_an_executable_eviction_check
 test_raw_claude_local_commands_are_refused
 test_dispatch_profile_default_cannot_select_it
 test_dispatch_rule_and_explicit_harness_can_select_it
+test_launch_carries_the_bounded_local_context
 test_eviction_check_is_gated_on_worker_liveness
 test_fresh_dispatch_rollback_retires_the_eviction_check
 test_incomplete_dispatch_rollback_still_retires_the_eviction_check

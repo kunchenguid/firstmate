@@ -46,6 +46,7 @@ Offer it for short, attended, local work the captain has asked to keep on his ow
 Three findings drive its design, and none of them is safe to re-derive by intuition:
 
 - **The catalog is the only model-identity source.** A request naming a model that is not loaded returned HTTP 200 and was answered by whatever *was* loaded, with the response naming the loaded model. The request path can therefore never report an eviction; `GET /api/v0/models` and its per-model `state` can.
+- **The endpoint host must be loopback.** `FM_LOCAL_MODEL_ENDPOINT` becomes the worker's `ANTHROPIC_BASE_URL`, so it decides where the brief, the files the worker reads, and its tool transcript are sent; a host outside `127.0.0.0/8`, `::1`, or `localhost` is refused rather than quietly making this a remote runtime.
 - **`POST /v1/messages/count_tokens` is not implemented** ("Unexpected endpoint or method"), so no exact token count is available without spending a full prefill.
 - **The harness prompt is the dominant context consumer.** Captured from the server's own request log, a single `claude -p` turn carrying a one-sentence prompt sent ~250 KB - roughly 60k tokens of system prompt and tool schema - before any task content. Against the 65,536-token window the reference model had loaded, that is ~96% of the window, leaving 5,536 tokens of headroom.
 
