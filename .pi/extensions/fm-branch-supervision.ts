@@ -58,7 +58,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
 // and compiled-binary loaders, the same standing as pi-tui and typebox
@@ -67,13 +67,16 @@ import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/
 import {
   createAgentSession,
   createBashToolDefinition,
+  DefaultPackageManager,
   DefaultResourceLoader,
   DynamicBorder,
   getAgentDir,
   keyHint,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
   ToolExecutionComponent,
+  VERSION,
   type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -126,6 +129,8 @@ const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
 const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
+const CODEX_COMPAT_PACKAGE = "pi-openai-codex-compat";
+const CODEX_COMPAT_SOURCE = `npm:${CODEX_COMPAT_PACKAGE}`;
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -220,6 +225,145 @@ type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type BranchEffort = ReturnType<NonNullable<ExtensionAPI["getThinkingLevel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
+type CodexCompatResources = { extensionPath: string; settingsManager: SettingsManager };
+type VersionTuple = readonly [number, number, number];
+
+function parseVersion(value: string): VersionTuple | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(left: VersionTuple, right: VersionTuple): number {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+// Package manifests use npm semver syntax, but Pi does not export its semver
+// dependency to extensions. Recognize the exact, comparator, caret, tilde,
+// and wildcard forms needed for a conservative fail-closed peer check.
+function versionSatisfiesRange(version: string, range: string): boolean | null {
+  const current = parseVersion(version);
+  if (!current) return null;
+  const alternatives = range.split("||").map((part) => part.trim()).filter(Boolean);
+  if (alternatives.length === 0) return null;
+
+  let understood = true;
+  const matched = alternatives.some((alternative) => {
+    if (alternative === "*") return true;
+    const clauses = alternative.split(/\s+/).filter(Boolean);
+    if (clauses.length === 0) {
+      understood = false;
+      return false;
+    }
+    return clauses.every((clause) => {
+      const match = /^(>=|<=|>|<|=|\^|~)?v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?$/.exec(clause);
+      if (!match) {
+        understood = false;
+        return false;
+      }
+      const operator = match[1] ?? "";
+      const minorToken = match[3];
+      const patchToken = match[4];
+      const minor = minorToken && !/[xX*]/.test(minorToken) ? Number(minorToken) : 0;
+      const patch = patchToken && !/[xX*]/.test(patchToken) ? Number(patchToken) : 0;
+      const target: VersionTuple = [Number(match[2]), minor, patch];
+      const comparison = compareVersions(current, target);
+      if (operator === ">=") return comparison >= 0;
+      if (operator === "<=") return comparison <= 0;
+      if (operator === ">") return comparison > 0;
+      if (operator === "<") return comparison < 0;
+      if (operator === "=") return comparison === 0;
+      if (operator === "^") {
+        const upper: VersionTuple = target[0] > 0
+          ? [target[0] + 1, 0, 0]
+          : target[1] > 0
+            ? [0, target[1] + 1, 0]
+            : [0, 0, target[2] + 1];
+        return comparison >= 0 && compareVersions(current, upper) < 0;
+      }
+      if (operator === "~") {
+        const upper: VersionTuple = minorToken === undefined
+          ? [target[0] + 1, 0, 0]
+          : [target[0], target[1] + 1, 0];
+        return comparison >= 0 && compareVersions(current, upper) < 0;
+      }
+      if (minorToken === undefined || /[xX*]/.test(minorToken)) return current[0] === target[0];
+      if (patchToken === undefined || /[xX*]/.test(patchToken)) {
+        return current[0] === target[0] && current[1] === target[1];
+      }
+      return comparison === 0;
+    });
+  });
+  return understood ? matched : null;
+}
+
+async function resolveCodexCompatResources(model: BranchModel | undefined): Promise<CodexCompatResources | null> {
+  if (model?.provider !== "openai-codex") return null;
+
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+  const packageManager = new DefaultPackageManager({ cwd: fmRoot, agentDir, settingsManager });
+  const installedPath = packageManager.getInstalledPath(CODEX_COMPAT_SOURCE, "user");
+  if (!installedPath) throw new Error(`${CODEX_COMPAT_PACKAGE} is not installed in Pi's user package store`);
+
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(join(installedPath, "package.json"), "utf8"));
+  } catch (error) {
+    throw new Error(
+      `${CODEX_COMPAT_PACKAGE} has an unreadable package manifest: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const packageManifest = manifest as {
+    name?: unknown;
+    version?: unknown;
+    peerDependencies?: Record<string, unknown>;
+    pi?: { extensions?: unknown };
+  };
+  const extensionEntries = packageManifest.pi?.extensions;
+  const piPeer = packageManifest.peerDependencies?.["@earendil-works/pi-coding-agent"];
+  if (
+    packageManifest.name !== CODEX_COMPAT_PACKAGE ||
+    typeof packageManifest.version !== "string" ||
+    parseVersion(packageManifest.version) === null ||
+    typeof piPeer !== "string" ||
+    !Array.isArray(extensionEntries) ||
+    extensionEntries.length !== 1 ||
+    typeof extensionEntries[0] !== "string" ||
+    extensionEntries[0].trim() === ""
+  ) {
+    throw new Error(`${CODEX_COMPAT_PACKAGE} has malformed package metadata`);
+  }
+  const compatible = versionSatisfiesRange(VERSION, piPeer);
+  if (compatible === null) {
+    throw new Error(`${CODEX_COMPAT_PACKAGE} has an unsupported Pi peer range: ${piPeer}`);
+  }
+  if (!compatible) {
+    throw new Error(`${CODEX_COMPAT_PACKAGE} requires Pi ${piPeer}, but this branch runs Pi ${VERSION}`);
+  }
+
+  const packageRoot = resolve(installedPath);
+  const expectedExtensionPath = resolve(packageRoot, extensionEntries[0]);
+  const extensionRelative = relative(packageRoot, expectedExtensionPath);
+  if (!extensionRelative || extensionRelative.startsWith("..") || isAbsolute(extensionRelative)) {
+    throw new Error(`${CODEX_COMPAT_PACKAGE} declares an extension outside its installed package`);
+  }
+  const resolvedResources = await packageManager.resolveExtensionSources([CODEX_COMPAT_SOURCE]);
+  const enabledExtensions = resolvedResources.extensions.filter((entry) => entry.enabled);
+  if (
+    enabledExtensions.length !== 1 ||
+    resolve(enabledExtensions[0].path) !== expectedExtensionPath ||
+    enabledExtensions[0].metadata.source !== CODEX_COMPAT_SOURCE ||
+    enabledExtensions[0].metadata.scope !== "user" ||
+    enabledExtensions[0].metadata.origin !== "package"
+  ) {
+    throw new Error(`${CODEX_COMPAT_PACKAGE} did not resolve to its declared user-package extension`);
+  }
+  return { extensionPath: expectedExtensionPath, settingsManager };
+}
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
 // come from Pi's own getSupportedThinkingLevels/clampThinkingLevel, so this
@@ -491,6 +635,7 @@ export default function (pi: ExtensionAPI) {
   let durableReportRevision = 0;
   let mainStreaming = false;
   let shuttingDown = false;
+  let resetInProgress = false;
   // Bumps at every session replacement so a stale chain continuation from the
   // prior generation cannot act into the new one.
   let generation = 0;
@@ -658,6 +803,11 @@ export default function (pi: ExtensionAPI) {
   // keep them). One bulk release per generation, at activation.
   function releaseBranchLeases(expectedGeneration: number): boolean {
     if (!generationOwnsLock(expectedGeneration)) return false;
+    return releaseBranchLeasesWhileOwned();
+  }
+
+  function releaseBranchLeasesWhileOwned(): boolean {
+    if (lockOwnership() !== "owned") return false;
     try {
       const result = spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
         cwd: fmRoot,
@@ -944,7 +1094,9 @@ export default function (pi: ExtensionAPI) {
     // and the effort here is what makes the captain's current choices
     // authoritative on all of them.
     const pinned = await branchModelSelection();
-    const effort = branchEffortSelection(pinned?.model);
+    const effectiveModel = await effectiveBranchModel(pinned?.model);
+    const effort = branchEffortSelection(effectiveModel);
+    const codexCompat = await resolveCodexCompatResources(effectiveModel);
     const prompt = spawnSync("bash", [promptScript], {
       cwd: fmRoot,
       encoding: "utf8",
@@ -970,13 +1122,18 @@ export default function (pi: ExtensionAPI) {
     if (!sessionManager) {
       sessionManager = SessionManager.create(fmRoot, sessionsDir);
     }
-    // The branch loads no project resources at all: extensions off (so it can
-    // never spawn its own branch), skills/context files off (they vary per
-    // home and would destabilize the byte-stable prefix). Its whole standing
-    // context is the generator's prompt.
+    // Discovery stays off for every resource class, so the branch cannot load
+    // this project again (and recursively spawn its own branch), another
+    // project extension, or home-global skills/prompts/themes/context. A Codex
+    // model gets one explicitly resolved installed package extension; no
+    // package resource other than that entry is passed to the loader.
     const loader = new DefaultResourceLoader({
       cwd: fmRoot,
       agentDir: getAgentDir(),
+      ...(codexCompat ? {
+        settingsManager: codexCompat.settingsManager,
+        additionalExtensionPaths: [codexCompat.extensionPath],
+      } : {}),
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,
@@ -1001,6 +1158,20 @@ export default function (pi: ExtensionAPI) {
       ],
     });
     await loader.reload();
+    if (codexCompat) {
+      const loaded = loader.getExtensions();
+      if (loaded.errors.length > 0) {
+        const details = loaded.errors.map((error) => `${error.path}: ${error.error}`).join("; " );
+        throw new Error(`${CODEX_COMPAT_PACKAGE} failed to load: ${details}`);
+      }
+      const packageExtensions = loaded.extensions.filter((extension) => !extension.path.startsWith("<inline:"));
+      if (
+        packageExtensions.length !== 1 ||
+        resolve(packageExtensions[0].resolvedPath ?? packageExtensions[0].path) !== resolve(codexCompat.extensionPath)
+      ) {
+        throw new Error(`${CODEX_COMPAT_PACKAGE} did not load as the branch's only package extension`);
+      }
+    }
     if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
     const bashTool = createBashToolDefinition(fmRoot, {
@@ -1032,11 +1203,43 @@ ${context.command}
       cwd: fmRoot,
       sessionManager,
       resourceLoader: loader,
+      ...(codexCompat ? { settingsManager: codexCompat.settingsManager } : {}),
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [bashTool as unknown as ToolDefinition, createReportTool(branchGeneration)],
       ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
       ...(effort === undefined ? {} : { thinkingLevel: effort }),
     });
+    if (codexCompat) {
+      const startupErrors: string[] = [];
+      try {
+        await created.session.bindExtensions({
+          mode: "print",
+          onError: (error) => {
+            startupErrors.push(`${error.extensionPath} ${error.event}: ${error.error}`);
+          },
+        });
+      } catch (error) {
+        startupErrors.push(error instanceof Error ? error.message : String(error));
+      }
+      if (startupErrors.length > 0) {
+        try {
+          created.session.dispose();
+        } catch {}
+        throw new Error(`${CODEX_COMPAT_PACKAGE} session startup failed: ${startupErrors.join("; ")}`);
+      }
+      const activeTools = created.session.getActiveToolNames();
+      if (
+        activeTools.length !== BRANCH_TOOL_NAMES.length ||
+        activeTools.some((name, index) => name !== BRANCH_TOOL_NAMES[index])
+      ) {
+        try {
+          created.session.dispose();
+        } catch {}
+        throw new Error(
+          `${CODEX_COMPAT_PACKAGE} changed the supervision tool allowlist: ${activeTools.join(", " )}`,
+        );
+      }
+    }
     if (!actingAsOwner(branchGeneration)) {
       try {
         created.session.dispose();
@@ -1224,7 +1427,7 @@ ${context.command}
   }
 
   function enqueueMirrorFlush(): void {
-    if (!branch || pendingMirror.length === 0) return;
+    if (resetInProgress || !branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
     const flushSession = branch.session;
     beginBranchWork(flushGeneration);
@@ -1249,6 +1452,7 @@ ${context.command}
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
     if (!offerEligible(offer)) return;
+    if (resetInProgress) return;
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
@@ -1360,6 +1564,7 @@ ${context.command}
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     shuttingDown = false;
+    resetInProgress = false;
     branchBroken = "";
     consecutiveProviderErrors = 0;
     generation += 1;
@@ -1394,9 +1599,100 @@ ${context.command}
     releaseBranchForSelectionChange();
   });
 
+  // Reset only the headless supervision conversation. The command first
+  // closes admission, aborts an active branch turn through Pi's supported
+  // session API, and waits for its serialized work to settle so the normal
+  // failure path can return any claimed wake to main. Only then does it
+  // release ownership, preserve the old JSONL under a reset archive name,
+  // remove the pointer, and move the mirror cursor to main's current tail.
+  // The next eligible wake creates the replacement; main and transports such
+  // as the Feishu bridge are separate extensions and are never rebound here.
+  pi.registerCommand?.("supervision-reset", {
+    description: "Archive and reset Firstmate's headless Pi supervision conversation.",
+    handler: async (_args, ctx) => {
+      rememberMainModel(ctx);
+      currentMainSession = ctx.sessionManager;
+      if (resetInProgress) {
+        ctx.ui.notify("Supervision branch reset is already in progress.", "warning");
+        return;
+      }
+      if (lockOwnership() !== "owned") {
+        ctx.ui.notify("Could not reset the supervision branch: this Pi session does not own the Firstmate lock.", "error");
+        return;
+      }
+
+      resetInProgress = true;
+      const resetGeneration = generation;
+      try {
+        const activeBranch = branch;
+        if (activeBranch?.session.isStreaming) await activeBranch.session.abort();
+        if (activeBranch) await activeBranch.session.waitForIdle();
+        await branchChain;
+
+        const staleBranch = branch ?? activeBranch;
+        branch = null;
+        if (staleBranch) {
+          if (staleBranch.session.isStreaming) await staleBranch.session.abort();
+          await staleBranch.session.waitForIdle();
+          staleBranch.session.dispose();
+        }
+        if (lockOwnership() !== "owned") throw new Error("this Pi session lost the Firstmate lock");
+        if (
+          readLiveEligibleRows(state) !== null &&
+          !releaseEligibleRowsSnapshot(state, wakeGrantScript, String(resetGeneration))
+        ) {
+          throw new Error("could not release the branch's wake-row grant");
+        }
+        if (!releaseBranchLeasesWhileOwned()) throw new Error("could not release branch task leases");
+
+        let recorded = "";
+        try {
+          recorded = readFileSync(sessionPointer, "utf8").trim();
+        } catch {}
+        if (recorded) {
+          const sessionPath = resolve(recorded);
+          const sessionsRoot = resolve(sessionsDir);
+          const insideSessions = relative(sessionsRoot, sessionPath);
+          if (!insideSessions || insideSessions.startsWith("..") || isAbsolute(insideSessions) || !sessionPath.endsWith(".jsonl")) {
+            throw new Error("the persistent branch-session pointer is invalid");
+          }
+          if (!existsSync(sessionPath)) throw new Error("the persistent branch session is missing");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          renameSync(sessionPath, `${sessionPath}.reset-${stamp}-${randomUUID()}.archived`);
+        }
+        rmSync(sessionPointer, { force: true });
+
+        const mainFile = currentMainSession.getSessionFile() ?? "";
+        writeMirrorCursor({ file: mainFile, index: currentMainSession.getEntries().length });
+        pendingMirror.length = 0;
+        mirrorCollection.collectAnchor = { file: mainFile, index: currentMainSession.getEntries().length };
+        mirrorCollection.pendingCursor = null;
+        mirrorCollection.stagedCaptain = null;
+
+        deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(resetGeneration));
+        generation += 1;
+        activatedGeneration = -1;
+        branchWorkGeneration = generation;
+        branchWorkPending = 0;
+        branchChain = Promise.resolve();
+        branchBroken = "";
+        consecutiveProviderErrors = 0;
+        ctx.ui.notify("Supervision branch reset; a fresh conversation will start on the next supervision wake.", "info");
+      } catch (error) {
+        ctx.ui.notify(
+          `Could not reset the supervision branch: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      } finally {
+        resetInProgress = false;
+      }
+    },
+  });
+
   pi.on?.("session_shutdown", () => {
     deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(generation));
     shuttingDown = true;
+    resetInProgress = false;
     generation += 1;
     processing = null;
     pendingMirror.length = 0;

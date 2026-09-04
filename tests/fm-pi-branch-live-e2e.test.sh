@@ -18,14 +18,19 @@
 # does the same for the supervision-branch effort pin: Pi's own supported-level
 # list is what the picker offers, Pi's own clamp is what lowers a level a model
 # cannot run, and an explicit thinking level must beat the level a reopened
-# session recorded.
+# session recorded. Finally, an isolated copy of the installed
+# pi-openai-codex-compat package is driven through the branch dispatch boundary
+# with intercepted SSE responses, proving package startup precedes prompting
+# and that the native remote-compaction checkpoint is persisted.
 #
 # No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
 # model resolution stays empty by construction. The 429 probe intercepts its
 # only request before transport, and the precedence probes read only a local
-# placeholder key for their never-contacted fake provider. Run after
-# every Pi upgrade and before trusting refreshed per-harness evidence
+# placeholder key for their never-contacted fake provider. The compatibility
+# probe reads only a synthetic OAuth record from its isolated agent directory
+# and intercepts every request in-process. Run after every Pi or compatibility
+# package upgrade and before trusting refreshed per-harness evidence
 # (docs/verification/runtime-backends.md).
 set -u
 
@@ -139,6 +144,7 @@ const offer = {
   accept() {
     offer.accepted = true;
   },
+  reportAlreadyOwned() {},
 };
 bus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("branch did not accept the wake offer against the real SDK");
@@ -187,6 +193,7 @@ const pinOffer = {
   accept() {
     pinOffer.accepted = true;
   },
+  reportAlreadyOwned() {},
 };
 bus.emit("fm-branch-supervision:dispatch", pinOffer);
 if (!pinOffer.accepted) throw new Error("branch did not accept the pinned wake offer");
@@ -299,6 +306,7 @@ const offer = {
   accept() {
     offer.accepted = true;
   },
+  reportAlreadyOwned() {},
 };
 bus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("real-SDK provider-error wake was not accepted after branch construction");
@@ -703,3 +711,277 @@ if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
   fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"
+
+# Sixth probe: run the executable supervision extension with the REAL installed
+# pi-openai-codex-compat package copied into an otherwise isolated Pi home. The
+# provider transport is forced to SSE only inside this process and intercepted
+# before the network, so the real provider override, tool-call loop, threshold
+# compaction hook, and persisted native checkpoint all execute without using a
+# captain credential or contacting OpenAI.
+PI_AGENT_DIR=$(PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module <<'EOF'
+import { pathToFileURL } from "node:url";
+const { getAgentDir } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+process.stdout.write(getAgentDir());
+EOF
+)
+compat_source_root=${FM_PI_CODEX_COMPAT_NODE_MODULES:-"$PI_AGENT_DIR/npm/node_modules"}
+compat_package_dir="$compat_source_root/pi-openai-codex-compat"
+for package_path in \
+  "$compat_package_dir/package.json" \
+  "$compat_package_dir/extensions/index.ts" \
+  "$compat_source_root/@2h2d/tree-sitter-wasms/package.json" \
+  "$compat_source_root/web-tree-sitter/package.json"; do
+  if [ ! -f "$package_path" ]; then
+    fail "installed Pi compatibility resource absent: $package_path"
+  fi
+done
+compat_version=$(jq -r '.version' "$compat_package_dir/package.json" 2>/dev/null || printf 'unknown')
+compathome="$TMP_ROOT/compat-home"
+compatagentdir="$TMP_ROOT/compat-agent-dir"
+compatmodules="$compatagentdir/npm/node_modules"
+mkdir -p "$compathome/state/branch-session" "$compathome/config" "$compatmodules/@2h2d"
+cp -R "$compat_package_dir" "$compatmodules/"
+cp -R "$compat_source_root/@2h2d/tree-sitter-wasms" "$compatmodules/@2h2d/"
+cp -R "$compat_source_root/web-tree-sitter" "$compatmodules/"
+
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$compatagentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/compat-output" 2>&1 <<'EOF'
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { zstdDecompressSync } from "node:zlib";
+
+const home = resolve(process.env.FM_HOME);
+const root = resolve(process.env.FM_ROOT_OVERRIDE);
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+const approvedProject = `${home}/projects/compat-live`;
+mkdirSync(approvedProject, { recursive: true });
+writeFileSync(`${home}/state/compat-live.meta`, `project=${approvedProject}\nwindow=fm-compat-live\n`);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tcompat-live.status\tsignal: compat package probe\n");
+writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/gpt-5.4\n");
+
+const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+const access = `${encode({ alg: "none", typ: "JWT" })}.${encode({
+  "https://api.openai.com/auth": { chatgpt_account_id: "fm-live-account" },
+})}.signature`;
+writeFileSync(`${agentDir}/auth.json`, `${JSON.stringify({
+  "openai-codex": { type: "oauth", access, refresh: "unused", expires: Date.now() + 3_600_000 },
+})}\n`);
+
+const pkg = pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href;
+const { ModelRuntime, SessionManager, SettingsManager } = await import(pkg);
+const probeRuntime = await ModelRuntime.create();
+const probeModel = probeRuntime.getModel("openai-codex", "gpt-5.4");
+if (!probeModel || probeModel.api !== "openai-codex-responses") {
+  throw new Error("the installed Pi catalog no longer exposes openai-codex/gpt-5.4 on the Codex Responses API");
+}
+if (probeModel.contextWindow <= 5000) throw new Error("the Codex probe model cannot support its test threshold");
+
+// The production branch intentionally uses an in-memory manager. Narrow its
+// values here so the real AgentSession takes deterministic SSE and crosses a
+// small threshold after the synthetic final response. The extension under
+// test still creates and shares the manager through its production path.
+const originalInMemory = SettingsManager.inMemory.bind(SettingsManager);
+SettingsManager.inMemory = (settings = {}, options = {}) => originalInMemory({
+  ...settings,
+  transport: "sse",
+  compaction: {
+    enabled: true,
+    reserveTokens: probeModel.contextWindow - 5000,
+    keepRecentTokens: 50,
+  },
+  retry: { enabled: false },
+}, options);
+
+// Seed a valid persistent branch with discardable history. Its final low-usage
+// assistant message stays below the threshold, so no compaction can happen
+// before the package has started and the real branch prompt begins.
+const sessionsDir = `${home}/state/branch-session`;
+const seeded = SessionManager.create(root, sessionsDir);
+const oldText = (label) => `${label}: ${"discardable context ".repeat(80)}`;
+for (let index = 1; index <= 3; index += 1) {
+  seeded.appendMessage({ role: "user", content: [{ type: "text", text: oldText(`old user ${index}`) }], timestamp: Date.now() - 10_000 + index });
+  seeded.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: oldText(`old assistant ${index}`) }],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.4",
+    usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: Date.now() - 9_000 + index,
+  });
+}
+writeFileSync(`${home}/state/.branch-session`, `${seeded.getSessionFile()}\n`);
+
+const requestRecords = [];
+const sse = (events) => `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+async function requestBody(init) {
+  const headers = new Headers(init?.headers);
+  const raw = init?.body;
+  let bytes;
+  if (typeof raw === "string") bytes = Buffer.from(raw);
+  else if (raw instanceof Uint8Array) bytes = Buffer.from(raw);
+  else if (raw instanceof ArrayBuffer) bytes = Buffer.from(raw);
+  else if (raw) bytes = Buffer.from(await new Response(raw).arrayBuffer());
+  else bytes = Buffer.alloc(0);
+  if (headers.get("content-encoding") === "zstd") bytes = zstdDecompressSync(bytes);
+  return { body: JSON.parse(bytes.toString("utf8")), headers };
+}
+globalThis.fetch = async (input, init) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://chatgpt.com/backend-api/")) {
+    throw new Error(`unexpected external request in compatibility probe: ${url}`);
+  }
+  const { body, headers } = await requestBody(init);
+  const metadataRaw = body.client_metadata?.["x-codex-turn-metadata"];
+  if (typeof metadataRaw !== "string") {
+    throw new Error(`compatibility provider metadata absent before request: ${JSON.stringify(body.client_metadata)}`);
+  }
+  const metadata = JSON.parse(metadataRaw);
+  requestRecords.push({ body, headers: Object.fromEntries(headers), metadata, url });
+
+  if (metadata.request_kind === "compaction") {
+    return new Response(sse([
+      { type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "fm-native-checkpoint" } },
+      { type: "response.completed", response: { id: "resp_compact", status: "completed", usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } },
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+
+  const turnNumber = requestRecords.filter((record) => record.metadata.request_kind === "turn").length;
+  if (turnNumber === 1) {
+    const args = JSON.stringify({
+      task: "compat-live",
+      verdict: "routine",
+      summary: "installed Codex compatibility provider handled the branch",
+      wake: "signal: compat package probe",
+    });
+    return new Response(sse([
+      { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_report", call_id: "call_report", name: "fm_branch_report", arguments: args } },
+      { type: "response.completed", response: { id: "resp_report", status: "completed", end_turn: true, usage: { input_tokens: 50, output_tokens: 10, total_tokens: 60 } } },
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+  if (turnNumber === 2) {
+    return new Response(sse([
+      { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_done", role: "assistant", status: "completed", phase: "final_answer", content: [{ type: "output_text", text: "reported", annotations: [] }] } },
+      { type: "response.completed", response: { id: "resp_done", status: "completed", end_turn: true, usage: { input_tokens: 5900, output_tokens: 100, total_tokens: 6000 } } },
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+  throw new Error(`unexpected extra Codex turn request: ${turnNumber}`);
+};
+
+const busHandlers = new Map();
+const bus = {
+  on(channel, handler) {
+    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of busHandlers.get(channel) ?? []) handler(data);
+  },
+};
+const piHandlers = new Map();
+const mainUserMessages = [];
+const mainMessages = [];
+const pi = {
+  events: bus,
+  on(event, handler) {
+    piHandlers.set(event, [...(piHandlers.get(event) ?? []), handler]);
+  },
+  registerTool() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  sendMessage(message, options) { mainMessages.push({ message, options: options ?? {} }); },
+  sendUserMessage(content, options) { mainUserMessages.push({ content, options: options ?? {} }); },
+  getThinkingLevel() { return "off"; },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionCtx = {
+  model: probeModel,
+  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
+};
+for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
+if (requestRecords.length !== 0) throw new Error("compatibility package contacted the provider during primary startup");
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const offer = {
+  message: "signal: compat package probe",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  accept() { offer.accepted = true; },
+  reportAlreadyOwned() {},
+};
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("Codex compatibility wake was not accepted");
+if (requestRecords.length !== 0) throw new Error("Codex provider ran synchronously before branch startup completed");
+
+let entries = [];
+for (let index = 0; index < 600; index += 1) {
+  try {
+    const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+    entries = SessionManager.open(pointer, sessionsDir).getEntries();
+  } catch {}
+  if (entries.some((entry) => entry.type === "compaction")) break;
+  await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+}
+
+if (mainUserMessages.length !== 0) {
+  throw new Error(`Codex compatibility probe fell back to main: ${JSON.stringify(mainUserMessages)}`);
+}
+const routine = mainMessages.find((sent) => sent.message?.customType === "fm-branch-merge");
+if (!routine?.message?.content?.includes("installed Codex compatibility provider handled the branch")) {
+  throw new Error(`the real branch tool call did not publish its routine outcome: ${JSON.stringify(mainMessages)}`);
+}
+const turns = requestRecords.filter((record) => record.metadata.request_kind === "turn");
+const compactions = requestRecords.filter((record) => record.metadata.request_kind === "compaction");
+if (turns.length !== 2 || compactions.length !== 1 || requestRecords.length !== 3) {
+  throw new Error(`unexpected compatibility request sequence: ${requestRecords.map((record) => record.metadata.request_kind).join(",")}`);
+}
+const expectedTools = ["read", "bash", "fm_branch_report"];
+for (const [index, turn] of turns.entries()) {
+  const toolNames = Array.isArray(turn.body.tools) ? turn.body.tools.map((tool) => tool.name) : [];
+  if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
+    throw new Error(`Codex turn ${index + 1} changed the branch tool payload: ${JSON.stringify(toolNames)}`);
+  }
+  const beta = turn.headers["x-codex-beta-features"] ?? "";
+  if (!beta.split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
+    throw new Error(`Codex turn ${index + 1} lacks the compatibility startup hook: ${beta}`);
+  }
+}
+if (!turns[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_report")) {
+  throw new Error("the installed compatibility provider did not continue after the branch report tool");
+}
+const compactRequest = compactions[0];
+if (compactRequest.body.input.at(-1)?.type !== "compaction_trigger") {
+  throw new Error(`native compaction request lacks its trigger: ${JSON.stringify(compactRequest.body.input.at(-1))}`);
+}
+if (!String(compactRequest.headers["x-codex-beta-features"] ?? "").split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
+  throw new Error("native compaction request lacks the remote_compaction_v2 feature header");
+}
+if (compactRequest.metadata.compaction?.implementation !== "responses_compaction_v2" ||
+    compactRequest.metadata.compaction?.phase !== "pre_turn") {
+  throw new Error(`native compaction metadata is wrong: ${JSON.stringify(compactRequest.metadata)}`);
+}
+const checkpoint = entries.find((entry) => entry.type === "compaction");
+if (!checkpoint || checkpoint.fromHook !== true || checkpoint.details?.kind !== "openai-codex-compat-remote-compaction") {
+  throw new Error(`the real branch did not persist a compatibility checkpoint: ${JSON.stringify(checkpoint)}`);
+}
+const nativeItems = checkpoint.details.history?.filter((item) => item.type === "compaction") ?? [];
+if (nativeItems.length !== 1 || nativeItems[0].encrypted_content !== "fm-native-checkpoint") {
+  throw new Error(`the persisted compatibility checkpoint lost native history: ${JSON.stringify(checkpoint.details)}`);
+}
+if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("installed Codex compatibility provider handled the branch")) {
+  throw new Error("the executable branch boundary did not persist its report");
+}
+console.log("CODEX_COMPAT_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/compat-output")
+if [ "$status" -ne 0 ] || [ "$out" != "CODEX_COMPAT_OK" ]; then
+  fail "real installed pi-openai-codex-compat $compat_version branch guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real installed pi-openai-codex-compat $compat_version initializes before prompting and persists native Codex compaction"

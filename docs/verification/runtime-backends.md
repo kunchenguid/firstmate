@@ -1001,8 +1001,9 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Pi supervision branch
 
-The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
+The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories` (plus, for an `openai-codex` branch, `DefaultPackageManager` and a shared in-memory `SettingsManager` resolving the installed `pi-openai-codex-compat` package entry through `additionalExtensionPaths`, `bindExtensions` before the first prompt, and the post-start `getActiveToolNames` allowlist check), `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
+Its `/supervision-reset` command drives the branch session's `abort` and `waitForIdle` lifecycle calls to settle an active turn before rotating the conversation.
 
 Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
@@ -1110,6 +1111,35 @@ ok - real Pi SDK 0.84.4 returns a post-construction 429 wake to main without los
 ```
 
 The portable regression also proves that only consecutive provider errors count toward the two-error broken-branch latch: a durable report between errors resets the streak, the error that reaches the threshold still falls back, and the next wake remains on main without another branch prompt.
+
+### 2026-09-03 Codex compatibility package in the supervision branch
+
+The focused branch suite, strict installed-Pi typecheck, documentation-audience check, lint, and real-SDK guard were run on Linux 5.15.152.bsk.4-amd64 x86_64 with Node v22.22.2, installed `@earendil-works/pi-coding-agent` 0.84.4, and installed `pi-openai-codex-compat` 0.0.9.
+The live compatibility probe copied that installed package and its declared runtime dependencies into an isolated Pi agent directory, supplied a synthetic unexpired OAuth token, forced only the isolated branch settings to SSE, and intercepted every request in-process; it read no captain credential and no provider request left the machine.
+
+```sh
+bash tests/fm-pi-branch-extension.test.sh
+bash tests/fm-pi-primary-types.test.sh
+bin/fm-doc-audience-check.sh
+bin/fm-lint.sh
+FM_PI_BRANCH_LIVE_E2E=1 bash tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - Codex branch create and reopen initialize only pi-openai-codex-compat before prompting without widening tools
+ok - non-Codex branch startup remains unchanged when pi-openai-codex-compat is absent
+ok - absent, malformed, incompatible, resolution, load, and startup failures return Codex wakes to main before prompting
+ok - supervision-reset safely aborts active work, rotates history, releases ownership, and re-anchors the next branch
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+fm-doc-audience-check: ok surfaces=100 local_links=331
+fm-lint.sh: full ShellCheck extended analysis enabled
+ok - real installed pi-openai-codex-compat 0.0.9 initializes before prompting and persists native Codex compaction
+```
+
+The real-SDK probe drove `.pi/extensions/fm-branch-supervision.ts` through its public dispatch event.
+It observed no request before branch startup completed, then exactly two Codex provider turns using only `read`, `bash`, and `fm_branch_report`, followed by one native compaction request whose turn metadata said `request_kind=compaction`, whose beta header included `remote_compaction_v2`, and whose final input item was `compaction_trigger`.
+Reopening the real branch JSONL showed a `fromHook: true` compaction entry with `details.kind=openai-codex-compat-remote-compaction` and the returned encrypted checkpoint in `details.history`.
+The portable suite separately proves create and reopen ordering, the isolated loader/session settings manager, exact resource and tool suppression, non-Codex independence, every fail-closed package-load class, and the reset lifecycle.
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
