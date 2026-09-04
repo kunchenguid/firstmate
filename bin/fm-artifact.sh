@@ -46,6 +46,11 @@
 #   fm-artifact.sh new <url>                  (thread lines on stdin)
 #   fm-artifact.sh handled <url> <thread-id> [<mark>]
 #
+#   retire    drops the registry record and the ledger. A URL this home never
+#             registered is refused rather than reported as retired, so retiring
+#             the wrong URL cannot look like success while the real artifact
+#             stays live. `rearm`, `new` and `handled` refuse an unregistered
+#             URL the same way; only `register` creates a record.
 #   list      one "<url>\t<title>" per live artifact.
 #   digest    the session-start listing: one indented block per artifact,
 #             carrying any recorded re-arm failure. Prints NOTHING when this
@@ -57,7 +62,13 @@
 #   new       reads "<thread-id> [<mark>]" lines on stdin and prints the ones
 #             whose mark differs from the handled ledger, one per line. Records
 #             the poll either way, so an empty read still resets the interval.
-#   handled   records one thread as handled at <mark> (default "-").
+#   handled   records one thread as handled at <mark> (default "-"). Everything
+#             after the thread id is the mark, so a mark written as several
+#             words is kept whole rather than truncated at the first one.
+#
+# A mark's own interior spaces are folded to "_" on the way in, by the same one
+# normalization on the recording and the comparing path, so a mark carrying one
+# still matches itself later.
 #
 # Environment:
 #   FM_HOME                          operational home whose data/ and state/ are used.
@@ -82,10 +93,11 @@
 # so the directory is recognizable while two artifacts that share a tail still
 # get separate ledgers.
 #
-# A registry that exists but cannot be read - or a data/ directory that cannot
-# be read, which hides it just as completely - is refused by every subcommand,
-# never answered as an empty registry. Reporting a home that has live artifacts
-# as a home that has none is the same silent loss this record exists to prevent.
+# A registry that exists but cannot be read - or a data/ directory this process
+# cannot SEARCH, which hides the registry just as completely, whatever its read
+# bit says - is refused by every subcommand, never answered as an empty
+# registry. Reporting a home that has live artifacts as a home that has none is
+# the same silent loss this record exists to prevent.
 set -eu
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
