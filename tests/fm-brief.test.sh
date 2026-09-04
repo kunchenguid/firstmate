@@ -221,6 +221,34 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# Captain confirmed 2026-08-23 that crewmate-authored commits and PR descriptions
+# must never include a tool-attribution footer or an agent name as co-author.
+# Every ship-mode brief must carry that instruction directly so firstmate does
+# not have to relay it by hand each time. The scout brief has no PR/commit
+# rules at all, so it must not gain this sentence either.
+test_ship_rules_forbid_tool_attribution_footer() {
+  local home id mode brief
+  home="$TMP_ROOT/no-attribution-home"
+
+  for id_mode in "brief-noattr-a1:no-mistakes" "brief-noattr-a2:direct-PR" "brief-noattr-a3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep 'Never add a "Generated with Claude Code" (or similar tool-attribution) footer to a commit message or PR description, and never add an agent name as a commit or PR co-author.' \
+      "$brief" "$id ($mode): rule 3 is missing the no-attribution-footer/no-agent-co-author instruction"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-noattr-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-noattr-scout/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "tool-attribution" "$brief" \
+    "scout brief unexpectedly gained the ship-mode no-attribution-footer sentence"
+
+  pass "fm-brief.sh: every ship-mode brief forbids a tool-attribution footer or agent co-author"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -850,6 +878,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_rules_forbid_tool_attribution_footer
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
