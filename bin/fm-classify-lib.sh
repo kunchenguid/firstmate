@@ -99,6 +99,11 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Bounded lookback depth for status_terminal_then_paused below. An operator
+# override; a non-numeric or non-positive value falls back to this default
+# rather than making `[` error to stderr.
+FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT=20
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
@@ -183,6 +188,44 @@ status_is_captain_held() {  # <status-line>
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
+}
+
+# 0 if <lines> (the full non-blank line list, newest last) ends in a settled
+# done/failed line followed only by declared-pause lines - the shape a worker
+# produces when it finishes into an external wait (bin/fm-brief.sh's status
+# protocol has it append `paused: <why>` after `done:` rather than leaving the
+# terminal report as the sole final line). <last> is the caller's own read of
+# the final line, reused here rather than re-derived. Bounded by
+# FM_TERMINAL_PAUSE_SCAN_MAX (default FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT) so a
+# pathological log cannot make the scan expensive; exhausting the budget
+# without finding a non-pause line is "no terminal report", never a guess.
+# Deliberately does NOT match a standalone declared pause with no preceding
+# terminal line - a bare paused log must still return 1, since that shape means
+# something else entirely (a worker paused mid-task, never having reported
+# done). Consumers: bin/fm-watch.sh's terminal_then_paused wraps this today;
+# bin/fm-inactive-reconcile.sh's child_terminal_ledger_line, bin/fm-crew-state.sh's
+# log_reports_ci_ready, and fm-inactive-reconcile.sh's captain-presentation
+# backstop are each meant to share it too, but that rewiring is deliberately
+# deferred to a follow-up change and does not happen here.
+status_terminal_then_paused() {  # <lines> <last>
+  local lines=$1 last=$2 n budget i idx line
+  status_is_paused "$last" || return 1
+  n=$(printf '%s\n' "$lines" | grep -c .)
+  [ "$n" -ge 2 ] || return 1
+  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-$FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT}
+  case "$budget" in ''|*[!0-9]*|0) budget=$FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT ;; esac
+  [ "$n" -lt "$budget" ] && budget=$n
+  i=2
+  while [ "$i" -le "$budget" ]; do
+    idx=$(( n - i + 1 ))
+    line=$(printf '%s\n' "$lines" | sed -n "${idx}p")
+    case "$(status_line_verb "$line")" in
+      done|failed) return 0 ;;
+    esac
+    status_is_paused "$line" || return 1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 # --- durable keyed decisions ------------------------------------------------
