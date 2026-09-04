@@ -505,8 +505,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if .structured then
           (delivery_body(.body_lines)) as $delivery_body
-          | .pr_url = (.pr_url // ((delivery_links($delivery_body) | map(select(test("/pull/[0-9]+"))) | .[0]) // null))
-          | .report_path = (.report_path // cap($delivery_body; ".*(?<v>data/[^[:space:]);]+/report\\.md).*"))
+          | ((delivery_links($delivery_body) | map(select(test("/pull/[0-9]+"))) | .[0]) // null) as $delivery_pr_url
+          | .pr_url = (if .hold_kind == "captain" then $delivery_pr_url else (.pr_url // $delivery_pr_url) end)
+          | .report_path = (.report_path // cap($delivery_body; ".*(?:^|[;:][[:space:]]*)report[[:space:]]+(?<v>[^[:space:];]+/report\\.md)(?:[[:space:]]*;|$)"))
           | .local_note = (.local_note // body_local_note(.body_lines))
           | if (.body_lines | length) > 0 then
               .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")

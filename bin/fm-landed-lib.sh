@@ -18,9 +18,8 @@
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
-# that carries one of those artifacts is a delivery whoever approved it. A
-# captain question remains a captain-kind row even when its title names an
-# artifact, so an answered question is never rendered as shipped work.
+# that carries one of those normalized completion artifacts is a delivery
+# whoever approved it, while a referenced artifact is not completion evidence.
 
 FM_LANDED_JQ_DEFS='
   def landed_delivery:
