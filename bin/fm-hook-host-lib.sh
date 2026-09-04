@@ -30,34 +30,24 @@
 # redundant run under a foreign host wastes work; a skipped run under Claude
 # breaks the primary's supervision, which is the worse failure.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
 fm_hook_actual_host() {
-  local pid=$$ comm args argv0
+  local pid=$$ comm args host
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename -- "$comm")" in
-      *claude*) printf 'claude\n'; return 0 ;;
-      copilot) printf 'copilot\n'; return 0 ;;
-      MainThread)
-        args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
-        case "$argv0" in
-          copilot|*/copilot) printf 'copilot\n'; return 0 ;;
-        esac
-        ;;
-      node*|python*)
-        args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
-        case "$argv0" in
-          *claude*) printf 'claude\n'; return 0 ;;
-          copilot|*/copilot) printf 'copilot\n'; return 0 ;;
-        esac
-        case "$args" in
-          *claude*) printf 'claude\n'; return 0 ;;
-        esac
-        ;;
-    esac
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    if host=$(fm_harness_process_name "$comm" "$args"); then
+      case "$host" in
+        claude|copilot)
+          printf '%s\n' "$host"
+          return 0
+          ;;
+      esac
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     case "$pid" in ''|*[!0-9]*) break ;; esac
     [ "$pid" -gt 1 ] || break

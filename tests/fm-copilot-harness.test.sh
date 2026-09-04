@@ -54,12 +54,17 @@ test_process_shapes_are_anchored() {
 }
 
 test_actual_host_overrides_inherited_markers() {
-  local fakebin out
+  local fakebin out versioned_claude
   fakebin="$TMP_ROOT/ancestry-over-marker"
   make_ps "$fakebin"
 
   out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' "$HARNESS")
   [ "$out" = claude ] || fail "real Claude ancestry lost to inherited Copilot markers: '$out'"
+
+  versioned_claude='/home/test/.local/share/claude/versions/2.1.220/2.1.220'
+  out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM="$versioned_claude" \
+    FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" "$HARNESS")
+  [ "$out" = claude ] || fail "version-named Claude ancestry lost to inherited Copilot markers: '$out'"
 
   out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
     FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
@@ -84,7 +89,7 @@ test_session_lock_identity_matches_copilot() {
 make_hook_fixture() {
   local dir=$1 guard_status=${2:-0}
   mkdir -p "$dir/bin"
-  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/"
   chmod +x "$dir/bin/fm-copilot-hook.sh"
   cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
@@ -136,7 +141,7 @@ make_claude_compat_fixture() {
   mkdir -p "$dir/bin" "$dir/.claude"
   git -C "$dir" init -q
   : > "$dir/AGENTS.md"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-claude-compat-hook.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-claude-compat-hook.sh" "$dir/bin/"
   cp "$ROOT/.claude/settings.json" "$dir/.claude/settings.json"
   cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
@@ -331,14 +336,16 @@ EOF
 }
 
 test_claude_compatibility_hooks_run_under_actual_claude_with_inherited_copilot_markers() {
-  local dir fakebin command out rc count=0
+  local dir fakebin command out rc count=0 versioned_claude
   dir="$TMP_ROOT/claude-compat-claude"
   fakebin="$dir/fakebin"
   make_ps "$fakebin"
   make_claude_compat_fixture "$dir"
+  versioned_claude='/home/test/.local/share/claude/versions/2.1.220/2.1.220'
   while IFS= read -r command; do
     count=$((count + 1))
-    out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' \
+    out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM="$versioned_claude" \
+      FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" \
       CLAUDE_PROJECT_DIR="$dir" sh -c "$command" <<'EOF' 2>&1
 {"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
 EOF

@@ -34,13 +34,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
 detect_own() {
-  local pid=$$ comm args argv0 ancestry=''
+  local pid=$$ comm args ancestry=''
   # Prefer the nearest actual harness process in ancestry before consulting any
   # inherited marker. This keeps a real Claude session authoritative inside a
   # Copilot shell and a real Copilot, Cursor, Gemini, Rovo, or omp process
@@ -48,9 +48,9 @@ detect_own() {
   # verified marker fallbacks when ancestry cannot prove the host.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      ancestry=cursor
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    if ancestry=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
       break
     fi
     if fm_gemini_pid_is_gemini "$pid" 2>/dev/null; then
@@ -58,12 +58,6 @@ detect_own() {
       break
     fi
     case "$(basename -- "$comm")" in
-      *claude*) ancestry=claude; break ;;
-      *codex*) ancestry=codex; break ;;
-      copilot) ancestry=copilot; break ;;
-      *opencode*) ancestry=opencode; break ;;
-      *grok*) ancestry=grok; break ;;
-      kimi) ancestry=kimi; break ;;
       rovo) ancestry=rovo; break ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
@@ -71,34 +65,12 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) ancestry=muse; break ;;
-      pi-signed) ancestry=pi-signed; break ;;
-      pi) ancestry=pi; break ;;
-      # omp is a Bun-compiled single binary whose process name is exactly `omp`
-      # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-      # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-      # comp, and similar unrelated commands are not misread as this harness.
-      # It sits above the node*|python*|MainThread interpreter fallback
-      # deliberately: the optional claude-bridge extension runs a nested
-      # executable literally named `claude` with its own node child, and that
-      # fallback's *claude* args glob would otherwise claim it if that subtree
-      # were ever walked.
-      omp) ancestry=omp; break ;;
       node*|python*|MainThread)
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
         if fm_gemini_args_are_gemini "$args"; then
           ancestry=gemini
           break
         fi
-        case "${args%% *}" in
-          copilot|*/copilot) ancestry=copilot; break ;;
-        esac
-        case "$args" in
-          *claude*) ancestry=claude; break ;;
-          *codex*) ancestry=codex; break ;;
-          *opencode*) ancestry=opencode; break ;;
-          *grok*) ancestry=grok; break ;;
-          *" pi "*|*/pi) ancestry=pi; break ;;
-        esac ;;
+        ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     case "$pid" in ''|*[!0-9]*) break ;; esac

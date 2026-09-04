@@ -107,12 +107,14 @@ case "$EVENT" in
     copilot_worker_apply_busy || exit 0
     ;;
   agent-stop)
+    turnend_failed=0
     copilot_worker_binding_matches "$binding" "$session" || exit 0
     copilot_worker_apply_idle || exit 0
     if [ -n "$TURNEND" ] && ! touch "$TURNEND" 2>/dev/null; then
-      exit 0
+      turnend_failed=1
     fi
     copilot_worker_clear_binding "$binding" || exit 0
+    [ "$turnend_failed" -eq 0 ] || exit 0
     ;;
   session-end)
     copilot_worker_binding_matches "$binding" "$session" || exit 0
