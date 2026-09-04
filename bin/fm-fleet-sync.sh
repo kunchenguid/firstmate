@@ -82,6 +82,14 @@ project_label() {
   esac
 }
 
+project_registry_key() {
+  local project_parent projects_root
+  project_parent=$(cd "$(dirname "$PROJ")" 2>/dev/null && pwd -P) || return 1
+  projects_root=$(cd "$PROJECTS" 2>/dev/null && pwd -P) || return 1
+  [ "$project_parent" = "$projects_root" ] || return 1
+  basename "$PROJ"
+}
+
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
 # or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
 # back to the original argument unresolved so a genuinely bad path still hits
@@ -300,6 +308,7 @@ report_stuck() {
 }
 
 sync_project() {
+  local registry_key mode_line mode
   PROJ=$1
   label=$(project_label)
 
@@ -340,8 +349,11 @@ sync_project() {
     return 0
   fi
 
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
-  mode=${mode_line%% *}
+  mode=no-mistakes
+  if registry_key=$(project_registry_key); then
+    mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_key" 2>/dev/null || echo "no-mistakes off")
+    mode=${mode_line%% *}
+  fi
   if [ "$mode" != "local-only" ]; then
     prune_gone_branches || true
   fi
