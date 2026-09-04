@@ -235,6 +235,11 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+#
+#   The memory guard below refuses a spawn that would overcommit the machine:
+#   FM_MAX_CREWS      hard cap on concurrent crews (default 8)
+#   FM_MIN_FREE_MB    refuse to spawn below this much available memory (default 6000)
+#   FM_SPAWN_FORCE=1  override both, deliberately
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -329,6 +334,43 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+
+# ── memory guard ─────────────────────────────────────────────────────────────
+# Crews are multi-gigabyte processes. On 2026-08-14 eleven of them ran at once
+# on a 30 GiB box: individual crew windows peaked at 9.4/5.3/4.8/4.6/4.5/3.2 GiB,
+# one process was OOM-killed holding 8.7 GiB, and the machine hard-locked with no
+# OOM record at all (the kernel had no memory left to write one). Scale crew
+# count against RAM, never against ambition.
+#
+# The variables that tune and override this guard are documented in the header.
+fm_memory_guard() {
+  [ -z "${FM_SPAWN_FORCE:-}" ] || return 0
+  local cap="${FM_MAX_CREWS:-8}" minfree="${FM_MIN_FREE_MB:-6000}" live avail meta
+  live=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    live=$((live + 1))
+  done
+  if [ "${live:-0}" -ge "$cap" ]; then
+    printf 'refusing to spawn: %s crews already live (cap %s).
+' "$live" "$cap" >&2
+    printf '  Crews are multi-GB each; exceeding this has hard-locked the machine.
+' >&2
+    printf '  Let some finish, raise FM_MAX_CREWS deliberately, or set FM_SPAWN_FORCE=1.
+' >&2
+    return 1
+  fi
+  avail=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 99999)
+  if [ "${avail:-99999}" -lt "$minfree" ]; then
+    printf 'refusing to spawn: only %s MiB available (need %s).
+' "$avail" "$minfree" >&2
+    printf '  Wait for memory to free, or set FM_SPAWN_FORCE=1 deliberately.
+' >&2
+    return 1
+  fi
+  return 0
+}
+fm_memory_guard || exit 1
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
