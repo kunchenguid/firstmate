@@ -85,11 +85,13 @@
 # Human views must render this output instead of parsing state files again.
 set -u
 
-BACKLOG_JSON_FILE=
-TASKS_JSON_FILE=
+JSON_TRANSPORT_DIR=
 cleanup_json_files() {
-  [ -z "$BACKLOG_JSON_FILE" ] || rm -f -- "$BACKLOG_JSON_FILE"
-  [ -z "$TASKS_JSON_FILE" ] || rm -f -- "$TASKS_JSON_FILE"
+  [ -n "$JSON_TRANSPORT_DIR" ] || return 0
+  rm -f -- "$JSON_TRANSPORT_DIR/backlog.json" \
+    "$JSON_TRANSPORT_DIR/tasks.json" \
+    "$JSON_TRANSPORT_DIR/main-inventory.json"
+  rmdir -- "$JSON_TRANSPORT_DIR"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1837,10 +1839,11 @@ BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" 
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
-BACKLOG_JSON_FILE=$(mktemp "$STATE/.fm-fleet-snapshot-backlog.XXXXXX") \
-  || { echo "fm-fleet-snapshot: temporary backlog file creation failed" >&2; exit 1; }
-TASKS_JSON_FILE=$(mktemp "$STATE/.fm-fleet-snapshot-tasks.XXXXXX") \
-  || { echo "fm-fleet-snapshot: temporary task file creation failed" >&2; exit 1; }
+JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
+  || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
+BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
+TASKS_JSON_FILE="$JSON_TRANSPORT_DIR/tasks.json"
+MAIN_INVENTORY_JSON_FILE="$JSON_TRANSPORT_DIR/main-inventory.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
@@ -1853,7 +1856,7 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
-MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE") \
+main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" > "$MAIN_INVENTORY_JSON_FILE" \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON_FILE") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
@@ -1875,12 +1878,13 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
   --arg projects "$PROJECTS" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
-  --argjson main_inventory "$MAIN_INVENTORY_JSON" \
+  --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
   '($backlog[0]) as $backlog
    | ($tasks[0]) as $tasks
+   | ($main_inventory[0]) as $main_inventory
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
