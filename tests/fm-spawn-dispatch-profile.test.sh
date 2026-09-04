@@ -459,7 +459,7 @@ test_all_codex_launches_bypass_hook_trust() {
   expect_code 0 "$status" "secondmate codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "secondmate codex launch did not trust its vetted primary lifecycle hooks"
+    "secondmate codex launch omitted the hook-trust bypass"
   assert_not_contains "$launch" "--disable hooks" \
     "secondmate codex launch disabled its primary lifecycle hooks"
   assert_not_contains "$launch" "notify=" \
