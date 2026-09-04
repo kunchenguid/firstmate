@@ -56,21 +56,21 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] The contract accepts an exact manifest hash, artifact paths and hashes, approval identity, run binding, reviewed-head binding, destination, and declared media types.
-- [ ] The contract rejects missing required fields, unknown major schema versions, absolute or traversing artifact paths, duplicate paths, and unsupported media types.
+- [ ] The contract accepts an exact manifest hash, human-readable report relative path and hash, artifact paths and hashes, approval identity, run binding, reviewed-head binding, destination, and declared media types.
+- [ ] The contract rejects missing required fields, unknown major schema versions, absolute or traversing report or artifact paths, duplicate paths, and unsupported media types.
 - [ ] The contract accepts newer optional fields within a supported major schema version.
 - [ ] The contract contains no Firstmate, comparison-mode, behavior-mode, or **Visual Evidence** branching.
 - [ ] Contract parsing has positive, malformed, boundary, and producer-neutral regression tests.
 
 **Validation Test:**
 
-- **Setup:** Create two equivalent valid import fixtures from differently named producers and malformed fixtures for each rejected condition.
+- **Setup:** Create two equivalent valid import fixtures from differently named producers, each with a manifest-bound report, and malformed fixtures for each rejected condition.
 - **Steps:**
   1. Validate both producer fixtures.
   2. Validate every malformed fixture.
   3. Run the focused import-contract test suite.
-- **Expected Result:** Both producers receive the same accepted result, and every malformed or unsupported fixture receives a deterministic refusal without state mutation.
-- **Failure Indicator:** Producer identity changes behavior, an unsafe path or media type is accepted, or malformed input creates import state.
+- **Expected Result:** Both producers receive the same accepted result with the report identity preserved, and every malformed or unsupported fixture receives a deterministic refusal without state mutation.
+- **Failure Indicator:** Producer identity changes behavior, a report identity is omitted, an unsafe path or media type is accepted, or malformed input creates import state.
 
 ### US-003: Stage imported evidence outside the worktree
 
@@ -80,20 +80,20 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 - [ ] Import staging is outside the project worktree and inside no-mistakes-owned local state.
 - [ ] The importer accepts only regular files contained by the offered bundle and refuses symlinks, traversal, and path substitution.
-- [ ] The importer copies into a unique incomplete location, verifies all hashes from the staged copy, and finalizes atomically.
+- [ ] The importer copies into a unique incomplete location, verifies the manifest, report, and artifact hashes from the staged copy, and finalizes atomically.
 - [ ] An existing non-identical import destination is never overwritten or merged.
 - [ ] A failed import publishes nothing and retains only bounded diagnostic state required for recovery.
 - [ ] Focused filesystem, race, and interrupted-import tests pass.
 
 **Validation Test:**
 
-- **Setup:** Prepare a valid bundle, a symlink escape, a file changed during import, and an interruption immediately before finalization.
+- **Setup:** Prepare a valid bundle, report and artifact symlink escapes, a report changed during import, an artifact changed during import, and an interruption immediately before finalization.
 - **Steps:**
   1. Import each fixture into an isolated no-mistakes home.
   2. Inspect the worktree, staged files, final import state, and publication state.
   3. Restart recovery for the interrupted case.
-- **Expected Result:** Only the stable valid bundle finalizes, the worktree stays unchanged, unsafe fixtures fail closed, and recovery never publishes incomplete evidence.
-- **Failure Indicator:** Mutable source bytes reach final staging, an unsafe path escapes containment, or any failed fixture becomes publishable.
+- **Expected Result:** Only the stable valid bundle finalizes with its manifest-bound report and artifacts, the worktree stays unchanged, unsafe fixtures fail closed, and recovery never publishes incomplete evidence.
+- **Failure Indicator:** Mutable report or artifact bytes reach final staging, an unsafe path escapes containment, or any failed fixture becomes publishable.
 
 ### US-004: Admit Evidence Import Consent without trusting project data
 
@@ -101,7 +101,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] **Evidence Import Consent** binds one exact batch, manifest hash, artifact hashes, named destination, run, and reviewed head.
+- [ ] **Evidence Import Consent** binds one exact batch, manifest hash, report relative path and hash, artifact hashes, named destination, run, and reviewed head.
 - [ ] Project-controlled manifests, JSON, repository configuration, and environment configuration cannot grant consent.
 - [ ] `--yes` and generic automatic approval cannot grant consent.
 - [ ] An active validation-step descendant cannot use the import-control interface to grant consent.
@@ -110,13 +110,13 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Create a valid offered batch, a project file that claims approval, a nested test process, and a legitimate consent record for the exact batch.
+- **Setup:** Create a valid offered batch with a manifest-bound report, a project file that claims approval, a nested test process, and a legitimate consent record for the exact batch.
 - **Steps:**
   1. Attempt import with only the project approval file.
   2. Attempt import from the nested test process.
   3. Attempt import with `--yes` and configuration-based approval.
   4. Submit the legitimate exact consent through the protected control path.
-- **Expected Result:** The first three attempts are refused without authority state, while the exact legitimate consent permits staging but not publication.
+- **Expected Result:** The first three attempts are refused without authority state, while the exact legitimate consent including the report identity permits staging but not publication.
 - **Failure Indicator:** Any project-controlled input or automatic path creates import authority or directly publishes evidence.
 
 ### US-005: Present the no-mistakes publication preview
@@ -126,19 +126,19 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] The preview is generated from finalized protected staging rather than the producer's source directory.
-- [ ] The preview displays the run, reviewed head, pull request destination, manifest hash, artifact names, artifact hashes, media types, and sizes.
+- [ ] The preview displays the run, reviewed head, pull request destination, manifest hash, report relative path and hash, artifact names, artifact hashes, media types, and sizes.
 - [ ] Rendering or closing the preview performs no publication.
 - [ ] The preview clearly distinguishes prior **Evidence Import Consent** from pending **Publication Approval**.
 - [ ] Preview tests cover empty, single-artifact, multiple-artifact, and rejected-media batches.
 
 **Validation Test:**
 
-- **Setup:** Stage a valid multi-artifact batch under a test run and retain its expected digest.
+- **Setup:** Stage a valid manifest-bound report and multi-artifact batch under a test run and retain its expected digest.
 - **Steps:**
   1. Open the no-mistakes publication preview.
   2. Compare every displayed binding with the staged digest.
   3. Close the preview without approval.
-- **Expected Result:** The preview matches the protected staged bytes exactly and no evidence branch, pull request body, or publication approval changes.
+- **Expected Result:** The preview matches the protected staged report and artifact identities exactly and no evidence branch, pull request body, or publication approval changes.
 - **Failure Indicator:** The preview reads mutable producer files, omits a binding, or closing it authorizes publication.
 
 ### US-006: Grant no-mistakes-owned Publication Approval
@@ -148,7 +148,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] **Publication Approval** can be granted only for the exact protected staged batch shown in the no-mistakes preview.
-- [ ] The approval binds the run, reviewed head, manifest hash, artifact hashes, allowed media types, and named pull request destination.
+- [ ] The approval binds the run, reviewed head, manifest hash, report relative path and hash, artifact hashes, allowed media types, and named pull request destination.
 - [ ] Project data, configuration, generic gate approval, and `--yes` cannot grant or substitute for this approval.
 - [ ] Approval is one-time and produces a durable audit record without exposing private artifact contents.
 - [ ] Closing or declining the preview leaves publication unauthorized.
@@ -156,7 +156,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Prepare one staged import with consent but no publication approval and one identical import that receives explicit approval after preview.
+- **Setup:** Prepare one staged manifest-bound report and artifact batch with consent but no publication approval and one identical import that receives explicit approval after preview.
 - **Steps:**
   1. Attempt publication for the consent-only import.
   2. Close the preview for that import and retry.
@@ -171,8 +171,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] Publication immediately revalidates staged hashes, manifest hash, run, reviewed head, destination, media types, and unconsumed approval.
-- [ ] Artifact drift, manifest drift, replay, destination change, run change, or reviewed-head change invalidates the affected authority.
+- [ ] Publication immediately revalidates the staged manifest, report, and artifact hashes, run, reviewed head, destination, media types, and unconsumed approval.
+- [ ] Report drift, artifact drift, manifest drift, replay, destination change, run change, or reviewed-head change invalidates the affected authority.
 - [ ] An invalidated attempt publishes nothing and requires a new exact preview and approval.
 - [ ] An exact replay after successful consumption is a deterministic no-op or refusal and never creates a second publication.
 - [ ] Concurrent publication attempts consume at most one approval.
@@ -180,12 +180,12 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Create approved imports and mutate one bound dimension in each fixture before publication.
+- **Setup:** Create approved imports and mutate one bound dimension in each fixture before publication, including separate report-path, report-hash, and report-byte drift fixtures.
 - **Steps:**
   1. Attempt publication for every drift fixture.
   2. Race two publication attempts against one unchanged approved fixture.
   3. Replay the successful request.
-- **Expected Result:** Every drift fixture fails closed, exactly one racing attempt may publish, and replay cannot publish twice.
+- **Expected Result:** Every drift fixture including report drift fails closed, exactly one racing attempt may publish, and replay cannot publish twice.
 - **Failure Indicator:** Stale approval survives drift, concurrent attempts publish twice, or replay changes remote state.
 
 ### US-008: Publish approved evidence through the managed PR flow
@@ -196,7 +196,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 - [ ] Only an import with valid consent and unconsumed **Publication Approval** can enter managed publication.
 - [ ] Artifacts are published through no-mistakes' evidence branch using immutable evidence-commit addresses.
-- [ ] The **Managed PR Description** includes the exact approved evidence batch through the existing generated evidence section.
+- [ ] The **Managed PR Description** includes the exact approved report and artifact batch through the existing generated evidence section.
 - [ ] Reruns may regenerate the full description, and no contract promises to preserve manual author text there.
 - [ ] Version 1 does not add comment-based evidence publication.
 - [ ] The owning project worker drives no-mistakes, and Firstmate does not mutate the project pull request directly.
@@ -209,7 +209,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
   1. Complete the managed publication step for the approved import.
   2. Inspect evidence branch history and the generated pull request description.
   3. Attempt the same step for the unapproved import.
-- **Expected Result:** The approved batch is linked by immutable evidence commit, neither code branch contains artifacts, and the unapproved batch creates no remote mutation.
+- **Expected Result:** The approved report and artifact batch is linked by immutable evidence commit, neither code branch contains evidence, and the unapproved batch creates no remote mutation.
 - **Failure Indicator:** Evidence enters a code branch, a mutable local path is linked, a comment is added, or the unapproved import changes the pull request.
 
 ### US-009: Publish the clean-room Visual Evidence skill package
@@ -288,7 +288,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim, plus independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset** when Comparison Mode applies.
+- [ ] A **Scenario Definition** explicitly names startup, readiness, fixture setup, route, viewports, interactions, assertions, captures, and demonstrated claim, plus distinct independently isolated server-side synthetic fixture namespaces for the baseline and candidate when Comparison Mode applies.
 - [ ] Scenario commands and fixture commands are never invented by the skill.
 - [ ] Tracked scenario definitions contain no secrets and refer to private values only by declared name.
 - [ ] **Scenario Values** remain ignored local state and never appear in manifests, reports, logs, or error text.
@@ -337,8 +337,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] **Comparison Mode** runs the exact **Baseline Revision** and candidate head under equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs.
-- [ ] Separate browser contexts use the server-side synthetic state mechanism declared by the **Evidence Scenario**: independently isolated fixture namespaces or a **Deterministic Capture Reset**.
-- [ ] Reset-based scenarios satisfy the authoritative **Deterministic Capture Reset** contract, while asynchronous scenarios or scenarios without guaranteed deterministic draining require independently isolated fixture namespaces.
+- [ ] Separate baseline and candidate browser contexts use distinct independently isolated server-side synthetic fixture namespaces declared by the **Evidence Scenario**.
+- [ ] Both namespaces are seeded equivalently before either capture begins, share no mutable state, and allow no asynchronous cross-writes.
 - [ ] A **Verified Baseline** is labeled only after the exact **Baseline Revision**, distinct from the candidate head, runs successfully under equivalent conditions.
 - [ ] User-provided and historical screenshots are never labeled as Verified Baseline evidence.
 - [ ] The review presents baseline and candidate views side by side.
@@ -347,15 +347,15 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Validation Test:**
 
-- **Setup:** Prepare one reset-safe synchronous synthetic scenario with delayed baseline work that can be drained, one asynchronous synthetic scenario with independently isolated server-side namespaces, one reset-only scenario whose prior work cannot be drained deterministically, one runnable **Baseline Revision**, one candidate-head visual change, and a historical screenshot unrelated to the run.
+- **Setup:** Prepare a synthetic comparison with distinct baseline and candidate server-side fixture namespaces, one intentionally shared-namespace variant, one asynchronous cross-write attempt, one runnable **Baseline Revision**, one candidate-head visual change, and a historical screenshot unrelated to the run.
 - **Steps:**
-  1. Run the reset-safe baseline and candidate captures and observe capture ordering, prior-work draining, reset, and quiescence verification.
-  2. Run the asynchronous scenario with isolated namespaces, then attempt its reset-only variant and the scenario whose prior work cannot be drained deterministically.
-  3. Inspect viewport, setup, authentication, fixture equivalence, and server-side state after every attempt.
+  1. Seed both isolated namespaces equivalently before either capture and run the baseline and candidate in their separate browser contexts.
+  2. Attempt the shared-namespace variant and the asynchronous write across namespaces.
+  3. Inspect viewport, setup, authentication, fixture equivalence, namespace identity, and server-side state after every attempt.
   4. Open the side-by-side review with `chrome-devtools-axi`.
   5. Request a diff once with and once without a documented threshold.
-- **Expected Result:** The reset path starts the candidate only after prior work drains and quiescence is verified, asynchronous capture uses isolated namespaces, unsafe reset-only variants are refused, browser and server state never cross contexts, the exact runnable revisions appear side by side, the historical image is contextual only, and diff verdicts follow policy.
-- **Failure Indicator:** Captures overlap on the reset path, a late server write crosses captures, an asynchronous or non-quiesceable scenario uses reset-only isolation, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
+- **Expected Result:** The isolated namespaces begin with equivalent synthetic state, share no mutable state, reject asynchronous cross-writes, and keep browser and server state from crossing contexts; the exact runnable revisions appear side by side, the historical image is contextual only, and diff verdicts follow policy.
+- **Failure Indicator:** A comparison accepts shared server state, a late server write crosses namespaces, the initial seeds differ, an unrun image becomes a baseline, or an explanatory diff silently fails validation.
 
 ### US-015: Handle an unavailable baseline honestly
 
@@ -410,24 +410,24 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] Each **Evidence Bundle** contains a human-readable report, a **Portable Manifest**, and zero or more visual artifacts.
-- [ ] Every manifest declares **Evidence Schema Version** `1.0` and includes the claim, relative artifact names, types, capture times, hashes, capture scope, immutable **Privacy Scan Result** and exact finding set, and relevant tool versions.
+- [ ] Every manifest declares **Evidence Schema Version** `1.0` and includes the claim, human-readable report relative path and hash, relative artifact names, types, capture times, hashes, capture scope, immutable **Privacy Scan Result** and exact finding set, and relevant tool versions.
 - [ ] A manifest never records explicit acceptance or other approval state.
 - [ ] Comparison manifests identify the exact baseline and candidate revisions used for capture.
-- [ ] Portable output excludes usernames, absolute paths, environment variables, credentials, unnecessary URL parameters, and private values.
+- [ ] Manifests, reports, and non-artifact bundle metadata exclude usernames, absolute paths, environment variables, credentials, unnecessary URL parameters, and private values.
 - [ ] Detailed diagnostics remain separate **Private Outputs** and are excluded from the portable bundle by default.
 - [ ] Bundle finalization is atomic, finalized bytes are immutable, and no existing non-identical bundle is overwritten.
 - [ ] Bundle schema, hashing, redaction, tamper, and compatibility tests pass.
 
 **Validation Test:**
 
-- **Setup:** Produce comparison, behavior, after-only, empty-artifact, privacy-finding, and tampered bundle fixtures with private machine details present in the runtime environment.
+- **Setup:** Produce comparison, behavior, after-only, empty-artifact, privacy-finding, report-tamper, artifact-tamper, and manifest-tamper bundle fixtures with private machine details present in the runtime environment.
 - **Steps:**
   1. Validate and finalize each legitimate fixture.
-  2. Inspect required fields, revision identities, immutable privacy scan results, and finding sets.
-  3. Search portable files for private machine details.
+  2. Inspect required fields, report identities, revision identities, immutable privacy scan results, and finding sets.
+  3. Search manifests, reports, and non-artifact bundle metadata for private machine details.
   4. Validate the tampered fixture and attempt a destination collision.
-- **Expected Result:** Legitimate bundles validate without private details or approval state, privacy-finding output records its immutable scan result and exact finding set, tampering is detected, and a non-identical collision is refused without overwrite.
-- **Failure Indicator:** A required identity is missing, acceptance or another private value becomes portable, tampering passes, or finalization replaces an existing bundle.
+- **Expected Result:** Legitimate bundles validate with a manifest-bound immutable report and without private details or approval state outside reviewed private artifact pixels, privacy-finding output records its immutable scan result and exact finding set, every tamper is detected, and a non-identical collision is refused without overwrite.
+- **Failure Indicator:** A report or other required identity is missing, acceptance or another private value appears outside reviewed private artifact pixels, report or artifact tampering passes, or finalization replaces an existing bundle.
 
 ### US-018: Review privacy findings without altering originals
 
@@ -437,25 +437,26 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 - [ ] **Privacy Review** inspects the exact bundle that will be offered or exported.
 - [ ] Every suspected sensitive item becomes an individually identified **Privacy Finding**.
+- [ ] Privacy test values may appear in the review page only within pixels intentionally rendered from the private artifact under review and never in page scaffolding, metadata, manifests, reports, logs, or controller state.
 - [ ] Any unresolved finding blocks local export and **Evidence Import Consent**.
 - [ ] Each finding can be explicitly accepted, cropped, redacted into a derived artifact, or resolved by excluding its artifact.
 - [ ] Originals in the **Local Evidence Store** are never silently altered.
-- [ ] The active trusted host controller stores explicit acceptance only in private decision state bound to the unchanged manifest hash, artifact bytes, exact finding set, batch, and destination.
+- [ ] The active trusted host controller stores explicit acceptance only in private decision state bound to the unchanged manifest hash, report relative path and hash, artifact bytes, exact finding set, batch, and destination.
 - [ ] Explicit acceptance changes no **Privacy Scan Result** or bundle byte and does not require a new preview while those bindings remain unchanged.
-- [ ] A derivation, crop, redaction, exclusion, byte change, batch change, finding-set change, or destination change invalidates the decision and produces a new exact preview before authority can be granted.
+- [ ] A derivation, crop, redaction, exclusion, report change, artifact byte change, batch change, finding-set change, or destination change invalidates the decision and produces a new exact preview before authority can be granted.
 - [ ] Privacy review and derived output are verified in browser using `chrome-devtools-axi`.
 
 **Validation Test:**
 
-- **Setup:** Create a bundle containing one benign screenshot, two screenshots with suspected sensitive content, and their original hashes.
+- **Setup:** Create a bundle containing one benign screenshot, two screenshots with a recognizable privacy test value in their pixels, and their original hashes.
 - **Steps:**
-  1. Open the privacy review using `chrome-devtools-axi`.
+  1. Open the privacy review using `chrome-devtools-axi` and inspect rendered artifact pixels, page scaffolding, metadata, manifests, reports, logs, and controller state.
   2. Attempt export and import consent with the finding unresolved.
   3. Explicitly accept one finding, compare the bundle and manifest hashes before and after, and inspect the active host controller's bound private decision state.
   4. Resolve the other finding through a redacted derivative.
   5. Compare original and derived hashes and open the new preview.
-- **Expected Result:** Unresolved publication is blocked, unchanged explicit acceptance preserves the bundle bytes, manifest hash, immutable scan result, finding set, and current preview while remaining only in bound private decision state, the original remains byte-identical, the derivative has a new identity, and only the newly previewed changed batch can receive authority.
-- **Failure Indicator:** Acceptance changes portable bytes or state, unresolved evidence proceeds, unchanged acceptance invalidates the preview, or an old decision applies to the derived batch.
+- **Expected Result:** The privacy test value appears only in intentionally rendered private artifact pixels, unresolved publication is blocked, unchanged explicit acceptance preserves the bundle bytes, manifest hash, report identity, immutable scan result, finding set, and current preview while remaining only in bound private decision state, the original remains byte-identical, the derivative has a new identity, and only the newly previewed changed batch can receive authority.
+- **Failure Indicator:** The privacy test value appears outside intentionally rendered artifact pixels, acceptance changes portable bytes or state, unresolved evidence proceeds, unchanged acceptance invalidates the preview, or an old decision applies to the derived batch.
 
 ### US-019: Operate the local Evidence Review Surface
 
@@ -463,13 +464,14 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] The **Evidence Review Surface** presents the exact bundle, side-by-side comparisons where applicable, manifest details, privacy findings, destination, and proposed cleanup files with sizes.
+- [ ] The **Evidence Review Surface** presents the exact bundle, manifest hash, report relative path and hash, artifact hashes, side-by-side comparisons where applicable, privacy findings, destination, and proposed cleanup files with sizes.
+- [ ] The surface obeys the **Privacy Review** value boundary without adding masking or reveal controls.
 - [ ] Firstmate uses its existing visual review capability when available, and the standalone **Local Evidence Controller** generates equivalent local HTML.
 - [ ] Opening, rendering, or closing the page causes no upload, publication, export, or cleanup.
 - [ ] A **Review Decision** may resolve findings, authorize an exact local export, grant **Evidence Import Consent**, or grant **Evidence Cleanup Approval**.
 - [ ] The page never performs the external action directly.
 - [ ] Firstmate acts as the host controller in integrated use, while the public skill's trusted non-browser **Local Evidence Controller** owns private storage and decision intake in standalone use.
-- [ ] The active host controller revalidates exact hashes, batch, and destination before performing an approved local action and also revalidates the no-mistakes run and reviewed head before routing import consent.
+- [ ] The active host controller revalidates the manifest hash, report relative path and hash, artifact hashes, batch, and destination before performing an approved local action and also revalidates the no-mistakes run and reviewed head before routing import consent.
 - [ ] The standalone controller retains control state outside the project worktree and cannot grant **Publication Approval** or mutate a pull request directly.
 - [ ] The surface and no-side-effect behavior are verified in browser using `chrome-devtools-axi`.
 
@@ -492,20 +494,20 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] Local export copies only the exact reviewed batch to the chosen local folder after its **Review Decision**.
-- [ ] The exporter revalidates batch hashes and destination immediately before copying.
+- [ ] The exporter revalidates the manifest hash, report relative path and hash, artifact hashes, batch, and destination immediately before copying.
 - [ ] An identical existing export is idempotent.
 - [ ] A differing destination collision is refused without overwrite or merge.
-- [ ] A file or destination change requires a new preview and Review Decision.
+- [ ] A report, artifact, manifest, batch, or destination change requires a new preview and Review Decision.
 - [ ] Focused export, collision, drift, and replay tests pass.
 
 **Validation Test:**
 
-- **Setup:** Prepare two different bundles with the same proposed export name and approve the first bundle for that exact local folder.
+- **Setup:** Prepare two different bundles with manifest-bound reports under the same proposed export name and approve the first bundle for that exact local folder.
 - **Steps:**
   1. Export the first bundle twice.
   2. Attempt to export the second bundle to the occupied destination.
-  3. Change one approved artifact and retry the first export.
-- **Expected Result:** The identical replay is harmless, the differing collision is refused, and the changed batch requires a new preview and decision.
+  3. Change the approved report and retry the first export, then restore it and change one approved artifact before retrying again.
+- **Expected Result:** The identical replay is harmless, the differing collision is refused, and each changed report or artifact requires a new preview and decision.
 - **Failure Indicator:** Export overwrites or merges different content, stale authority survives drift, or identical replay creates a second copy.
 
 ### US-021: Hand consented evidence to no-mistakes
@@ -514,17 +516,17 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 **Acceptance Criteria:**
 
-- [ ] **Evidence Import Consent** identifies the exact reviewed batch, manifest and artifact hashes, pull request destination, no-mistakes run, and reviewed head offered to no-mistakes.
+- [ ] **Evidence Import Consent** identifies the exact reviewed batch, manifest hash, report relative path and hash, artifact hashes, pull request destination, no-mistakes run, and reviewed head offered to no-mistakes.
 - [ ] Firstmate performs the host-controller handoff in integrated use, and the **Local Evidence Controller** performs it in standalone use.
 - [ ] The active trusted host controller revalidates every consent binding before routing it to the owning project worker.
 - [ ] The owning worker drives **Approved Evidence Import** through the no-mistakes flow.
 - [ ] The handoff does not authorize or perform pull request mutation.
-- [ ] Changed batch, manifest or artifact hash, destination, run, or head bindings refuse the handoff and require a new local preview.
+- [ ] Changed batch, manifest hash, report path or hash, artifact hash, destination, run, or head bindings refuse the handoff and require a new local preview.
 - [ ] Focused integrated-host, standalone-host, worker-ownership, drift, and no-publication tests pass.
 
 **Validation Test:**
 
-- **Setup:** Prepare one consented bundle and pull request destination plus variants with changed batch, manifest hash, artifact hash, destination, no-mistakes run, and reviewed-head bindings.
+- **Setup:** Prepare one consented bundle and pull request destination plus variants with changed batch, manifest hash, report path, report hash, report bytes, artifact hash, destination, no-mistakes run, and reviewed-head bindings.
 - **Steps:**
   1. Route the unchanged consent through Firstmate in integrated use and through the Local Evidence Controller in standalone use.
   2. Inspect no-mistakes staging and pull request state for each route.
@@ -586,22 +588,22 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-4: Structural Review must deepen only the affected responsibility and report unrelated duplication separately.
 - FR-5: The three adaptations must be original MIT-licensed clean-room implementations without vendored upstream prose or code.
 - FR-6: No-mistakes must expose **Approved Evidence Import** as a narrow producer-neutral interface.
-- FR-7: The import contract must bind the exact manifest hash, artifact paths and hashes, approval identity, run, reviewed head, destination, and declared media types.
+- FR-7: The import contract must bind the exact manifest hash, report relative path and hash, artifact paths and hashes, approval identity, run, reviewed head, destination, and declared media types.
 - FR-8: The importer must reject malformed schema, unsupported major versions, missing required fields, duplicate paths, unsafe paths, and unsupported media types.
 - FR-9: The importer must accept compatible optional fields within a supported major schema version.
 - FR-10: Imported evidence must be staged outside the project worktree under no-mistakes-owned run state.
 - FR-11: Protected staging must refuse symlinks, path traversal, mutable substitutions, and non-regular artifacts.
-- FR-12: Staging must verify hashes from its protected copy and finalize atomically without overwriting non-identical state.
-- FR-13: **Evidence Import Consent** must bind one exact reviewed batch, manifest and artifact hashes, no-mistakes run, reviewed head, and pull request destination before protected staging.
+- FR-12: Staging must verify the manifest, report, and artifact hashes from its protected copy and finalize atomically without overwriting non-identical state.
+- FR-13: **Evidence Import Consent** must bind one exact reviewed batch, manifest hash, report relative path and hash, artifact hashes, no-mistakes run, reviewed head, and pull request destination before protected staging.
 - FR-14: Evidence Import Consent must authorize only an offer to no-mistakes and must not authorize pull request mutation.
-- FR-15: No-mistakes must render its own exact preview from protected staging.
+- FR-15: No-mistakes must render its own exact preview from protected staging with the report relative path and hash alongside every other publication binding.
 - FR-16: Only a no-mistakes-owned **Publication Approval** after that preview may authorize pull request mutation.
 - FR-17: Project manifests, project JSON, repository configuration, environment configuration, `--yes`, and generic automatic approval must not grant consent or publication approval.
-- FR-18: Publication must revalidate every hash, media type, run, reviewed head, destination, and approval immediately before remote mutation.
-- FR-19: Drift, replay, changed destination, changed run, changed reviewed head, or consumed authority must require a new preview and authorization.
+- FR-18: Publication must revalidate the manifest, report, and artifact hashes, media types, run, reviewed head, destination, and approval immediately before remote mutation.
+- FR-19: Report, artifact, manifest, destination, run, or reviewed-head drift, replay, or consumed authority must require a new preview and authorization.
 - FR-20: Concurrent publication attempts must consume at most one approval.
 - FR-21: Approved evidence must publish through no-mistakes' evidence branch without entering feature or default branch history.
-- FR-22: The **Managed PR Description** must link the exact approved batch through immutable evidence-commit addresses.
+- FR-22: The **Managed PR Description** must link the exact approved report and artifact batch through immutable evidence-commit addresses.
 - FR-23: Version 1 must not add comment-based evidence publication or promise preservation of manual text in the managed description.
 - FR-24: Firstmate must route project publication to the owning worker and no-mistakes instead of mutating project pull requests directly.
 - FR-25: Firstmate must publish one public **Visual Evidence** skill containing Comparison Mode and Behavior Mode under one lifecycle owner.
@@ -610,7 +612,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-28: Relevant evidence must default to supplemental unless the captain's request or documented project policy establishes it as required.
 - FR-29: Worker briefs must carry an explicit evidence contract and canonical public skill path when Visual Evidence is active.
 - FR-30: Workers must report unexpected impact, and Firstmate alone must perform **Evidence Reclassification** under the same authority rules.
-- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information and, for Comparison Mode, independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset**.
+- FR-31: **Scenario Definitions** must explicitly provide non-secret startup, readiness, fixture, route, viewport, interaction, assertion, capture, and claim information and, for Comparison Mode, distinct independently isolated server-side synthetic fixture namespaces for the baseline and candidate.
 - FR-32: **Scenario Values** must remain ignored local state and must never enter portable output or diagnostics.
 - FR-33: Visual Evidence must never invent startup or fixture commands and must report scenarios that lack required explicit inputs.
 - FR-34: Version 1 must support macOS browser capture only and must make no Linux or Windows support claim.
@@ -618,7 +620,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-36: A task-scoped profile may preserve state only within its task and must not be reused by another task.
 - FR-37: Visual Evidence must seed captures only from **Synthetic Test Fixtures** or clean anonymous state and must never copy a current or production environment automatically.
 - FR-38: Visual Evidence must capture only scenario-named viewports and must not run an automatic device matrix.
-- FR-39: Comparison Mode must use separate browser contexts with equivalent viewport, setup, fixture, authentication, and initial synthetic state inputs plus independently isolated server-side synthetic fixture namespaces or a **Deterministic Capture Reset** satisfying the authoritative contract in [CONTEXT.md](../CONTEXT.md).
+- FR-39: Comparison Mode must use separate browser contexts and distinct independently isolated server-side synthetic fixture namespaces for baseline and candidate, seed both namespaces equivalently before either capture, and prohibit shared mutable state and asynchronous cross-writes.
 - FR-40: A before-and-after claim must require a successfully run and equivalently captured exact **Baseline Revision**, distinct from the candidate head, as its **Verified Baseline**.
 - FR-41: Historical or user-provided screenshots must not be labeled as Verified Baseline evidence.
 - FR-42: Required comparison evidence must fail when the baseline is unavailable, while supplemental evidence may produce reasoned **After-only Evidence** without a comparison claim.
@@ -629,17 +631,17 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-47: Behavior Mode must use sequenced screenshots, automated assertions, and timing notes only when needed for minimum sufficient evidence.
 - FR-48: Version 1 must not produce video or use operating-system-level screen capture.
 - FR-49: Visual evidence must complement feasible automated assertions and must not claim to prove hidden application behavior.
-- FR-50: Every **Evidence Bundle** must contain a versioned Portable Manifest and human-readable report with zero or more visual artifacts.
-- FR-51: Portable manifests must include claim, relative artifact identity, type, capture time, hash, capture scope, immutable **Privacy Scan Result** and exact finding set, tool versions, and applicable revision identities without acceptance or approval state.
-- FR-52: Portable bundles must exclude usernames, absolute paths, environment variables, credentials, private values, and unnecessary URL parameters.
+- FR-50: Every **Evidence Bundle** must contain a versioned Portable Manifest, one human-readable report, and zero or more visual artifacts, with the report and artifacts immutable under their manifest-recorded identities.
+- FR-51: Portable manifests must include claim, report relative path and hash, relative artifact identity, type, capture time, hash, capture scope, immutable **Privacy Scan Result** and exact finding set, tool versions, and applicable revision identities without acceptance or approval state.
+- FR-52: Portable bundles must exclude usernames, absolute paths, environment variables, credentials, unnecessary URL parameters, and private values from every surface except the reviewed private artifact pixels.
 - FR-53: Original bundles and diagnostic appendices must remain private in the ignored **Local Evidence Store** unless exact authority permits an export or publication copy.
-- FR-54: **Privacy Review** must flag suspected sensitive content and block export or import consent while any finding remains unresolved.
-- FR-55: Privacy resolution must preserve originals and keep explicit acceptance in controller-owned private decision state bound to the unchanged manifest hash, bytes, exact finding set, batch, and destination; acceptance alone must not rewrite the bundle or require a new preview, while derivation, crop, redaction, exclusion, byte change, batch change, finding-set change, or destination change must invalidate the decision and require a new exact preview.
+- FR-54: **Privacy Review** must flag suspected sensitive content, confine privacy test values to intentionally rendered private artifact pixels, and block export or import consent while any finding remains unresolved.
+- FR-55: Privacy resolution must preserve originals and keep explicit acceptance in controller-owned private decision state bound to the unchanged manifest hash, report identity, artifact bytes, exact finding set, batch, and destination; acceptance alone must not rewrite the bundle or require a new preview, while derivation, crop, redaction, exclusion, report change, artifact byte change, batch change, finding-set change, or destination change must invalidate the decision and require a new exact preview.
 - FR-56: The **Evidence Review Surface** must render locally, cause no upload or mutation, and provide exact review choices without performing external actions directly.
-- FR-57: The active trusted host controller must revalidate hashes, batch, and destination after a Review Decision and before performing an approved local action, and must also revalidate the no-mistakes run and reviewed head before routing consent for protected staging.
+- FR-57: The active trusted host controller must revalidate the manifest hash, report relative path and hash, artifact hashes, batch, and destination after a Review Decision and before performing an approved local action, and must also revalidate the no-mistakes run and reviewed head before routing consent for protected staging.
 - FR-57a: Firstmate must be the host controller in integrated use, while the public skill's trusted non-browser Local Evidence Controller must own private storage, decision intake, approved local actions, and no-mistakes consent routing in standalone use.
 - FR-57b: The Local Evidence Controller must retain control state outside the project worktree and must not grant Publication Approval or mutate a pull request directly.
-- FR-58: Local export must be exact and non-overwriting, with identical replay treated idempotently and differing collisions refused.
+- FR-58: Local export must revalidate the exact manifest, report, artifact, batch, and destination bindings and remain non-overwriting, with identical replay treated idempotently and differing collisions refused.
 - FR-59: No Private Output may expire or be removed automatically.
 - FR-60: Cleanup must preview exact files and sizes and move only approved files to recoverable trash.
 - FR-61: Firstmate must never empty recoverable trash, and permanent deletion must require a separate exact captain request.
@@ -659,6 +661,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - No access to the captain's ordinary signed-in browser profile.
 - No automatic copying of production or current environments into capture state.
 - No automatic standard device or viewport matrix.
+- No reset-based comparison isolation.
 - No visual claim that hidden application behavior was proved.
 - No silent replacement of feasible machine-verifiable assertions with screenshots.
 - No automatic upload, anonymous host, Gist, arbitrary endpoint, or unsupported third-party publication.
@@ -666,6 +669,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - No direct project pull request mutation by Firstmate.
 - No authority derived from project-controlled files, configuration, `--yes`, or generic automatic approval.
 - No automatic evidence expiry, silent original alteration, unapproved overwrite, or unapproved cleanup.
+- No masking or reveal controls for artifact pixels in version 1.
 - No local-export-only version 1 release.
 - No cryptographically trusted external single-approval receipt in version 1.
 
@@ -676,6 +680,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Behavior reviews should present sequence order, timing notes, and associated automated assertions without implying video playback.
 - Explanatory diffs should be visually subordinate to baseline and candidate because they are not verdicts unless project policy supplies a threshold.
 - Privacy findings should identify the affected artifact and suspected region without automatically altering original pixels.
+- Review-page scaffolding and metadata should never duplicate privacy values visible inside the private artifact pixels under review.
 - Derived crops and redactions should appear as new artifacts with new hashes rather than replacements hidden behind the original name.
 - No-mistakes' protected preview must clearly state that import consent has already occurred but publication approval remains pending.
 - Closing either review surface must have the same effect as submitting no decision.
@@ -694,10 +699,10 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Worker dispatch and reclassification need deterministic contracts that do not rely on workers inferring relevance from skill descriptions.
 - Import parsing, protected staging, approval state, and publication consumption need one semantic owner inside no-mistakes.
 - Authorization state must live outside project control and must be durable across process restarts without turning a receipt file into authority.
-- Hashes must be computed from the exact protected or finalized copy used by the next authority step.
+- Manifest, report, and artifact hashes must be computed from the exact protected or finalized copy used by the next authority step.
 - File operations must fail closed on symlinks, containment ambiguity, cross-device finalization, race detection, and non-identical destination collisions.
 - Browser startup must detect supported tool capabilities and versions without attaching to ambient browser sessions or installing dependencies automatically.
-- Capture must use separate safe browser contexts for the **Baseline Revision** and candidate head while preserving equivalent scenario inputs and isolating server-side synthetic state through independent fixture namespaces or a **Deterministic Capture Reset**.
+- Capture must use separate safe browser contexts and distinct independently isolated server-side synthetic fixture namespaces for the **Baseline Revision** and candidate head, seed the namespaces equivalently before either capture, and allow no shared mutable state or asynchronous cross-writes.
 - Portable privacy scan data must remain immutable and separate from controller-owned acceptance and approval state.
 - The selected diff implementation must be deterministic for a declared metric, but a project threshold remains the only source of a pass-or-fail diff verdict.
 - Portable schema parsers must reject unsupported major versions and missing required fields while tolerating newer optional fields within the same major version.
@@ -711,9 +716,11 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - **Risk:** A project may forge a plausible approval JSON.
 - **Mitigation:** Project data is never authority, and no-mistakes accepts publication approval only through protected local control state bound to its staged copy.
 - **Risk:** Evidence may change between preview and publication.
-- **Mitigation:** Every transition binds hashes and context, and publication revalidates immediately before mutation.
+- **Mitigation:** Every transition binds the manifest, report, artifact hashes, and context, and publication revalidates them immediately before mutation.
 - **Risk:** Browser capture may expose personal or production data.
-- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state, applies independently isolated server-side fixture namespaces or the scenario-declared **Deterministic Capture Reset**, and never attaches to the ordinary signed-in browser.
+- **Mitigation:** Version 1 uses isolated task profiles with synthetic fixtures or clean anonymous state, requires distinct independently isolated server-side fixture namespaces for baseline and candidate, and never attaches to the ordinary signed-in browser.
+- **Risk:** Privacy review must visibly render suspected sensitive artifact pixels.
+- **Mitigation:** The review stays local and private, privacy values are confined to intentionally rendered artifact pixels, and scaffolding, metadata, portable text, logs, and control state never duplicate them.
 - **Risk:** Visual evidence may be treated as proof of hidden behavior.
 - **Mitigation:** Automated assertions remain required where feasible, and reports limit claims to appearance and observable interaction.
 - **Risk:** Evidence storage may grow indefinitely because automatic expiry is prohibited.
@@ -725,9 +732,9 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 
 - All 23 story Validation Tests pass on the supported macOS environment.
 - One hundred percent of tampered, replayed, drifted, unsupported-media, unsafe-path, nested-gate, and project-forged authority fixtures fail before publication.
-- One hundred percent of finalized bundle artifacts match their Portable Manifest hashes.
+- One hundred percent of finalized bundle reports and artifacts match their Portable Manifest hashes.
 - Zero tests place evidence artifacts into a feature branch or default branch.
-- Zero privacy test values appear in portable manifests, reports, logs, or review pages.
+- Zero privacy test values appear in review-page scaffolding, metadata, Portable Manifests, reports, logs, or control state; pixels intentionally rendered from the private artifact under review are the only exception.
 - Required-evidence failure tests always prevent full validation, while supplemental-evidence failure tests preserve otherwise successful automated validation and report the reason.
 - Comparison tests always show a **Baseline Revision** distinct from the candidate head, equivalent inputs, and no browser or server state flow between captures, or explicitly refuse the comparison claim.
 - Browser isolation tests show zero access to the ordinary signed-in profile and zero cross-task profile reuse.
