@@ -458,11 +458,13 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 **Acceptance Criteria:**
 
 - [ ] The **Evidence Review Surface** presents the exact bundle, side-by-side comparisons where applicable, manifest details, privacy findings, destination, and proposed cleanup files with sizes.
-- [ ] Firstmate uses its existing visual review capability when available, and standalone use generates equivalent local HTML.
+- [ ] Firstmate uses its existing visual review capability when available, and the standalone **Local Evidence Controller** generates equivalent local HTML.
 - [ ] Opening, rendering, or closing the page causes no upload, publication, export, or cleanup.
 - [ ] A **Review Decision** may resolve findings, authorize an exact local export, grant **Evidence Import Consent**, or grant **Evidence Cleanup Approval**.
 - [ ] The page never performs the external action directly.
-- [ ] Firstmate revalidates exact hashes, batch, and destination before routing import consent or performing an approved home-local action.
+- [ ] Firstmate acts as the host controller in integrated use, while the public skill's trusted non-browser **Local Evidence Controller** owns private storage and decision intake in standalone use.
+- [ ] The active host controller revalidates exact hashes, batch, and destination before routing import consent to no-mistakes or performing an approved local action.
+- [ ] The standalone controller retains control state outside the project worktree and cannot grant **Publication Approval** or mutate a pull request directly.
 - [ ] The surface and no-side-effect behavior are verified in browser using `chrome-devtools-axi`.
 
 **Validation Test:**
@@ -470,11 +472,12 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - **Setup:** Prepare an exact bundle with comparison images, one privacy finding, a local destination, a pull request destination, and proposed cleanup files.
 - **Steps:**
   1. Open the Firstmate review and standalone HTML versions using `chrome-devtools-axi`.
-  2. Compare their displayed identities and actions.
-  3. Close both without submitting a decision.
-  4. Inspect local export, import, cleanup, and remote publication state.
-- **Expected Result:** Both surfaces show equivalent exact information, and closure leaves every external and cleanup action unauthorized and unchanged.
-- **Failure Indicator:** A surface omits a binding, loads remote content, or inspection alone changes local or remote state.
+  2. Compare their displayed identities, decisions, and controller bindings.
+  3. Submit an exact local-only decision through each host controller and verify its bindings are revalidated.
+  4. Reopen both surfaces and close them without submitting another decision.
+  5. Inspect local export, import, cleanup, and remote publication state.
+- **Expected Result:** Both surfaces show equivalent exact information, each decision is handled only by its trusted host controller, and closure leaves every further action unauthorized and unchanged.
+- **Failure Indicator:** A surface omits a binding, loads remote content, acts directly, routes standalone decisions to Firstmate, or inspection alone changes local or remote state.
 
 ### US-020: Export an exact reviewed batch locally
 
@@ -626,7 +629,9 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - FR-54: **Privacy Review** must flag suspected sensitive content and block export or import consent while any finding remains unresolved.
 - FR-55: Privacy resolution must preserve originals and require a new exact preview after acceptance, derivation, exclusion, file change, or destination change.
 - FR-56: The **Evidence Review Surface** must render locally, cause no upload or mutation, and provide exact review choices without performing external actions directly.
-- FR-57: Firstmate must revalidate hashes, batch, and destination after a Review Decision and before routing consent or performing an approved home-local action.
+- FR-57: The active host controller must revalidate hashes, batch, and destination after a Review Decision and before routing consent or performing an approved local action.
+- FR-57a: Firstmate must be the host controller in integrated use, while the public skill's trusted non-browser Local Evidence Controller must own private storage, decision intake, and approved local actions in standalone use.
+- FR-57b: The Local Evidence Controller must retain control state outside the project worktree and must not grant Publication Approval or mutate a pull request directly.
 - FR-58: Local export must be exact and non-overwriting, with identical replay treated idempotently and differing collisions refused.
 - FR-59: No Private Output may expire or be removed automatically.
 - FR-60: Cleanup must preview exact files and sizes and move only approved files to recoverable trash.
@@ -677,6 +682,8 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 - Firstmate and no-mistakes are separate delivery surfaces, so each repository must ship and validate its own part before the combined readiness gate runs.
 - Firstmate's hard project-write boundary remains in force, so project-specific capture derivatives and no-mistakes pipeline calls belong to the owning worker.
 - The public skill must remain installer-facing rather than being duplicated into Firstmate's internal loaded skill set.
+- The public skill must ship its **Local Evidence Controller** so standalone installations do not depend on Firstmate for private storage, decision intake, revalidation, export, cleanup, or no-mistakes consent routing.
+- Firstmate integration and standalone use must share the same controller contract, while only no-mistakes owns protected publication approval and pull request mutation.
 - Worker dispatch and reclassification need deterministic contracts that do not rely on workers inferring relevance from skill descriptions.
 - Import parsing, protected staging, approval state, and publication consumption need one semantic owner inside no-mistakes.
 - Authorization state must live outside project control and must be durable across process restarts without turning a receipt file into authority.
@@ -726,7 +733,7 @@ Version 1 is macOS-only, browser-first, screenshot-focused, private by default, 
 No product questions remain unresolved.
 The following engineering follow-ups must be settled during implementation without changing product scope:
 
-- Choose the concrete ignored Local Evidence Store path and namespace within Firstmate's existing private home layout.
+- Choose the concrete ignored Local Evidence Store path and namespace within Firstmate's private home layout and the equivalent host-private application-data path for standalone use.
 - Finalize the exact Portable Manifest version 1.0 field names and JSON Schema while preserving every required and excluded datum.
 - Finalize Scenario Definition and Scenario Values discovery paths and machine schemas within the tracked-versus-private boundary.
 - Choose no-mistakes command names, durable state tables, protected preview transport, and single-consumption transaction boundaries.
@@ -735,4 +742,4 @@ The following engineering follow-ups must be settled during implementation witho
 - Set supported browser-tool version and capability checks for macOS.
 - Specify atomic staging markers, interrupted-capture recovery records, and task-profile cleanup mechanics.
 - Define the exact Firstmate brief and durable reclassification message fields for the evidence contract.
-- Define the local review decision transport and replay record while preserving its non-authoritative browser boundary.
+- Define the shared local review decision transport and replay record used by Firstmate and the standalone Local Evidence Controller while preserving the browser surface's non-authoritative boundary.

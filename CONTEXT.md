@@ -80,6 +80,9 @@ A local browser page that presents an exact **Evidence Bundle**, side-by-side co
 **Review Decision**:
 Structured choices submitted from an **Evidence Review Surface** to resolve a **Privacy Finding**, authorize a local export, grant **Evidence Import Consent**, or grant **Evidence Cleanup Approval**.
 
+**Local Evidence Controller**:
+The trusted non-browser controller shipped with **Visual Evidence** that owns **Local Evidence Store** access, receives **Review Decisions**, revalidates their exact bindings, and applies approved local actions when Firstmate is not the host.
+
 **Complementary Evidence**:
 Visual evidence that supports but does not replace feasible automated assertions.
 
@@ -174,9 +177,12 @@ Suspected sensitive content identified during a **Privacy Review**.
 - An **Evidence Bundle** is a **Private Output**.
 - Opening or rendering an **Evidence Review Surface** causes no upload or publication.
 - Firstmate presents the **Evidence Review Surface** through its existing visual review capability when that capability is available.
-- Standalone use generates an equivalent local HTML **Evidence Review Surface**.
+- Standalone use runs the **Local Evidence Controller**, which generates an equivalent local HTML **Evidence Review Surface** and retains its control state outside the project worktree.
 - An **Evidence Review Surface** never performs an external action directly.
-- Firstmate receives a **Review Decision** and revalidates manifest hashes, the exact batch, and the destination before routing **Evidence Import Consent** to the owning worker or performing an approved home-local action.
+- In Firstmate-integrated use, Firstmate receives a **Review Decision** and acts as the host controller.
+- In standalone use, the **Local Evidence Controller** receives the same **Review Decision** through a local-only control channel.
+- The active host controller revalidates manifest hashes, the exact batch, and the destination before routing **Evidence Import Consent** to no-mistakes or performing an approved local export or cleanup.
+- The **Local Evidence Controller** cannot grant **Publication Approval** or mutate a pull request directly.
 - Any change to a file or destination invalidates its **Review Decision** and requires a new preview.
 - Closing an **Evidence Review Surface** without submitting a **Review Decision** authorizes nothing.
 - An **Evidence Bundle** is **Complementary Evidence** when the claimed behavior can be asserted automatically.
@@ -372,7 +378,8 @@ Suspected sensitive content identified during a **Privacy Review**.
 - Who or what may classify expected visual evidence as **Required Visual Evidence** was unresolved - resolved: only the captain's request or documented project acceptance policy may establish that classification.
 - Whether reusable **Evidence Scenarios** are tracked in project repositories or retained as private-only instructions was unresolved - resolved: projects track **Scenario Definitions**, while **Scenario Values** remain ignored local state.
 - What happens when a worker discovers an unexpected visual impact after dispatch was unresolved - resolved: the worker reports it and Firstmate performs **Evidence Reclassification**.
-- Whether approval, privacy-resolution, publication, and cleanup actions occur inside the **Evidence Review Surface** or back in conversation was unresolved - resolved: the surface submits a **Review Decision** to Firstmate, which revalidates it, routes **Evidence Import Consent** to the owning worker and no-mistakes flow, and may perform approved home-local export or cleanup.
+- Whether approval, privacy-resolution, publication, and cleanup actions occur inside the **Evidence Review Surface** or in a trusted controller was unresolved - resolved: the surface submits a **Review Decision** to the active host controller, which is Firstmate in integrated use and the public skill's **Local Evidence Controller** in standalone use.
+- The active host controller revalidates the decision, routes **Evidence Import Consent** to no-mistakes, and may perform approved local export or cleanup, while only no-mistakes may grant **Publication Approval** or mutate a pull request.
 - Whether approved local export alone permits a version 1 release was unresolved - resolved: **Visual Evidence v1 Readiness** requires both approved destinations and **Approved Evidence Import**, and this coordinated dependency is central to the eventual architecture ADR.
 - Whether **Approved Evidence Import** is generic or specific to **Visual Evidence** was unresolved - resolved: it is a narrow producer-neutral no-mistakes interface with no Firstmate-specific or **Visual Evidence**-specific behavior.
 - Whether the local **Evidence Review Surface** directly authorizes pull request mutation was unresolved - resolved: it may grant only **Evidence Import Consent**, while no-mistakes owns the separate **Publication Approval** after protected staging, revalidation, and its own exact preview.
