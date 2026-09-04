@@ -663,3 +663,4 @@ Copy [`board.example.json`](../bin/board/board.example.json) to the owning home'
 The [`launchd example`](../bin/board/com.wondermedia.firstmate-board.plist.example) requires absolute paths to Python 3.14 and the home, with `state/logs/` created before loading it.
 The bookmark carries `?k=<secret>` once; the page stores it locally and immediately removes it from the URL.
 Plain HTTP is supported only on the trusted private LAN.
+Answers the daemon cannot route itself wake firstmate through a self-announcing `board-answers` process-event source; the [`process-event-sources`](../.agents/skills/process-event-sources/SKILL.md) skill owns handling that wake.

@@ -56,7 +56,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-board-answers.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 
@@ -76,6 +76,13 @@ Two rules the commands cannot enforce for you:
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
+: A `board-answers` wake is the captain dashboard's exception path: the daemon armed the source itself, routed every answer it could, and only answers it could not route remain, listed in `<result-file>` with a `.exceptions.json` report beside it.
+  Route each listed answer yourself, record it with `bin/fm-board.sh answered <answer-id>`, then run
+  ```sh
+  bin/fm-procevent-board-answers.sh handle <source-id> <sequence> <result-file>
+  ```
+  which acknowledges the wake once every listed answer is consumed; an answer with no dashboard row can only be retired through the generic acknowledgement below.
+  Never re-arm this source by hand: `bin/fm-board.sh arm-answers` and the running daemon own registration, and `bin/fm-board.py`'s header owns the answer contract.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
