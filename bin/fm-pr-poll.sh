@@ -9,6 +9,7 @@
 set -u
 LC_ALL=C
 export LC_ALL
+DETAIL_STATE=${FM_PR_POLL_DETAIL_STATE:-0}
 
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
@@ -62,8 +63,19 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || {
+      if [ "$DETAIL_STATE" = 1 ]; then printf '%s\n' unreadable; exit 1; fi
+      exit 0
+    }
+    case "$state" in
+      MERGED) printf '%s\n' merged ;;
+      OPEN) [ "$DETAIL_STATE" = 1 ] && printf '%s\n' open ;;
+      CLOSED) [ "$DETAIL_STATE" = 1 ] && printf '%s\n' closed ;;
+      *)
+        if [ "$DETAIL_STATE" = 1 ]; then printf '%s\n' unknown; exit 1; fi
+        exit 0
+        ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -101,9 +113,23 @@ case "$provider" in
     # because plain glab has no field selector and firstmate does not require a
     # JSON processor; only an exact "merged" wakes, so a changed format or an
     # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || {
+      if [ "$DETAIL_STATE" = 1 ]; then printf '%s\n' unreadable; exit 1; fi
+      exit 0
+    }
+    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || {
+      if [ "$DETAIL_STATE" = 1 ]; then printf '%s\n' unreadable; exit 1; fi
+      exit 0
+    }
+    case "$state" in
+      merged) printf '%s\n' merged ;;
+      opened) [ "$DETAIL_STATE" = 1 ] && printf '%s\n' open ;;
+      closed) [ "$DETAIL_STATE" = 1 ] && printf '%s\n' closed ;;
+      *)
+        if [ "$DETAIL_STATE" = 1 ]; then printf '%s\n' unknown; exit 1; fi
+        exit 0
+        ;;
+    esac
     ;;
   *) exit 0 ;;
 esac

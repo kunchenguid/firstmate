@@ -61,7 +61,9 @@ make_case() {
   printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
   git -C "$publisher" add advanced-main.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
-  git -C "$publisher" push --quiet origin "$default"
+  # The publisher is an external fixture and must not inherit a worker hook overlay.
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+    -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 git -C "$publisher" push --quiet origin "$default"
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -269,7 +271,8 @@ make_submodule_case() {  # <name> <id>
   git -C "$publisher" -c protocol.file.allow=always submodule --quiet update --init
   git -C "$publisher/ui" checkout --quiet "$subpin2"
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam advance-pin
-  git -C "$publisher" push --quiet origin main
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+    -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 git -C "$publisher" push --quiet origin main
   advanced=$(git -C "$publisher" rev-parse HEAD)
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$subpin1|$subpin2|$advanced"

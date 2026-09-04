@@ -52,7 +52,8 @@ test_crewmate_brief_explains_session_lock_scope() {
 }
 
 test_ordinary_briefs_state_slice_contracts() {
-  local kind id brief section_file line_count charter
+  local kind id brief section_file line_count charter wait_syntax
+  wait_syntax="A \`paused:\` line may optionally include \`wait=pr:<full PR URL>\` or \`wait=quota:<provider scope>\`; omitted premises remain valid."
   for kind in ship scout; do
     id="brief-slice-contracts-$kind"
     if [ "$kind" = scout ]; then
@@ -64,6 +65,8 @@ test_ordinary_briefs_state_slice_contracts() {
     fi
     brief="$BRIEF_HOME/data/$id/brief.md"
     assert_grep '# Rules' "$brief" "$kind brief is missing its Rules section"
+    assert_grep "$wait_syntax" "$brief" \
+      "$kind brief omitted the optional wait-premise status syntax"
     section_file="$TMP_ROOT/$kind-rules-section"
     awk '/^# Rules$/ {seen=1; next} seen && /^# / {exit} seen {print}' "$brief" > "$section_file"
     assert_grep '- Specify the exact verification command and the observable passing result.' "$section_file" \

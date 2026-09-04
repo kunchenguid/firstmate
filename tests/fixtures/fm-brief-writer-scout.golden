@@ -45,6 +45,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use `blocked:` when you are stuck and need help.
+A `paused:` line may optionally include `wait=pr:<full PR URL>` or `wait=quota:<provider scope>`; omitted premises remain valid.
 5. If you hit the same obstacle twice, append `blocked: {why}` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append `needs-decision: {summary of options}` and stop. Firstmate will reply with the decision.

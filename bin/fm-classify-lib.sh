@@ -1505,7 +1505,11 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' pause
+  _fm_status_open_activities_stream_with_key _fm_decision_key
+}
+
+_fm_status_open_activities_stream_with_key() {
+  local key_fn=$1 line verb key note resolve held open='' pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -1516,7 +1520,7 @@ _fm_status_open_activities_stream() {
       *) continue ;;
     esac
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    key=$("$key_fn" "$line") || continue
     case "$verb" in
       working|"$pause")
         note=$(status_line_note "$line")
@@ -1541,6 +1545,16 @@ status_open_activities() {  # <status-file-or-dash>
   fi
   [ -f "$f" ] || return 0
   _fm_status_open_activities_stream < "$f"
+}
+
+status_open_activities_with_key() {  # <status-file-or-dash> <key-function>
+  local f=$1 key_fn=$2
+  if [ "$f" = - ]; then
+    _fm_status_open_activities_stream_with_key "$key_fn"
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  _fm_status_open_activities_stream_with_key "$key_fn" < "$f"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped

@@ -746,6 +746,73 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
   wake "$reason"
 }
 
+# Shadow-only observation for a paused wait. The wait-premise command owns the
+# status read and owner check; this hook records its verdict without using it to
+# release, wake, or schedule anything. Rows are timestamp, task, premise,
+# verdict, separated by tabs for the report command. A fifth field records the
+# non-blank pause occurrence so repeated premises remain distinct.
+shadow_wait_log_append() {  # <file> <row>
+  local file=$1 row=$2 device
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    fm_pr_private_file_valid "$file" 600 "$device" || return 1
+  fi
+  node - "$file" "$row" "$device" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const [file, row, stateDevice] = process.argv.slice(2);
+const state = path.dirname(file);
+const noFollow = fs.constants.O_NOFOLLOW ?? 0x20000;
+const stateStat = fs.lstatSync(state);
+if (!stateStat.isDirectory() || String(fs.statSync(state).dev) !== stateDevice) process.exit(1);
+const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | noFollow, 0o600);
+try {
+  const stat = fs.fstatSync(fd);
+  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600 || String(stat.dev) !== stateDevice) process.exit(1);
+  fs.writeSync(fd, `${row}\n`, null, 'utf8');
+  fs.fsyncSync(fd);
+} finally {
+  fs.closeSync(fd);
+}
+NODE
+  fm_pr_private_file_valid "$file" 600 "$device"
+}
+
+shadow_wait_events_append() {  # <row>
+  shadow_wait_log_append "$STATE/wait-events.log" "$1"
+}
+
+shadow_wait_correction() {  # <task>
+  local task=$1 marker premise pause_line row
+  marker="$STATE/.wait-premise-$task"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  IFS=$'\t' read -r premise pause_line < "$marker" 2>/dev/null || return 0
+  [ -n "$premise" ] && [ -n "$pause_line" ] || return 0
+  row=$(printf '%s\t%s\t%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$task" "$premise" corrected "$pause_line")
+  shadow_wait_log_append "$STATE/wait-corrections.log" "$row" 2>/dev/null || return 0
+  rm -f -- "$marker"
+}
+
+shadow_wait_premise() {  # <task>
+  local task=$1 row premise verdict pause_line
+  row=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-wait-premise.sh" --shadow-row "$task" 2>/dev/null) || return 0
+  [ -n "$row" ] || return 0
+  premise=${row%%$'\t'*}
+  verdict=${row#*$'\t'}
+  pause_line=${verdict#*$'\t'}
+  verdict=${verdict%%$'\t'*}
+  [ -n "$premise" ] && [ -n "$verdict" ] || return 0
+  printf '%s\t%s\n' "$premise" "$pause_line" > "$STATE/.wait-premise-$task" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$task" "$premise" "$verdict" "$pause_line" | {
+      IFS= read -r event_row
+      shadow_wait_events_append "$event_row" 2>/dev/null || true
+    }
+}
+
 # Defer ONE wedge escalation for a pane that went quiet while its own task
 # worktree is demonstrably still being written (crew_worktree_written_since in
 # fm-classify-lib.sh). The pane and the run step both say nothing is happening;
@@ -870,6 +937,11 @@ handle_paused_stale() {  # <window> <task> <hash>
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+  fi
+  if status_is_paused "$(last_status_line "$statusf")" \
+    && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] \
+    && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    shadow_wait_premise "$task"
   fi
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
@@ -1756,6 +1828,11 @@ reconcile_requests_detached() {
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
+WATCHER_PID=${BASHPID:-$$}
+if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-pipeline.sh" arm >/dev/null; then
+  echo "watcher: pipeline shadow check could not be registered" >&2
+  exit 1
+fi
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
@@ -2102,6 +2179,7 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+      shadow_wait_correction "$task"
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
