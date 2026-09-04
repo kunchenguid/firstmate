@@ -1509,7 +1509,7 @@ make_death_lab() {  # <dir> <shell-pid>
   cat > "$dir/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  "-axo pid=,ppid=") printf '1 0\n$pid 1\n' ;;
+  "-axo pid=,ppid=,comm=") printf '1 0 init\n$pid 1 zsh\n' ;;
   "-p $pid -o stat=") printf 'Ss+\n' ;;
   "-p $pid -o comm=") printf -- '-zsh\n' ;;
   *) exit 1 ;;
