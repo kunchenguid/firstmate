@@ -406,6 +406,14 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
   chmod +x "$tree/share/cursor-agent/versions/v1/cursor-agent"
   ln -s "$tree/share/cursor-agent/versions/v1/cursor-agent" "$FAKEBIN_DIR/agent"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env -S agent --flag")
+  status=$?
+  expect_code 1 "$status" "an env split-string alias must refuse before cursor verification can be bypassed"
+  assert_contains "$out" "split-string" \
+    "the split-string refusal must explain why raw launch classification stopped"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused split-string alias spawn must not compose a launch"
+
   # 1. An unattended ship spawn through the verified alias is refused by the
   # cursor bar, not launched through the unverified-adapter escape hatch.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \

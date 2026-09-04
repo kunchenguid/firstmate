@@ -1849,8 +1849,9 @@ raw_launch_executable() {
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       --) env=2; continue ;;
-      -u|--unset|-C|--chdir|-S|--split-string) env_option_arg=1; continue ;;
-      -u?*|--unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
+      -S|--split-string|--split-string=*) return 2 ;;
+      -u|--unset|-C|--chdir) env_option_arg=1; continue ;;
+      -u?*|--unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
       -*) continue ;;
       *) printf '%s\n' "$word"; return 0 ;;
     esac
@@ -1862,7 +1863,12 @@ case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
     HARNESS=""
-    raw_executable=$(raw_launch_executable "$LAUNCH" || true)
+    raw_executable_status=0
+    raw_executable=$(raw_launch_executable "$LAUNCH") || raw_executable_status=$?
+    if [ "$raw_executable_status" -eq 2 ]; then
+      echo "error: raw launch commands using env --split-string/-S are refused because their executable cannot be verified for the cursor unattended-launch bar; invoke the executable directly or use env assignments without split-string" >&2
+      exit 1
+    fi
     [ -z "$raw_executable" ] || HARNESS=$(basename "$raw_executable")
     # Cursor installs a legacy alias named `agent` alongside cursor-agent, and that
     # basename is far too generic to add to any adapter table by name. But a raw
