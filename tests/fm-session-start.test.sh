@@ -1455,7 +1455,16 @@ EOF
   assert_contains "$out" "Live artifacts (data/artifacts.md)" "an unreadable data/ silently dropped the whole subsection"
   assert_contains "$out" "COULD NOT BE READ" "an unreadable data/ was not reported as unreadable"
 
-  pass "a registry that cannot be read, whether the file or data/ itself, is reported loudly rather than as an empty section"
+  # A readable but non-searchable data/ hides the registry exactly as well, and
+  # the digest's own existence test cannot see through it either.
+  chmod 444 "$home/data"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  chmod 755 "$home/data"
+
+  assert_contains "$out" "Live artifacts (data/artifacts.md)" "a non-searchable data/ silently dropped the whole subsection"
+  assert_contains "$out" "COULD NOT BE READ" "a non-searchable data/ was not reported as unreadable"
+
+  pass "a registry that cannot be read, whether the file, an unreadable data/, or a non-searchable data/, is reported loudly rather than as an empty section"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------

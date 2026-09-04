@@ -208,9 +208,18 @@ normalize_mark() {  # <mark>
 # different bytes than the ones on disk and silently matches nothing: the record
 # is never replaced or removed, and the caller is told it was. The environment
 # does no such processing, so awk reads the value verbatim.
-# shellcheck disable=SC2016 # awk program text: $2 and ENVIRON are awk syntax, not shell.
+#
+# The prelude is where the value is bound, and the trailing "" is what makes it
+# an unambiguous STRING. awk compares two strnums numerically, so without it a
+# numeric-looking thread id is matched by value rather than by bytes and two
+# distinct ids that round to the same double collide. Binding it once here keeps
+# every program below on a byte comparison.
+# shellcheck disable=SC2016 # awk program text: ENVIRON is awk syntax, not shell.
+DROP_PRELUDE='BEGIN { want = ENVIRON["FM_ARTIFACT_WANT"] "" }'
+
+# shellcheck disable=SC2016 # awk program text: $2 is an awk field, not shell.
 REGISTRY_DROP_AWK='
-  BEGIN { want = ENVIRON["FM_ARTIFACT_WANT"]; skip = 0 }
+  BEGIN { skip = 0 }
   /^- http/ {
     u = $2
     sub(/\/+$/, "", u)
@@ -221,14 +230,13 @@ REGISTRY_DROP_AWK='
   { skip = 0; print }
 '
 
-# shellcheck disable=SC2016 # awk program text: $1 and ENVIRON are awk syntax, not shell.
+# shellcheck disable=SC2016 # awk program text: $1 is an awk field, not shell.
 LEDGER_DROP_AWK='
-  BEGIN { want = ENVIRON["FM_ARTIFACT_WANT"] }
   $1 != want
 '
 
 drop_matching() {  # <want> <awk-program> <file>
-  FM_ARTIFACT_WANT=$1 awk "$2" "$3"
+  FM_ARTIFACT_WANT=$1 awk "$DROP_PRELUDE $2" "$3"
 }
 
 # --- registry reads ---------------------------------------------------------
@@ -238,11 +246,13 @@ drop_matching() {  # <want> <awk-program> <file>
 # exactly the silent loss this whole record exists to prevent - so every
 # subcommand refuses up front rather than returning a confident empty answer.
 require_readable_registry() {
-  # An unreadable data/ hides the registry just as completely as an unreadable
-  # registry file does, and answering "this home has no artifacts" is the same
-  # silent loss either way.
-  if [ -d "$DATA" ] && [ ! -r "$DATA" ]; then
-    die "the data directory exists but cannot be read: $DATA"
+  # Concluding "this home has no artifacts" means having actually resolved the
+  # registry path inside data/, and resolving a path inside a directory is what
+  # its search bit governs. A data/ this process cannot search hides the
+  # registry as completely as an unreadable registry file does, and answering as
+  # an empty home is the same silent loss either way.
+  if [ -d "$DATA" ] && [ ! -x "$DATA" ]; then
+    die "the data directory exists but cannot be searched, so its registry cannot be resolved: $DATA"
   fi
   [ -e "$REG" ] || return 0
   [ -f "$REG" ] || die "the artifact registry is not a regular file: $REG"

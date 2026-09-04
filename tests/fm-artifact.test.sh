@@ -250,6 +250,22 @@ A handled "$UBT" 't\t1' 6 >/dev/null || fail "re-handled with a backslash thread
   || fail "a re-handled backslash thread id was re-surfaced: $(printf 't\\t1 6\n' | A new "$UBT")"
 pass "re-handling a thread whose id contains a backslash replaces its mark instead of stacking a stale one"
 
+# Host-assigned thread ids are commonly large integers. Two distinct ids that
+# round to the same double must stay two records: matching them by numeric value
+# would silently delete one artifact's answered thread and report it new for
+# ever. The same holds for a leading zero, which is a different id, not a
+# different spelling of one.
+UBI=https://x.example/bigids
+A register "$UBI" --title "Big ids" >/dev/null || fail "register for the numeric-id case failed"
+A handled "$UBI" 1234567890123456789 3 >/dev/null || fail "handled with a 19-digit id failed"
+A handled "$UBI" 1234567890123456790 4 >/dev/null || fail "handled with a colliding 19-digit id failed"
+A handled "$UBI" 1 x >/dev/null || fail "handled with a bare numeric id failed"
+A handled "$UBI" 01 y >/dev/null || fail "handled with a leading-zero id failed"
+NEW=$(printf '1234567890123456789 3\n1234567890123456790 4\n1 x\n01 y\n' | A new "$UBI")
+[ -z "$NEW" ] \
+  || fail "a thread id matched by numeric value lost its handled record and was re-surfaced: $NEW"
+pass "thread ids that collide as numbers keep separate handled records and neither is re-surfaced"
+
 # --- a missing hash tool refuses, it does not delete every ledger ------------
 
 # `retire` composes a per-artifact ledger path. If the hash behind that path
@@ -300,7 +316,18 @@ else
     fi
   done
   chmod 755 "$HOME_DIR/data"
-  pass "a registry hidden behind an unreadable file or an unreadable data/ is refused, never reported as no artifacts"
+
+  # A readable but non-searchable data/ hides it exactly as well: resolving the
+  # registry path inside a directory is what its search bit governs.
+  chmod 444 "$HOME_DIR/data"
+  for sub in list digest due; do
+    if A "$sub" >/dev/null 2>&1; then
+      chmod 755 "$HOME_DIR/data"
+      fail "$sub reported a non-searchable data directory as an answer instead of refusing"
+    fi
+  done
+  chmod 755 "$HOME_DIR/data"
+  pass "a registry hidden behind an unreadable file, an unreadable data/, or a non-searchable data/ is refused, never reported as no artifacts"
 fi
 
 echo "# fm-artifact.test.sh: all assertions passed"
