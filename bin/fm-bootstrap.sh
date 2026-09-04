@@ -889,13 +889,21 @@ missing_tool_diagnostic() {
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
-BACKEND=$(fm_backend_name)
+BACKEND=
 BACKEND_VALID=1
-if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
-  BACKEND_VALID=0
-  BACKEND_TOOLS=""
+BACKEND_TOOLS=
+TOOLS=
+# The detached network-only phase does not run local tool detection or spawn a
+# backend endpoint, so resolving an auto-detected runtime there would leak its
+# human-facing notice into the clean report and make the notice look actionable.
+if local_phase; then
+  BACKEND=$(fm_backend_name)
+  if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
+    BACKEND_VALID=0
+    BACKEND_TOOLS=""
+  fi
+  TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 fi
-TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
