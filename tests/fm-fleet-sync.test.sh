@@ -560,6 +560,33 @@ test_missing_mode_annotation_preserves_gone_unmerged_branch() {
   pass "missing-mode annotation refresh preserves remote-gone unmerged work"
 }
 
+test_escape_shaped_name_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" '\146oo')
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "escape-shaped local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf '%s\n' \
+    '- foo [no-mistakes] - collision fixture (added 2026-09-04)' \
+    '- \146oo [local-only] - escape-shaped fixture (added 2026-09-04)' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" '\146oo: synced' "escape-shaped default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "escape-shaped local-only branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "escape-shaped local-only branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "escape-shaped local-only branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "escape-shaped default branch did not fast-forward"
+  pass "escape-shaped project identity preserves remote-gone unmerged work"
+}
+
 test_remote_backed_prunes_gone_branch() {
   local home clone out
   home=$(new_home)
@@ -876,6 +903,7 @@ test_external_alias_local_only_preserves_gone_unmerged_branch
 test_absent_registry_preserves_gone_unmerged_branch
 test_malformed_registry_preserves_gone_unmerged_branch
 test_missing_mode_annotation_preserves_gone_unmerged_branch
+test_escape_shaped_name_preserves_gone_unmerged_branch
 test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow

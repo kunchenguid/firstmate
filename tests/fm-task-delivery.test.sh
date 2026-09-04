@@ -412,6 +412,8 @@ test_project_mode_maps_the_conditional_policy() {
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 - malformedproj [
 - missingmodeproj [+yolo] - fixture (added 2026-01-01)
+- foo [no-mistakes] - collision fixture (added 2026-01-01)
+- \146oo [local-only] - escape-shaped fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -438,6 +440,9 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- yoloproj 2>/dev/null)
   [ "$out" = "no-mistakes on" ] || fail "strict lookup rejected a supported mode with +yolo (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- '\146oo' 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "escape-shaped project key collided with the plain project (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
   status=$?

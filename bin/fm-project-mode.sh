@@ -68,7 +68,8 @@ if [ ! -f "$REG" ]; then
 fi
 
 # awk emits "<validity> <mode> <yolo>" or nothing if the project is absent.
-parsed=$(awk -v n="$NAME" '
+parsed=$(FM_PROJECT_MODE_NAME="$NAME" awk '
+  BEGIN { n=ENVIRON["FM_PROJECT_MODE_NAME"] }
   function complete_tail(delimiter) {
     return $(delimiter) == "-" && NF >= delimiter + 3 && $(NF - 1) == "(added" &&
       $NF ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/
