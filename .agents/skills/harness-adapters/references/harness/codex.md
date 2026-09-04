@@ -19,8 +19,8 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
-Codex 0.153.1 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
-Firstmate's interactive launch includes `--dangerously-bypass-hook-trust`, which runs the enabled hooks without requiring persisted hook trust because firstmate vets its hook sources.
+Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
+Firstmate's interactive launch includes `--disable hooks`, which disables hooks for the invocation and avoids the dialog without trusting or running effective hook sources.
 If an already-parked worker shows this dialog, choose "Continue without trusting" with `../../../bin/fm-send.sh --key Down --key Down --key Enter` and verify that the brief starts processing.
 Turn-end detection rides the launch `notify=` signal, not Codex hooks.
 

@@ -417,7 +417,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_hook_trust_bypass_is_scoped_to_codex() {
+test_codex_hook_disabling_is_scoped_to_codex() {
   local rec id out status launch sm harness
   id=profile-codex-hook-trust-z3b
   rec=$(make_spawn_case profile-codex-hook-trust codex "$id")
@@ -427,8 +427,10 @@ test_codex_hook_trust_bypass_is_scoped_to_codex() {
   status=$?
   expect_code 0 "$status" "ordinary codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "ordinary codex launch omitted the invocation-scoped hook-trust bypass"
+  assert_contains "$launch" "--disable hooks" \
+    "ordinary codex launch omitted invocation-scoped hook disabling"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "ordinary codex launch trusted effective hook sources"
   assert_contains "$launch" "notify=" \
     "ordinary codex launch lost its turn-end notify configuration"
 
@@ -441,8 +443,10 @@ test_codex_hook_trust_bypass_is_scoped_to_codex() {
   status=$?
   expect_code 0 "$status" "secondmate codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "secondmate codex launch omitted the invocation-scoped hook-trust bypass"
+  assert_contains "$launch" "--disable hooks" \
+    "secondmate codex launch omitted invocation-scoped hook disabling"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "secondmate codex launch trusted effective hook sources"
   assert_not_contains "$launch" "notify=" \
     "secondmate codex launch gained the parent worker's turn-end notify configuration"
 
@@ -454,10 +458,10 @@ test_codex_hook_trust_bypass_is_scoped_to_codex() {
     status=$?
     expect_code 0 "$status" "$harness comparison spawn should succeed"
     launch=$(cat "$LAUNCH_LOG")
-    assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
-      "$harness launch received the codex-only hook-trust bypass"
+    assert_not_contains "$launch" "--disable hooks" \
+      "$harness launch received Codex-only hook disabling"
   done
-  pass "hook-trust bypass is present on both codex launch branches and absent from non-codex launches"
+  pass "hooks are disabled on both codex launch branches and unchanged for non-codex launches"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -851,7 +855,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_hook_trust_bypass_is_scoped_to_codex
+test_codex_hook_disabling_is_scoped_to_codex
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

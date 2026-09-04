@@ -280,33 +280,33 @@ The composer-classification record below observes the same gate from the other s
 
 ## Codex hook trust
 
-Verified on 2026-09-04 with codex-cli 0.153.1 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
-Codex 0.153.1 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
-`bin/fm-spawn.sh` now passes the separate `--dangerously-bypass-hook-trust` flag on both interactive Codex launch branches.
+Verified on 2026-09-04 with codex-cli 0.153.2 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
+Codex 0.153.2 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
+`bin/fm-spawn.sh` passes `--disable hooks` on both interactive Codex launch branches, so effective hooks do not run and require no trust decision.
 The ordinary worker branch retains its independent `notify=` turn-end signal.
 
 The live guard captures the candidate launch through the real `bin/fm-spawn.sh` executable, then runs it in a trusted scratch worktree with isolated untrusted global and project hook records.
-Its treatment uses the captured command unchanged.
-Its control removes only `--dangerously-bypass-hook-trust`, so a wrapper that adds the flag implicitly makes the control fail instead of producing a vacuous pass.
-Point `FM_CODEX_HOOK_TRUST_BIN` at the exact installed vendor executable rather than any fleet-local shim that injects launch flags.
+Its treatment uses the captured command unchanged and proves neither isolated hook executes.
+Its control removes only `--disable hooks`, so a wrapper that suppresses hooks implicitly makes the control fail instead of producing a vacuous pass.
+Point `FM_CODEX_HOOK_TRUST_BIN` at the exact installed vendor executable rather than any fleet-local shim that injects hook suppression.
 
 ```sh
+set -o pipefail
 FM_CODEX_HOOK_TRUST_LIVE_E2E=1 \
   FM_CODEX_HOOK_TRUST_BIN=/home/haro/.nix-profile/bin/codex \
-  bin/fm-test-run.sh tests/fm-codex-hook-trust-live-e2e.test.sh
+  bin/fm-test-run.sh tests/fm-codex-hook-trust-live-e2e.test.sh \
+  | sed -n '/^ok - codex-cli/p'
 ```
 
 Observed bounded output:
 
 ```text
-ok - codex-cli 0.153.1 flagged fm-spawn launch reached the brief, ran the global hook, emitted notify, and showed no hook review
-ok - codex-cli 0.153.1 unflagged counterfactual parked at Hooks need review before hooks, brief, or notify
-FM_TEST_END 2026-09-04T18:33:42Z tests/fm-codex-hook-trust-live-e2e.test.sh exit=0 duration_ms=11850 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11903
+ok - codex-cli 0.153.2 hooks-disabled fm-spawn launch reached the brief, ran no hooks, emitted notify, and showed no hook review
+ok - codex-cli 0.153.2 unsuppressed counterfactual parked at Hooks need review before hooks, brief, or notify
 ```
 
 The portable regression is `tests/fm-spawn-dispatch-profile.test.sh`.
-It drives launch construction through `bin/fm-spawn.sh`, requires the bypass on ordinary and secondmate Codex launches, preserves the ordinary `notify=` split, and rejects the Codex-only flag on six other harness launch paths.
+It drives launch construction through `bin/fm-spawn.sh`, requires hook disabling on ordinary and secondmate Codex launches, preserves the ordinary `notify=` split, and confirms six other harness launch paths remain unchanged.
 
 ## Composer classification matrix
 

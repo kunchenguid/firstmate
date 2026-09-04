@@ -7,9 +7,9 @@
 # against an exact vendor Codex binary in a private tmux server.
 # It gives Codex an isolated config home with one untrusted global hook and a
 # trusted scratch worktree with one untrusted project hook.
-# The treatment command must reach its brief, run the global hook, and emit the
+# The treatment command must reach its brief, run neither hook, and emit the
 # existing notify= turn-end marker without showing the review dialog.
-# The otherwise-identical control removes only the bypass flag and must park at
+# The otherwise-identical control removes only hook disabling and must park at
 # the review dialog before its brief or notify marker can fire.
 set -u
 
@@ -26,7 +26,7 @@ REAL_TMUX=$(command -v tmux || true)
 AUTH_FILE=${FM_CODEX_HOOK_TRUST_AUTH_FILE:-${HOME}/.codex/auth.json}
 
 [ -x "$CODEX_VENDOR_BIN" ] \
-  || fail "FM_CODEX_HOOK_TRUST_BIN must name an exact executable that does not inject --dangerously-bypass-hook-trust"
+  || fail "FM_CODEX_HOOK_TRUST_BIN must name an exact executable that does not inject hook suppression"
 [ -n "$REAL_TMUX" ] || fail "tmux not found"
 [ -f "$AUTH_FILE" ] || fail "Codex auth file not found at $AUTH_FILE"
 
@@ -151,14 +151,17 @@ chmod +x "$SHIM_DIR/codex"
 TREAT_LAUNCH=$(cat "$TREAT_LOG")
 CONTROL_LAUNCH=$(cat "$CONTROL_LOG")
 case "$TREAT_LAUNCH" in
-  *' --dangerously-bypass-hook-trust '*) ;;
-  *) fail "fm-spawn treatment command omitted --dangerously-bypass-hook-trust" ;;
+  *' --disable hooks '*) ;;
+  *) fail "fm-spawn treatment command omitted --disable hooks" ;;
+esac
+case "$TREAT_LAUNCH" in
+  *' --dangerously-bypass-hook-trust '*) fail "fm-spawn treatment command trusted effective hook sources" ;;
 esac
 case "$CONTROL_LAUNCH" in
-  *' --dangerously-bypass-hook-trust '*) ;;
-  *) fail "fm-spawn control seed command omitted --dangerously-bypass-hook-trust" ;;
+  *' --disable hooks '*) ;;
+  *) fail "fm-spawn control seed command omitted --disable hooks" ;;
 esac
-CONTROL_LAUNCH=${CONTROL_LAUNCH/ --dangerously-bypass-hook-trust/}
+CONTROL_LAUNCH=${CONTROL_LAUNCH/ --disable hooks/}
 
 TREAT_TASK_TMP=$(sed -n 's/^tasktmp=//p' "$TEST_HOME/state/$TREAT_ID.meta")
 CONTROL_TASK_TMP=$(sed -n 's/^tasktmp=//p' "$TEST_HOME/state/$CONTROL_ID.meta")
@@ -176,11 +179,11 @@ wait_for_file "$TREAT_BRIEF_MARKER" \
   || { capture treatment >&2; fail "flagged Codex did not reach the launch brief"; }
 wait_for_file "$TEST_HOME/state/$TREAT_ID.turn-ended" \
   || { capture treatment >&2; fail "flagged Codex did not emit the notify= turn-end signal"; }
-[ -e "$GLOBAL_HOOK_MARKER" ] \
-  || { capture treatment >&2; fail "flagged Codex did not run the enabled global hook"; }
+[ ! -e "$GLOBAL_HOOK_MARKER" ] && [ ! -e "$PROJECT_HOOK_MARKER" ] \
+  || { capture treatment >&2; fail "hooks-disabled Codex ran an effective hook"; }
 if capture treatment | grep -Fq 'Hooks need review'; then
   capture treatment >&2
-  fail "flagged Codex still showed the hook-trust dialog"
+  fail "hooks-disabled Codex still showed the hook-trust dialog"
 fi
 
 rm -f "$GLOBAL_HOOK_MARKER" "$PROJECT_HOOK_MARKER"
@@ -201,5 +204,5 @@ wait_for_text control 'Hooks need review' \
   || fail "unflagged Codex ran hooks before trust was resolved"
 
 CODEX_VERSION=$($CODEX_VENDOR_BIN --version 2>/dev/null | head -1)
-printf 'ok - %s flagged fm-spawn launch reached the brief, ran the global hook, emitted notify, and showed no hook review\n' "$CODEX_VERSION"
-printf 'ok - %s unflagged counterfactual parked at Hooks need review before hooks, brief, or notify\n' "$CODEX_VERSION"
+printf 'ok - %s hooks-disabled fm-spawn launch reached the brief, ran no hooks, emitted notify, and showed no hook review\n' "$CODEX_VERSION"
+printf 'ok - %s unsuppressed counterfactual parked at Hooks need review before hooks, brief, or notify\n' "$CODEX_VERSION"
