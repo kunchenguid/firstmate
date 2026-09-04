@@ -803,6 +803,11 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in *"git fm-isolation-check"*)
+      (cd "$wt" && /bin/bash -c "\$a") || exit \$?
+    ;; esac; done
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -873,6 +878,11 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    for a in "\$@"; do case "\$a" in *"git fm-isolation-check"*)
+      (cd "$wt" && /bin/bash -c "\$a") || exit \$?
+    ;; esac; done
+    exit 0 ;;
 esac
 exit 0
 SH

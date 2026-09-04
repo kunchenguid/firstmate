@@ -93,8 +93,9 @@ fm_test_fake_gh_axi() {
 
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
-# firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
+# firstmate, window ops succeed, and send-keys executes the worker Git guard
+# activation line just as the pane shell would. When FM_FAKE_LAUNCH_LOG is set,
+# each send-keys -l payload is appended one per line. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
@@ -118,6 +119,13 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        *"git fm-isolation-check"*)
+          (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$arg") || exit $?
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do

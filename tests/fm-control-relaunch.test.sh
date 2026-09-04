@@ -89,6 +89,9 @@ case "${1:-}" in
             while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
           fi
           ;;
+        *'git fm-isolation-check'*)
+          (cd "$(cat "$D/cwd")" && /bin/bash -c "$payload") || exit $?
+          ;;
         'export TRACEPARENT='*)
           [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
           ;;

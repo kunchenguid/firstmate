@@ -43,6 +43,13 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        *"git fm-isolation-check"*)
+          (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$a") || exit $?
+          ;;
+      esac
+    done
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
         case "$a" in
