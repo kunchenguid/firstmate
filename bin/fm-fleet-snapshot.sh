@@ -423,14 +423,15 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def delivery_values($lines):
-      [ $lines[]
-        | select(startswith("Deliverable of the finished work: "))
-        | sub("^Deliverable of the finished work: "; "") ];
+      ([ $lines[]
+         | select(startswith("Deliverable of the finished work: "))
+         | sub("^Deliverable of the finished work: "; "") ]
+       | if length > 0 then [.[-1]] else [] end);
     def delivery_links($values):
       [$values[] | scan("https?://[^[:space:]);\"<>]+")];
     def delivery_report($values):
       (([ $values[]
-          | capture("(?:^|;[[:space:]]*)report[[:space:]]+(?<v>[^;]*/report\\.md)(?:[[:space:]]*;|$)")?
+          | capture("(?:^|;[[:space:]]*)report[[:space:]]+(?<v>.*/report\\.md)(?:[[:space:]]*;|$)")?
           | .v | trim ][0]) // null);
     def body_local_note($values):
       if any($values[]; test("(^|;[[:space:]]*)local main([[:space:]]*;|$)"))

@@ -2008,8 +2008,8 @@ SH
   assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
   assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
   assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
-    "session start did not record the finished work's deliverable"
+  assert_contains "$show" "Deliverable of the finished work: none" \
+    "session start did not preserve the forced non-delivery record"
   pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
 }
 
@@ -2018,7 +2018,7 @@ SH
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
   local home data id show json
   home=$(make_home teardown-relocated-hold)
-  data="$home/team records"
+  data="$home/team; records"
   mv "$home/data" "$data"
   id=sample-relocated-hold
   mkdir -p "$home/data" "$data/$id"
@@ -2057,7 +2057,7 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report team records/$id/report.md" \
+  assert_contains "$show" "Deliverable of the finished work: report team; records/$id/report.md" \
     "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
@@ -2071,10 +2071,39 @@ EOF
   json=$(FM_DATA_OVERRIDE="$data" run_bearings "$home") \
     || fail "Bearings failed for the relocated completed report"
   printf '%s' "$json" | jq -e --arg id "$id" \
-    --arg report "team records/$id/report.md" '
+    --arg report "team; records/$id/report.md" '
       .landed | any(.id == $id and .artifact == $report)
     ' >/dev/null || fail "Bearings omitted the relocated completed report: $json"
   pass "cleanup retains and Bearings lands captain calls in relocated data"
+}
+
+test_completion_provenance_survives_zero_done_retention() {
+  local home id archive
+  home=$(make_home zero-done-retention)
+  id=sample-zero-retention
+  archive="$home/data/done-archive.md"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' \
+    'path = "data/backlog.md"' 'archive = "data/done-archive.md"' \
+    'done_keep = 0' > "$home/.tasks.toml"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate zero-retention completion" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the zero-retention fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Zero retention\n\nThe report is complete.\n' > "$home/data/$id/report.md"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion gate failed for the zero-retention fixture"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "zero-retention cleanup kept the completed row in the active backlog"
+  assert_grep "$id" "$archive" "zero-retention cleanup did not archive the completed row"
+  assert_grep "Deliverable of the finished work: report data/$id/report.md" "$archive" \
+    "zero-retention archival lost completion provenance"
+  assert_absent "$home/state/$id.meta" "zero-retention cleanup retained task metadata"
+  assert_absent "$home/state/$id.backlog-close" \
+    "zero-retention cleanup retained its pending close record"
+  pass "completion provenance survives zero Done-row retention"
 }
 
 # "Cannot tell" is not permission to close. A ship row has no separate
@@ -2146,6 +2175,7 @@ test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog
+test_completion_provenance_survives_zero_done_retention
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix

@@ -343,7 +343,6 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
     esac
     previous_arg=$arg
   done
-  [ -n "$deliverable" ] || deliverable=none
   out=$(fm_backlog_row_show "$data" "$id" --full)
   command_status=$?
   if [ "$command_status" -ne 0 ]; then
@@ -364,6 +363,12 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
     FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
     return 1
   }
+  if [ -z "$deliverable" ]; then
+    case $'\n'"$body"$'\n' in
+      *$'\nDeliverable of the finished work: '*) return 0 ;;
+    esac
+    deliverable=none
+  fi
   line="Deliverable of the finished work: $deliverable"
   case $'\n'"$body"$'\n' in
     *$'\n'"$line"$'\n'*) ;;
@@ -389,18 +394,10 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg has_deliverable=0
+  local data=$1 id=$2
   shift 2
-  for arg in "$@"; do
-    case "$arg" in --pr|--report|--note) has_deliverable=1 ;; esac
-  done
-  if [ "$has_deliverable" = 0 ]; then
-    fm_backlog_record_completion "$data" "$id" || return 1
-    fm_backlog_mutate "$data" "done" "$id" "$@"
-  else
-    fm_backlog_mutate "$data" "done" "$id" "$@" || return 1
-    fm_backlog_record_completion "$data" "$id" "$@"
-  fi
+  fm_backlog_record_completion "$data" "$id" "$@" || return 1
+  fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
 # Keep a captain-held row open across the removal of the work record that
@@ -730,7 +727,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note) case "${args[1]}" in local%20main|none) true ;; *) false ;; esac ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -904,7 +901,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"

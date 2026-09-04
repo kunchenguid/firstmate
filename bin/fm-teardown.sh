@@ -1283,6 +1283,10 @@ BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
   BACKLOG_DONE_ARGS=()
+  if [ "$FORCE" = --force ]; then
+    BACKLOG_DONE_ARGS=(--note none)
+    return 0
+  fi
   case "$KIND" in
     scout)
       data_relative=$(fm_backlog_data_relative "$DATA") || return 1
