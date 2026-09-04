@@ -792,6 +792,108 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+# --- exited-agent corroboration (stale agent record vs bare-shell foreground) -
+#
+# A cleanly exited agent leaves herdr's agent record behind: `agent get` still
+# succeeds and reports a non-working status (this repo's issue #3639 saw an
+# exited pi report agent_status=done; the exited claude pane that motivated
+# this fix reported agent_status=unknown), yet the pane holds only a bare
+# shell. Before this fix the classifier trusted agent_status alone, so a
+# provably agent-free pane read as `live` (done/blocked/idle) or `unknown`,
+# and fm-control exit/relaunch refused to recover it. The classifier now
+# corroborates any non-working status against the pane's own foreground
+# process - two independent signals - and only the process proof carries the
+# agent-free verdict, mirroring the tmux classifier. These fixtures drive the
+# two signals apart: a stale record plus a bare-shell foreground must classify
+# no-agent, while a real idle agent (whose foreground is still the harness
+# process) must survive as live.
+
+# exited_agent_pane_probes <dir> <status> <shell-pid>: seed pane get -> present,
+# agent get -> the stale <status>, and a bare idle-shell process-info sample,
+# plus the fake ps the idle-shell proof reads. Echoes the fakebin dir.
+exited_agent_pane_probes() {  # <dir> <status> <shell-pid>
+  local dir=$1 status=$2 pid=$3 resp="$dir/responses"
+  mkdir -p "$resp"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
+  death_process_info_fixture w1:p2 "$pid" > "$resp/3.out"
+  make_death_lab "$dir" "$pid"
+  make_herdr_fakebin "$dir"
+}
+
+test_pane_agent_state_exited_agent_stale_done_status_is_no_agent() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/exited-done"; log="$dir/log"; resp="$dir/responses"
+  fb=$(exited_agent_pane_probes "$dir" done 4242); : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = no-agent ] || fail "an exited agent (stale agent_status=done, bare-shell pane) must classify no-agent, got '$out'"
+  # Assert the process-proof signal is load-bearing, not vacuous: the classifier
+  # must actually consult the foreground process to override the stale record.
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the classifier did not corroborate the stale record against the pane's foreground process"
+  pass "fm_backend_herdr_pane_agent_state: a stale agent_status=done over a bare idle shell (issue #3639) classifies no-agent"
+}
+
+test_pane_agent_state_exited_agent_stale_unknown_status_is_no_agent() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/exited-unknown"; log="$dir/log"; resp="$dir/responses"
+  fb=$(exited_agent_pane_probes "$dir" unknown 4242); : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = no-agent ] || fail "an exited agent (stale agent_status=unknown, bare-shell pane) must classify no-agent, not unknown, got '$out'"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the classifier did not corroborate the stale unknown status against the pane's foreground process"
+  pass "fm_backend_herdr_pane_agent_state: a stale agent_status=unknown over a bare idle shell classifies no-agent, not unknown"
+}
+
+test_agent_state_exited_agent_is_dead_relaunchable() {
+  # The recovery-grade view fm-control and the session-start sweep read: an
+  # exited-agent pane must reach `dead` (agent-free, relaunchable), never the
+  # `alive` that stalls exit forever or the `unreadable` that refuses recovery.
+  local dir log resp fb out
+  dir="$TMP_ROOT/exited-recovery"; log="$dir/log"; resp="$dir/responses"
+  fb=$(exited_agent_pane_probes "$dir" done 4242); : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = dead ] || fail "the recovery-grade state of an exited-agent pane must be dead (relaunchable), got '$out'"
+  pass "fm_backend_herdr_agent_state: an exited-agent pane is dead (relaunchable), not alive or unreadable"
+}
+
+test_pane_agent_state_live_idle_agent_stays_live() {
+  # The other side of the divergence: a genuinely idle registered agent still
+  # runs its harness process in the foreground, so the bare-shell proof fails
+  # and the verdict must stay live - the corroboration must never demote a real
+  # idle agent to agent-free.
+  local dir log resp fb out
+  dir="$TMP_ROOT/live-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  # A live idle agent: its foreground process group is the harness (node), a
+  # distinct pid from the pane shell, so the idle-shell proof rejects it.
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":5000,"foreground_processes":[{"pid":5000,"name":"node","argv0":"node"}]}}}\n' > "$resp/3.out"
+  make_death_lab "$dir" 4242
+  fb=$(make_herdr_fakebin "$dir"); : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] || fail "a genuinely idle registered agent (harness still in the foreground) must stay live, got '$out'"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the classifier skipped corroborating the idle agent, so the guard is vacuous"
+  pass "fm_backend_herdr_pane_agent_state: a live idle agent whose harness still runs stays live"
+}
+
+test_pane_agent_state_working_agent_trusted_without_process_probe() {
+  # A generating agent is trusted outright: never probed, both to keep the hot
+  # path cheap and to avoid racing a busy pane's process table.
+  local dir log resp fb out
+  dir="$TMP_ROOT/working-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir"); : > "$log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] || fail "a working agent must classify live, got '$out'"
+  assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a working agent must be trusted without a foreground-process probe"
+  pass "fm_backend_herdr_pane_agent_state: a working agent is trusted live without a foreground-process probe"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -4516,6 +4618,11 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_pane_agent_state_exited_agent_stale_done_status_is_no_agent
+test_pane_agent_state_exited_agent_stale_unknown_status_is_no_agent
+test_agent_state_exited_agent_is_dead_relaunchable
+test_pane_agent_state_live_idle_agent_stays_live
+test_pane_agent_state_working_agent_trusted_without_process_probe
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
