@@ -23,6 +23,8 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
@@ -151,8 +153,13 @@ test_spawn_get_uses_per_home_treehouse_root() {
   out=$(run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "spawn should succeed while recording the per-home Treehouse root"
-  expected_root=$(cd "$HOME_DIR" && pwd -P)/state/treehouse
   expected_home=$(cd "$HOME_DIR/user-home" && pwd -P)
+  expected_root=$(HOME="$expected_home" fm_treehouse_pool_root "$HOME_DIR")
+  case "$expected_root" in
+    "$expected_home"/*) ;;
+    *) fail "per-home Treehouse root '$expected_root' must live under the launching HOME, never inside the firstmate home" ;;
+  esac
+  assert_present "$expected_root/firstmate-home" "spawn did not prepare the per-home Treehouse root"
   assert_grep "cd $PROJ_DIR && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
     "treehouse get did not receive the per-home root"
   assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \

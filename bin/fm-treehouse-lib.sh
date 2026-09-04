@@ -3,14 +3,37 @@
 # Shared Treehouse pool-root helpers.
 #
 # Treehouse v2.0.0's installed CLI has no --root flag and ignores
-# TREEHOUSE_ROOT, but it uses HOME as the default root. Keep the override scoped
-# to each Treehouse command so the worker itself retains the launching home's
-# normal HOME and credentials.
+# TREEHOUSE_ROOT and TREEHOUSE_DIR, but it uses HOME as the default root. Keep
+# the override scoped to each Treehouse command so the worker itself retains the
+# launching home's normal HOME and credentials.
+#
+# The per-home root lives OUTSIDE the firstmate home, under the launching user's
+# real HOME, keyed by the home's resolved path: a root inside the home would put
+# every pooled worker checkout under the home's CLAUDE.md/AGENTS.md, and a
+# harness that walks up from the checkout would import firstmate's own job
+# description into a project worker.
+#
+# Because the Treehouse command runs with HOME pointed at the root, everything
+# git and its credential helpers read from HOME must be reachable there too:
+# fm_treehouse_prepare_root links the real ~/Library (macOS keychain for
+# credential.helper=osxkeychain), ~/.gitconfig, ~/.ssh and ~/.config into the
+# root, so a fresh pool can clone with the launching user's credentials.
 
 fm_treehouse_pool_root() { # <home> -> <absolute-root>
-  local home=$1 resolved
+  local home=$1 resolved key
   resolved=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  printf '%s/state/treehouse\n' "$resolved"
+  key=$(printf '%s' "$resolved" | shasum | cut -c1-12) || return 1
+  printf '%s/%s\n' "${FM_TREEHOUSE_POOL_BASE:-$HOME/.firstmate-treehouse}" "$key"
+}
+
+fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
+  local home=$1 root=$2 entry
+  mkdir -p -- "$root" || return 1
+  printf '%s\n' "$home" > "$root/firstmate-home" || return 1
+  for entry in Library .gitconfig .ssh .config; do
+    [ -e "$HOME/$entry" ] || continue
+    [ -e "$root/$entry" ] || [ -L "$root/$entry" ] || ln -s -- "$HOME/$entry" "$root/$entry" || return 1
+  done
 }
 
 fm_treehouse_require_config_free_project() { # <project> -> empty

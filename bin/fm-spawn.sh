@@ -4269,6 +4269,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
     exit 1
   }
+  fm_treehouse_prepare_root "$FM_HOME" "$TREEHOUSE_POOL_ROOT" || {
+    echo "error: could not prepare the per-home Treehouse root '$TREEHOUSE_POOL_ROOT'" >&2
+    exit 1
+  }
   # Treehouse v2.0.0 uses HOME as its default root; keep this assignment on the
   # acquisition command only, then restore the launching home's HOME before the
   # worker starts so harness credentials still resolve normally.

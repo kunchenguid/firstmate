@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
 fm_git_identity fmtest fmtest@example.invalid
@@ -279,7 +281,7 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  expected_root=$(cd "$home" && pwd -P)/state/treehouse
+  expected_root=$(HOME="$home/user-home" fm_treehouse_pool_root "$home")
   assert_grep "send-keys -t @spawnwid cd $proj && HOME=$expected_root treehouse get Enter" "$rec" \
     "treehouse get must carry the per-home root and use the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \

@@ -57,6 +57,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$ROOT/bin/fm-treehouse-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -4086,9 +4088,10 @@ EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
-  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  mkdir -p "$case_dir/user-home"
+  HOME="$case_dir/user-home" FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "per-home-treehouse-root: teardown should succeed"
-  expected_root=$(cd "$case_dir" && pwd -P)/state/treehouse
+  expected_root=$(HOME="$case_dir/user-home" fm_treehouse_pool_root "$case_dir")
   assert_present "$case_dir/treehouse-home.log" \
     "per-home-treehouse-root: teardown did not call treehouse return"
   [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root" ] || \

@@ -396,6 +396,10 @@ acquire_treehouse_home() {
     echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
     return 1
   }
+  fm_treehouse_prepare_root "$FM_HOME" "$pool_root" || {
+    echo "error: could not prepare the per-home Treehouse root '$pool_root'" >&2
+    return 1
+  }
   # Durably lease a firstmate worktree from the per-home pool. The lease persists
   # with no live process and is skipped by later get/prune, so the home survives
   # restarts until teardown or rollback returns it. treehouse prints only the
