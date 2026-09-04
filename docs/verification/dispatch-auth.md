@@ -189,7 +189,7 @@ CODEX_HOME=<empty-dir> quota-axi auth --json            # codex auth-json path: 
 The reported path follows `CODEX_HOME` and an unauthenticated home reports `missing` rather than falling back to `~/.codex`, which is what makes the per-home measurement in `.agents/skills/quota-array-dispatch/SKILL.md` real evidence instead of a relabelled default-home reading.
 `quota-axi --full` distinguishes the two homes by identity in its `accounts[]` row: the `codex` row's `accountId` was `<account-a>` for the default home and `<account-b>` for the second home in the same session.
 That row is the account evidence the skill requires before a candidate naming a home is dispatched.
-Nothing in this path reads an `auth.json`; `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` test only for that file's presence when validating a configured home.
+Firstmate's home validators do not read an `auth.json`; `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` test only for that file's presence, while quota-axi owns the authenticated quota measurement.
 
 ## Standalone Grok discovery probe
 

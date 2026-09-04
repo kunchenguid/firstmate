@@ -51,14 +51,15 @@
 #   --codex-home <path> is the absolute Codex home a codex dispatch profile named
 #   (docs/configuration.md "Crew dispatch profiles"), which is how one fleet
 #   dispatches across two logged-in Codex accounts. It is accepted only for the
-#   codex harness and refused unless the path is absolute, is a directory, and
-#   holds an auth.json, so a mistyped home is a loud refusal rather than a silent
-#   fall back to ~/.codex; the file's contents are never read. An accepted value
-#   prefixes CODEX_HOME= onto this one launch, so the worker and everything it
-#   runs (its no-mistakes pipeline included) use that account, and is recorded as
-#   codex_home= in state/<id>.meta. Nothing else in this home's environment
-#   changes, and a spawn without the flag behaves exactly as it did before the
-#   flag existed. bin/fm-control.sh relaunch carries the recorded value forward
+#   codex harness and refused unless the path has no control bytes, is absolute,
+#   is a directory, and holds an auth.json, so a mistyped home is a loud refusal
+#   rather than a silent fall back to ~/.codex; the file's contents are never read.
+#   An accepted value prefixes CODEX_HOME= onto this one launch, so the worker
+#   and everything it runs (its no-mistakes pipeline included) use that account.
+#   The value is recorded as codex_home= in state/<id>.meta.
+#   Nothing else in this home's environment changes, and a spawn without the
+#   flag behaves exactly as it did before the flag existed.
+#   bin/fm-control.sh relaunch carries the recorded value forward
 #   for a replacement on the same harness.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
@@ -1650,8 +1651,8 @@ fi
 # A named Codex home is only meaningful to the codex CLI, and an unusable one
 # would silently fall back to ~/.codex - the wrong ACCOUNT, not a visible
 # failure. Prove the required facts that make it usable before anything exists to
-# unwind: harness, absolute path, and a logged-in home. auth.json is only ever
-# tested for presence; nothing here reads a credential.
+# unwind: harness, a control-byte-free absolute path, and a logged-in home.
+# auth.json is only ever tested for presence; nothing here reads a credential.
 if [ -n "$CODEX_HOME_ARG" ]; then
   if [ "$HARNESS" != codex ]; then
     echo "error: --codex-home applies only to the codex harness, but this spawn resolved harness '$HARNESS'" >&2
