@@ -282,15 +282,14 @@ The composer-classification record below observes the same gate from the other s
 
 Verified on 2026-09-04 with codex-cli 0.153.2 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
 Codex 0.153.2 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
-`bin/fm-spawn.sh` passes `--dangerously-bypass-hook-trust` on every interactive Codex launch it composes, including crewmate, scout, secondmate, and accepted raw Codex commands, so hooks remain enabled and no interactive decision is required.
+`bin/fm-spawn.sh` passes `--disable hooks` on every interactive Codex launch it composes, including crewmate, scout, secondmate, and accepted raw Codex commands, so no interactive decision is required and unreviewed hook sources do not execute.
 The worker branches retain their independent `notify=` turn-end signal.
-Codex secondmate project-hook firing under the bypass is UNPROVEN on this branch because the live guard covers scouts only and asserts only the global hook.
-The open [Codex worktree hook issue](https://github.com/openai/codex/issues/27133) reports project hooks being silently ignored in worktrees even with the bypass, so this record makes no claim that secondmate lifecycle hooks are preserved.
+Codex secondmates do not run project lifecycle hooks from their home under this launch policy.
 
 The live guard captures the candidate launch through the real `bin/fm-spawn.sh` executable, then runs it in a trusted scratch worktree with isolated untrusted global and project hook records.
-Its treatment uses the captured command unchanged and proves the enabled global hook executes.
-Its control removes only `--dangerously-bypass-hook-trust`, so a wrapper that injects the bypass implicitly makes the control fail instead of producing a vacuous pass.
-Point `FM_CODEX_HOOK_TRUST_BIN` at the exact installed vendor executable rather than any fleet-local shim that injects the bypass.
+Its treatment uses the captured command unchanged and proves neither hook executes.
+Its control removes only `--disable hooks`, so a wrapper that injects hook suppression implicitly makes the control fail instead of producing a vacuous pass.
+Point `FM_CODEX_HOOK_TRUST_BIN` at the exact installed vendor executable rather than any fleet-local shim that changes hook flags.
 
 ```sh
 set -o pipefail
@@ -303,12 +302,12 @@ FM_CODEX_HOOK_TRUST_LIVE_E2E=1 \
 Observed bounded output:
 
 ```text
-ok - codex-cli 0.153.2 flagged fm-spawn launch reached the brief, ran the global hook, emitted notify, and showed no hook review
-ok - codex-cli 0.153.2 unflagged counterfactual parked at Hooks need review before hooks, brief, or notify
+ok - codex-cli 0.153.2 hook-disabled fm-spawn launch reached the brief, suppressed hooks, emitted notify, and showed no hook review
+ok - codex-cli 0.153.2 hooks-enabled counterfactual parked at Hooks need review before hooks, brief, or notify
 ```
 
 The portable regression is `tests/fm-spawn-dispatch-profile.test.sh`.
-It drives launch construction through `bin/fm-spawn.sh`, requires the trust bypass without hook disabling on crewmate, scout, secondmate, and accepted raw Codex launches, preserves the worker-only `notify=` split, and confirms six other harness templates do not receive Codex-only flags.
+It drives launch construction through `bin/fm-spawn.sh`, requires hook suppression without the trust bypass on crewmate, scout, secondmate, and accepted raw Codex launches, preserves the worker-only `notify=` split, and confirms six other harness templates do not receive Codex-only flags.
 It also pins the accepted verified-harness raw form and fail-closed refusals for quotes, compound commands, comments, Codex option termination, and command wrappers.
 
 ## Composer classification matrix

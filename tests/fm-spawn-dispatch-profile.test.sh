@@ -418,7 +418,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_all_codex_launches_bypass_hook_trust() {
+test_all_codex_launches_disable_hooks() {
   local rec id out status launch sm harness
   id=profile-codex-hook-trust-z3b
   rec=$(make_spawn_case profile-codex-hook-trust codex "$id")
@@ -428,10 +428,10 @@ test_all_codex_launches_bypass_hook_trust() {
   status=$?
   expect_code 0 "$status" "ordinary codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "ordinary codex launch omitted the hook-trust bypass"
-  assert_not_contains "$launch" "--disable hooks" \
-    "ordinary codex launch disabled hooks"
+  assert_contains "$launch" "--disable hooks" \
+    "ordinary codex launch did not suppress hooks"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "ordinary codex launch crossed the hook-trust boundary"
   assert_contains "$launch" "notify=" \
     "ordinary codex launch lost its turn-end notify configuration"
 
@@ -442,10 +442,10 @@ test_all_codex_launches_bypass_hook_trust() {
   status=$?
   expect_code 0 "$status" "scout codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "scout codex launch omitted the hook-trust bypass"
-  assert_not_contains "$launch" "--disable hooks" \
-    "scout codex launch disabled hooks"
+  assert_contains "$launch" "--disable hooks" \
+    "scout codex launch did not suppress hooks"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "scout codex launch crossed the hook-trust boundary"
   assert_contains "$launch" "notify=" \
     "scout codex launch lost its turn-end notify configuration"
 
@@ -458,10 +458,10 @@ test_all_codex_launches_bypass_hook_trust() {
   status=$?
   expect_code 0 "$status" "secondmate codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "secondmate codex launch omitted the hook-trust bypass"
-  assert_not_contains "$launch" "--disable hooks" \
-    "secondmate codex launch disabled its primary lifecycle hooks"
+  assert_contains "$launch" "--disable hooks" \
+    "secondmate codex launch did not suppress hooks"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "secondmate codex launch crossed the hook-trust boundary"
   assert_not_contains "$launch" "notify=" \
     "secondmate codex launch gained the parent worker's turn-end notify configuration"
 
@@ -473,10 +473,10 @@ test_all_codex_launches_bypass_hook_trust() {
   status=$?
   expect_code 0 "$status" "raw codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" ] \
-    || fail "raw codex launch did not receive only the hook-trust bypass"$'\n'"actual: $launch"
-  assert_not_contains "$launch" "--disable hooks" \
-    "raw codex launch disabled hooks"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --dangerously-bypass-approvals-and-sandbox --disable hooks" ] \
+    || fail "raw codex launch did not receive only hook suppression"$'\n'"actual: $launch"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "raw codex launch crossed the hook-trust boundary"
 
   id=profile-codex-hook-trust-env-raw-z3f
   rec=$(make_spawn_case profile-codex-hook-trust-env-raw codex "$id")
@@ -487,10 +487,10 @@ test_all_codex_launches_bypass_hook_trust() {
   expect_code 0 "$status" "env-prefixed raw codex spawn should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env CODEX_HOME=/tmp/isolated -u FOO --unset BAR codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" \
-    "env-prefixed raw codex launch omitted the hook-trust bypass"
-  assert_not_contains "$launch" "--disable hooks" \
-    "env-prefixed raw codex launch disabled hooks"
+  assert_contains "$launch" "env CODEX_HOME=/tmp/isolated -u FOO --unset BAR codex --dangerously-bypass-approvals-and-sandbox --disable hooks" \
+    "env-prefixed raw codex launch omitted hook suppression"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "env-prefixed raw codex launch crossed the hook-trust boundary"
 
   id=profile-codex-hook-trust-quoted-env-raw-z3g
   rec=$(make_spawn_case profile-codex-hook-trust-quoted-env-raw codex "$id")
@@ -575,7 +575,7 @@ test_all_codex_launches_bypass_hook_trust() {
     assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
       "$harness launch received the Codex-only hook-trust bypass"
   done
-  pass "all codex launch paths bypass hook trust without disabling hooks"
+  pass "all codex launch paths suppress hooks without crossing hook trust"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -969,7 +969,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_all_codex_launches_bypass_hook_trust
+test_all_codex_launches_disable_hooks
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
