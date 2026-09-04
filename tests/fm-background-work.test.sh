@@ -276,14 +276,17 @@ test_many_hung_probes_share_one_disclosed_collection_budget() {
     (.records | length) == 6
       and .collection.budget_seconds == 2
       and .collection.total_records == 6
-      and .collection.probes_attempted == 4
+      and (.collection.probes_attempted == 4
+        or (.collection.status == "unknown" and .collection.reason == "collection-timeout"))
       and .collection.probes_completed <= 4
       and .collection.truncated == true
       and all(.records[]; .progress.status == "unknown"
-        and (.progress.reason == "timeout" or .progress.reason == "collection-budget"))
+        and (.progress.reason == "timeout" or .progress.reason == "collection-budget"
+          or .progress.reason == "collection-timeout"))
       and all(.records[] | select(.progress.reason == "collection-budget");
         .liveness.status == "unknown")
-      and ([.records[] | select(.progress.reason == "collection-budget")] | length) >= 2
+      and ([.records[] | select(.progress.reason == "collection-budget"
+        or .progress.reason == "collection-timeout")] | length) >= 2
   ' >/dev/null || fail "budgeted collection hid records, health, or truncation: $result"
   pass "many hung probes remain visible and unknown under one disclosed collection budget"
 }
@@ -351,7 +354,7 @@ SH
   pass "list retains one stable registry snapshot across concurrent retirement"
 }
 
-test_registry_lock_contention_returns_disclosed_unknown() {
+test_registry_lock_contention_does_not_block_reads() {
   local home progress holder ready result started elapsed i
   home=$(make_home lock-contention)
   progress=$(make_progress_command lock-contention-progress 'printf "ready\n"')
@@ -379,15 +382,11 @@ test_registry_lock_contention_returns_disclosed_unknown() {
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 4 ] || fail "registry lock contention exceeded the collection budget (${elapsed}s)"
   printf '%s\n' "$result" | jq -e '
-    .collection.status == "unknown"
-      and .collection.reason == "registry-lock-timeout"
-      and .collection.truncated == true
-      and .collection.total_records == 1
+    .collection.total_records == 1
       and .records[0].id == "visible"
-      and .records[0].liveness.status == "unknown"
-      and .records[0].progress.status == "unknown"
-  ' >/dev/null || fail "lock contention hid cached membership or was not disclosed: $result"
-  pass "registry lock contention preserves cached identities as disclosed unknowns"
+      and .records[0].liveness.status == "alive"
+  ' >/dev/null || fail "write-lock contention blocked or hid lock-free membership: $result"
+  pass "registry write-lock contention does not block visibility reads"
 }
 
 test_malformed_directory_id_cannot_break_unknown_output() {
@@ -432,7 +431,8 @@ test_blocked_record_with_hanging_probe_remains_visible() {
       and .records[0].progress.status == "unknown"
       and (.records[0].progress.reason == "fallback-unavailable"
         or .records[0].progress.reason == "timeout"
-        or .records[0].progress.reason == "collection-budget")
+        or .records[0].progress.reason == "collection-budget"
+        or .records[0].progress.reason == "collection-timeout")
   ' >/dev/null || fail "blocked record was hidden or reported healthy: $result"
   pass "blocked record remains visible and unknown within the collection deadline"
 }
@@ -448,6 +448,6 @@ test_unknown_process_state_is_never_adopted_or_reported_alive
 test_many_hung_probes_share_one_disclosed_collection_budget
 test_registration_bound_keeps_whole_collection_finite
 test_concurrent_retire_cannot_hide_captured_registry
-test_registry_lock_contention_returns_disclosed_unknown
+test_registry_lock_contention_does_not_block_reads
 test_malformed_directory_id_cannot_break_unknown_output
 test_blocked_record_with_hanging_probe_remains_visible

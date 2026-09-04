@@ -57,7 +57,6 @@ COLLECTION_PROBE_TIMEOUT=${FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT:-2}
 MAX_RECORDS=${FM_BACKGROUND_WORK_MAX_RECORDS:-32}
 MAX_PROGRESS_BYTES=512
 RUNTIME_LIBS_LOADED=0
-MEMBERSHIP_INDEX="$REGISTRY/.membership.json"
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -101,23 +100,6 @@ safe_arg() {
 
 valid_time() {
   [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-}
-
-refresh_membership_index() {
-  local record id tmp
-  local -a members=()
-  for record in "$REGISTRY"/*; do
-    [ -d "$record" ] && [ ! -L "$record" ] || continue
-    id=${record##*/}
-    valid_id "$id" || continue
-    members+=("$id")
-  done
-  tmp=$(umask 077; mktemp "$REGISTRY/.membership.XXXXXX") || return 1
-  if ! jq -n --args '$ARGS.positional' "${members[@]+"${members[@]}"}" > "$tmp" \
-    || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$MEMBERSHIP_INDEX"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
 }
 
 positive_integer() {
@@ -284,11 +266,6 @@ register_work() {
     rm -rf -- "$stage"
     fm_lock_release "$REGISTRY/.registry.lock"
     die "cannot publish background-work record"
-  fi
-  if ! refresh_membership_index; then
-    rm -rf -- "$record"
-    fm_lock_release "$REGISTRY/.registry.lock"
-    die "cannot update background-work membership index"
   fi
   fm_lock_release "$REGISTRY/.registry.lock"
   printf 'registered: %s pid=%s\n' "$id" "$pid"
@@ -588,28 +565,10 @@ write_unknown_fallback() {
        last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}' > "$path"
 }
 
-membership_error_document() {
-  local generated=$1 remaining=$2
-  if [ -f "$MEMBERSHIP_INDEX" ] && [ ! -L "$MEMBERSHIP_INDEX" ]; then
-    fm_run_timed "$remaining" jq --arg generated "$generated" --arg home "$FM_HOME" \
-      --argjson budget "$COLLECTION_BUDGET" '
-      {schema:"fm-background-work-list.v1",generated:$generated,fm_home:$home,
-       collection:{status:"unknown",reason:"registry-lock-timeout",budget_seconds:$budget,
-         total_records:length,probes_attempted:0,probes_completed:0,truncated:true},
-       records:map({id:.,description:null,task:null,pid:null,started_at:null,
-         expected_finish_at:null,liveness:{status:"unknown",reason:"registry-lock-timeout"},
-         progress:{status:"unknown",reason:"registry-lock-timeout",value:null,
-           observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}})}' \
-      "$MEMBERSHIP_INDEX" </dev/null
-    return
-  fi
-  return 1
-}
-
-list_work() {
+list_work_impl() {
   local format=${1-} generated now record document stage id total=0 attempted=0 completed=0 truncated=false
   local capture_degraded=0
-  local collection_started collection_deadline remaining lock_rc lock_error_document
+  local collection_started collection_deadline remaining
   local -a records=() ids=() record_files=()
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   collection_started=$(date +%s) || die "cannot start background-work collection deadline"
@@ -618,71 +577,20 @@ list_work() {
   load_runtime_libs
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
   now=$(date +%s) || die "cannot read the current epoch time"
-  lock_error_document=$(jq -n --arg generated "$generated" --arg home "$FM_HOME" \
-    --argjson budget "$COLLECTION_BUDGET" '
-    {schema:"fm-background-work-list.v1",generated:$generated,fm_home:$home,
-     collection:{status:"unknown",reason:"registry-lock-timeout",budget_seconds:$budget,
-       total_records:null,probes_attempted:0,probes_completed:0,truncated:true},
-     records:[{id:"(registry)",description:"Background-work registry unavailable",
-       task:null,pid:null,started_at:null,expected_finish_at:null,
-       liveness:{status:"unknown",reason:"registry-lock-timeout"},
-       progress:{status:"unknown",reason:"registry-lock-timeout",value:null,
-         observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}]}') \
-    || die "cannot encode background-work lock fallback"
   if [ -d "$REGISTRY" ]; then
     stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
       || die "cannot stage background-work collection"
-    remaining=$((collection_deadline - $(date +%s) - 1))
-    if [ "$remaining" -le 0 ]; then
-      lock_rc=124
-    elif fm_lock_acquire_wait_bounded "$REGISTRY/.registry.lock" "$remaining"; then
-      lock_rc=0
-    else
-      lock_rc=$?
-    fi
-    if [ "$lock_rc" -ne 0 ]; then
-      rm -rf -- "$stage"
-      remaining=$((collection_deadline - $(date +%s)))
-      if [ "$remaining" -gt 0 ]; then
-        document=$(membership_error_document "$generated" "$remaining" 2>/dev/null) || document=$lock_error_document
-      else
-        document=$lock_error_document
-      fi
-      if [ "$format" = --json ]; then
-        printf '%s\n' "$document"
-      else
-        printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
-        printf '%s\n' "$document" | jq -r '.records[] | [
-          .id, "-", .liveness.status, .progress.status, "-", "-", "-", "Registry unavailable"
-        ] | @tsv'
-      fi
-      return 0
-    fi
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
       total=$((total + 1))
       [ "$attempted" -ge "$COLLECTION_MAX_PROBES" ] || attempted=$((attempted + 1))
       id=${record##*/}
-      if [ -f "$record/fallback.json" ] && [ ! -L "$record/fallback.json" ]; then
-        if ! cp "$record/fallback.json" "$stage/$id.json"; then
-          capture_degraded=$((capture_degraded + 1))
-          write_unknown_fallback "$stage/$id.json" "$id" fallback-unavailable \
-            || { fm_lock_release "$REGISTRY/.registry.lock"; rm -rf -- "$stage"; die "cannot capture background-work identity: $id"; }
-        fi
-      else
-        capture_degraded=$((capture_degraded + 1))
-        write_unknown_fallback "$stage/$id.json" "$id" fallback-unavailable \
-          || { fm_lock_release "$REGISTRY/.registry.lock"; rm -rf -- "$stage"; die "cannot capture background-work identity: $id"; }
-      fi
+      valid_id "$id" || capture_degraded=$((capture_degraded + 1))
+      write_unknown_fallback "$stage/$id.json" "$id" collection-budget \
+        || { rm -rf -- "$stage"; die "cannot capture background-work identity: $id"; }
       records+=("$record")
       ids+=("$id")
     done
-    refresh_membership_index || {
-      fm_lock_release "$REGISTRY/.registry.lock"
-      rm -rf -- "$stage"
-      die "cannot update background-work membership index"
-    }
-    fm_lock_release "$REGISTRY/.registry.lock"
     remaining=$((collection_deadline - $(date +%s) - 1))
     if [ "$remaining" -gt 0 ]; then
       collect_records "$stage" "$now" "$generated" "$remaining" "${records[@]+"${records[@]}"}"
@@ -714,6 +622,57 @@ list_work() {
       .id, (.task // "-"), .liveness.status, .progress.status,
       (.progress.value // "-"), (.started_at // "-"),
       (.expected_finish_at // "-"), (.description // "-")
+    ] | @tsv'
+  fi
+}
+
+timeout_membership_document() {
+  local generated record id
+  local -a ids=()
+  generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
+  if [ -d "$REGISTRY" ]; then
+    for record in "$REGISTRY"/*; do
+      [ -d "$record" ] && [ ! -L "$record" ] || continue
+      id=${record##*/}
+      ids+=("$id")
+    done
+  fi
+  jq -n --args --arg generated "$generated" --arg home "$FM_HOME" \
+    --argjson budget "$COLLECTION_BUDGET" '
+    $ARGS.positional as $ids |
+    {schema:"fm-background-work-list.v1",generated:$generated,fm_home:$home,
+     collection:{status:"unknown",reason:"collection-timeout",budget_seconds:$budget,
+       total_records:($ids|length),probes_attempted:0,probes_completed:0,truncated:true},
+     records:($ids|map({id:.,description:null,task:null,pid:null,started_at:null,
+       expected_finish_at:null,liveness:{status:"unknown",reason:"collection-timeout"},
+       progress:{status:"unknown",reason:"collection-timeout",value:null,
+         observed_at:null,last_changed_at:null,stale_after_seconds:null,timeout_seconds:null}}))}' \
+    "${ids[@]+"${ids[@]}"}"
+}
+
+list_work() {
+  local format=${1-} started deadline inner_budget output rc remaining
+  case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
+  started=$(date +%s) || die "cannot start background-work collection deadline"
+  deadline=$((started + COLLECTION_BUDGET))
+  inner_budget=$((COLLECTION_BUDGET - 1))
+  if output=$(fm_run_timed "$inner_budget" "$0" _list "$format"); then
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 124 ] || return "$rc"
+  remaining=$((deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || die "background-work collection budget exhausted"
+  output=$(fm_run_timed "$remaining" "$0" _timeout_membership) \
+    || die "cannot encode timed-out background-work membership"
+  if [ "$format" = --json ]; then
+    printf '%s\n' "$output"
+  else
+    printf 'ID\tTASK\tLIVENESS\tPROGRESS\tVALUE\tSTARTED\tEXPECTED\tDESCRIPTION\n'
+    printf '%s\n' "$output" | jq -r '.records[] | [
+      .id, "-", .liveness.status, .progress.status, "-", "-", "-", "Collection timed out"
     ] | @tsv'
   fi
 }
@@ -757,13 +716,13 @@ retire_work() {
   fm_lock_release "$record/.observe.lock"
   rmdir -- "$record" \
     || { fm_lock_release "$REGISTRY/.registry.lock"; die "cannot retire background-work record: $id"; }
-  refresh_membership_index \
-    || { fm_lock_release "$REGISTRY/.registry.lock"; die "cannot update background-work membership index"; }
   fm_lock_release "$REGISTRY/.registry.lock"
   printf 'retired: %s (process was not signalled)\n' "$id"
 }
 
 case "${1-}" in
+  _list) shift; list_work_impl "${1-}" ;;
+  _timeout_membership) timeout_membership_document ;;
   register) shift; register_work "$@" ;;
   list) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; list_work "${1-}" ;;
   retire) shift; [ "$#" -eq 1 ] || { usage >&2; exit 2; }; retire_work "$1" ;;
