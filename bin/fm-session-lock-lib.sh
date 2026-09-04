@@ -109,10 +109,17 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   # Bare interpreter (e.g. node): match the first non-flag script path it runs.
-  if script=$(fm_harness_interpreter_script_path "$comm" "$args") && name=$(fm_harness_path_name "$script"); then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    FM_HARNESS_MATCH_NAME=$name
-    return 0
+  if script=$(fm_harness_interpreter_script_path "$comm" "$args"); then
+    if [ "${script##*/}" = copilot ]; then
+      name=copilot
+    elif name=$(fm_harness_path_name "$script"); then
+      [ "$name" != copilot ] || name=
+    fi
+    if [ -n "$name" ]; then
+      case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+      FM_HARNESS_MATCH_NAME=$name
+      return 0
+    fi
   fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
