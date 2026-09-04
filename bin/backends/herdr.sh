@@ -1933,7 +1933,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   # agent left behind, so corroborate against the pane's own foreground
   # process: a provable lone idle bare shell has no agent process, so the pane
   # is agent-free and relaunchable rather than a live-or-unknown husk.
-  if fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1; then
+  if fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id" >/dev/null 2>&1; then
     printf 'no-agent'
     return 0
   fi

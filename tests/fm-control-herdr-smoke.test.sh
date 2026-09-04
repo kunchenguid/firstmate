@@ -118,8 +118,19 @@ herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-
   --state unknown --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register the stale agent record on the task pane"
 
-STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+STATE=
+for _ in $(seq 1 50); do
+  STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+  [ "$STATE" = dead ] && break
+  [ "$STATE" = unreadable ] \
+    || fail "herdr returned an unexpected stale registration state '$STATE'"
+  sleep 0.1
+done
 [ "$STATE" = dead ] || fail "herdr should classify a stale unknown record over a bare shell as dead, got '$STATE'"
+REGISTERED_STATE=$(herdr agent get "$PANE_ID" --session "$SESSION" 2>/dev/null \
+  | jq -r '.result.agent.agent_status // empty')
+[ "$REGISTERED_STATE" = unknown ] \
+  || fail "the dead verdict must retain agent_status=unknown, got '${REGISTERED_STATE:-<missing>}'"
 pass "real herdr: a stale unknown registration over a bare shell is dead and relaunchable"
 
 # --- a registered foreground agent: classification flips, and verbs follow --
