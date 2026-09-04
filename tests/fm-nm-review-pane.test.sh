@@ -28,6 +28,9 @@
 #   (g) a record whose pane is gone is recreated once; an ambiguous presence refuses
 #   (h) teardown closes the review pane under the session lock and removes the
 #       record; a pane that will not close keeps its record with a warning
+#   (j) a create attempt while another process holds the session presentation
+#       lock (a teardown in progress) splits nothing, writes no record, and
+#       exits 0, so the next sweep re-evaluates against the removed meta
 #   (i) quiesce sends q once and only polls afterwards, so a viewer that exits
 #       between polls never gets a stray q at its shell; a viewer that ignores
 #       the first q gets it again only after several unchanged polls
@@ -578,6 +581,57 @@ test_teardown_closes_review_pane_and_removes_record() {
   pass "fm-teardown: closes the review pane under the session lock and removes its record"
 }
 
+test_create_yields_while_session_lock_is_held() {
+  local dir id=contended rc lock ready release holder_pid waited=0
+  dir=$(make_case contended)
+  write_status_none "$dir"
+  write_meta "$dir" "$id"
+  lock=$(PATH="$dir/fakebin:$PATH" FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log" \
+    FM_FAKE_HERDR_SOCKET="$dir/herdr.sock" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path lab' "$ROOT") \
+    || fail "could not resolve the fixture session presentation lock path"
+  ready="$dir/lock-ready"; release="$dir/lock-release"
+  ROOT="$ROOT" LOCK="$lock" READY="$ready" RELEASE="$release" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$LOCK" || exit 1
+    : > "$READY"
+    while [ ! -e "$RELEASE" ]; do sleep 0.1; done
+    fm_lock_release "$LOCK"
+  ' &
+  holder_pid=$!
+  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || fail "the contending session lock holder never started"
+
+  : > "$dir/herdr.log"
+  rc=$(run_script "$dir" "$id")
+  if [ "$rc" != 0 ]; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "a contended session lock must yield with rc 0 (rc=$rc): $(cat "$dir/stderr")"
+  fi
+  if [ "$(herdr_calls "$dir" pane split)" != 0 ]; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "a contended session lock must not split a pane"
+  fi
+  if [ -e "$dir/home/state/$id.nm-review-pane" ]; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "a contended session lock must not write a record"
+  fi
+  if [ "$(herdr_calls "$dir" pane run)" != 0 ]; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "a contended session lock must not run anything"
+  fi
+
+  : > "$release"
+  wait "$holder_pid" 2>/dev/null || true
+  : > "$dir/herdr.log"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "create after the lock was released failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(herdr_calls "$dir" pane split)" = 1 ] || fail "the next sweep must create the pane once the lock is free"
+  [ "$(record_field "$dir" "$id" pane)" = "w1:p3" ] || fail "record must name the split pane"
+  [ ! -e "$lock" ] || fail "ensure must release the session lock after creating"
+  pass "fm-nm-review-pane: a contended session presentation lock yields without splitting and the next sweep creates"
+}
+
 test_close_refusal_retains_record_and_names_rerun() {
   local dir id=retain rc
   dir=$(make_case retain)
@@ -618,4 +672,5 @@ test_foreign_branch_run_and_missing_run_leave_pointed_pane_alone
 test_quiesce_sends_detach_key_once_and_resends_after_unchanged_polls
 test_dead_pane_recreated_and_ambiguous_presence_refuses
 test_teardown_closes_review_pane_and_removes_record
+test_create_yields_while_session_lock_is_held
 test_close_refusal_retains_record_and_names_rerun

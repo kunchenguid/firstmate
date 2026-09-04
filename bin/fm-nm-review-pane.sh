@@ -45,6 +45,13 @@
 # presentation pane and the last run this script asked it to show. A record
 # whose pane is structurally gone (pane_not_found) is discarded and the pane is
 # recreated; an unreadable presence refuses rather than splitting a second pane.
+# The per-task record lock serializes this script against itself; creating a
+# pane additionally try-acquires the named-session presentation lock (the one
+# --close and bin/fm-teardown.sh hold while closing panes) around the worker
+# presence read, the split, and the first record write, and returns 0 without
+# creating when that lock is contended, so a teardown in progress wins instead
+# of racing a fresh split against its two closes and leaving an orphan pane
+# whose record no later sweep retires.
 #
 # Current run: `no-mistakes axi status` in the task worktree (bounded by
 # bin/fm-nm-run-lib.sh's fm_nm_run_checked, FM_NM_REVIEW_PANE_NM_TIMEOUT seconds,
@@ -281,7 +288,7 @@ fm_nm_review_pane_viewer_command() {  # <worktree> <task-id> <run-id>
 # fm_nm_review_pane_ensure <state-dir> <config-dir> <task-id>: the ensure entry
 # point. Exit-code contract in the header.
 fm_nm_review_pane_ensure() {  # <state-dir> <config-dir> <task-id>
-  local state=$1 config=$2 id=$3 meta record lock fresh=0 pane presence run desired_viewer cmd rc=0
+  local state=$1 config=$2 id=$3 meta record lock session_lock fresh=0 pane presence run desired_viewer cmd rc=0
   meta="$state/$id.meta"
   record=$(fm_nm_review_pane_record_path "$state" "$id")
   fm_nm_review_pane_eligible "$meta" || return 3
@@ -310,8 +317,18 @@ fm_nm_review_pane_ensure() {  # <state-dir> <config-dir> <task-id>
     esac
   fi
   if [ -z "$pane" ]; then
+    session_lock=$(fm_backend_herdr_presentation_session_lock_path "$FM_NM_REVIEW_SESSION") || {
+      echo "warning: herdr session presentation lock path is unavailable; not creating a review pane for $id" >&2
+      fm_lock_release "$lock"
+      return 1
+    }
+    if ! fm_lock_try_acquire "$session_lock"; then
+      fm_lock_release "$lock"
+      return 0
+    fi
     if [ "$(fm_backend_herdr_pane_presence_state "$FM_NM_REVIEW_SESSION" "$FM_NM_REVIEW_WORKER_PANE")" != present ]; then
       echo "warning: worker pane $FM_NM_REVIEW_WORKER_PANE for $id is not present; not creating a review pane" >&2
+      fm_lock_release "$session_lock" || true
       fm_lock_release "$lock"
       return 1
     fi
@@ -320,15 +337,18 @@ fm_nm_review_pane_ensure() {  # <state-dir> <config-dir> <task-id>
       | jq -r '.result.pane.pane_id // empty' 2>/dev/null) || pane=
     if [ -z "$pane" ]; then
       echo "warning: herdr pane split for $id returned no pane id; no review pane was created" >&2
+      fm_lock_release "$session_lock" || true
       fm_lock_release "$lock"
       return 1
     fi
     fresh=1
     if ! fm_nm_review_pane_record_write "$record" "$FM_NM_REVIEW_SESSION" "$pane" "" ""; then
       echo "warning: no-mistakes review pane record for $id could not be written; pane $pane exists without a record" >&2
+      fm_lock_release "$session_lock" || true
       fm_lock_release "$lock"
       return 1
     fi
+    fm_lock_release "$session_lock" || true
   fi
   if ! run=$(fm_nm_review_pane_current_run "$FM_NM_REVIEW_WORKTREE"); then
     if [ "$fresh" = 1 ]; then
