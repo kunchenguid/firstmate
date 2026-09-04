@@ -152,7 +152,7 @@ log_last_line() {
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
 map_log_state() {  # <line>
-  local terminal
+  local terminal trimmed
   if status_is_paused "$1"; then
     echo paused
     return
@@ -161,9 +161,18 @@ map_log_state() {  # <line>
   # own voice; bin/fm-done-claim-lib.sh owns that question for every reader.
   # A routed phase closing with `done [key=<slug>]` says one sub-event finished,
   # not that the task did, and reading it as `done` would report a whole task
-  # complete on a line that never claimed as much. The non-terminal verbs below
-  # stay deliberately key-blind: a routed phase that is blocked or paused really
-  # is a supervision concern of the task it belongs to.
+  # complete on a line that never claimed as much.
+  #
+  # The handoff verb is under the same speaker test, for the same reason rather
+  # than a new one: `ready` says THIS worker committed an implementation and is
+  # waiting to be told to validate it, which is a statement about the task
+  # itself. A secondmate publishing a child's handoff upward writes
+  # `ready [key=inactive-outcome-...]` into the parent's status, and read
+  # key-blind that would make the mate task claim a handoff it never made.
+  #
+  # `blocked`, `needs-decision` and the paused verb stay deliberately key-blind,
+  # unchanged: a routed phase that is blocked or paused really is a supervision
+  # concern of the task it belongs to.
   if terminal=$(fm_done_claim_own_terminal_verb "$1"); then
     echo "$terminal"
     return
@@ -172,7 +181,15 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}") echo ready ;;
+    "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}")
+      trimmed=${1#"${1%%[![:space:]]*}"}
+      if fm_done_claim_own_voice "$trimmed" \
+        "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}"; then
+        echo ready
+      else
+        echo unknown
+      fi
+      ;;
     done|failed)    echo unknown ;;
     *)              echo unknown ;;
   esac

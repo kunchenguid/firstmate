@@ -330,13 +330,24 @@ home_secondmate_id() {
   fm_parent_channel_home_id "$FM_HOME"
 }
 
+# 0 when this inactive report is about the PRE-VALIDATION HANDOFF rather than a
+# terminal outcome. `ready` is defined as deliberately not terminal
+# (bin/fm-classify-lib.sh owns the verb, and status_is_terminal_verb says no to
+# it), so every line this backstop writes about it has to say what was actually
+# observed: a worker that stopped waiting on firstmate, not work that finished.
+inactive_report_is_handoff() { # <state>
+  [ "$1" = "${FM_CLASSIFY_READY_VERB:-$FM_CLASSIFY_READY_VERB_DEFAULT}" ]
+}
+
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
   local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
   # The parent channel is a status stream, so this line must lead with a verb the
   # parent's classifier knows. A terminal state that is not one - an unverified
   # claim - is a blocker for the parent rather than a completion, and names its
   # real state in the note instead of being reported as done.
-  if status_line_verb_is_known "$state:"; then
+  if inactive_report_is_handoff "$state"; then
+    line="$state [key=$outcome_key]: inactive handoff waiting on firstmate child=$task fingerprint=$fingerprint"
+  elif status_line_verb_is_known "$state:"; then
     line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   else
     line="blocked [key=$outcome_key]: inactive terminal child=$task state=$state fingerprint=$fingerprint"
@@ -559,13 +570,22 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
     else
-      notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
-        "inactive terminal outcome needs parent report: child=$id state=$state"
+      if inactive_report_is_handoff "$state"; then
+        notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+          "inactive handoff waiting on firstmate needs parent report: child=$id state=$state"
+      else
+        notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+          "inactive terminal outcome needs parent report: child=$id state=$state"
+      fi
     fi
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
-  payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
+  if inactive_report_is_handoff "$state"; then
+    payload="inactive handoff waiting on firstmate awaiting captain presentation: child=$id state=$state"
+  else
+    payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
+  fi
   [ -z "$pr" ] || payload="$payload pr=$pr"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }

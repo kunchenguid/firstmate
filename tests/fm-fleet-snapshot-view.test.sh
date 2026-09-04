@@ -903,7 +903,27 @@ EOF
       and .invalidity == {kind:null,ids:[]}
       and .reason == null
   ' >/dev/null || fail "a deliberately excluded program-role child was reported as an inconsistency: $out"
-  pass "a deliberately excluded row is accounted for and raises no invalidity"
+
+  # The exclusion is exactly as narrow as its reason. It covers `working`, which
+  # is the only state $active_all claims, so a program-role row in a state no
+  # bucket claims must still surface - otherwise the guard is permanently blind
+  # to program rows and the next state token added is absorbed here in silence.
+  local root
+  root="$home/test-root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  sed -i.bak 's/^    \*)              echo unknown ;;$/    *)              echo novel-state ;;/' \
+    "$root/bin/fm-crew-state.sh"
+  rm -f "$root/bin/fm-crew-state.sh.bak"
+  printf 'note: a line whose verb maps to no bucket\n' > "$home/state/prog-task.status"
+  record_claude_idle "$home/state" prog-task
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$root/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity.kind == "unbucketed_current"
+      and (.invalidity.ids == ["prog-task"])
+  ' >/dev/null || fail "the guard stayed blind to a program-role row in an unclassified state: $out"
+  pass "a deliberate exclusion is accounted for only in the state its reason covers"
 }
 
 # What each invalidity reason MEANS to its consumers has one owner, and this

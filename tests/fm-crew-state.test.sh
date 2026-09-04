@@ -1061,6 +1061,24 @@ test_the_prevalidation_handoff_has_its_own_state_and_leaves_done_intact() {
   assert_contains "$out" "state: ready" "the pre-validation handoff did not report its own state"
   assert_not_contains "$out" "done-unverified" "the handoff was downgraded as if it were a claim"
 
+  # `ready` says THIS worker committed and awaits the go-ahead to validate, so it
+  # is under the same speaker test the terminal verbs are. A secondmate publishes
+  # a child's handoff upward as `ready [key=inactive-outcome-...]` into the
+  # parent's status, and read key-blind that would make the mate task claim a
+  # handoff it never made.
+  reset_fakes
+  d=$(new_case ready-keyed)
+  make_repo_on_branch "$d/wt" fm/feat-rk
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rk.meta" "window=fm:fm-feat-rk" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'ready [key=inactive-outcome-mate-child-ready]: inactive handoff waiting on firstmate child=child\n' \
+    > "$d/state/feat-rk.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rk
+  out=$(run_crew_state "$d" feat-rk)
+  assert_not_contains "$out" "state: ready" "a child's handoff became the mate task's own state"
+
   reset_fakes
   d=$(new_case ready-then-passed)
   make_repo_on_branch "$d/wt" fm/feat-rp

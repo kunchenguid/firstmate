@@ -299,6 +299,56 @@ test_a_stopped_ready_child_reaches_the_backstop() {
   pass "a stopped child that handed off for validation still reaches the backstop"
 }
 
+# What the backstop SAYS about a handoff has to be what it observed. `ready` is
+# defined as pre-terminal, so a line calling it a terminal outcome would be the
+# false narration this change has corrected repeatedly - and a genuinely terminal
+# child must keep being described as one, so the wording is not merely softened
+# everywhere.
+test_a_handoff_report_is_not_narrated_as_terminal() {
+  local line
+  make_world handoff-narration; bind_secondmate local
+  write_child "$MATE" child 'working: still implementing'
+  FM_FAKE_CREW_STATE='ready' run_reconcile "$MATE" --startup
+  line=$(grep 'inactive-outcome-' "$MAIN/state/mate.status" 2>/dev/null | tail -1)
+  [ -n "$line" ] || fail "the handoff was never reported upward: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  case "$line" in
+    *"waiting on firstmate"*) ;;
+    *) fail "the handoff report did not say what was observed: $line" ;;
+  esac
+  case "$line" in
+    *terminal*) fail "the handoff was narrated as a terminal outcome: $line" ;;
+  esac
+
+  make_world terminal-narration; bind_secondmate local
+  write_child "$MATE" child 'working: still implementing'
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  line=$(grep 'inactive-outcome-' "$MAIN/state/mate.status" 2>/dev/null | tail -1)
+  [ -n "$line" ] || fail "the terminal outcome was never reported upward: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  case "$line" in
+    *terminal*) ;;
+    *) fail "a genuinely terminal child stopped being described as terminal: $line" ;;
+  esac
+  pass "a handoff report says what was observed while a terminal outcome still reads as terminal"
+}
+
+# The captain presentation carries the same distinction, on the main-home path.
+test_a_handoff_presentation_is_not_narrated_as_terminal() {
+  local payload
+  make_world handoff-presentation
+  write_child "$MAIN" child 'working: still implementing'
+  FM_FAKE_CREW_STATE='ready' run_reconcile "$MAIN" --startup
+  payload=$(grep -o 'inactive [^|]*' "$MAIN/state/.wake-queue" 2>/dev/null | tail -1)
+  [ -n "$payload" ] || fail "the handoff was never queued for presentation: $(cat "$MAIN/state/.wake-queue" 2>/dev/null)"
+  case "$payload" in
+    *"waiting on firstmate"*) ;;
+    *) fail "the queued handoff did not say what was observed: $payload" ;;
+  esac
+  case "$payload" in
+    *terminal*) fail "the queued handoff was narrated as a terminal outcome: $payload" ;;
+  esac
+  pass "a queued handoff presentation says what was observed rather than calling it terminal"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -901,6 +951,8 @@ test_ledger_delivery_downgrades_an_unestablished_claim
 test_a_later_established_claim_corrects_the_parents_record
 test_a_keyed_phase_close_is_not_the_childs_terminal_outcome
 test_a_stopped_ready_child_reaches_the_backstop
+test_a_handoff_report_is_not_narrated_as_terminal
+test_a_handoff_presentation_is_not_narrated_as_terminal
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

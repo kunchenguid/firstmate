@@ -828,12 +828,19 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     # program-role child came to be reported as an inconsistency that did not
     # exist. Do not answer a fall-through by inventing a bucket instead: that
     # hides the exclusion rather than stating it.
-    #   - a program-role in-flight row is outside $active_all because a program
-    #     is not active child work;
+    #   - a program-role in-flight row in the `working` state is outside
+    #     $active_all because a program is not active child work. The exclusion
+    #     is exactly as narrow as that reason: in any other state the row is
+    #     bucketed like any child, so the guard is not permanently blind to it
+    #     and the next state token added cannot be silently absorbed here;
     #   - an in-flight row whose hold the backlog already reports is outside the
     #     $holds_all child-state arm so one hold is not listed twice; the
     #     backlog arm reports it.
-    | (([ $owned_in_flight[] | select(.current_role == "program") | .id ]
+    | (([ $owned_in_flight[] as $work
+          | select($work.current_role == "program")
+          | $tasks[]
+          | select(.id == $work.id and .current_state.state == "working")
+          | .id ]
         + [ $owned_in_flight[] | select(.hold_reason != null and .hold_kind != null) | .id ])
        | unique) as $accounted_exclusions
     | (([ $active_all[].id ] + [ $holds_all[].id ] + [ $terminal_in_flight[].id ]
