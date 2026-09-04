@@ -41,7 +41,10 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the stale delivery
+# artifacts, including the busy-guard busy+empty streak marker - a streak from a
+# PRIOR away session must never carry into a fresh one and satisfy the escape
+# threshold on the new session's first injection attempt.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -49,6 +52,7 @@ unit_clear_stale() {
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
+  : > "$st/state/.subsuper-busy-empty-streak-since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
@@ -61,6 +65,11 @@ unit_clear_stale() {
     pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
   else
     fail "clear-stale: stale artifacts survived"
+  fi
+  if [ ! -e "$st/state/.subsuper-busy-empty-streak-since" ]; then
+    pass "clear-stale: removes a prior session's busy+empty streak marker"
+  else
+    fail "clear-stale: a prior away session's busy+empty streak marker survived into a fresh entry"
   fi
   if [ -e "$st/state/.wake-queue" ]; then
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
@@ -127,6 +136,7 @@ unit_fresh_vs_refresh() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
+  : > "$st/state/.subsuper-busy-empty-streak-since"
   : > "$st/state/.subsuper-inject-wedged"
   # A live "daemon": a real process whose identity the lock records, so
   # daemon_lock_held_by_live_daemon returns true (a refresh).
@@ -141,6 +151,11 @@ unit_fresh_vs_refresh() {
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
+  fi
+  if [ -e "$st/state/.subsuper-busy-empty-streak-since" ]; then
+    pass "refresh: a live busy+empty streak survives a refresh (its elapsed time is not silently reset)"
+  else
+    fail "refresh: cleared the live busy+empty streak marker, resetting the escape deadline mid-streak"
   fi
   kill "$sleep_pid" 2>/dev/null || true
   wait "$sleep_pid" 2>/dev/null || true

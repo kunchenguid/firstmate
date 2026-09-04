@@ -123,6 +123,7 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
+    "$STATE/.subsuper-busy-empty-streak-since" \
     "$STATE/.subsuper-inject-wedged"
 }
 

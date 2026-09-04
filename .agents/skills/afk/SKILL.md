@@ -101,6 +101,13 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+The deferral log line names which branch produced the busy verdict (native agent-state vs the rendered-pane busy-regex fallback), so a stuck guard is attributable from the log alone.
+The one exception is the busy guard's bounded escape: when a busy verdict has disagreed with an affirmatively `empty` composer continuously for `FM_BUSY_GUARD_ESCAPE_SECS` (default 300; 0 disables), `inject_msg` stops trusting the busy verdict and delivers instead of deferring again.
+That continuous streak is measured by the durable `state/.subsuper-busy-empty-streak-since` marker, which is created on the first busy-plus-confirmed-empty observation and removed the instant that observation is not made again.
+The marker's contents hold the seconds observed so far and its mtime holds when the last observation was made, so each attempt credits only the time since the previous observation, capped at one poll interval.
+The daemon skips delivery attempts entirely while the supervisor pane is gone, during a crash backoff, and across a restart between flushes, and none of that unobserved time may buy the escape.
+It records observed continuity, not wall-clock time since it was written, so it is cleared on any composer verdict other than `empty`, on any non-busy verdict, on any attempt that returns before observing the pane at all (afk inactive, an unencodable payload, a supervisor target that no longer exists), once the escape fires, and on a fresh away-session entry or a return.
+Nothing else escapes: a composer that is not confirmed `empty` still defers unconditionally, and a busy pane whose streak has not yet reached the threshold defers exactly as documented above.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
@@ -125,6 +132,7 @@ For tmux that confirmation is normally a proven cleared composer from the shared
 Without that baseline, busy state never converts an `unknown` composer into confirmation.
 For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
+A confirmed submit logs one `inject delivered` line and stamps the epoch into `state/.subsuper-last-delivery`, so a healthy away session is distinguishable from a wedged one from the log and state alone; unlike the session-scoped artifacts in "Stale-artifact lifecycle" that marker is a durable positive record and is never cleared on entry, return, or refresh.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
 
 **Busy-queued Enter exception (opencode 1.18.4).** OpenCode keeps queued text visible while it is mid-turn, so tmux and herdr delegate the final delivery decision to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh` rather than treating visible text alone as a swallowed Enter.
@@ -218,7 +226,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-busy-empty-streak-since`, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
