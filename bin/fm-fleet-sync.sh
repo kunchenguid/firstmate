@@ -11,7 +11,7 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
+# Still skips (benignly) projects without an origin, missing remotes/branches,
 # and fetch failures.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
@@ -322,12 +322,6 @@ sync_project() {
   proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
   if [ "$proj_top" != "$proj_abs" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
-    return 0
-  fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
-  mode=${mode_line%% *}
-  if [ "$mode" = "local-only" ]; then
-    echo "$label: skipped: local-only project"
     return 0
   fi
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then

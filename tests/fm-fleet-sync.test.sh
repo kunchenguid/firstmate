@@ -9,8 +9,9 @@
 #   - every other off-default state is left untouched and reported as a loud,
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
-# The pre-existing fast-forward / already-current / local-only / no-origin paths
-# must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
+# The pre-existing fast-forward, already-current, and no-origin paths must be
+# unchanged, local-only projects with origins must refresh, and bootstrap must
+# relay the new outcomes as FLEET_SYNC lines.
 #
 # It also pins the clone-root guard: a plain directory under projects/ resolves,
 # through git's upward repository discovery, to the ENCLOSING repository - in a
@@ -395,19 +396,24 @@ test_no_origin_skipped() {
   pass "no-origin clone is skipped (benign), not flagged STUCK"
 }
 
-test_local_only_skipped() {
-  local home clone out
+test_local_only_with_origin_fast_forwards() {
+  local home clone out before
   home=$(new_home)
   clone=$(build_pair "$home" iota)
   advance_origin "$home" iota C1
+  before=$(head_sha "$clone")
   mkdir -p "$home/data"
   printf -- '- iota [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "iota: skipped: local-only project" "local-only clone is skipped as before"
-  assert_not_contains "$out" "STUCK" "local-only skip is not escalated to STUCK"
-  pass "local-only clone is skipped (benign), not flagged STUCK"
+  assert_contains "$out" "iota: synced" "local-only clone with an origin is refreshed"
+  assert_not_contains "$out" "skipped" "delivery mode does not suppress refresh"
+  assert_not_contains "$out" "STUCK" "safe local-only fast-forward is not flagged STUCK"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "local-only clone was not moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "local-only clone did not fast-forward to origin/main"
+  pass "local-only clone with an origin is fast-forwarded"
 }
 
 test_single_project_by_bare_name_resolves() {
@@ -703,7 +709,7 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
-test_local_only_skipped
+test_local_only_with_origin_fast_forwards
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

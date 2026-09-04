@@ -292,7 +292,6 @@ fleet_sync_relay_filtered_output() {
   local tmp=$1 line
   while IFS= read -r line; do
     case "$line" in
-      *': skipped: local-only project') ;;
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
