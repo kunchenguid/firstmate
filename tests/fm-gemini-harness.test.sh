@@ -58,7 +58,7 @@ test_gemini_does_not_claim_inherited_ai_agent() {
   [ "$out" != gemini ] \
     || fail "AI_AGENT must never claim the gemini identity, got '$out'"
   # A non-1 GEMINI_CLI is not the verified marker value either.
-  out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
         -u PI_CODING_AGENT -u GROK_AGENT GEMINI_CLI=0 "$HARNESS")
   [ "$out" != gemini ] \
     || fail "GEMINI_CLI=0 must not claim the gemini identity, got '$out'"
