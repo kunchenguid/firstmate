@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$SCRIPT_DIR/fm-gemini-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -94,6 +96,10 @@ detect_own() {
       echo cursor
       return
     fi
+    if fm_gemini_path_is_gemini "$comm"; then
+      echo gemini
+      return
+    fi
     case "$(basename -- "$comm")" in
       # gemini precedes claude here for the same precedence reason as the
       # marker layer above, so a gemini worker under a claude primary is never
@@ -108,7 +114,6 @@ detect_own() {
       # MainThread to the interpreter arm to close this: that would make the
       # args of EVERY node process searchable and let an unrelated node
       # command carrying a harness name in its arguments claim an identity.
-      *gemini*) echo gemini; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -125,8 +130,11 @@ detect_own() {
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
+        if fm_gemini_args_are_gemini "$args"; then
+          echo gemini
+          return
+        fi
         case "$args" in
-          *gemini*) echo gemini; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;

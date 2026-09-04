@@ -20,9 +20,9 @@
 # because probing a stranger's binary during a liveness poll is exactly what
 # must not happen.
 #
-# Detection of firstmate's OWN harness does not come through here. That uses
-# the GEMINI_CLI=1 environment marker in bin/fm-harness.sh, which is a separate
-# and independent signal, so no single source is load-bearing on its own.
+# Detection of firstmate's OWN harness uses these structural rules for the
+# ancestry fallback. The GEMINI_CLI=1 environment marker in bin/fm-harness.sh
+# remains the load-bearing path for the installed bundle shape on modern Node.
 
 # True when path $1 carries Gemini's own structural evidence: the file is named
 # gemini, or it sits inside the published @google/gemini-cli package tree. A

@@ -87,6 +87,33 @@ SH
   pass "fm-harness.sh: ancestry detects a natively-named gemini command"
 }
 
+test_gemini_ancestry_rejects_unrelated_mentions() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u GEMINI_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        -u PI_CODING_AGENT -u GROK_AGENT FAKE_PS_COMM=gemini-helper \
+        FAKE_PS_ARGS='gemini-helper --serve' PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != gemini ] \
+    || fail "an unrelated gemini-helper command must not detect gemini, got '$out'"
+
+  out=$(env -u GEMINI_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        -u PI_CODING_AGENT -u GROK_AGENT FAKE_PS_COMM=node \
+        FAKE_PS_ARGS='node server.js --model gemini' PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != gemini ] \
+    || fail "a later node argument naming gemini must not detect gemini, got '$out'"
+  pass "fm-harness.sh: ancestry rejects unrelated gemini mentions"
+}
+
 test_gemini_node_bundle_is_not_ancestry_detectable() {
   command -v node >/dev/null 2>&1 || return 0
   local dir="$TMP_ROOT/ancestry" out comm
@@ -209,6 +236,7 @@ test_gemini_wiring_stays_outside_the_worktree() {
 test_gemini_marker_outranks_inherited_claudecode
 test_gemini_does_not_claim_inherited_ai_agent
 test_gemini_ancestry_matches_only_a_native_command_name
+test_gemini_ancestry_rejects_unrelated_mentions
 test_gemini_node_bundle_is_not_ancestry_detectable
 test_gemini_process_identity_reads_the_script_argument
 test_gemini_control_mechanics_are_the_verified_ones
