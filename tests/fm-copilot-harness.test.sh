@@ -7,6 +7,7 @@ set -u
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 LOCK_LIB="$ROOT/bin/fm-session-lock-lib.sh"
+TMUX_LIB="$ROOT/bin/fm-tmux-lib.sh"
 HOOK="$ROOT/bin/fm-copilot-hook.sh"
 OPINPUT="$ROOT/bin/fm-operational-input.sh"
 TMP_ROOT=$(fm_test_tmproot fm-copilot-harness)
@@ -45,13 +46,108 @@ test_process_shapes_are_anchored() {
   make_ps "$fakebin"
 
   out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=copilot FM_FAKE_PS_ARGS='copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "native copilot command detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
   [ "$out" = copilot ] || fail "MainThread with Copilot argv zero detected as '$out'"
 
   out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=/opt/copilot/bin/copilot FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "path-prefixed copilot executable detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "node-bundled copilot script detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
   [ "$out" = unknown ] || fail "an unrelated later copilot argument detected as '$out'"
-  pass "Copilot process detection accepts argv zero and rejects later-argument false positives"
+  pass "Copilot process detection accepts native, path, MainThread, and node-bundle shapes while rejecting later-argument decoys"
+}
+
+test_real_process_identity_accepts_copilot_shapes_and_rejects_decoy() {
+  command -v node >/dev/null 2>&1 || { pass "node not installed, skipping"; return; }
+  local dir native_pid path_pid bundle_pid decoy_pid comm args out
+  dir="$TMP_ROOT/real-copilot-shapes"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/copilot" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  cat > "$dir/runner.js" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  bash -c 'exec -a copilot sleep 30' & native_pid=$!
+  bash -c 'exec -a /opt/copilot/bin/copilot sleep 30' & path_pid=$!
+  node "$dir/bin/copilot" --allow-all & bundle_pid=$!
+  node "$dir/runner.js" copilot & decoy_pid=$!
+
+  comm=$(LC_ALL=C ps -p "$native_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$native_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "native copilot argv0 was not identified"
+  [ "$out" = copilot ] || fail "native copilot argv0 detected as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$path_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$path_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "path-prefixed copilot argv0 was not identified"
+  [ "$out" = copilot ] || fail "path-prefixed copilot argv0 detected as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$bundle_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$bundle_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "node-bundled copilot was not identified"
+  [ "$out" = copilot ] || fail "node-bundled copilot detected as '$out'"
+  out=$(bash -c '. "$1"; fm_tmux_harness_process_name "$2" "$3"' -- "$TMUX_LIB" "$comm" "$args") || fail "tmux harness identity did not recognize the node-bundled copilot"
+  [ "$out" = copilot ] || fail "tmux harness identity detected the node-bundled copilot as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$decoy_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$decoy_pid" -o args= 2>/dev/null || true)
+  if bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args" >/dev/null 2>&1; then
+    fail "a later-argument decoy real node process was treated as copilot"
+  fi
+
+  kill "$native_pid" "$path_pid" "$bundle_pid" "$decoy_pid" 2>/dev/null || true
+  wait "$native_pid" "$path_pid" "$bundle_pid" "$decoy_pid" 2>/dev/null || true
+  pass "real processes identify native, path, and node-bundled Copilot shapes while rejecting decoys"
+}
+
+test_tmux_identity_and_liveness_recognize_node_bundled_copilot() {
+  local dir fakebin out
+  dir="$TMP_ROOT/tmux-node-bundle"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'-t pts/fm-copilot -o pid=,pgid=,tpgid=,comm='*) printf '%s\n' '111 222 222 node' ;;
+  *'-p 111 -o args='*) printf '%s\n' 'node /opt/copilot/bin/copilot --allow-all' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    case "${*: -1}" in
+      '#{pane_tty}') printf '/dev/pts/fm-copilot\n' ;;
+      '#{pane_current_command}') printf 'node\n' ;;
+      '#{cursor_y}') printf '0\n' ;;
+      '#{pane_id}') printf '%s\n' '%1' ;;
+      *) exit 1 ;;
+    esac ;;
+  list-windows)
+    printf 'fm-copilot\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps" "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_tmux_composer_identity s:fm-copilot' -- "$TMUX_LIB") || fail "tmux composer identity did not recognize a node-bundled Copilot pane"
+  [ "$out" = $'copilot	present' ] || fail "tmux composer identity detected a node-bundled Copilot pane as '$out'"
+  out=$(PATH="$fakebin:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c '. "$1"; fm_backend_tmux_agent_state s:fm-copilot' -- "$ROOT/bin/backends/tmux.sh") || fail "tmux agent-state did not evaluate the node-bundled Copilot pane"
+  [ "$out" = alive ] || fail "tmux agent-state detected a node-bundled Copilot pane as '$out'"
+  pass "tmux composer identity and liveness recognize a node-bundled Copilot pane"
 }
 
 test_actual_host_overrides_inherited_markers() {
@@ -82,9 +178,15 @@ test_session_lock_identity_matches_copilot() {
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
   case "$out" in
-    ''|*[!0-9]*) fail "Copilot lock identity returned '$out'" ;;
+    ''|*[!0-9]*) fail "Copilot MainThread lock identity returned '$out'" ;;
   esac
-  pass "session-lock ancestry recognizes Copilot's MainThread process shape"
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/copilot --allow-all' \
+    bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
+  case "$out" in
+    ''|*[!0-9]*) fail "Copilot node-bundle lock identity returned '$out'" ;;
+  esac
+  pass "session-lock ancestry recognizes Copilot MainThread and node-bundle process shapes"
 }
 
 make_hook_fixture() {
@@ -470,6 +572,8 @@ test_environment_marker_wins
 test_process_shapes_are_anchored
 test_actual_host_overrides_inherited_markers
 test_session_lock_identity_matches_copilot
+test_real_process_identity_accepts_copilot_shapes_and_rejects_decoy
+test_tmux_identity_and_liveness_recognize_node_bundled_copilot
 test_session_start_translates_context
 test_agent_stop_translates_block
 test_copilot_native_policies_bypass_compatibility_stand_down

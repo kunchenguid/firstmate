@@ -43,8 +43,8 @@
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -84,6 +84,37 @@ fm_tmux_composer_caps() {
   printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
 }
 
+fm_tmux_harness_process_name() {  # <comm> <args>
+  local comm=$1 args=${2:-} name
+  if name=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
+    printf '%s\n' "$name"
+    return 0
+  fi
+  case "${comm##*/}" in
+    pi-launcher|Pi) printf 'pi\n'; return 0 ;;
+    muse|muse-bin-*) printf 'muse\n'; return 0 ;;
+  esac
+  return 1
+}
+
+fm_tmux_foreground_harness_name() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args name
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+    if name=$(fm_tmux_harness_process_name "$comm" "$args" 2>/dev/null); then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
+}
+
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
 # separated Pi and half-box Copilot composer shapes, tmux's analogue of herdr's native
 # `agent get`. It answers for Pi and Copilot from live foreground identity:
@@ -102,32 +133,18 @@ fm_tmux_composer_caps() {
 # Prints "pi<TAB>idle", "pi<TAB>working", or "copilot<TAB>present"; exits 1
 # when neither live identity is present.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0 found='' status
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
-  case "$tty" in
-    /dev/*)
-      while read -r pid pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=pi ;;
-          copilot) found=copilot ;;
-          MainThread)
-            args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-            args=${args#"${args%%[![:space:]]*}"}
-            argv0=${args%%[[:space:]]*}
-            case "$argv0" in copilot|*/copilot) found=copilot ;; esac
-            ;;
-        esac
-      done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-      ;;
-  esac
+  local target=$1 comm found='' status
+  if found=$(fm_tmux_foreground_harness_name "$target" 2>/dev/null); then
+    case "$found" in
+      pi|pi-signed) found=pi ;;
+      copilot) ;;
+      *) found='' ;;
+    esac
+  fi
   if [ -z "$found" ]; then
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=pi ;;
+      pi|pi-signed|pi-launcher|Pi) found=pi ;;
       copilot) found=copilot ;;
     esac
   fi
@@ -190,47 +207,14 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # matches fm_tmux_composer_identity, so a pane whose agent exited to a shell has
 # no Cursor foreground process and gets no reclassification.
 fm_tmux_pane_is_cursor() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
-  case "$tty" in /dev/*) ;; *) return 1 ;; esac
-  while read -r pid pgid tpgid comm; do
-    [ -n "$comm" ] || continue
-    [ "$pgid" = "$tpgid" ] || continue
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-    args=${args#"${args%%[![:space:]]*}"}
-    argv0=${args%%[[:space:]]*}
-    fm_cursor_process_matches "$comm" '' "$argv0" && return 0
-  done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-  return 1
+  [ "$(fm_tmux_foreground_harness_name "$1" 2>/dev/null || true)" = cursor ]
 }
 
 fm_tmux_pane_is_copilot() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
-  case "$tty" in
-    /dev/*)
-      while read -r pid pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        case "${comm##*/}" in copilot) return 0 ;; esac
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
-        case "${comm##*/}:$argv0" in
-          MainThread:copilot|MainThread:*/copilot) return 0 ;;
-        esac
-      done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-      ;;
-  esac
-  comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
-  case "${comm##*/}" in
-    copilot) return 0 ;;
-  esac
-  return 1
+  local comm
+  [ "$(fm_tmux_foreground_harness_name "$1" 2>/dev/null || true)" = copilot ] && return 0
+  comm=$(tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null) || comm=
+  [ "$(fm_tmux_harness_process_name "$comm" "$comm" 2>/dev/null || true)" = copilot ]
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
