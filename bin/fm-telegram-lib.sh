@@ -108,6 +108,7 @@ FM_TELEGRAM_CHAT_ID=
 # shellcheck disable=SC2034 # Read by sourcing callers.
 FM_TELEGRAM_TOKEN_FILE=
 FM_TELEGRAM_SECRET_ERROR_PATH=
+# shellcheck disable=SC2034 # Read by sourcing callers.
 FM_TELEGRAM_CONFIG_ERROR=
 
 _fm_telegram_config_dir() {  # <home>
@@ -206,6 +207,7 @@ fm_telegram_config_load() {  # <home>
     return 2
   fi
   fm_telegram_token_usable "$token" || {
+    # shellcheck disable=SC2034 # Read by sourcing callers.
     FM_TELEGRAM_CONFIG_ERROR="token file $token must contain exactly one usable token line"
     return 2
   }
