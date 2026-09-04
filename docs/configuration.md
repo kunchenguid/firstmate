@@ -303,10 +303,17 @@ On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 gemini is likewise refused for secondmates because it has no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/gemini.md) owns the credential precondition, canonical-launch wiring, and raw-launch limitations.
+omp (Oh My Pi) is a candidate crewmate/scout adapter rather than a verified one.
+Its pinned 17.2.9 effective configuration and effective tool registry remain unproven because no supported matching session-free importable consumer artifact is available.
+Every runnable launch remains refused until immutable executable provenance, that consumer proof, and the separate ATX-2170 First Mate interrupt, exit, and relaunch proof all pass; no mandatory prerequisite substitutes for another.
+First Mate remains its sole supervisor, and tmux is the only backend allowed for bounded candidate development.
+The [`fm-spawn.sh` usage contract](../bin/fm-spawn.sh) owns explicit selection, hard dormancy, model, backend, relaunch, and trace ordering.
+[`fm-omp-candidate-artifacts.sh`](../bin/fm-omp-candidate-artifacts.sh) owns exact flags, environment isolation, requested tool containment, and input policy.
+The [harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md) owns adapter capability and safety details, and [runtime backend verification](verification/runtime-backends.md#omp-candidate-tool-containment) owns current empirical evidence.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
-Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Launch mechanics for verified adapters live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh), alongside the dormant candidate's non-runnable request template.
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
