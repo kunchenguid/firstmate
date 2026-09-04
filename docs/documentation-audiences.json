@@ -289,6 +289,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/permission-modes.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },

@@ -42,6 +42,19 @@ jobs:
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
+  tests-pi-permission-modes:
+    name: Behavior tests (Pi permission modes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Install pinned Pi runtime
+        run: npm install --prefix "$RUNNER_TEMP/fm-pi" @earendil-works/pi-coding-agent@0.84.2
+      - name: Run mandatory permission-mode behavior tests
+        env:
+          FM_PI_PACKAGE_DIR: ${{ runner.temp }}/fm-pi/node_modules/@earendil-works/pi-coding-agent
+        run: tests/fm-permission-modes.test.sh
+
   # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
