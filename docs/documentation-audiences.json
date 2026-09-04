@@ -253,6 +253,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "CONTEXT.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
     },
@@ -270,6 +274,10 @@
     },
     {
       "path": "docs/agent-control.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/adr/0001-public-visual-evidence-with-private-outputs.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -358,6 +366,10 @@
     },
     {
       "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/prd-public-visual-evidence-with-private-outputs.md",
       "audience": "maintainer-architecture"
     },
     {
