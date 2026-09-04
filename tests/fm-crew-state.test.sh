@@ -1450,7 +1450,33 @@ test_no_run_idle_pane_paused() {
   assert_contains "$out" "state: paused" "paused log -> paused"
   assert_contains "$out" "source: status-log" "idle pause -> status-log source"
   assert_contains "$out" "holding for the upstream tool release" "the pause reason is carried in the detail"
+  printf 'The release window opens tomorrow.\n\n' >> "$d/state/feat-pause.status"
+  out=$(run_crew_state "$d" feat-pause)
+  assert_contains "$out" "state: paused" "continuation prose and trailing blanks preserve the pause"
+  assert_contains "$out" "holding for the upstream tool release" "multiline pause preserves its declared reason"
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
+}
+
+test_secondmate_open_block_survives_unrelated_append() {
+  reset_fakes
+  local d out suffix gen
+  d=$(new_case buried-block)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer' 'working: continuing another task'; do
+    printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$d/state/mate.status"
+    out=$(run_crew_state "$d" mate)
+    assert_contains "$out" "state: blocked" "open blocker survives '$suffix' with a busy endpoint"
+    assert_contains "$out" "need release access" "the open blocker's reason remains visible"
+  done
+  printf 'resolved [key=access]: access granted\n' >> "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown" "matching resolution clears the blocker"
+  assert_not_contains "$out" "need release access" "closed blocker is not resurrected"
+  pass "a busy secondmate keeps its open blocker until that exact key closes"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -2239,6 +2265,7 @@ test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
+test_secondmate_open_block_survives_unrelated_append
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
