@@ -36,6 +36,26 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
+# Validation judges the SHAPE of a payload, never the quality of a question.
+# A question the composer wrote badly still reaches the captain: he cannot
+# answer what he is never shown, so no rule here may withhold, drop, defer or
+# hide a Captain's Call card on account of what it says. Two faults are handled
+# by marking the card instead:
+#
+#   - A card carrying more than one question, or offering options that describe
+#     how to work through the card rather than answering it, is dealt with a
+#     visible `bundle` flag telling the composer to split it. Splitting is the
+#     composer's job; the board only says it is owed.
+#   - A card the composer knows is thin carries an optional `missing` string -
+#     a short plain statement of what is not yet established, for example
+#     "the two figures are not named yet". It is rendered verbatim as a visible
+#     `incomplete` flag. It is never required and never checked: a card whose
+#     gaps are named still asks its question, and one whose gaps are not named
+#     still has to be asked.
+#
+# Both are informational. Neither can fail a build, and neither is a substitute
+# for the composer supplying the specifics in the first place.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -93,6 +113,7 @@ validate_payload() {  # <data.json>
           and (.label | nonempty_string)
           and optional_string("hint")] | all)
       and (optional_string("about"))
+      and (optional_string("missing"))
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))

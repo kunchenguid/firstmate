@@ -288,6 +288,170 @@ test_hiding_a_picked_charted_row_clears_its_selection() {
   pass "filtering away a picked charted row clears its selection instead of dispatching it invisibly"
 }
 
+# --- the answer a captain queues -------------------------------------------
+#
+# The card offers options plus a free-text box. A captain who wants to say
+# something the options do not cover must be able to type it and queue it with
+# nothing selected; making him tick an option first would force him to assert
+# something he does not mean before he can say what he does.
+
+call_payload() {  # <call-items-json>
+  jq -n --argjson calls "$1" '{
+    schema:"fm-bearings-board.v1", home:"answer-home", generated:"2026-09-04T00:00Z",
+    prs_live:false, captains_call:$calls, underway:[], landed:[], charted:[]}'
+}
+
+one_question_card() {
+  printf '%s' '[{
+    "key":"base-branch","type":"decision","repo":"firstmate",
+    "title":"Which base branch should this land on?",
+    "about":"The branch targets main; the other phases landed on develop.",
+    "options":[{"value":"develop","label":"Rebase onto develop"},
+               {"value":"main","label":"Keep targeting main"}],
+    "allow_freeform":true
+  }]'
+}
+
+test_a_typed_answer_queues_on_its_own_with_no_option_selected() {
+  local home out
+  home=$(make_home bare-note)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"neither - hold it until the study lands"}},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.question == "base-branch")
+      and (.queued[0].options.data.answer == "neither - hold it until the study lands")
+      and (.queued[0].prompt | test("neither - hold it until the study lands"))
+      and (.deck.cards[0].queued == true)
+  ' >/dev/null || fail "a typed answer with no option selected did not queue as the whole answer: $out"
+  pass "a typed answer queues on its own with no option selected"
+}
+
+test_a_selected_option_is_annotated_by_the_typed_note() {
+  local home out
+  home=$(make_home option-and-note)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"set":{"checked":true}},
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"but not before Friday"}},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "develop - but not before Friday")
+  ' >/dev/null || fail "a selected option was not annotated by the typed note: $out"
+  pass "a selected option is annotated by the typed note"
+}
+
+test_queueing_nothing_at_all_says_so_instead_of_going_quiet() {
+  local home out
+  home=$(make_home empty-answer)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 0
+      and (.deck.cards[0].queued == false)
+      and (.deck.cards[0].limit | test("Type your answer"))
+  ' >/dev/null || fail "an empty submit queued something, or said nothing at all: $out"
+  pass "queueing nothing at all reports what is missing instead of going quiet"
+}
+
+test_the_dealt_card_owns_the_caret_so_typing_lands_in_its_answer_box() {
+  local home out
+  home=$(make_home caret)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")")
+  printf '%s' "$out" | jq -e '.deck.focused | test("bb-freeform")' >/dev/null     || fail "the dealt card did not take the caret into its own answer box: $out"
+  pass "the dealt card owns the caret so typing lands in its answer box"
+}
+
+# --- badly composed cards are marked, never withheld ------------------------
+#
+# A question the captain never sees cannot be answered, so no fault in a card
+# may keep it off the board. The board says what is wrong on the card's face
+# and deals it anyway.
+
+test_a_card_asking_several_questions_is_flagged_and_still_dealt() {
+  local home out
+  home=$(make_home bundle-title)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"four-things","type":"decision","repo":"interact",
+    "title":"What do we charge on? Is a member a person? Is onboarding in the price?",
+    "about":"Three product questions carried on one task.",
+    "options":[{"value":"walk","label":"Walk me through all of them"},
+               {"value":"rec","label":"Take my recommendation on all of them"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("bundle") != null)
+      and (.deck.cards[0].flags[0].text | test("one question per card"))
+  ' >/dev/null || fail "a multi-question card was not flagged, or was withheld: $out"
+  pass "a card asking several questions is flagged as a bundle and still dealt"
+}
+
+test_options_that_answer_the_card_rather_than_the_question_are_flagged() {
+  local home out
+  home=$(make_home bundle-options)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"four-things","type":"decision","repo":"interact",
+    "title":"Four things about the product I need you to settle",
+    "about":"Pricing, membership, fundraising and onboarding.",
+    "options":[{"value":"walk","label":"Walk me through all four"},
+               {"value":"rec","label":"Take my recommendation on all four"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("bundle") != null)
+  ' >/dev/null || fail "options about how to work the card were not flagged as a bundle: $out"
+  pass "options that answer how to work the card rather than the question are flagged"
+}
+
+test_one_question_with_real_options_is_not_flagged() {
+  local home out
+  home=$(make_home no-false-bundle)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")")
+  printf '%s' "$out" | jq -e '(.deck.cards[0].flags | length) == 0' >/dev/null     || fail "an ordinary single-question card was flagged: $out"
+  pass "one question with real options carries no flag"
+}
+
+test_a_thin_card_carries_what_is_missing_and_is_still_dealt() {
+  local home out
+  home=$(make_home thin-card)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"uncitable","type":"decision","repo":"jt2627s",
+    "title":"Two figures in an approved stage cannot be traced. Keep or cut?",
+    "about":"They are used in the study but no source we can find supports them.",
+    "missing":"the two figures are not named yet - firstmate is tracing them",
+    "options":[{"value":"keep","label":"Keep them"},{"value":"cut","label":"Cut them"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("incomplete") != null)
+      and (.deck.cards[0].flags | map(.text) | any(test("not named yet")))
+  ' >/dev/null || fail "a thin card lost its missing note, or was withheld: $out"
+  pass "a thin card carries what is missing and is still dealt"
+}
+
+test_every_card_reaches_the_board_however_badly_composed() {
+  local home out
+  home=$(make_home never-withheld)
+  out=$(render_payload "$home" "$(call_payload '[
+    {"key":"a","type":"decision","repo":"one","title":"Plain question?","about":"named specifics",
+     "options":[{"value":"y","label":"Yes"}]},
+    {"key":"b","type":"decision","repo":"one","title":"Two? Questions?","about":"",
+     "options":[{"value":"walk","label":"Walk me through all of them"}]},
+    {"key":"c","type":"decision","repo":"two","title":"Thin one","about":"a stage",
+     "missing":"nothing is named yet","options":[{"value":"y","label":"Yes"}]}
+  ]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 3
+      and (.stats[0].n == 3)
+      and (.error == "")
+  ' >/dev/null || fail "the board dropped a card instead of dealing it flagged: $out"
+  pass "every card reaches the board however badly composed"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
@@ -299,3 +463,12 @@ test_type_filter_narrows_only_the_stack_not_the_other_sections
 test_clear_filters_restores_everything
 test_a_filter_combination_with_no_matches_stays_graceful
 test_hiding_a_picked_charted_row_clears_its_selection
+test_a_typed_answer_queues_on_its_own_with_no_option_selected
+test_a_selected_option_is_annotated_by_the_typed_note
+test_queueing_nothing_at_all_says_so_instead_of_going_quiet
+test_the_dealt_card_owns_the_caret_so_typing_lands_in_its_answer_box
+test_a_card_asking_several_questions_is_flagged_and_still_dealt
+test_options_that_answer_the_card_rather_than_the_question_are_flagged
+test_one_question_with_real_options_is_not_flagged
+test_a_thin_card_carries_what_is_missing_and_is_still_dealt
+test_every_card_reaches_the_board_however_badly_composed

@@ -259,6 +259,16 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--radius-xs); padding: 5px 9px 4px;
 }
 .is-queued .bb-queued { display: inline-flex; }
+/* A card the composer left in poor shape is still dealt; the flag says so on
+   the card's face rather than keeping the question off the board. */
+.bb-flag {
+  display: flex; align-items: baseline; gap: 8px;
+  background: var(--status-warn-soft); border: 1px solid var(--gold-500);
+  border-radius: var(--radius-sm); padding: 7px 10px;
+}
+.bb-flag__k { flex: none; font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--status-warn); }
+.bb-flag__v { font-size: var(--fs-xs); line-height: 1.4; color: var(--text-body); }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
 .bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
@@ -621,6 +631,31 @@ __FM_BEARINGS_BOARD_DATA__
     return row;
   }
 
+  /* Marks, never gates. Every question the composer hands the board reaches the
+     captain; a card in poor shape reaches him carrying a plain statement of
+     what is wrong with it. A question he never sees is the one outcome the
+     board must never produce, so nothing below removes, hides or defers a
+     card - it only writes on it. */
+  var BUNDLE_OPTION =
+    /walk me through|one by one|one at a time|take my recommendation|all (?:of them|of these|three|four|five|six)\b|go through (?:them|these)/i;
+  function bundleFault(it) {
+    if ((String(it.title).match(/\?/g) || []).length > 1) {
+      return "this card asks more than one question - split it, one question per card";
+    }
+    var meta = (it.options || []).some(function (o) { return BUNDLE_OPTION.test(String(o.label)); });
+    if (meta) {
+      return "these options answer how to work through the card rather than the question itself" +
+        " - split it, one question per card";
+    }
+    return "";
+  }
+  function flag(kind, text) {
+    var f = el("div", "bb-flag");
+    f.appendChild(el("span", "bb-flag__k", kind));
+    f.appendChild(el("span", "bb-flag__v", text));
+    return f;
+  }
+
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     card.dataset.repo = repoKey(item.repo);
@@ -638,6 +673,16 @@ __FM_BEARINGS_BOARD_DATA__
     pad.appendChild(top);
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));
+
+    var bundle = bundleFault(item);
+    if (bundle) pad.appendChild(flag("bundle", bundle));
+    /* `missing` is the composer's own admission that it published a thin card.
+       It is shown as given and never checked, because a card whose gaps are
+       named still asks its question, and one whose gaps are not named still
+       has to be asked. */
+    if (typeof item.missing === "string" && item.missing.trim()) {
+      pad.appendChild(flag("incomplete", item.missing.trim()));
+    }
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
@@ -700,7 +745,16 @@ __FM_BEARINGS_BOARD_DATA__
       var note = (fd.get("note") || "").trim();
       /* picked option, optionally annotated; a bare note is itself the answer */
       var answer = value ? (note ? value + " - " + note : value) : note;
-      if (!answer) return;
+      if (!answer) {
+        /* Never fail silently here: an unexplained dead button is what makes a
+           captain believe the box needs an option ticked before it will take
+           his words. Say what is missing instead. */
+        answerLimit.textContent = item.allow_freeform
+          ? "Type your answer, or pick an option, then queue it."
+          : "Pick an option, then queue it.";
+        answerLimit.classList.add("is-visible");
+        return;
+      }
       if (utf8ByteLength(answer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
@@ -751,6 +805,15 @@ __FM_BEARINGS_BOARD_DATA__
     /* the pile thins as the deal approaches the bottom */
     deck.classList.toggle("bb-call--penult", active === visibleCards.length - 2);
     deck.classList.toggle("bb-call--last", active === visibleCards.length - 1);
+    /* Put the caret in the dealt card's own answer box. The board is embedded
+       in a review tool whose annotation popup also takes typing, and words
+       typed there are a comment on the card, not an answer to it. Owning the
+       caret keeps the captain's words in the field that answers the question. */
+    var dealt = visibleCards[active];
+    var noteBox = dealt && dealt.querySelectorAll(".bb-freeform")[0];
+    if (noteBox && typeof noteBox.focus === "function") {
+      try { noteBox.focus({ preventScroll: true }); } catch (e) { noteBox.focus(); }
+    }
   }
   function cardVisible(card) {
     var repoOk = activeRepos.size === 0 || activeRepos.has(card.dataset.repo);
