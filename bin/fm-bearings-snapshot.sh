@@ -470,6 +470,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
+      background_work_collection:(if ($background.collection.truncated // true) then "truncated" else "complete" end),
       background_work: [ $background.records[] | {
         id, description, task, pid, started_at, expected_finish_at,
         liveness:.liveness.status, progress:.progress.status,

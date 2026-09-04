@@ -14,8 +14,8 @@
 # is reported dead rather than mistaken for the registered work. The progress
 # command is stored as an argv vector and run directly, from the registered
 # working directory, with no shell interpretation. Its stdout must be one
-# non-empty printable line of at most 512 bytes. It is hard-bounded by
-# --progress-timeout (default 2 seconds), so it is suitable for dashboard reads.
+# non-empty printable line of at most 512 bytes. Each probe is bounded by
+# --progress-timeout (default 2 seconds).
 #
 # list observes every durable record under state/background-work/. A successful
 # progress value is compared with the prior observation. A changed value is
@@ -24,7 +24,12 @@
 # a failed/timed-out/malformed progress command, an unreadable process identity,
 # a missing working directory, or an observation race reads unknown. A missing
 # process, zombie, or identity mismatch reads dead and remains listed until
-# retire, so quiet death cannot look like absence or health.
+# retire, so quiet death cannot look like absence or health. List probes at most
+# 32 records concurrently under one 3-second collection budget. Every record is
+# still emitted; work not completed within the budget reads unknown, and the
+# collection metadata discloses incomplete or capped probing. Three seconds keeps
+# this below the five-second fleet snapshot collection budget while allowing the
+# normal two-second per-probe bound plus process startup and JSON encoding.
 #
 # `list --json` emits schema fm-background-work-list.v1. This is the supported
 # machine interface for dashboards; consumers never read the private records.
@@ -42,6 +47,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REGISTRY="$STATE/background-work"
 DEFAULT_STALE_AFTER=${FM_BACKGROUND_WORK_STALE_AFTER:-300}
 DEFAULT_PROGRESS_TIMEOUT=${FM_BACKGROUND_WORK_PROGRESS_TIMEOUT:-2}
+COLLECTION_BUDGET=${FM_BACKGROUND_WORK_COLLECTION_BUDGET:-3}
+COLLECTION_MAX_PROBES=${FM_BACKGROUND_WORK_COLLECTION_MAX_PROBES:-32}
+COLLECTION_PROBE_TIMEOUT=${FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT:-2}
 MAX_PROGRESS_BYTES=512
 RUNTIME_LIBS_LOADED=0
 
@@ -96,6 +104,12 @@ positive_integer() {
   esac
 }
 
+positive_integer "$COLLECTION_BUDGET" || die "FM_BACKGROUND_WORK_COLLECTION_BUDGET must be a positive integer"
+positive_integer "$COLLECTION_MAX_PROBES" || die "FM_BACKGROUND_WORK_COLLECTION_MAX_PROBES must be a positive integer"
+positive_integer "$COLLECTION_PROBE_TIMEOUT" || die "FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT must be a positive integer"
+[ "$COLLECTION_PROBE_TIMEOUT" -lt "$COLLECTION_BUDGET" ] \
+  || die "FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT must be less than the collection budget"
+
 meta_value() { # <file> <key>
   awk -v key="$2" '
     index($0, key "=") == 1 { count++; value=substr($0, length(key) + 2) }
@@ -144,7 +158,7 @@ resolve_executable() { # <command> <cwd>
 register_work() {
   local id=${1-} description='' task='' pid='' started_at='' expected_finish_at=''
   local cwd stale_after=$DEFAULT_STALE_AFTER progress_timeout=$DEFAULT_PROGRESS_TIMEOUT
-  local current_identity resolved stage record tmp arg
+  local current_identity resolved stage record tmp arg zombie_rc
   local -a progress=()
   shift || true
   valid_id "$id" || die "invalid background-work id: $id"
@@ -184,9 +198,10 @@ register_work() {
 
   load_runtime_libs
   fm_pid_alive "$pid" || die "cannot adopt pid $pid: process is not alive"
-  if process_is_zombie "$pid"; then
-    die "cannot adopt pid $pid: process is a zombie"
-  fi
+  process_is_zombie "$pid"
+  zombie_rc=$?
+  [ "$zombie_rc" -ne 0 ] || die "cannot adopt pid $pid: process is a zombie"
+  [ "$zombie_rc" -ne 2 ] || die "cannot adopt pid $pid: process state is unknown"
   current_identity=$(fm_pid_identity "$pid" 2>/dev/null) \
     || die "cannot adopt pid $pid: process identity is unknown"
   safe_text "$current_identity" 131072 || die "cannot adopt pid $pid: process identity is not a single printable line"
@@ -289,6 +304,11 @@ observe_liveness() {
   if [ "$zombie_rc" -eq 0 ]; then
     LIVENESS_STATUS=dead
     LIVENESS_REASON=zombie
+    return 0
+  fi
+  if [ "$zombie_rc" -eq 2 ]; then
+    LIVENESS_STATUS=unknown
+    LIVENESS_REASON='process-state-unreadable'
     return 0
   fi
   current=$(fm_pid_identity "$RECORD_PID" 2>/dev/null) || {
@@ -417,13 +437,28 @@ observe_progress() { # <record-directory> <now-epoch> <now-iso>
   fm_lock_release "$lock"
 }
 
-record_json() { # <record-directory> <now-epoch> <now-iso>
-  local dir=$1 now=$2 now_iso=$3 pid_json=null expected_json=null value_json=null
+record_json() { # <record-directory> <now-epoch> <now-iso> [budget-only]
+  local dir=$1 now=$2 now_iso=$3 mode=${4-} pid_json=null expected_json=null value_json=null
   local observed_json=null changed_json=null description_json=null task_json=null started_json=null
   local stale_json=null timeout_json=null
   load_record "$dir" || true
-  observe_liveness
-  observe_progress "$dir" "$now" "$now_iso"
+  if [ "${BACKGROUND_COLLECTION_CONTEXT:-0}" = 1 ] \
+    && [ "$RECORD_VALID" -eq 1 ] \
+    && [ "$RECORD_PROGRESS_TIMEOUT" -gt "$COLLECTION_PROBE_TIMEOUT" ]; then
+    RECORD_PROGRESS_TIMEOUT=$COLLECTION_PROBE_TIMEOUT
+  fi
+  if [ "$mode" = budget-only ]; then
+    LIVENESS_STATUS=unknown
+    LIVENESS_REASON=collection-budget
+    PROGRESS_STATUS=unknown
+    PROGRESS_REASON=collection-budget
+    PROGRESS_VALUE=''
+    PROGRESS_OBSERVED_AT=''
+    PROGRESS_LAST_CHANGED_AT=''
+  else
+    observe_liveness
+    observe_progress "$dir" "$now" "$now_iso"
+  fi
   if [ "$RECORD_VALID" -eq 1 ]; then
     pid_json=$RECORD_PID
     description_json=$(jq -Rn --arg value "$RECORD_DESCRIPTION" '$value')
@@ -465,8 +500,43 @@ record_json() { # <record-directory> <now-epoch> <now-iso>
         timeout_seconds:$timeout_seconds}}'
 }
 
+collect_records() { # <output-directory> <now-epoch> <now-iso>
+  local output=$1 now=$2 generated=$3 record id tmp count=0 worker watchdog monitor_was_on=0
+  local -a workers=()
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  for record in "$REGISTRY"/*; do
+    [ -d "$record" ] && [ ! -L "$record" ] || continue
+    count=$((count + 1))
+    [ "$count" -le "$COLLECTION_MAX_PROBES" ] || continue
+    id=${record##*/}
+    tmp="$output/.${id}.$$"
+    (BACKGROUND_COLLECTION_CONTEXT=1 record_json "$record" "$now" "$generated" > "$tmp" \
+      && mv -f -- "$tmp" "$output/$id.json" \
+      && : > "$output/$id.complete") &
+    workers+=("$!")
+  done
+  (
+    sleep "$COLLECTION_BUDGET"
+    for worker in "${workers[@]+"${workers[@]}"}"; do
+      kill -TERM -- "-$worker" 2>/dev/null || true
+    done
+    sleep 0.2
+    for worker in "${workers[@]+"${workers[@]}"}"; do
+      kill -KILL -- "-$worker" 2>/dev/null || true
+    done
+  ) &
+  watchdog=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+  for worker in "${workers[@]+"${workers[@]}"}"; do
+    wait "$worker" 2>/dev/null || true
+  done
+  kill -TERM -- "-$watchdog" 2>/dev/null || kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+}
+
 list_work() {
-  local format=${1-} generated now records_tmp record document
+  local format=${1-} generated now records_tmp record document stage id total=0 attempted=0 completed=0 truncated=false
   case "$format" in ''|--json) ;; *) die "unknown list option: $format" ;; esac
   command -v jq >/dev/null 2>&1 || die "jq is required to list background work"
   generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die "cannot read the current UTC time"
@@ -476,14 +546,33 @@ list_work() {
   : > "$records_tmp"
   if [ -d "$REGISTRY" ]; then
     load_runtime_libs
+    stage=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-background-work-collect.XXXXXX") \
+      || { rm -f -- "$records_tmp"; die "cannot stage background-work collection"; }
     for record in "$REGISTRY"/*; do
       [ -d "$record" ] && [ ! -L "$record" ] || continue
-      record_json "$record" "$now" "$generated" >> "$records_tmp" \
-        || { rm -f -- "$records_tmp"; die "cannot encode background-work record: ${record##*/}"; }
+      total=$((total + 1))
+      [ "$attempted" -ge "$COLLECTION_MAX_PROBES" ] || attempted=$((attempted + 1))
+      id=${record##*/}
+      record_json "$record" "$now" "$generated" budget-only > "$stage/$id.json" \
+        || { rm -rf -- "$stage"; rm -f -- "$records_tmp"; die "cannot encode background-work record: $id"; }
     done
+    collect_records "$stage" "$now" "$generated"
+    for record in "$REGISTRY"/*; do
+      [ -d "$record" ] && [ ! -L "$record" ] || continue
+      id=${record##*/}
+      [ ! -f "$stage/$id.complete" ] || completed=$((completed + 1))
+      cat "$stage/$id.json" >> "$records_tmp" \
+        || { rm -rf -- "$stage"; rm -f -- "$records_tmp"; die "cannot read background-work result: $id"; }
+    done
+    rm -rf -- "$stage"
   fi
+  [ "$completed" -eq "$attempted" ] && [ "$attempted" -eq "$total" ] || truncated=true
   document=$(jq -s --arg generated "$generated" --arg home "$FM_HOME" \
-    '{schema:"fm-background-work-list.v1", generated:$generated, fm_home:$home, records:.}' \
+    --argjson budget "$COLLECTION_BUDGET" --argjson total "$total" \
+    --argjson attempted "$attempted" --argjson completed "$completed" --argjson truncated "$truncated" \
+    '{schema:"fm-background-work-list.v1", generated:$generated, fm_home:$home,
+      collection:{budget_seconds:$budget,total_records:$total,probes_attempted:$attempted,
+        probes_completed:$completed,truncated:$truncated},records:.}' \
     "$records_tmp") || { rm -f -- "$records_tmp"; die "cannot encode background-work list"; }
   rm -f -- "$records_tmp"
   if [ "$format" = --json ]; then

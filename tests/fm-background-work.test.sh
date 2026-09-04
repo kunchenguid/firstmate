@@ -221,6 +221,73 @@ test_retire_removes_visibility_without_signalling_process() {
   pass "retirement removes only visibility and leaves the process running"
 }
 
+test_unknown_process_state_is_never_adopted_or_reported_alive() {
+  local home progress fakebin pid result
+  home=$(make_home unknown-process-state)
+  progress=$(make_progress_command unknown-state-progress 'printf "visible\n"')
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'stat='*) exit 1 ;;
+  *'lstart='*) printf 'Thu Sep  3 22:25:13 2026 fixture worker\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  start_sleeper
+  pid=$STARTED_PID
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/missing-proc" FM_HOME="$home" \
+    "$COMMAND" register observed --description "Collecting fixture observations" \
+      --task fixture-investigation --pid "$pid" --started-at 2026-09-03T22:25:13Z \
+      --progress "$progress" >/dev/null 2>&1 \
+    && fail "fixture unexpectedly registered with unreadable process state"
+
+  register_fixture "$home" observed "$pid" "$progress" ''
+  result=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/missing-proc" list_json "$home") \
+    || fail "could not observe an indeterminate process state"
+  printf '%s\n' "$result" | jq -e '
+    .records[0].liveness.status == "unknown"
+      and .records[0].liveness.reason == "process-state-unreadable"
+      and .records[0].progress.status == "unknown"
+  ' >/dev/null || fail "an indeterminate process state was reported alive"
+  pass "unreadable process state is refused at adoption and remains unknown during observation"
+}
+
+test_many_hung_probes_share_one_disclosed_collection_budget() {
+  local home progress result started elapsed i
+  home=$(make_home collection-budget)
+  progress=$(make_progress_command collection-budget-progress 'sleep 10; printf "late\n"')
+  start_sleeper
+  i=1
+  while [ "$i" -le 6 ]; do
+    register_fixture "$home" "hung-$i" "$STARTED_PID" "$progress" '' --progress-timeout 10
+    i=$((i + 1))
+  done
+  started=$(date +%s)
+  result=$(FM_BACKGROUND_WORK_COLLECTION_BUDGET=2 \
+    FM_BACKGROUND_WORK_COLLECTION_PROBE_TIMEOUT=1 \
+    FM_BACKGROUND_WORK_COLLECTION_MAX_PROBES=4 list_json "$home") \
+    || fail "bounded concurrent collection failed"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 4 ] || fail "hung probes exceeded the shared collection budget (${elapsed}s)"
+  printf '%s\n' "$result" | jq -e '
+    (.records | length) == 6
+      and .collection.budget_seconds == 2
+      and .collection.total_records == 6
+      and .collection.probes_attempted == 4
+      and .collection.probes_completed == 4
+      and .collection.truncated == true
+      and all(.records[]; .progress.status == "unknown"
+        and (.progress.reason == "timeout" or .progress.reason == "collection-budget"))
+      and all(.records[] | select(.progress.reason == "collection-budget");
+        .liveness.status == "unknown")
+      and ([.records[] | select(.progress.reason == "collection-budget")] | length) == 2
+  ' >/dev/null || fail "budgeted collection hid records, health, or truncation: $result"
+  pass "many hung probes remain visible and unknown under one disclosed collection budget"
+}
+
 test_live_adopted_process_reads_alive_and_progressing
 test_dead_process_remains_listed_as_dead
 test_unchanged_progress_becomes_stalled_while_process_stays_alive
@@ -228,3 +295,5 @@ test_hung_progress_command_reads_unknown
 test_reused_pid_reads_dead
 test_unregistered_process_is_not_listed
 test_retire_removes_visibility_without_signalling_process
+test_unknown_process_state_is_never_adopted_or_reported_alive
+test_many_hung_probes_share_one_disclosed_collection_budget
