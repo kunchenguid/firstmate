@@ -414,6 +414,22 @@ test_raw_agent_alias_resolves_to_the_cursor_bar() {
     "the split-string refusal must explain why raw launch classification stopped"
   [ ! -s "$LAUNCH_LOG" ] || fail "the refused split-string alias spawn must not compose a launch"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "FOO='two words' agent --flag")
+  status=$?
+  expect_code 1 "$status" "a quoted assignment must still resolve the cursor alias"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the quoted assignment must not hide the cursor alias from its refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused quoted-assignment alias spawn must not compose a launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "/usr/bin/env -S agent --flag")
+  status=$?
+  expect_code 1 "$status" "an absolute env wrapper must refuse before cursor verification can be bypassed"
+  assert_contains "$out" "absolute wrappers" \
+    "the absolute env refusal must explain why raw launch classification stopped"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused absolute-wrapper alias spawn must not compose a launch"
+
   # 1. An unattended ship spawn through the verified alias is refused by the
   # cursor bar, not launched through the unverified-adapter escape hatch.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \

@@ -1833,30 +1833,40 @@ launch_template() {
 }
 
 raw_launch_executable() {
-  local line=$1 word env=0 env_option_arg=0
-  for word in $line; do
-    if [ "$env_option_arg" -eq 1 ]; then
-      env_option_arg=0
-      continue
-    fi
-    if [ "$env" -eq 0 ]; then
-      case "$word" in
-        [A-Za-z_]*=*) continue ;;
-        env) env=1; continue ;;
-        *) printf '%s\n' "$word"; return 0 ;;
-      esac
-    fi
-    case "$word" in
-      [A-Za-z_]*=*) continue ;;
-      --) env=2; continue ;;
-      -S|--split-string|--split-string=*) return 2 ;;
-      -u|--unset|-C|--chdir) env_option_arg=1; continue ;;
-      -u?*|--unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
-      -*) continue ;;
-      *) printf '%s\n' "$word"; return 0 ;;
-    esac
-  done
-  return 1
+  case "$1" in
+    *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'*'*|*'?'*|*'['*|*']'*|*'{'*|*'}'*|*'~'*|*$'\n'*|*$'\r'*) return 2 ;;
+  esac
+  perl -MText::ParseWords=shellwords -e '
+    my @words = eval { shellwords($ARGV[0]) };
+    exit 2 if $@ || !@words;
+    my $index = 0;
+    $index++ while $index < @words && $words[$index] =~ /\A[A-Za-z_][A-Za-z0-9_]*=/;
+    exit 2 if $index >= @words;
+    if ($words[$index] eq q{env}) {
+      $index++;
+      while ($index < @words) {
+        my $word = $words[$index];
+        if ($word =~ /\A[A-Za-z_][A-Za-z0-9_]*=/) { $index++; next; }
+        if ($word eq q{--}) { $index++; last; }
+        exit 2 if $word eq q{-S} || $word eq q{--split-string} || $word =~ /\A--split-string=/;
+        if ($word eq q{-u} || $word eq q{--unset} || $word eq q{-C} || $word eq q{--chdir}) {
+          $index += 2;
+          next;
+        }
+        if ($word =~ /\A-u.+/ || $word =~ /\A--unset=/ || $word =~ /\A--chdir=/
+          || $word =~ /\A(?:-i|--ignore-environment|-0|--null|-v|--debug)\z/) {
+          $index++;
+          next;
+        }
+        exit 2 if $word =~ /\A-/;
+        last;
+      }
+    }
+    exit 2 if $index >= @words || $words[$index] eq q{env};
+    exit 2 if $words[$index] =~ m{/(?:env|command|exec|nice|nohup|sudo|time)\z};
+    exit 2 if $words[$index] =~ /\A(?:command|exec|nice|nohup|sudo|time)\z/;
+    print $words[$index], qq{\n};
+  ' -- "$1"
 }
 
 case "$ARG3" in
@@ -1866,7 +1876,7 @@ case "$ARG3" in
     raw_executable_status=0
     raw_executable=$(raw_launch_executable "$LAUNCH") || raw_executable_status=$?
     if [ "$raw_executable_status" -eq 2 ]; then
-      echo "error: raw launch commands using env --split-string/-S are refused because their executable cannot be verified for the cursor unattended-launch bar; invoke the executable directly or use env assignments without split-string" >&2
+      echo "error: raw launch command is not a direct executable or supported bare env wrapper, so its executable cannot be verified for the cursor unattended-launch bar; shell expansion syntax, absolute wrappers, and env --split-string/-S are refused" >&2
       exit 1
     fi
     [ -z "$raw_executable" ] || HARNESS=$(basename "$raw_executable")
