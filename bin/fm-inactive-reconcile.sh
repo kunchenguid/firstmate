@@ -360,8 +360,9 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 # (fm-classify-lib.sh documents both), so a single-line lookback would
 # silently drop an already-landed PR from parent-channel delivery. Scans
 # backward across any run of consecutive trailing declared-pause lines,
-# bounded by FM_TERMINAL_PAUSE_SCAN_MAX (default 20 lines) so a pathological
-# ledger cannot make this expensive; exhausting the budget without finding a
+# bounded by FM_TERMINAL_PAUSE_SCAN_MAX (default lookback depth
+# FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT lines) so a pathological ledger cannot
+# make this expensive; exhausting the budget without finding a
 # done/failed line is "no terminal report", never a guess.
 # Prints the terminal line, then a second line holding whatever non-blank line
 # immediately precedes it (empty when there is none): a caller run through
@@ -378,8 +379,8 @@ child_terminal_ledger_line() { # <status>
   lines=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$') || true
   n=$(printf '%s\n' "$lines" | grep -c .)
   [ "$n" -ge 1 ] || return 1
-  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
-  case "$budget" in ''|*[!0-9]*|0) budget=20 ;; esac
+  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-$FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT}
+  case "$budget" in ''|*[!0-9]*|0) budget=$FM_TERMINAL_PAUSE_SCAN_MAX_DEFAULT ;; esac
   [ "$n" -lt "$budget" ] && budget=$n
   i=1
   while [ "$i" -le "$budget" ]; do
