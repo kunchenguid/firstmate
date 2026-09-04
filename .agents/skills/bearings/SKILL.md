@@ -118,7 +118,7 @@ After handling, rebuild the board from a fresh snapshot so acted-on items leave 
 
 A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
 The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
-Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
+Only the exact answer value `merge` authorizes a merge; an answer the captain typed in his own words is his instruction text to read and act on with judgment, never an auto-merge.
 
 ## Chat-response contract
 

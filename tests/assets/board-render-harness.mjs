@@ -13,7 +13,8 @@
 //     for a checkbox);
 //   the same shape with a "set" object instead of a click assigns those
 //   properties directly (e.g. {"set":{"checked":true}} to tick a checkbox
-//   without going through its own click handler).
+//   without going through its own click handler), optionally followed by
+//   {"fire":"input"} to dispatch that event the way typing would.
 // Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}],
 // filterbar:{chips,clearHidden}, deck:{...}, sections:{...} }
 import { readFileSync } from "node:fs";
@@ -68,8 +69,26 @@ class Node {
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
   }
+  // Events reach ancestor listeners, as they do in a browser: the decision
+  // form listens for changes made on the radios inside it.
+  dispatch(type) {
+    const ev = { type, target: this, preventDefault() {} };
+    for (let n = this; n; n = n.parentNode) {
+      for (const fn of n._listeners[type] || []) fn(ev);
+    }
+  }
   click() {
-    for (const fn of this._listeners.click || []) fn({ preventDefault() {} });
+    // A radio takes its group exclusively, so picking one clears the rest.
+    if (this.type === "radio") {
+      let top = this;
+      while (top.parentNode) top = top.parentNode;
+      for (const r of top.querySelectorAll("input")) {
+        if (r.type === "radio" && r.name === this.name) r.checked = false;
+      }
+      this.checked = true;
+      this.dispatch("change");
+    }
+    this.dispatch("click");
   }
   submit() {
     for (const fn of this._listeners.submit || []) fn({ preventDefault() {} });
@@ -130,7 +149,8 @@ globalThis.window = {
   lavish: {
     // The origin element is a live DOM node; keep only what a caller asserts on.
     queuePrompt: (prompt, options = {}) =>
-      queued.push({ prompt, options: { tag: options.tag, text: options.text, data: options.data } }),
+      queued.push({ prompt, options: { tag: options.tag, text: options.text,
+        queueKey: options.queueKey, data: options.data } }),
   },
 };
 globalThis.TextEncoder = TextEncoder;
@@ -189,8 +209,8 @@ for (const c of clicks) {
         .find((n) => !c.match || Object.entries(c.match).every(([k, v]) => (k in n.dataset ? n.dataset[k] : n[k]) === v));
   if (!target) throw new Error("harness click target not found: " + JSON.stringify(c));
   if (c.set) Object.assign(target, c.set);
-  else if (c.submit) target.submit();
-  else target.click();
+  if (c.fire) target.dispatch(c.fire);
+  else if (!c.set) { if (c.submit) target.submit(); else target.click(); }
 }
 
 const badgesOf = (row) =>

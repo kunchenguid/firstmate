@@ -290,10 +290,10 @@ test_hiding_a_picked_charted_row_clears_its_selection() {
 
 # --- the answer a captain queues -------------------------------------------
 #
-# The card offers options plus a free-text box. A captain who wants to say
-# something the options do not cover must be able to type it and queue it with
-# nothing selected; making him tick an option first would force him to assert
-# something he does not mean before he can say what he does.
+# Writing your own answer is the LAST OPTION in the same radio group, not a box
+# hanging below the list. A captain who picks an option and then changes his
+# mind can pick "in my own words" to clear it, and an answer is one thing: the
+# typed words, or the option - never an option with a note stapled to it.
 
 call_payload() {  # <call-items-json>
   jq -n --argjson calls "$1" '{
@@ -329,19 +329,80 @@ test_a_typed_answer_queues_on_its_own_with_no_option_selected() {
   pass "a typed answer queues on its own with no option selected"
 }
 
-test_a_selected_option_is_annotated_by_the_typed_note() {
+test_a_picked_option_queues_alone() {
   local home out
-  home=$(make_home option-and-note)
+  home=$(make_home option-alone)
   out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
-    {"card":"base-branch","selector":"input","match":{"value":"develop"},"set":{"checked":true}},
-    {"card":"base-branch","selector":".bb-freeform","set":{"value":"but not before Friday"}},
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
     {"card":"base-branch","submit":true}
   ]')
   printf '%s' "$out" | jq -e '
     (.queued | length) == 1
-      and (.queued[0].options.data.answer == "develop - but not before Friday")
-  ' >/dev/null || fail "a selected option was not annotated by the typed note: $out"
-  pass "a selected option is annotated by the typed note"
+      and (.queued[0].options.data.answer == "develop")
+  ' >/dev/null || fail "a picked option did not queue as the whole answer: $out"
+  pass "a picked option queues alone"
+}
+
+test_choosing_own_words_clears_the_option_the_captain_changed_his_mind_about() {
+  local home out
+  home=$(make_home change-of-mind)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","selector":"input","match":{"value":"__own words__"},"click":true},
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"neither - hold it until the study lands"},"fire":"input"},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "neither - hold it until the study lands")
+  ' >/dev/null || fail "the option the captain changed his mind about rode along with his words: $out"
+  pass "choosing own words clears the option the captain changed his mind about"
+}
+
+test_picking_an_option_clears_words_typed_before_it() {
+  local home out
+  home=$(make_home stale-words)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"actually, hold it"},"fire":"input"},
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "develop")
+  ' >/dev/null || fail "a stale typed sentence rode along with a picked option: $out"
+  pass "picking an option clears words typed before it"
+}
+
+test_own_words_with_nothing_typed_refuses_instead_of_queueing_an_empty_answer() {
+  local home out
+  home=$(make_home own-words-empty)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"__own words__"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 0
+      and (.deck.cards[0].queued == false)
+      and (.deck.cards[0].limit | test("Type your answer, then queue it"))
+  ' >/dev/null || fail "own words with nothing typed queued an empty answer, or said nothing: $out"
+  pass "own words with nothing typed refuses instead of queueing an empty answer"
+}
+
+test_a_changed_answer_replaces_the_earlier_one() {
+  local home out
+  home=$(make_home re-answer)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","submit":true},
+    {"card":"base-branch","selector":"input","match":{"value":"main"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    ([.queued[] | select(.options.queueKey == "base-branch")] | length) == 2
+      and (.queued[-1].options.data.answer == "main")
+  ' >/dev/null || fail "a changed answer did not carry the card key so the later one wins: $out"
+  pass "a changed answer replaces the earlier one"
 }
 
 test_queueing_nothing_at_all_says_so_instead_of_going_quiet() {
@@ -464,7 +525,11 @@ test_clear_filters_restores_everything
 test_a_filter_combination_with_no_matches_stays_graceful
 test_hiding_a_picked_charted_row_clears_its_selection
 test_a_typed_answer_queues_on_its_own_with_no_option_selected
-test_a_selected_option_is_annotated_by_the_typed_note
+test_a_picked_option_queues_alone
+test_choosing_own_words_clears_the_option_the_captain_changed_his_mind_about
+test_picking_an_option_clears_words_typed_before_it
+test_own_words_with_nothing_typed_refuses_instead_of_queueing_an_empty_answer
+test_a_changed_answer_replaces_the_earlier_one
 test_queueing_nothing_at_all_says_so_instead_of_going_quiet
 test_the_dealt_card_owns_the_caret_so_typing_lands_in_its_answer_box
 test_a_card_asking_several_questions_is_flagged_and_still_dealt

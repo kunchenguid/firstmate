@@ -271,9 +271,13 @@ a { color: inherit; text-decoration: none; }
 .bb-flag__v { font-size: var(--fs-xs); line-height: 1.4; color: var(--text-body); }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
+/* The write-my-own box is the body of the last option, not a field below the
+   list, so choosing it deselects any other pick the way any radio does. */
+.bb-freeform { width: 100%; margin-top: 6px; font-family: var(--font-sans); font-size: var(--fs-sm);
+  color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.bb-freeform:disabled { background: var(--paper-100); color: var(--text-faint); cursor: not-allowed; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -486,6 +490,10 @@ __FM_BEARINGS_BOARD_DATA__
   var chartedMoreQueued = data.charted_more || 0;
   var chartedMoreWarnings = data.charted_warning_more || 0;
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
+  /* Sentinel value for the write-my-own radio. It carries a space, which the
+     payload contract forbids in an option value, so it can never collide with
+     a real option. */
+  var OWN_WORDS = "__own words__";
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
@@ -718,11 +726,34 @@ __FM_BEARINGS_BOARD_DATA__
     });
     form.appendChild(opts);
 
+    /* "Answer in my own words" is the last radio in the SAME group: picking it
+       clears whatever was picked before, and picking a listed option clears and
+       disables this box, so a stale sentence can never ride along with a choice
+       the captain did not mean. */
+    var ownRadio = null, ff = null;
     if (item.allow_freeform) {
-      var ff = document.createElement("input");
+      var ownLab = el("label", "bb-opt");
+      ownRadio = document.createElement("input");
+      ownRadio.type = "radio"; ownRadio.name = "answer"; ownRadio.value = OWN_WORDS;
+      ownLab.appendChild(ownRadio);
+      var ownBody = el("span", "bb-opt__body");
+      ownBody.appendChild(el("span", "bb-opt__label", "Answer in my own words"));
+      ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
+      ff.placeholder = item.freeform_hint || "type your answer…";
+      ownBody.appendChild(ff);
+      ownLab.appendChild(ownBody);
+      opts.appendChild(ownLab);
+
+      /* typing is itself the choice, so a bare typed answer needs no extra click */
+      ff.addEventListener("input", function () { ownRadio.checked = true; });
+      form.addEventListener("change", function (ev) {
+        if (ev.target.name !== "answer") return;
+        var own = ownRadio.checked;
+        ff.disabled = !own;
+        if (!own) { ff.value = ""; return; }
+        try { ff.focus({ preventScroll: true }); } catch (e) { ff.focus(); }
+      });
     }
 
     var foot = el("div", "bb-decision__foot");
@@ -743,15 +774,18 @@ __FM_BEARINGS_BOARD_DATA__
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
-      /* picked option, optionally annotated; a bare note is itself the answer */
-      var answer = value ? (note ? value + " - " + note : value) : note;
+      /* An answer is one thing: the typed words, or the picked option - never a
+         value with a note stapled to it. */
+      var answer = (value === OWN_WORDS || !value) ? note : value;
       if (!answer) {
         /* Never fail silently here: an unexplained dead button is what makes a
            captain believe the box needs an option ticked before it will take
            his words. Say what is missing instead. */
-        answerLimit.textContent = item.allow_freeform
-          ? "Type your answer, or pick an option, then queue it."
-          : "Pick an option, then queue it.";
+        answerLimit.textContent = value === OWN_WORDS
+          ? "Type your answer, then queue it."
+          : item.allow_freeform
+            ? "Type your answer, or pick an option, then queue it."
+            : "Pick an option, then queue it.";
         answerLimit.classList.add("is-visible");
         return;
       }
@@ -768,7 +802,9 @@ __FM_BEARINGS_BOARD_DATA__
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + answer,
           { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: ctxData }
+            /* keyed on the card, so changing an answer replaces it rather than
+               queueing a second, contradictory one */
+            queueKey: item.key, data: ctxData }
         );
       }
       card.classList.add("is-queued");

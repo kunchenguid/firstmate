@@ -56,6 +56,13 @@
 # Both are informational. Neither can fail a build, and neither is a substitute
 # for the composer supplying the specifics in the first place.
 #
+# `allow_freeform` adds "Answer in my own words" as the LAST OPTION of the
+# card's radio group, not a box below it, so choosing it clears whatever the
+# captain picked before and choosing a listed option clears what he typed.
+# An answer is therefore always one thing: the typed words, or the option
+# value - never an option value with a note appended. `freeform_hint`
+# overrides that option's placeholder text.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
