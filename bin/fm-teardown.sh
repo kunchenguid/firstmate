@@ -134,8 +134,15 @@
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
 #     strict fm_nm_head_matches_worktree rule) both match this worktree, then
-#     runs `no-mistakes axi abort --run <id>` for
-#     that verified run instance. A run already terminal
+#     runs `no-mistakes axi abort --run <id>` for that verified run instance.
+#     When the run head is absent from this copy's object store - the pipeline
+#     committed its fix round in its own repo and the task copy never fetched
+#     it - attribution falls to the same lib's shared
+#     fm_nm_runs_status_for_worktree ledger rule, whose anchored continuation
+#     recognition is the only remaining path and which refuses every row shape
+#     it cannot prove (observed 2026-09-03: a run parked at a post-CI gate
+#     after fix rounds advanced its head past the submitted head stayed parked
+#     forever once the task was cleaned up). A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
@@ -1510,12 +1517,20 @@ validate_worktree_teardown_safety() {
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
-# match so the caller knows it is safe to abort - never a guess.
+# match so the caller knows it is safe to abort - never a guess. Identity
+# binds through the strict object-local head rule, with bin/fm-nm-run-lib.sh's
+# shared ledger-anchored continuation rule as the only recognition for a head
+# this copy cannot resolve at all.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
+# How many of the most recent `no-mistakes runs` rows the parked-run
+# continuation proof may scan, mirroring bin/fm-crew-state.sh's limit posture
+# (generous: rows of other branches interleave freely in the real ledger).
+NM_TEARDOWN_RUNS_LIMIT=${FM_TEARDOWN_NM_RUNS_LIMIT:-200}
+case "$NM_TEARDOWN_RUNS_LIMIT" in ''|*[!0-9]*) NM_TEARDOWN_RUNS_LIMIT=200 ;; esac
 TASK_RUN_ID=
 task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate
+  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate ledger
   TASK_RUN_ID=
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
@@ -1525,7 +1540,20 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
+  if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
+    # The strict object-local rule rejected this run head. That rejection is
+    # final when the head object resolves in this copy (diverged or rewritten
+    # tips are genuine mismatches), but when the object is absent entirely -
+    # the pipeline committed its fix round in its own repo and this copy
+    # never fetched it - the ONE shared runs-ledger rule in
+    # bin/fm-nm-run-lib.sh owns the only remaining recognition, and it prints
+    # nothing for any ledger shape it cannot prove, so the run stays
+    # untouched unless the ledger proves this exact continuation.
+    [ -n "$run_head" ] || return 1
+    [ -z "$(fm_nm_resolve_commit "$wt" "$run_head")" ] || return 1
+    ledger=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
+    [ -n "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger")" ] || return 1
+  fi
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")

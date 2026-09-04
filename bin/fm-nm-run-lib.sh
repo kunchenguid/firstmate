@@ -3,9 +3,12 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
-# strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned attribution paths defined below. Getting this wrong in either
+# (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
+# by strict branch-and-head identity first, and both then recognize a provable
+# pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
+# crew-state for an ACTIVE run, so a fix round never reads as an older failed
+# run, and teardown for a run PARKED at a gate, so cleanup concludes it
+# instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
