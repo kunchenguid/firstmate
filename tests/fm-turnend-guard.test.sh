@@ -1004,6 +1004,19 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }
 
+test_hook_claude_mode_reblocks_custom_check_without_tasks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-custom-check")
+  : > "$dir/state/voice-inbox.check.sh"
+  : > "$dir/state/voice-inbox.check-trust"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block a custom-check-only stop when no auto-arm claims recovery"
+  assert_contains "$out" "A registered custom check needs supervision" "--claude custom-check re-block must name the custom check as the supervision need"
+  assert_not_contains "$out" "X-mode" "--claude custom-check re-block must not attribute the need to X mode"
+  assert_not_contains "$out" "x-mode.env" "--claude custom-check re-block must not point repair at the X-mode cadence config"
+  pass "fm-turnend-guard --claude: custom-check-only homes re-block naming the custom check, not X mode"
+}
+
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
@@ -1170,6 +1183,7 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_hook_claude_mode_reblocks_custom_check_without_tasks
 test_predicate_registered_custom_check_needs_supervision
 test_predicate_unregistered_check_is_not_need
 test_hook_claude_mode_allows_when_autoarm_owner_alive

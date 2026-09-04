@@ -1539,6 +1539,36 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# config/check-interval: sourced-mode assertions on CHECK_INTERVAL resolution.
+# Each case runs in a subshell so sourcing the watcher cannot leak its globals.
+check_interval_for() {  # <config-content-or-empty> [FM_CHECK_INTERVAL]
+  (
+    local home="$TMP_ROOT/check-interval-$$-$RANDOM"
+    mkdir -p "$home/config" "$home/state"
+    [ -z "$1" ] || printf '%s\n' "$1" > "$home/config/check-interval"
+    if [ -n "${2:-}" ]; then export FM_CHECK_INTERVAL=$2; else unset FM_CHECK_INTERVAL; fi
+    export FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    unset FM_STATE_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$WATCH"
+    printf '%s' "$CHECK_INTERVAL"
+  ) 2>&1
+}
+
+test_check_interval_config_file() {
+  local got
+  got=$(check_interval_for "")
+  [ "$got" = 300 ] || fail "no config/check-interval must default CHECK_INTERVAL to 300 with no stderr noise (got '$got')"
+  got=$(check_interval_for "45")
+  [ "$got" = 45 ] || fail "config/check-interval=45 must set CHECK_INTERVAL=45 (got '$got')"
+  got=$(check_interval_for "abc")
+  [ "$got" = 300 ] || fail "non-numeric config/check-interval must fall back to 300 (got '$got')"
+  got=$(check_interval_for "45" 7)
+  [ "$got" = 7 ] || fail "explicit FM_CHECK_INTERVAL must win over config/check-interval (got '$got')"
+  pass "fm-watch: config/check-interval sets the default check cadence, invalid falls back to 300, FM_CHECK_INTERVAL wins"
+}
+
+test_check_interval_config_file
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
