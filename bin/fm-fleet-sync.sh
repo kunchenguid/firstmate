@@ -20,7 +20,9 @@
 # that would have been touched.
 # Registered local-only projects still refresh when they have an origin, but skip
 # remote-gone branch pruning because their landing proof is local rather than remote.
-# For other projects, pruning never deletes the checked-out branch or a branch that
+# Pruning requires a complete, uniquely resolved non-local registry mode; missing,
+# ambiguous, or malformed registry state fails closed while refresh still proceeds.
+# When pruning is allowed, it never deletes the checked-out branch or a branch that
 # still has a worktree; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
