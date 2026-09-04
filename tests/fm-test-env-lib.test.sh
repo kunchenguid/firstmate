@@ -12,10 +12,10 @@
 #   OWNER      fm_test_env_isolate clears every pointer it publishes, driven from
 #              its own published list so this test cannot hold a stale copy.
 #   REFUSAL    a pointer that survives is reported and refused, not ignored.
-#   INVARIANT  every tests/*.test.sh reaches the owner, so a NEW suite cannot
-#              skip isolation silently - the whole point of the invariant.
-#   NOT-VACUOUS the executable probe rejects suites whose only owner references
-#              are unrelated libraries or source text that never executes.
+#   INVARIANT  every tests/*.test.sh reaches the owner in its original top-level
+#              process before writing through an inherited fleet pointer.
+#   NOT-VACUOUS the executable probe rejects unrelated or unexecuted references
+#              and isolation confined to a subshell or child process.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -294,9 +294,8 @@ test_direct_invocation_is_isolated() {
   local dir suite out
   dir=$(fm_test_tmproot fm-test-env-lib)
   suite="$dir/probe.test.sh"
-  # Shaped like a suite that owns its own reporters and trap: the case the 36
-  # non-reachers are in, and the reason they route to the owner directly rather
-  # than through tests/lib.sh.
+  # Shaped like a suite that owns its own reporters and trap: the reason such
+  # suites route to the owner directly rather than through tests/lib.sh.
   cat > "$suite" <<SH
 #!/usr/bin/env bash
 set -u

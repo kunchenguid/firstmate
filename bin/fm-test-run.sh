@@ -1506,8 +1506,8 @@ families_for_changed_path() {
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
     bin/fm-test-env-lib.sh)
-      # tests/lib.sh and the suites that route to this owner directly are
-      # callers too, so this file's pointer list shapes the environment of very
+      # tests/lib.sh and the suites that route to this owner directly are callers
+      # too, so this file's pointer list shapes the environment of very
       # nearly every suite, not just the runner's own contract tests. Select
       # through the same reference scan tests/lib.sh gets, so a pointer edit
       # here selects the suites it can break rather than only
