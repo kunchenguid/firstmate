@@ -522,21 +522,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
+  # A crew's own "done: ... checks green" status-log beats a run that is still
+  # monitoring the PR to merge/close. CI readiness is decided once, above: on the
+  # full path RUN_STATE=working reaches here only from the `case "$status"` block,
+  # which already ran the first derivation, so CI_LOG_STATE is final here (never
+  # not-ready without the first block having said so); on the coarse path no step
+  # detail exists, so the done log alone carries the verdict.
+  if [ "$RUN_STATE" = working ] && log_reports_ci_ready \
+     && { [ "$RUN_SOURCE" = coarse ] || [ "$CI_LOG_STATE" != not-ready ]; }; then
+    emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

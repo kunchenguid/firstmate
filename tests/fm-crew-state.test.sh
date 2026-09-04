@@ -308,6 +308,22 @@ run:
 EOF
 }
 
+run_running_no_ci_step() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,running,0,0
+EOF
+}
+
 run_fixing_ci_running() {  # <branch>
   cat <<EOF
 run:
@@ -455,6 +471,47 @@ test_ci_ready_done_log_beats_monitoring_run() {
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
   pass "ci-ready status log beats monitoring run"
+}
+
+# Full path, CI_LOG_STATE empty: status=running with no ci step row means the
+# ci-readiness derivation leaves CI_LOG_STATE unset (nm_effective_ci_step_status
+# returns empty), yet the crew's own "checks green" status-log must still surface
+# done. Exercises the surviving CI_LOG_STATE != not-ready emit path with an empty
+# CI_LOG_STATE, the single-owner reduction of the former duplicate derivation.
+test_ci_ready_done_log_no_ci_step_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-no-step)
+  make_repo_on_branch "$d/wt" fm/feat-cinostep
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinostep.meta" "window=fm:fm-feat-cinostep" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cinostep.status"
+  FM_FAKE_AXI_STATUS="$(run_running_no_ci_step fm/feat-cinostep)"
+  local out; out=$(run_crew_state "$d" feat-cinostep)
+  assert_contains "$out" "state: done" "done log without ci step -> done"
+  assert_contains "$out" "source: status-log" "done log without ci step comes from the status log"
+  assert_contains "$out" "checks green" "done log without ci step detail preserves the report"
+  assert_not_contains "$out" "state: working" "done log without ci step is not hidden by the run"
+  pass "done log with no ci step row surfaces done"
+}
+
+# Full path, CI_LOG_STATE unknown: status=ci with no recognized ci-log marker
+# leaves CI_LOG_STATE=unknown (not not-ready), and a "checks green" status-log
+# must still surface done. Confirms unknown, like empty, does not block the emit.
+test_ci_ready_done_log_ci_log_unknown_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-unknown)
+  make_repo_on_branch "$d/wt" fm/feat-ciunknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciunknown.meta" "window=fm:fm-feat-ciunknown" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ciunknown.status"
+  FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-ciunknown)"
+  FM_FAKE_CI_LOGS=""
+  local out; out=$(run_crew_state "$d" feat-ciunknown)
+  assert_contains "$out" "state: done" "done log with unknown ci-log -> done"
+  assert_contains "$out" "source: status-log" "done log with unknown ci-log comes from the status log"
+  assert_contains "$out" "checks green" "done log with unknown ci-log detail preserves the report"
+  assert_not_contains "$out" "state: working" "done log with unknown ci-log is not hidden by the run"
+  pass "done log with unknown ci-log state surfaces done"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -1731,6 +1788,8 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_no_ci_step_surfaces_done
+test_ci_ready_done_log_ci_log_unknown_surfaces_done
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
