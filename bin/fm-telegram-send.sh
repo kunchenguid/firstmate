@@ -68,11 +68,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-check-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 CHECK_ID="telegram-outbox"
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 ERROR_FILE="$STATE/telegram-send.error"
+DRAIN_LOCK="$STATE/.telegram-send.lock"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 
 DRAIN_MAX=${FM_TELEGRAM_DRAIN_MAX:-10}
@@ -288,8 +292,10 @@ action_check() {
     exit 0
   }
   command -v curl >/dev/null 2>&1 || { emit_error_once "cannot send: curl is not installed"; exit 0; }
-  body=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-body.XXXXXX") || exit 0
-  trap 'rm -f -- "$body"' EXIT
+  fm_lock_acquire_wait "$DRAIN_LOCK" || exit 0
+  body=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-body.XXXXXX") \
+    || { fm_lock_release "$DRAIN_LOCK"; exit 0; }
+  trap 'rm -f -- "$body"; fm_lock_release "$DRAIN_LOCK"' EXIT
   while IFS= read -r card; do
     [ -n "$oldest" ] || oldest=$card
     [ "$sent" -lt "$DRAIN_MAX" ] || break

@@ -635,7 +635,10 @@ fm_telegram_notify() {  # <home> <state> <class> <key> <name=value>...
   esac
   mkdir -p "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || return 1
   chmod 0700 "$(fm_telegram_outbox_dir "$state")" 2>/dev/null || true
-  if fm_telegram_delivered "$state" "$key" || fm_telegram_queued "$state" "$key"; then
+  # Delivery moves monotonically from queued to both queued-and-delivered and
+  # finally delivered-only. Observe that transition in the same order so a
+  # publisher racing the sender cannot see both states as absent.
+  if fm_telegram_queued "$state" "$key" || fm_telegram_delivered "$state" "$key"; then
     return 0
   fi
   path=$(_fm_telegram_card_path "$state" "$key") || return 1

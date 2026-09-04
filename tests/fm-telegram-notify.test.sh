@@ -805,6 +805,29 @@ test_drain_sends_and_never_listens() {
   pass "a drain sends each card once, asks Telegram for nothing, and never repeats an outcome"
 }
 
+test_concurrent_drains_send_one_card_once() {
+  local dir base first second
+  dir=$(make_home concurrent-drain)
+  base=$(start_api "$dir")
+  report "$dir" "done [key=merged-t1]: merged t1 https://example.test/o/r/pull/3" \
+    landed merged-t1 "project=alpha" "url=https://example.test/o/r/pull/3" >/dev/null 2>&1 || true
+
+  run_send "$dir" "$base" check >"$dir/first.out" 2>&1 &
+  first=$!
+  run_send "$dir" "$base" check >"$dir/second.out" 2>&1 &
+  second=$!
+  wait "$first" || fail "the first concurrent drain failed"
+  wait "$second" || fail "the second concurrent drain failed"
+
+  [ ! -s "$dir/first.out" ] || fail "the first concurrent drain spoke: $(cat "$dir/first.out")"
+  [ ! -s "$dir/second.out" ] || fail "the second concurrent drain spoke: $(cat "$dir/second.out")"
+  [ "$(card_count "$dir")" = 0 ] || fail "concurrent drains left the card queued"
+  [ "$(grep -c . "$dir/api.log")" = 1 ] \
+    || fail "concurrent drains sent one card more than once: $(cat "$dir/api.log")"
+  stop_api
+  pass "concurrent drains serialize one card delivery"
+}
+
 test_semantic_success_response_is_accepted() {
   local dir base out
   dir=$(make_home spaced-response)
@@ -955,6 +978,7 @@ test_cleanup_gate_is_unaffected_by_an_unreachable_telegram
 test_secondmate_failure_cards_track_incarnations
 test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
+test_concurrent_drains_send_one_card_once
 test_semantic_success_response_is_accepted
 test_non_loopback_api_override_is_refused
 test_malformed_success_response_is_rejected
