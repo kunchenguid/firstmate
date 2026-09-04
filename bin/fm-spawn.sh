@@ -114,6 +114,13 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command for a verified harness command.
+#   Raw commands accept only whitespace-separated tokens matching
+#   [A-Za-z0-9_./=@:+,-]+. They may start with plain VAR=value assignments,
+#   followed optionally by env, more assignments, and -u NAME or --unset NAME
+#   pairs before the verified harness name.
+#   Quotes, escapes, shell syntax, command wrappers, paths in the harness seat,
+#   and a Codex -- terminator are refused before launch; use --harness with
+#   --model and --effort instead when the plain raw form cannot express a launch.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;

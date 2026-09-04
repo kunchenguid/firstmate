@@ -282,7 +282,7 @@ The composer-classification record below observes the same gate from the other s
 
 Verified on 2026-09-04 with codex-cli 0.153.2 and tmux 3.4 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
 Codex 0.153.2 gates new or changed hooks behind an interactive "Hooks need review" dialog even when `--dangerously-bypass-approvals-and-sandbox` is present.
-`bin/fm-spawn.sh` passes `--dangerously-bypass-hook-trust` on every interactive Codex launch it composes, including crewmate, scout, secondmate, and raw Codex commands, so hooks remain enabled and no interactive decision is required.
+`bin/fm-spawn.sh` passes `--dangerously-bypass-hook-trust` on every interactive Codex launch it composes, including crewmate, scout, secondmate, and accepted raw Codex commands, so hooks remain enabled and no interactive decision is required.
 The worker branches retain their independent `notify=` turn-end signal.
 Codex secondmate project-hook firing under the bypass is UNPROVEN on this branch because the live guard covers scouts only and asserts only the global hook.
 The open [Codex worktree hook issue](https://github.com/openai/codex/issues/27133) reports project hooks being silently ignored in worktrees even with the bypass, so this record makes no claim that secondmate lifecycle hooks are preserved.
@@ -308,7 +308,8 @@ ok - codex-cli 0.153.2 unflagged counterfactual parked at Hooks need review befo
 ```
 
 The portable regression is `tests/fm-spawn-dispatch-profile.test.sh`.
-It drives launch construction through `bin/fm-spawn.sh`, requires the trust bypass without hook disabling on crewmate, scout, secondmate, and raw Codex launches, preserves the worker-only `notify=` split, and confirms six other harness launch paths plus the existing non-Codex raw escape hatch remain unchanged.
+It drives launch construction through `bin/fm-spawn.sh`, requires the trust bypass without hook disabling on crewmate, scout, secondmate, and accepted raw Codex launches, preserves the worker-only `notify=` split, and confirms six other harness templates do not receive Codex-only flags.
+It also pins the accepted verified-harness raw form and fail-closed refusals for quotes, compound commands, comments, Codex option termination, and command wrappers.
 
 ## Composer classification matrix
 

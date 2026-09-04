@@ -20,7 +20,7 @@ Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
 Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
-Every interactive Codex launch Firstmate composes includes `--dangerously-bypass-hook-trust`, including crewmate, scout, secondmate, and raw Codex launches.
+Every interactive Codex launch Firstmate composes includes `--dangerously-bypass-hook-trust`, including crewmate, scout, secondmate, and accepted raw Codex launches.
 This keeps effective hooks enabled and accepts their sources for the invocation without persisting a trust decision.
 Crewmate and scout turn-end detection retains the independent launch `notify=` signal.
 Codex secondmate project-hook firing under the bypass is UNPROVEN on this branch, and the live guard covers scouts only.
@@ -29,9 +29,9 @@ If an already-parked worker shows this dialog, choose "Continue without trusting
 Replace `TASK_ID` with the recorded task ID.
 
 ```sh
-../../../bin/fm-send.sh TASK_ID --key Down
-../../../bin/fm-send.sh TASK_ID --key Down
-../../../bin/fm-send.sh TASK_ID --key Enter
+bin/fm-send.sh TASK_ID --key Down
+bin/fm-send.sh TASK_ID --key Down
+bin/fm-send.sh TASK_ID --key Enter
 ```
 
 ## Skill popup
