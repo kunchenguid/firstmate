@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$SCRIPT_DIR/fm-gemini-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -50,6 +52,19 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # Gemini is checked BEFORE claude for exactly cursor's reason above: the
+  # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
+  # launched from a claude primary carries BOTH markers and whichever is
+  # tested first wins. Verified live on gemini-cli 0.58.0: a tool process
+  # spawned by a gemini worker under a claude primary reported GEMINI_CLI=1
+  # AND CLAUDECODE=1 together. GEMINI_CLI is gemini's own and is unset in the
+  # launching environment, so ordering it first is what makes the verdict
+  # correct; bin/fm-spawn.sh additionally clears the foreign markers at the
+  # launch boundary. Both are kept for the same reason cursor keeps both.
+  # AI_AGENT is deliberately NOT used: it was present in that same process
+  # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
+  # an inherited launcher marker, not a Gemini identity.
+  [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -81,7 +96,24 @@ detect_own() {
       echo cursor
       return
     fi
+    if fm_gemini_path_is_gemini "$comm"; then
+      echo gemini
+      return
+    fi
     case "$(basename -- "$comm")" in
+      # gemini precedes claude here for the same precedence reason as the
+      # marker layer above, so a gemini worker under a claude primary is never
+      # read as claude. This arm covers a natively-named gemini binary only.
+      # It does NOT reach the currently installed CLI, which is a node bundle
+      # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
+      # Node on Linux reports `comm` as MainThread rather than node (measured
+      # on Node v24.20.0), so neither this arm nor the node interpreter arm
+      # below matches a live gemini process. GEMINI_CLI above is therefore
+      # load-bearing for gemini rather than a fast path, which is why gemini
+      # is not offered as a primary or secondmate harness. Do NOT add
+      # MainThread to the interpreter arm to close this: that would make the
+      # args of EVERY node process searchable and let an unrelated node
+      # command carrying a harness name in its arguments claim an identity.
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -98,6 +130,10 @@ detect_own() {
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
+        if fm_gemini_args_are_gemini "$args"; then
+          echo gemini
+          return
+        fi
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
