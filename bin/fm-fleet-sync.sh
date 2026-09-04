@@ -83,11 +83,12 @@ project_label() {
 }
 
 project_registry_key() {
-  local project_parent projects_root
-  project_parent=$(cd "$(dirname "$PROJ")" 2>/dev/null && pwd -P) || return 1
-  projects_root=$(cd "$PROJECTS" 2>/dev/null && pwd -P) || return 1
+  local project_entry project_parent projects_root
+  project_entry=$(CDPATH='' cd -L -- "$PROJ" 2>/dev/null && pwd -L) || return 1
+  project_parent=$(CDPATH='' cd -P -- "$(dirname -- "$project_entry")" 2>/dev/null && pwd -P) || return 1
+  projects_root=$(CDPATH='' cd -P -- "$PROJECTS" 2>/dev/null && pwd -P) || return 1
   [ "$project_parent" = "$projects_root" ] || return 1
-  basename "$PROJ"
+  basename -- "$project_entry"
 }
 
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)

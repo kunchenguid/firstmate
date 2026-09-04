@@ -416,7 +416,7 @@ test_local_only_with_origin_fast_forwards() {
   pass "local-only clone with an origin is fast-forwarded"
 }
 
-test_relative_path_local_only_preserves_gone_unmerged_branch() {
+test_dot_segment_path_local_only_preserves_gone_unmerged_branch() {
   local home clone out feature_before
   home=$(new_home)
   clone=$(build_packed_prunable "$home" iota-local-work)
@@ -427,9 +427,9 @@ test_relative_path_local_only_preserves_gone_unmerged_branch() {
   mkdir -p "$home/data"
   printf -- '- iota-local-work [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(cd "$home" && run_sync "$home" ./projects/iota-local-work)
+  out=$(cd "$home" && run_sync "$home" ./projects/iota-local-work/.)
 
-  assert_contains "$out" "./projects/iota-local-work: synced" "relative-path local-only default branch is refreshed"
+  assert_contains "$out" "./projects/iota-local-work/.: synced" "dot-segment local-only default branch is refreshed"
   assert_not_contains "$out" "pruned feature" "local-only remote-gone branch is not pruned"
   git -C "$clone" show-ref --verify --quiet refs/heads/feature \
     || fail "local-only remote-gone branch was deleted"
@@ -437,7 +437,7 @@ test_relative_path_local_only_preserves_gone_unmerged_branch() {
     || fail "local-only remote-gone branch moved"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "local-only default branch did not fast-forward"
-  pass "relative-path local-only refresh preserves remote-gone unmerged work"
+  pass "dot-segment local-only refresh preserves remote-gone unmerged work"
 }
 
 test_remote_backed_prunes_gone_branch() {
@@ -748,7 +748,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_with_origin_fast_forwards
-test_relative_path_local_only_preserves_gone_unmerged_branch
+test_dot_segment_path_local_only_preserves_gone_unmerged_branch
 test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
