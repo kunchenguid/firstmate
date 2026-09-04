@@ -106,11 +106,25 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
-# Return the last non-blank line of a status file (empty if missing/blank).
+# Return the last recognized status event, ignoring continuation prose and blanks.
+# Keep decision-closing events: skipping a resolved line would revive its opener.
+# A log with no recognized events retains its last nonblank legacy free-text line.
+# This is an event read; status_current_line below reconciles open decisions.
 last_status_line() {
-  local f=$1
-  [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
+  local f=$1 line last='' fallback='' verb
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) fallback=$line ;; esac
+    case "$line" in *:*) ;; *) continue ;; esac
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      working|needs-decision|blocked|done|failed|note|\
+      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
+      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") last=$line ;;
+    esac
+  done < "$f"
+  printf '%s\n' "${last:-$fallback}"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -477,6 +491,28 @@ status_open_decisions() {  # <status-file>
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
+}
+
+# Resolve the log's current declaration at one boundary for crew-state consumers.
+# An open blocker wins over unrelated events, then an open needs-decision wins;
+# within each kind the fold's most recently opened record supplies the detail.
+# Actual run/pane evidence is still reconciled by fm-crew-state.sh.
+status_current_line() {  # <status-file>
+  local open key verb note blocked='' decision=''
+  open=$(status_open_decisions "$1")
+  while IFS=$'\t' read -r key verb note; do
+    case "$verb" in
+      blocked) blocked="blocked [key=$key]: $note" ;;
+      needs-decision) decision="needs-decision [key=$key]: $note" ;;
+    esac
+  done <<EOF
+$open
+EOF
+  if [ -n "$blocked$decision" ]; then
+    printf '%s\n' "${blocked:-$decision}"
+  else
+    last_status_line "$1"
+  fi
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.

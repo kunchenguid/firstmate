@@ -314,6 +314,8 @@ test_classifier_primitives() {
   printf 'paused [corr=aaaa1111bbbb2222]: waiting for release\nMore detail: still waiting.\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = 'paused [corr=aaaa1111bbbb2222]: waiting for release' ] \
     || fail "continuation prose hid the last declared status verb"
+  printf 'merged\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = merged ] || fail "legacy free-text status was lost"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
@@ -1474,6 +1476,27 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
     || fail "surfaced secondmate note was not queued"
   pass "a secondmate's status note surfaces even while its own agent is busy"
+}
+
+test_secondmate_buried_block_wakes_despite_busy_agent() {
+  local dir state fakebin out suffix pid
+  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer'; do
+    dir=$(make_case "secondmate-buried-block-${#suffix}"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    printf 'kind=secondmate\n' > "$state/mate.meta"
+    printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$state/mate.status"
+    [ "$(status_line_verb "$(status_current_line "$state/mate.status")")" = blocked ] \
+      || fail "unrelated '$suffix' hid an open blocker from current-state resolution"
+    export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "busy secondmate's blocker did not wake after '$suffix'"
+    grep -F "signal: $state/mate.status" "$out" >/dev/null \
+      || fail "busy secondmate's blocker was not surfaced"
+    grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+      || fail "busy secondmate's blocker was not durably queued"
+  done
+  pass "a secondmate blocker wakes despite busy evidence and later unrelated appends"
 }
 
 test_self_announced_close_does_not_rewake_but_next_note_does() {
@@ -4144,6 +4167,7 @@ test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
+test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
