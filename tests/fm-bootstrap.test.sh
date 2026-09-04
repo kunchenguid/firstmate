@@ -36,8 +36,15 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # fm_backend_name and flip a default-backend case onto a non-tmux backend. Unset
 # them once so the suite resolves the tmux reference backend unless a case says
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
+export __CFBundleIdentifier=com.cmuxterm.app
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  __CFBundleIdentifier 2>/dev/null || true
+
+test_default_backend_fixture_sanitizes_cmux_bundle_marker() {
+  [ -z "${__CFBundleIdentifier:-}" ] || fail "default-backend fixture must clear the inherited cmux bundle marker"
+  pass "bootstrap: default-backend fixture clears the cmux bundle marker"
+}
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
@@ -149,6 +156,7 @@ make_fake_fleet_sync_root() {
 [ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
+[ -z "${FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER"
 exec perl -e 'sleep 300'
 SH
   chmod +x "$fake_root/bin/fm-fleet-sync.sh"
@@ -179,16 +187,24 @@ add_no_origin_projects() {
 }
 
 run_bootstrap_timeout_case() {
-  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
+  local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker output_marker
   override=__unset__
   started_marker=${5:-}
   git_record=${6:-}
   wait_for_marker=${7:-0}
+  output_marker=${8:-}
   [ "$#" -lt 4 ] || override=$4
   (
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     sleep() {
-      local inc=${1:-1}
+      local inc=${1:-1} tries
+      if [ -n "${FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER:-}" ]; then
+        tries=0
+        while [ "$tries" -lt 100 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER" ]; do
+          command sleep 0.01
+          tries=$((tries + 1))
+        done
+      fi
       SECONDS=$((SECONDS + inc))
       # Advance fake time quickly, but yield on every tick so the background
       # fleet-sync process can deterministically write its partial output before
@@ -215,6 +231,7 @@ run_bootstrap_timeout_case() {
     if [ "$override" = __unset__ ]; then
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -222,6 +239,7 @@ run_bootstrap_timeout_case() {
       PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
         FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT="$override" \
         FM_FAKE_FLEET_SYNC_STARTED_MARKER="$started_marker" \
+        FM_FAKE_FLEET_SYNC_OUTPUT_READY_MARKER="$output_marker" \
         FM_FAKE_GIT_SYNC_STARTED_RECORD="$git_record" \
         FM_FAKE_GIT_WAIT_FOR_FLEET_START="$wait_for_marker" \
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -715,9 +733,10 @@ test_treehouse_lease_check_follows_resolved_backend() {
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
-  local case_dir home fakebin fake_root out
+  local case_dir home fakebin fake_root out output_marker
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
+  output_marker="$case_dir/fleet-output-ready"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 18
@@ -725,7 +744,7 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
 
-  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
+  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "" "" 0 "$output_marker")
 
   assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "bootstrap timeout should relay partial fleet-sync output first"
   assert_timeout_report "$out" 59
@@ -1148,6 +1167,7 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_default_backend_fixture_sanitizes_cmux_bundle_marker
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
