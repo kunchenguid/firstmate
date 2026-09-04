@@ -136,10 +136,11 @@
 #      self-declared pause or done in the status log that the ledger's date
 #      proves post-dates the failed run, and finally a later run on this branch
 #      that cannot be bound here (reported as unknown - history, but no proof of
-#      the present). A terminal newest row is treated the same way unless its
-#      short SHA identifies the attributed run itself. Nothing else does, and
-#      with no ordering evidence the failure stands, so a real failure is never
-#      hidden. A terminal reading also
+#      the present). Because the ledger has no run ID, an equal head does not
+#      identify a rerun; a terminal row supplies newer truth when its observable
+#      status, head, or PR differs, or when the state came from the coarse
+#      fallback. Nothing else does, and with no ordering evidence the failure
+#      stands, so a real failure is never hidden. A terminal reading also
 #      publishes the PR its OWN run opened (`pr=`), or none when it opened none,
 #      so a consumer never lends it an older PR.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
@@ -1204,6 +1205,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   RUN_PR=""
+  RUN_HEAD=""
+  RUN_ID=""
+  ATTRIBUTED_TERMINAL_STATUS="$COARSE_STATUS"
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -1238,11 +1242,17 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
     # The pull request THIS run opened, if it reached its pr step at all. A run
     # that never opened one reports no pr field, and that absence is meaningful:
     # it is what keeps a terminal outcome from being lent an older task's PR.
     RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
+    case "$outcome" in
+      failed|cancelled) ATTRIBUTED_TERMINAL_STATUS=$outcome ;;
+      *) ATTRIBUTED_TERMINAL_STATUS=$status ;;
+    esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E "$FM_NM_AWAITING_AGENT_RE" | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
@@ -1370,11 +1380,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     NEWEST_REST=${NEWEST_REST#*|}
     NEWEST_EPOCH=${NEWEST_REST%%|*}
     NEWEST_PR=${NEWEST_REST#*|}
-    RUN_HEAD=$(strip_quotes "$(nm_field head)")
-    NEWEST_IS_ATTRIBUTED_RUN=0
-    case "$RUN_HEAD" in
-      "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_IS_ATTRIBUTED_RUN=1 ;;
-    esac
+    NEWEST_ROW_AGREES=0
+    if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
+      && [ "$run_branch" = "$CREW_BRANCH" ] \
+      && [ "$NEWEST_STATUS" = "$ATTRIBUTED_TERMINAL_STATUS" ] \
+      && [ "$NEWEST_PR" = "$RUN_PR" ]; then
+      case "$RUN_HEAD" in
+        "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_ROW_AGREES=1 ;;
+      esac
+    fi
     LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
     case "$LEDGER_STATUS" in
       running)
@@ -1386,7 +1400,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         emit "done" run-step "$SUPERSEDED_DETAIL"
         ;;
       failed|cancelled)
-        if [ "$NEWEST_IS_ATTRIBUTED_RUN" != 1 ]; then
+        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
           LEDGER_DETAIL="run $LEDGER_STATUS"
           [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
           [ -z "$NEWEST_PR" ] || LEDGER_DETAIL="$LEDGER_DETAIL${SEP}pr=$NEWEST_PR"
@@ -1413,7 +1427,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     case "$NEWEST_STATUS" in
       '') ;;
       *)
-        [ "$NEWEST_IS_ATTRIBUTED_RUN" = 1 ] || emit unknown run-step \
+        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
           "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
         ;;
     esac

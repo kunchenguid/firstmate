@@ -705,9 +705,9 @@ fm_nm_ledger_epoch() {  # <YYYY-MM-DD HH:MM>
 # IS that branch's current run, which is the same rule
 # fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
 # holding a TERMINAL run answer needs to know whether a LATER run has since
-# superseded it, which the status word alone cannot say. The short SHA lets that
-# caller recognize the already-attributed run, but makes no new head claim:
-# BINDING a run still needs the strict identity rules above.
+# superseded it, which the status word alone cannot say. The ledger has no run
+# ID, so these fields can expose disagreement with a full run answer but cannot
+# establish identity; BINDING a run still needs the strict rules above.
 fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
   local branch=$1 list=$2 row rest br st sha stamp pr
   [ -n "$list" ] || return 0

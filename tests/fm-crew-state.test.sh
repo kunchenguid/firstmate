@@ -3919,6 +3919,46 @@ EOF
   pass "a distinct unbindable terminal row supersedes an older failure"
 }
 
+test_same_head_terminal_rerun_publishes_newest_pr() {
+  reset_fakes
+  local d short; d=$(new_case same-head-terminal-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2d
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2d.meta" "window=fm:fm-feat-s2d" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2d https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-s2d ${short}  2026-08-27 15:20  https://github.com/o/r/pull/2
+  failed     fm/feat-s2d ${short}  2026-08-27 12:09  https://github.com/o/r/pull/1
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2d)
+  assert_contains "$out" "state: failed" "the newest same-head terminal run remains failed"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2" "the newest same-head run publishes its own pull request"
+  assert_not_contains "$out" "pull/1" "the stale same-head run's pull request must not surface"
+  pass "a same-head terminal rerun publishes the newest pull request"
+}
+
+test_foreign_status_never_hides_coarse_terminal_pr() {
+  reset_fakes
+  local d short; d=$(new_case foreign-status-terminal-pr)
+  make_repo_on_branch "$d/wt" fm/feat-s2e
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2e.meta" "window=fm:fm-feat-s2e" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/other-crew https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/other-crew ${short}  2026-08-27 15:25  https://github.com/o/r/pull/1
+  failed     fm/feat-s2e ${short}  2026-08-27 15:20  https://github.com/o/r/pull/2
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2e)
+  assert_contains "$out" "state: failed" "the current branch's coarse terminal run remains failed"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2" "the coarse terminal row publishes its own pull request"
+  assert_not_contains "$out" "pull/1" "the foreign branch's pull request must not surface"
+  pass "a foreign status answer cannot hide the coarse terminal pull request"
+}
+
 # The original title case: the crew declared a bounded external wait AFTER the
 # failed run started, and the declaration was silently dropped, so the pane kept
 # producing wedge-suspect wakes for healthy work.
@@ -6498,6 +6538,8 @@ test_later_active_run_supersedes_failed_reading
 test_later_completed_run_supersedes_failed_reading
 test_unbindable_later_run_reports_unknown_not_failed
 test_unbindable_later_terminal_run_reports_unknown
+test_same_head_terminal_rerun_publishes_newest_pr
+test_foreign_status_never_hides_coarse_terminal_pr
 test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
