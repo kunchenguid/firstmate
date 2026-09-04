@@ -387,7 +387,7 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes concrete `--harness`, `--model`, and `--effort` flags plus `--codex-home <home>` whenever the selected Codex candidate carries `home`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -406,7 +406,7 @@ This section is the single owner of the canonical schema and its per-field seman
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>" }
   ]
 }
 ```
@@ -419,7 +419,7 @@ An omitted model or effort means the selected harness uses its own default for t
 The optional `home` field names the absolute Codex home (`CODEX_HOME`) a candidate runs against, which is how one firstmate home dispatches across two logged-in Codex accounts.
 It is valid only for `harness: "codex"`, and any other harness carrying it is a `CREW_DISPATCH` configuration error.
 [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.
-A profile with no `home` launches exactly as it did before the field existed, against whatever Codex home the worker's environment already resolves.
+A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
 Bootstrap and `fm-spawn.sh` both refuse a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
