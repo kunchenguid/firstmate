@@ -59,6 +59,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Every scaffold also carries the operator's standing off-limits module
+# prohibition; the generated section below owns its private-preferences pointer,
+# render-based check, blocked return, no-fork response, and QA boundary.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -209,6 +212,21 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# This fence is included in every scaffold kind because module safety survives
+# hand-offs only when it travels with the worker's instructions.
+IFS= read -r -d '' OFF_LIMITS_MODULE_SECTION <<EOF || true
+# Off-limits module prohibition - permanent safety boundary
+1. The rule. Honour every off-limits module prohibition recorded by this brief's operator as an absolute boundary. Never edit, and never make a read that leads to a write, anywhere in a fenced module. This boundary remains absolute until the operator personally lifts it.
+2. The operator's concrete prohibition. Read the operator's own private preferences file at $DATA/captain.md for the concrete fenced-module list before inspecting or changing code that might be fenced. Do not copy that private list into this shared template.
+3. The check that actually works. Ask whether the fenced module RENDERS this file, not whether the path looks like it belongs to that module.
+Fenced modules can render shared components that live outside their own directories, so every "is this under the module directory/" test can pass while a change alters what a fenced module displays.
+4. The escape. If a task appears to REQUIRE touching a fenced module, that is NOT a green light - append \`blocked: {why}\`, stop, and return it to the operator without proceeding.
+Never resolve it by editing, and never by inventing a fork on your own judgement.
+
+QA boundary. Fenced modules are off limits to QA-style work. Do not exercise them, click through them, file tickets against them, or continue a journey that routes into them; stop at the boundary and say so.
+EOF
+OFF_LIMITS_MODULE_SECTION=${OFF_LIMITS_MODULE_SECTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -235,6 +253,8 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 
 # Charter
 $SECONDMATE_CHARTER
+
+$OFF_LIMITS_MODULE_SECTION
 
 # Routing scope
 $SECONDMATE_SCOPE
@@ -356,6 +376,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
+$OFF_LIMITS_MODULE_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -430,6 +452,8 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
+
+$OFF_LIMITS_MODULE_SECTION
 
 $HERDR_SECTION
 
