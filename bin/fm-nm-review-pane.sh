@@ -51,7 +51,10 @@
 # presence read, the split, and the first record write, and returns 0 without
 # creating when that lock is contended, so a teardown in progress wins instead
 # of racing a fresh split against its two closes and leaving an orphan pane
-# whose record no later sweep retires.
+# whose record no later sweep retires. Re-pointing an existing pane rewrites
+# the record only while state/<id>.meta still exists and the pane is still
+# present, so a teardown that closed the pane and retired the record between
+# the `pane run` and the write is not undone by a stale record.
 #
 # Current run: `no-mistakes axi status` in the task worktree (bounded by
 # bin/fm-nm-run-lib.sh's fm_nm_run_checked, FM_NM_REVIEW_PANE_NM_TIMEOUT seconds,
@@ -374,7 +377,9 @@ fm_nm_review_pane_ensure() {  # <state-dir> <config-dir> <task-id>
   fi
   cmd=$(fm_nm_review_pane_viewer_command "$FM_NM_REVIEW_WORKTREE" "$id" "$run")
   if fm_backend_herdr_cli "$FM_NM_REVIEW_SESSION" pane run "$pane" "$cmd" >/dev/null 2>&1; then
-    fm_nm_review_pane_record_write "$record" "$FM_NM_REVIEW_SESSION" "$pane" "$run" "$desired_viewer" || rc=1
+    if [ "$fresh" = 1 ] || { [ -f "$meta" ] && [ "$(fm_backend_herdr_pane_presence_state "$FM_NM_REVIEW_SESSION" "$pane")" = present ]; }; then
+      fm_nm_review_pane_record_write "$record" "$FM_NM_REVIEW_SESSION" "$pane" "$run" "$desired_viewer" || rc=1
+    fi
   else
     echo "warning: herdr pane run failed for the no-mistakes review pane of $id" >&2
     rc=1

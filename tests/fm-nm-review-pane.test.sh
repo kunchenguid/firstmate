@@ -31,13 +31,18 @@
 #   (j) a create attempt while another process holds the session presentation
 #       lock (a teardown in progress) splits nothing, writes no record, and
 #       exits 0, so the next sweep re-evaluates against the removed meta
+#   (k) a teardown that closes the pane and retires the record between the
+#       re-point's `pane run` and its record write leaves no stale record
 #   (i) quiesce sends q once and only polls afterwards, so a viewer that exits
 #       between polls never gets a stray q at its shell; a viewer that ignores
 #       the first q gets it again only after several unchanged polls
 #
 # Fake knobs: FM_FAKE_HERDR_DETACH_LAG=<n> keeps a viewer listed by
 # process-info for n reads after q (a second q in that window lands on the
-# shell); FM_FAKE_HERDR_IGNORE_Q=<n> makes the viewer ignore its first n q keys.
+# shell); FM_FAKE_HERDR_IGNORE_Q=<n> makes the viewer ignore its first n q keys;
+# FM_FAKE_HERDR_RUN_TEARS_DOWN=<meta path> makes `pane run` behave as if a
+# teardown landed right after it: the pane is closed and the meta and record
+# are removed before the script can rewrite the record.
 # Any key that arrives while the shell is the foreground is appended to the
 # pane's "typed" field, the observable stray-key evidence.
 set -u
@@ -155,6 +160,10 @@ case "${1:-} ${2:-}" in
         state=$(printf '%s' "$state" | jq -c --arg p "$p" --arg r "$run" '.panes[$p].fg = "viewer" | .panes[$p].run = $r') ;;
       *"while :; do"*) state=$(printf '%s' "$state" | jq -c --arg p "$p" '.panes[$p].fg = "loop"') ;;
     esac
+    if [ -n "${FM_FAKE_HERDR_RUN_TEARS_DOWN:-}" ]; then
+      state=$(printf '%s' "$state" | jq -c --arg p "$p" 'del(.panes[$p])')
+      rm -f "$FM_FAKE_HERDR_RUN_TEARS_DOWN" "${FM_FAKE_HERDR_RUN_TEARS_DOWN%.meta}.nm-review-pane"
+    fi
     save "$state" ;;
   "pane close")
     if [ "${FM_FAKE_HERDR_REFUSE_CLOSE:-0}" = 1 ]; then printf '{"error":{"code":"busy"}}\n'; exit 1; fi
@@ -632,6 +641,34 @@ test_create_yields_while_session_lock_is_held() {
   pass "fm-nm-review-pane: a contended session presentation lock yields without splitting and the next sweep creates"
 }
 
+test_repoint_skips_record_write_after_teardown_retired_it() {
+  local dir id=torn rc
+  dir=$(make_case torn)
+  write_status_none "$dir"
+  write_meta "$dir" "$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "setup create failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(record_field "$dir" "$id" viewer)" = wait ] || fail "setup pane must show the waiting loop"
+
+  write_status_run "$dir" 01RUNTORNAAAAAAAAAAAAAAAAA "fm/$id"
+  : > "$dir/herdr.log"
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+    FM_FAKE_HERDR_STATE="$dir/herdr-state.json" FM_FAKE_HERDR_LOG="$dir/herdr.log" \
+    FM_FAKE_HERDR_SOCKET="$dir/herdr.sock" FM_FAKE_HERDR_RUN_TEARS_DOWN="$dir/home/state/$id.meta" \
+    FM_FAKE_NM_LOG="$dir/nm.log" FM_FAKE_NM_STATUS="$dir/nm-status.txt" \
+    FM_NM_REVIEW_PANE_QUIESCE_SLEEP=0 \
+    "$SCRIPT" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" = 0 ] || fail "re-point interrupted by teardown must not fail (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(herdr_calls "$dir" pane run)" = 1 ] || fail "the re-point must have reached pane run"
+  [ ! -e "$dir/home/state/$id.meta" ] || fail "fixture: the fake teardown must have removed the meta"
+  [ "$(pane_fg "$dir" w1:p3)" = gone ] || fail "fixture: the fake teardown must have closed the pane"
+  [ ! -e "$dir/home/state/$id.nm-review-pane" ] || fail "a record retired by teardown must not be rewritten"
+  pass "fm-nm-review-pane: a teardown between pane run and the record write leaves no stale record"
+}
+
 test_close_refusal_retains_record_and_names_rerun() {
   local dir id=retain rc
   dir=$(make_case retain)
@@ -673,4 +710,5 @@ test_quiesce_sends_detach_key_once_and_resends_after_unchanged_polls
 test_dead_pane_recreated_and_ambiguous_presence_refuses
 test_teardown_closes_review_pane_and_removes_record
 test_create_yields_while_session_lock_is_held
+test_repoint_skips_record_write_after_teardown_retired_it
 test_close_refusal_retains_record_and_names_rerun
