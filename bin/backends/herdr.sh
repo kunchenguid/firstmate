@@ -1925,17 +1925,21 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   # A generating agent is trusted as-is: never probe it, both to keep this hot
   # path cheap and to avoid racing a busy pane's process table.
   [ "$status" = working ] && { printf 'live'; return 0; }
-  # Any other status can be a stale record a cleanly exited agent left behind,
-  # so corroborate against the pane's own foreground process: a provable lone
-  # idle bare shell has no agent process, so the pane is agent-free and
-  # relaunchable rather than a live-or-unknown husk.
-  if fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id" >/dev/null 2>&1; then
+  case "$status" in
+    idle|done|blocked|unknown) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  # A recognized non-working status can be a stale record a cleanly exited
+  # agent left behind, so corroborate against the pane's own foreground
+  # process: a provable lone idle bare shell has no agent process, so the pane
+  # is agent-free and relaunchable rather than a live-or-unknown husk.
+  if fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1; then
     printf 'no-agent'
     return 0
   fi
   case "$status" in
     idle|done|blocked) printf 'live' ;;
-    *) printf 'unknown' ;;
+    unknown) printf 'unknown' ;;
   esac
 }
 

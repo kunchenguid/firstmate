@@ -845,6 +845,24 @@ test_pane_agent_state_exited_agent_stale_unknown_status_is_no_agent() {
   pass "fm_backend_herdr_pane_agent_state: a stale agent_status=unknown over a bare idle shell classifies no-agent, not unknown"
 }
 
+test_pane_agent_state_malformed_status_stays_unknown() {
+  local shape dir log resp fb out
+  for shape in missing unrecognized; do
+    dir="$TMP_ROOT/malformed-status-$shape"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"
+    printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+    case "$shape" in
+      missing) printf '{"result":{"agent":{}}}\n' > "$resp/2.out" ;;
+      unrecognized) printf '{"result":{"agent":{"agent_status":"paused"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir"); : > "$log"
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+    [ "$out" = unknown ] || fail "a $shape agent status must remain unknown, got '$out'"
+    assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a $shape agent status must not reach bare-shell corroboration"
+  done
+  pass "fm_backend_herdr_pane_agent_state: missing and unrecognized statuses fail safe without a process probe"
+}
+
 test_agent_state_exited_agent_is_dead_relaunchable() {
   # The recovery-grade view fm-control and the session-start sweep read: an
   # exited-agent pane must reach `dead` (agent-free, relaunchable), never the
@@ -4620,6 +4638,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_pane_agent_state_exited_agent_stale_done_status_is_no_agent
 test_pane_agent_state_exited_agent_stale_unknown_status_is_no_agent
+test_pane_agent_state_malformed_status_stays_unknown
 test_agent_state_exited_agent_is_dead_relaunchable
 test_pane_agent_state_live_idle_agent_stays_live
 test_pane_agent_state_working_agent_trusted_without_process_probe

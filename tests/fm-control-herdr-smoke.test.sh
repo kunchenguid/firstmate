@@ -9,9 +9,8 @@
 # an agent is running, and therefore whether a lifecycle verb may act at all,
 # comes from herdr's own agent registry.
 #
-# No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# A deterministic foreground process stands in for the harness while herdr's
+# `pane report-agent` drives the same registry the adapter reads.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -113,7 +112,34 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
 
-# --- a registered agent: classification flips, and the verbs follow ---------
+# --- a stale registration over a bare shell is relaunchable ------------------
+
+herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+  --state unknown --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register the stale agent record on the task pane"
+
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+[ "$STATE" = dead ] || fail "herdr should classify a stale unknown record over a bare shell as dead, got '$STATE'"
+pass "real herdr: a stale unknown registration over a bare shell is dead and relaunchable"
+
+# --- a registered foreground agent: classification flips, and verbs follow --
+
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "sleep 300" \
+  || fail "could not start the foreground agent process"
+for _ in $(seq 1 20); do
+  PROCESS_INFO=$(herdr pane process-info --pane "$PANE_ID" --session "$SESSION" 2>/dev/null) || PROCESS_INFO=
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $p
+    | $p.foreground_process_group_id != $p.shell_pid
+  ' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+printf '%s' "$PROCESS_INFO" | jq -e '
+  .result.process_info as $p
+  | $p.foreground_process_group_id != $p.shell_pid
+' >/dev/null 2>&1 || fail "the foreground agent process did not become observable"
 
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
