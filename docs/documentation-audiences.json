@@ -425,6 +425,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/known-test-failures.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
