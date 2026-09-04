@@ -665,7 +665,7 @@ list_work() {
         "Collection timed out"] | @tsv)') \
       || die "cannot encode timed-out background-work table"
   fi
-  inner_budget=$((deadline - $(date +%s) - 1))
+  inner_budget=$((deadline - $(date +%s)))
   if [ "$inner_budget" -le 0 ]; then
     printf '%s\n' "$fallback"
     return 0
