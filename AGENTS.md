@@ -346,6 +346,11 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
+For user-visible work, derive the relevant sources of truth and grounding targets from the project, current context, and user-provided evidence rather than assuming fixed tools, channels, or runtimes.
+Treat user-provided tool channel tokens as request-scoped; use only the current value and never reuse a prior one.
+When grounding can inform the change, require the crewmate to use available MCP tools to interact with the relevant artifacts or real flows, inspect results, and iterate on every discrepancy; static tests never justify accepting even small unverified deviations.
+Do not require grounding work when it cannot inform the change.
+
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
