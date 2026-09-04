@@ -149,6 +149,7 @@ test_missing_binding_fails_closed() {
 test_spawn_freezes_and_exports_guard() {
   local id tasktmp guard_path guard_dir case_dir home primary worktree fakebin launch_log out rc path_line launch_line
   local dropped_id dropped_tasktmp dropped_home dropped_primary dropped_worktree dropped_log dropped_meta endpoint_state
+  local transport_id transport_tasktmp transport_home transport_primary transport_worktree transport_log transport_meta transport_endpoint
   id="worker-git-spawn-$$"
   tasktmp="/tmp/fm-$id"
   FM_TEST_CLEANUP_DIRS+=("$tasktmp")
@@ -195,6 +196,7 @@ case "${1:-}" in
       printf '%s\n' "$1" >> "${FM_FAKE_LAUNCH_LOG:-/dev/null}"
       case "$1" in
         *"git fm-isolation-check"*)
+          [ "${FM_FAKE_GIT_GUARD_SEND_FAIL:-0}" != 1 ] || exit 1
           if [ "${FM_FAKE_DROP_GIT_GUARD_EXPORT:-0}" != 1 ]; then
             (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$1") || exit $?
           fi
@@ -278,6 +280,44 @@ SH
   expect_code 1 "$rc" "a retry must refuse the retained fresh endpoint"
   assert_contains "$out" "window firstmate:fm-$dropped_id already exists" \
     "the retry did not refuse the exact retained endpoint"
+
+  transport_id="worker-git-transport-failure-$$"
+  transport_tasktmp="/tmp/fm-$transport_id"
+  FM_TEST_CLEANUP_DIRS+=("$transport_tasktmp")
+  rm -rf "$transport_tasktmp"
+  transport_home="$case_dir/transport-home"
+  transport_primary="$case_dir/transport-project"
+  transport_worktree="$case_dir/transport-worktree"
+  transport_log="$case_dir/transport-launch.log"
+  transport_meta="$transport_home/state/$transport_id.meta"
+  transport_endpoint="$case_dir/transport-endpoint"
+  fm_test_spawn_home "$transport_home" codex
+  fm_test_spawn_brief "$transport_home" "$transport_id"
+  fm_git_worktree "$transport_primary" "$transport_worktree" guard-transport-base
+  : > "$transport_log"
+  out=$(FM_FAKE_GIT_GUARD_SEND_FAIL=1 FM_FAKE_LAUNCH_LOG="$transport_log" \
+    FM_FAKE_ENDPOINT_STATE="$transport_endpoint" FM_FAKE_ENDPOINT_WINDOW="fm-$transport_id" \
+    fm_test_run_spawn "$transport_home" "$transport_worktree" "$fakebin" \
+    "$transport_id" "$transport_primary" --harness codex --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 1 "$rc" "spawn must refuse when the Git guard activation command cannot be delivered"
+  assert_contains "$out" "worker Git isolation guard activation command could not be delivered" \
+    "the guard transport failure did not report its launch refusal"
+  assert_grep "git fm-isolation-check" "$transport_log" \
+    "spawn did not attempt to deliver the Git guard activation command"
+  if grep -q 'encode launch-brief' "$transport_log"; then
+    fail "spawn appended the worker launch after its Git guard activation command failed"
+  fi
+  assert_present "$transport_endpoint" "the guard transport failure did not retain its fresh endpoint"
+  assert_present "$transport_meta" "the guard transport refusal discarded its endpoint recovery record"
+  assert_grep "window=firstmate:fm-$transport_id" "$transport_meta" \
+    "the transport-failure recovery record lost the exact refused endpoint"
+  assert_grep "endpoint_task_id=$transport_id" "$transport_meta" \
+    "the transport-failure recovery record lost its task identity binding"
+  assert_grep "worktree=$transport_worktree" "$transport_meta" \
+    "the transport-failure recovery record lost the exact local copy"
+  assert_grep "project=$transport_primary" "$transport_meta" \
+    "the transport-failure recovery record lost the exact primary checkout"
   pass "fm-spawn: every new ship/scout process tree verifies its frozen Git guard before launch"
 }
 

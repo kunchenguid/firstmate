@@ -3311,6 +3311,12 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+spawn_preserve_worker_git_guard_recovery() {
+  local reason=$1
+  SPAWN_FRESH_COMMIT_PENDING=0
+  echo "error: worker Git isolation guard $reason; refusing to append the launch command and preserving task record $STATE/$ID.meta for endpoint $T and local copy $WT recovery" >&2
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -3320,7 +3326,12 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # The pane-level export is the same cross-backend inheritance boundary GOTMPDIR already uses, so descendants that preserve PATH inherit one binding.
 # The worker shell publishes proof only after resolving and executing that exact frozen guard, so a dropped export cannot silently launch an unguarded worker.
 if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
-  spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\"; if [ \"\$(command -v git 2>/dev/null)\" = $(shell_quote "$WORKER_GIT_GUARD_DIR/git") ] && git fm-isolation-check >/dev/null; then : > $(shell_quote "$WORKER_GIT_GUARD_READY"); else printf '%s\\n' 'error: worker Git isolation guard is not active on PATH; refusing launch' >&2; false; fi"
+  if ! spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\"; if [ \"\$(command -v git 2>/dev/null)\" = $(shell_quote "$WORKER_GIT_GUARD_DIR/git") ] && git fm-isolation-check >/dev/null; then : > $(shell_quote "$WORKER_GIT_GUARD_READY"); else printf '%s\\n' 'error: worker Git isolation guard is not active on PATH; refusing launch' >&2; false; fi"; then
+    if [ "$RELAUNCH" -eq 0 ]; then
+      spawn_preserve_worker_git_guard_recovery "activation command could not be delivered"
+    fi
+    exit 1
+  fi
   WORKER_GIT_VERIFY_ATTEMPT=0
   while [ ! -f "$WORKER_GIT_GUARD_READY" ] && [ "$WORKER_GIT_VERIFY_ATTEMPT" -lt 20 ]; do
     sleep 0.1
@@ -3328,8 +3339,7 @@ if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
   done
   [ -f "$WORKER_GIT_GUARD_READY" ] || {
     if [ "$RELAUNCH" -eq 0 ]; then
-      SPAWN_FRESH_COMMIT_PENDING=0
-      echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command and preserving task record $STATE/$ID.meta for endpoint $T and local copy $WT recovery" >&2
+      spawn_preserve_worker_git_guard_recovery "could not be verified first on PATH"
     else
       echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command" >&2
     fi
