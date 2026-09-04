@@ -117,6 +117,17 @@ FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
 # both fixes reaches 19, and the pre-fix builds top out at 17.
 FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL=19
 FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
+# Herdr's atomic agent-prompt route is required for long typed input.  Claude's
+# terminal composer can lose the head of a large literal PTY paste, while the
+# agent-prompt API submits the text as one bracketed-paste operation.
+FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL=19
+# Live verification only reproduced the legacy path as safe for a short
+# (~43-byte) marker-bearing message and confirmed the atomic route for
+# 2,000+ bytes; the true onset of head/marker loss between those points is
+# unproven. Kept deliberately far below the smallest untested point so the
+# legacy literal route is only ever used for messages close in size to what
+# was actually verified safe.
+FM_BACKEND_HERDR_LONG_TEXT_BYTES=200
 # One-warning-per-release dedupe marker prefix, under the state dir. The
 # projection decision is remade on every spawn, so an undeduplicated
 # below-floor warning would repeat on every crewmate; the key is the detected
@@ -2550,9 +2561,66 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
+#
+# Long text fails closed here rather than falling back to the atomic
+# agent-prompt route: that route submits as part of the call, which would
+# break this function's unsubmitted contract, and it targets a running
+# agent's composer - not available for pre-launch shell sends.
 fm_backend_herdr_send_literal() {  # <target> <text>
+  fm_backend_herdr_send_literal_impl "$1" "$2" 0
+}
+
+# fm_backend_herdr_send_literal_command: like fm_backend_herdr_send_literal,
+# but exempt from the long-text guard. Reserved for fm-spawn.sh's fixed,
+# code-constructed LAUNCH command line, sent to a bare pre-agent shell prompt
+# before any agent is running - not the agent composer widget the documented
+# head-loss failure mode was reproduced against - and whose length tracks
+# path/env lengths rather than arbitrary long user-authored content. The
+# submit step for that send must stay a separate, later call (never folded
+# into an atomic type+submit primitive): fm-spawn.sh's herdr presentation
+# order lock is released in the window between typing and Enter, and an
+# atomic primitive would collapse that window.
+fm_backend_herdr_send_literal_command() {  # <target> <text>
+  fm_backend_herdr_send_literal_impl "$1" "$2" 1
+}
+
+fm_backend_herdr_send_literal_impl() {  # <target> <text> <allow-long>
+  local text_bytes
   fm_backend_herdr_target_ready "$1" || return 1
+  if [ "$3" -ne 1 ]; then
+    text_bytes=$(LC_ALL=C printf '%s' "$2" | wc -c | tr -d '[:space:]')
+    if [ "$text_bytes" -gt "$FM_BACKEND_HERDR_LONG_TEXT_BYTES" ]; then
+      echo "error: refusing unsafe Herdr literal send (${text_bytes} bytes); Herdr's PTY paste can silently drop the head of long input and no atomic unsubmitted primitive exists" >&2
+      return 1
+    fi
+  fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+}
+
+# fm_backend_herdr_agent_prompt_capable: return 0 only when both the client and
+# selected server advertise the atomic agent-prompt protocol.  Unknown release
+# data is deliberately not treated as capable because long input must never
+# fall back to a truncating PTY paste.
+fm_backend_herdr_agent_prompt_capable() {  # <session>
+  local session=$1 status running client_protocol server_protocol
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 2
+  client_protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null) || return 2
+  case "$client_protocol" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  running=$(printf '%s' "$status" | jq -r 'if .server.running == true then "true" elif .server.running == false then "false" else "unknown" end' 2>/dev/null) || return 2
+  case "$running" in
+    false) [ "$client_protocol" -ge "$FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL" ] ;;
+    true)
+      server_protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null) || return 2
+      case "$server_protocol" in
+        ''|*[!0-9]*) return 2 ;;
+      esac
+      [ "$client_protocol" -ge "$FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL" ] \
+        && [ "$server_protocol" -ge "$FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL" ]
+      ;;
+    *) return 2 ;;
+  esac
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -2789,8 +2857,35 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local text_bytes agent_prompt_capable
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  # fm_backend_herdr_send_literal below auto-starts the server via
+  # fm_backend_herdr_target_ready; the atomic agent-prompt branch calls
+  # fm_backend_herdr_cli directly instead, which has no bootstrap logic of
+  # its own, so ensure the server here for both branches alike.
+  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || { printf 'send-failed'; return 0; }
+
+  # Herdr's literal PTY route is unsafe for large composer pastes: a Claude
+  # terminal can accept the tail while dropping the marker and leading text.
+  # Protocol 19's agent-prompt API is atomic and includes submission, so use it
+  # for long messages; older or unreadable releases fail closed before typing.
+  text_bytes=$(LC_ALL=C printf '%s' "$text" | wc -c | tr -d '[:space:]')
+  if [ "$text_bytes" -gt "$FM_BACKEND_HERDR_LONG_TEXT_BYTES" ]; then
+    agent_prompt_capable=0
+    fm_backend_herdr_agent_prompt_capable "$FM_BACKEND_HERDR_SESSION" || agent_prompt_capable=$?
+    if [ "$agent_prompt_capable" -ne 0 ]; then
+      echo "error: refusing unsafe Herdr long send (${text_bytes} bytes); atomic agent prompt requires protocol ${FM_BACKEND_HERDR_MIN_AGENT_PROMPT_PROTOCOL}" >&2
+      printf 'send-failed'
+      return 0
+    fi
+    if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent prompt "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1; then
+      printf 'empty'
+    else
+      printf 'send-failed'
+    fi
+    return 0
+  fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")

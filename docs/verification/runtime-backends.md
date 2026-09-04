@@ -1214,6 +1214,11 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` o
 
 ### Herdr backend
 
+Long typed-input safety was reverified on Herdr 0.8.0 client and server, protocol 19, using the operational `[fm-from-firstmate]` marker and correlation prefix.
+The live Claude path reproduced the failure signature with a literal PTY paste: the tail arrived while the marker and beginning disappeared, while a shorter resend arrived intact.
+The smallest counterfactual used `herdr agent prompt` and preserved marker, correlation prefix, and tail for 2,000, 8,000, and 16,000-byte messages.
+The regression `tests/fm-herdr-long-send.test.sh` verifies the atomic route, protocol-below-19 fail-closed behavior, and the short literal resend boundary through the adapter submit interface, plus the spawn-time LAUNCH command's exemption from that boundary through `fm_backend_herdr_send_literal_command`.
+
 The tmux run above is the reference; this section is the separate Herdr proof, produced on 2026-08-12 against Herdr 0.8.0 (client and server, protocol 19) and the same signed `cursor-agent` 2026.08.11-e8db854 on macOS 26.5.2 arm64.
 Every step ran inside an isolated `fm-lab-` session provisioned by `bin/fm-herdr-lab.sh`, launched from a neutral parent outside any Herdr pane, with the live default session's pane count checked before, during, and after; it stayed at 7 throughout.
 

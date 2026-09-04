@@ -2455,7 +2455,7 @@ spawn_current_path() {  # <target>
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_literal_command "$1" "$2" ;;
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
