@@ -2310,6 +2310,56 @@ EOF
   pass "a parked run the pipeline advanced past the task copy is still concluded from the runs ledger, not orphaned"
 }
 
+test_parked_run_with_mismatched_ledger_head_is_never_aborted() {
+  local case_dir rc advanced_short anchor_short
+  case_dir=$(make_case parked-run-mismatched-ledger-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-mismatched-ledger-head"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/task-x1 deadbee 2026-09-03 07:55)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-02 06:36)
+EOF
+)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-mismatched-ledger-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-mismatched-ledger-head: teardown aborted a ledger run with a different head"
+  pass "a ledger row for a different head never authorizes a parked-run abort"
+}
+
+test_parked_run_with_malformed_ledger_row_is_never_aborted() {
+  local case_dir rc advanced_short anchor_short
+  case_dir=$(make_case parked-run-malformed-ledger-row)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-malformed-ledger-row"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$advanced_short")" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+running fm/task-x1 $advanced_short
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-02 06:36)
+EOF
+)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-malformed-ledger-row: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-malformed-ledger-row: teardown aborted from a malformed ledger row"
+  pass "a malformed ledger row never authorizes a parked-run abort"
+}
+
 # Counterfactual twin of the unfetched defect above: the SAME parked-run shape
 # with the pipeline's advanced fix head FETCHED into the task copy (objects
 # only - no ref moves) resolves through the strict object-local rule alone,
@@ -3134,6 +3184,8 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
+test_parked_run_with_mismatched_ledger_head_is_never_aborted
+test_parked_run_with_malformed_ledger_row_is_never_aborted
 test_parked_run_advanced_head_locally_fetched_is_still_aborted
 test_parked_advanced_run_without_anchor_is_never_aborted
 test_parked_advanced_run_ancestor_anchor_is_never_aborted
