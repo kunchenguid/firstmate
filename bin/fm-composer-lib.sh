@@ -66,7 +66,11 @@
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#                strict rule's unidentifiable blank row. A bare agent-glyph
+#                row inside the separator pair defers as `unknown` on
+#                identity-less backends when the row carries only the glyph;
+#                Claude's real idle row retains U+00A0 after the glyph and
+#                still reads empty there.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -1354,8 +1358,28 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
 }
 
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent raw plain glyph='' rest
   if [ "$has_identity" != 1 ]; then
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    if [ "$styled" = 1 ]; then
+      plain=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+    else
+      plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+    fi
+    case "$plain" in
+      '│'*'│') plain=${plain#│}; plain=${plain%│} ;;
+      '┃'*'┃') plain=${plain#┃}; plain=${plain%┃} ;;
+      '║'*'║') plain=${plain#║}; plain=${plain%║} ;;
+      '|'*'|') plain=${plain#|}; plain=${plain%|} ;;
+    esac
+    plain="${plain#"${plain%%[![:space:]]*}"}"
+    if fm_composer_leading_agent_glyph_var glyph "$plain"; then
+      rest=${plain#"$glyph"}
+      if [ -z "$rest" ]; then
+        printf 'unknown'
+        return 0
+      fi
+    fi
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
     return 0
   fi

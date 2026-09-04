@@ -321,8 +321,8 @@ test_matrix_pi_separated_needs_identity() {
   typed=$'────────────────────────\n❯\n────────────────────────'
   assert_screen "pi lone-glyph draft with identity" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   assert_screen "pi lone-glyph draft on tmux" pending "$CAPS_TMUX" "$typed" 1 "$pi_idle"
-  assert_screen "lone glyph without identity capability" empty "$CAPS_STYLED_NOID" "$typed"
-  assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
+  assert_screen "lone glyph without identity capability" unknown "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "lone glyph on plain backend" unknown "$CAPS_PLAIN" "$typed"
   assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
@@ -489,8 +489,8 @@ test_cursorless_bare_wrap_region_classifies() {
 
   bounded=$'────────────────────────\n❯\n────────────────────────\nClaude 4.1'
   assert_screen "rule-bounded claude footer on herdr" empty "$CAPS_STYLED" "$bounded" '' probe-absent
-  assert_screen "rule-bounded claude footer on zellij" empty "$CAPS_STYLED_NOID" "$bounded"
-  assert_screen "rule-bounded claude footer on cmux/orca" empty "$CAPS_PLAIN" "$bounded"
+  assert_screen "rule-bounded lone glyph overlap on zellij" unknown "$CAPS_STYLED_NOID" "$bounded"
+  assert_screen "rule-bounded lone glyph overlap on cmux/orca" unknown "$CAPS_PLAIN" "$bounded"
 
   ghost=$'❯ '"${ESC}[2ma long rotating suggestion that${ESC}[0m"$'\n'"${ESC}[2mwraps onto the next line${ESC}[0m"
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$ghost")
