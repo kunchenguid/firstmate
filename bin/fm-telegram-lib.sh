@@ -148,13 +148,27 @@ _fm_telegram_chat_id_valid() {  # <id>
 # returns 1 in silence; an opted-in home with unusable token configuration
 # returns 2 with an actionable error for operator-facing callers.
 fm_telegram_config_load() {  # <home>
-  local home=$1 chat token device dir token_setting
+  local home=$1 chat token device dir chat_setting token_setting
   FM_TELEGRAM_CHAT_ID=
   FM_TELEGRAM_TOKEN_FILE=
   FM_TELEGRAM_CONFIG_ERROR=
-  chat=$(_fm_telegram_config_read "$home" telegram-chat-id) || return 1
-  _fm_telegram_chat_id_valid "$chat" || return 1
   dir=$(_fm_telegram_config_dir "$home")
+  chat_setting="$dir/telegram-chat-id"
+  if [ ! -e "$chat_setting" ] && [ ! -L "$chat_setting" ]; then
+    return 1
+  fi
+  if [ ! -f "$chat_setting" ] || [ -L "$chat_setting" ] || [ ! -r "$chat_setting" ]; then
+    FM_TELEGRAM_CONFIG_ERROR="chat id setting $chat_setting must be a readable regular file containing a numeric chat id"
+    return 2
+  fi
+  chat=$(_fm_telegram_config_read "$home" telegram-chat-id) || {
+    FM_TELEGRAM_CONFIG_ERROR="chat id setting $chat_setting must contain a numeric chat id"
+    return 2
+  }
+  _fm_telegram_chat_id_valid "$chat" || {
+    FM_TELEGRAM_CONFIG_ERROR="chat id setting $chat_setting must contain a numeric chat id"
+    return 2
+  }
   token_setting="$dir/telegram-token-path"
   if [ -e "$token_setting" ] || [ -L "$token_setting" ]; then
     if [ ! -f "$token_setting" ] || [ -L "$token_setting" ] || [ ! -r "$token_setting" ]; then
@@ -353,9 +367,10 @@ fm_telegram_scrub() {  # <text>
     | LC_ALL=C tr '\t\r\n' '   ' \
     | LC_ALL=C sed -E \
       -e 's#(^|[[:space:]])(child|task|fingerprint|key|mode|yolo|harness|backend|window|worktree|branch|report|pane|session)=[^[:space:]]*#\1#g' \
-      -e 's#(^|[[:space:]])/[^[:space:]]*#\1#g' \
+      -e 's#\(/[^)]*\)##g' \
+      -e 's#(^|[[:space:]([{,;])(/[^[:space:])\]},;]*)#\1#g' \
       -e 's#(^|[^[:alnum:]_./:-])fm/[A-Za-z0-9._/-]+#\1#g' \
-      -e 's#(^|[^[:alnum:]_.-])(claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse)([^[:alnum:]_.-]|$)#\1\3#g' \
+      -e 's#(^|[^[:alnum:]_./-])(claude|codex|opencode|pi-signed|pi|grok|kimi|cursor|muse)([^[:alnum:]_./-]|$)#\1\3#g' \
       -e 's/[[:space:]]+/ /g' \
       -e 's/^ //' -e 's/ $//' \
     | fm_telegram_utf8_truncate "$FM_TELEGRAM_FIELD_MAX" "$FM_TELEGRAM_FIELD_BYTES_MAX"
@@ -381,7 +396,14 @@ fm_telegram_card_render() {  # <class> <name=value>...
     if fm_telegram_looks_like_status_line "$value"; then
       return 3
     fi
-    value=$(fm_telegram_scrub "$value")
+    if [ "$name" = url ]; then
+      value=$(printf '%s' "$value" \
+        | LC_ALL=C tr '\t\r\n' '   ' \
+        | LC_ALL=C sed -E -e 's/[[:space:]]+/ /g' -e 's/^ //' -e 's/ $//' \
+        | fm_telegram_utf8_truncate "$FM_TELEGRAM_FIELD_MAX" "$FM_TELEGRAM_FIELD_BYTES_MAX")
+    else
+      value=$(fm_telegram_scrub "$value")
+    fi
     case "$name" in
       title) title=$value ;;
       reason) reason=$value ;;

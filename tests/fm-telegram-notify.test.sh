@@ -345,6 +345,32 @@ test_invalid_explicit_token_path_never_uses_default() {
   pass "an invalid explicit token path is visible and never falls back"
 }
 
+test_invalid_chat_id_is_visible_and_recovers() {
+  local dir base out setting
+  dir=$(make_home invalid-chat)
+  report "$dir" "failed [key=k-chat]: child t1 failed: x" failed k-chat \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  [ "$(card_count "$dir")" = 1 ] || fail "the configured home did not queue its card"
+  base=$(start_api "$dir")
+  setting="$dir/home/config/telegram-chat-id"
+  printf 'not-a-number\n' > "$setting"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the invalid-chat drain failed"
+  case "$out" in
+    *"$setting"*"numeric chat id"*) ;;
+    *) fail "the drain did not name the invalid chat-id setting: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "an invalid chat id discarded its card"
+  [ ! -s "$dir/api.log" ] || fail "an invalid chat id still reached the API"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the repeated invalid-chat drain failed"
+  [ -z "$out" ] || fail "a persistent invalid chat id was reported more than once: $out"
+  printf '4242\n' > "$setting"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the repaired-chat drain failed"
+  [ -z "$out" ] || fail "the repaired-chat drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the repaired chat id did not deliver its card"
+  stop_api
+  pass "an invalid chat id reports once, preserves cards, and recovers"
+}
+
 test_card_is_built_from_typed_fields() {
   local dir card
   dir=$(make_home typed)
@@ -522,7 +548,7 @@ test_internal_identifiers_do_not_reach_a_card() {
   dir=$(make_home scrub)
   report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
     "project=alpha" \
-    "note=build failed on branch fm/task-x under claude in /home/captain/wt/alpha with harness=claude mode=no-mistakes key=child-outcome-t1 branch=fm/task-x" \
+    "note=build failed (/home/captain/wt/alpha) on branch fm/task-x under claude; details https://github.com/codex/repo/issues/1 with harness=claude mode=no-mistakes key=child-outcome-t1 branch=fm/task-x" \
     >/dev/null 2>&1 || true
   card=$(only_card "$dir")
   grep -Fq '/home/captain' "$card" && fail "a card carried an absolute worktree path"
@@ -533,11 +559,17 @@ test_internal_identifiers_do_not_reach_a_card() {
   grep -Fq 'fm/task-x' "$card" && fail "a card carried a bare branch ref"
   grep -Fq 'claude' "$card" && fail "a card carried a bare harness name"
   grep -Fq 'build failed on branch' "$card" || fail "scrubbing removed the readable part of the note"
-  out=$(render pr-ready "project=alpha" "url=https://example.test/fm/repo/pull/7") \
-    || fail "a PR URL containing an fm path would not render"
-  grep -Fq 'https://example.test/fm/repo/pull/7' <<< "$out" \
-    || fail "scrubbing ate a PR URL"
-  pass "the internal identifiers section 9 forbids do not reach a card"
+  grep -Fq 'https://github.com/codex/repo/issues/1' "$card" \
+    || fail "scrubbing damaged a URL inside prose"
+  out=$(render pr-ready "project=alpha" "url=https://github.com/codex/repo/pull/7") \
+    || fail "a PR URL containing a harness name would not render"
+  grep -Fq 'https://github.com/codex/repo/pull/7' <<< "$out" \
+    || fail "the PR-ready card damaged its canonical URL"
+  out=$(render landed "project=alpha" "url=https://github.com/codex/repo/pull/7") \
+    || fail "a landed URL containing a harness name would not render"
+  grep -Fq 'https://github.com/codex/repo/pull/7' <<< "$out" \
+    || fail "the landed card damaged its canonical URL"
+  pass "internal identifiers are scrubbed while paths and canonical URLs stay safe"
 }
 
 test_pr_card_identity_tracks_the_canonical_pr() {
@@ -904,6 +936,7 @@ test_arm_and_disarm() {
 test_unconfigured_home_is_inert
 test_configured_token_disappearance_is_visible_and_recovers
 test_invalid_explicit_token_path_never_uses_default
+test_invalid_chat_id_is_visible_and_recovers
 test_an_unusable_token_file_is_inert
 test_unsafe_token_permissions_are_a_visible_configuration_error
 test_card_is_built_from_typed_fields

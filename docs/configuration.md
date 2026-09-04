@@ -654,6 +654,7 @@ A held decision, a registered PR, a failure, and a merge are all durable in the 
 | Network down or Telegram unreachable | Cards stay queued in order, the drain retries next cycle, nothing blocks |
 | Token revoked, or the chat refuses the bot | One rate-limited wake naming the rejection, not one per poll; the cards survive |
 | No `telegram-chat-id` configuration | Automatic paths are a hard no-op: exit 0, no output, nothing written; deliberate `arm` refuses and names the required files |
+| A present chat-id setting is empty, unsafe, unreadable, or nonnumeric | Cards remain queued and the drain reports the exact file once; publishers remain silent and unchanged |
 | A configured token path is missing, empty, unsafe, or unreadable | Cards remain queued and the drain reports the exact file once; publishers remain silent and unchanged |
 | The drain is not armed | Cards queue and are delivered when it is armed |
 | An hour with nothing delivered | One wake reporting the silence, so a stalled channel cannot masquerade as a quiet one |
