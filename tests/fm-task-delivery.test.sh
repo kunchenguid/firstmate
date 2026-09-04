@@ -407,8 +407,10 @@ test_project_mode_maps_the_conditional_policy() {
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- legacyproj - fixture (added 2026-01-01)
 - --raw [local-only] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
+- malformedproj [
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -430,6 +432,9 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "strict lookup rejected a recognized registered mode (got '$out')"
 
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- legacyproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "strict lookup rejected a complete legacy row (got '$out')"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
   status=$?
   [ "$status" -ne 0 ] || fail "strict lookup accepted a project missing from the registry"
@@ -444,6 +449,11 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "strict lookup accepted an unknown registered mode"
   [ -z "$out" ] || fail "strict unknown-mode lookup emitted fallback output '$out'"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- malformedproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a malformed matching row"
+  [ -z "$out" ] || fail "strict malformed-row lookup emitted fallback output '$out'"
 
   missing_home="$TMP_ROOT/project-mode/missing-home"
   mkdir -p "$missing_home/data"

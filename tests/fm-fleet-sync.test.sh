@@ -512,6 +512,30 @@ test_absent_registry_preserves_gone_unmerged_branch() {
   pass "absent-registry refresh preserves remote-gone unmerged work"
 }
 
+test_malformed_registry_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-malformed-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "malformed-registry local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-malformed-work [\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-malformed-work: synced" "malformed-registry default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "malformed-registry remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "malformed-registry remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "malformed-registry remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "malformed-registry default branch did not fast-forward"
+  pass "malformed-registry refresh preserves remote-gone unmerged work"
+}
+
 test_remote_backed_prunes_gone_branch() {
   local home clone out
   home=$(new_home)
@@ -826,6 +850,7 @@ test_dot_segment_path_local_only_preserves_gone_unmerged_branch
 test_option_shaped_local_only_preserves_gone_unmerged_branch
 test_external_alias_local_only_preserves_gone_unmerged_branch
 test_absent_registry_preserves_gone_unmerged_branch
+test_malformed_registry_preserves_gone_unmerged_branch
 test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow

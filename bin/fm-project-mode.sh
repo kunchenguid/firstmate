@@ -33,7 +33,7 @@
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
 # --strict exits nonzero instead of falling back when the registry, project, or
-# registered mode is unresolved.
+# matching registry row is unresolved, ambiguous, or malformed.
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
@@ -67,9 +67,15 @@ if [ ! -f "$REG" ]; then
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<validity> <mode> <yolo>" or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
+  function complete_tail(delimiter) {
+    return $(delimiter) == "-" && NF >= delimiter + 3 && $(NF - 1) == "(added" &&
+      $NF ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/
+  }
   $1=="-" && $2==n {
+    matches++;
+    if (matches > 1) next;
     mode="no-mistakes"; yolo="off";
     if ($3 ~ /^\[/) {
       s="";
@@ -79,7 +85,13 @@ parsed=$(awk -v n="$NAME" '
       if (a[1] != "" && a[1] != "+yolo") mode = a[1];
       for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
     }
-    print mode, yolo; exit
+    valid=0;
+    if ($3 == "-") valid=complete_tail(3);
+    else if ($3 ~ /^\[[^][]+\]$/) valid=complete_tail(4);
+    else if ($3 ~ /^\[[^][]+$/ && $4 == "+yolo]") valid=complete_tail(5);
+  }
+  END {
+    if (matches > 0) print (matches == 1 && valid ? "valid" : "malformed"), mode, yolo;
   }
 ' "$REG")
 
@@ -91,6 +103,13 @@ if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
+fi
+
+parse_status=${parsed%% *}
+parsed=${parsed#* }
+if [ "$STRICT" -eq 1 ] && [ "$parse_status" != "valid" ]; then
+  echo "warn: malformed or duplicate registry row for \"$NAME\"; cannot resolve mode" >&2
+  exit 1
 fi
 
 mode=${parsed%% *}
