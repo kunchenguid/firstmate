@@ -11,6 +11,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Interrupt | Single Escape. |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
+| Managed launch | `codex-multi-auth-codex`, forwarding to the official `codex` executable while metadata remains `harness=codex`. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
@@ -18,6 +19,14 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
+
+## Managed launch boundary
+
+Every Firstmate-managed Codex ship worker, scout, and secondmate launches through `codex-multi-auth-codex`.
+`bin/fm-spawn.sh` resolves both the wrapper and the official `codex` executable before creating an endpoint, pins the official executable through the wrapper's documented per-process `CODEX_MULTI_AUTH_REAL_CODEX_BIN`, and refuses rather than falling back to unwrapped Codex when either executable is absent.
+The wrapper receives the existing Codex model, reasoning-effort, sandbox, prompt, hook, and turn-end arguments unchanged, while task metadata and all control-plane behavior continue to use `harness=codex`.
+Firstmate invokes no multi-auth login, logout, switch, pin, repair, or other account-management command at this boundary.
+`docs/configuration.md` owns operator setup, and `bin/fm-spawn.sh --help` owns the exact launch mechanics.
 
 ## Skill popup
 

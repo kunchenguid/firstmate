@@ -87,6 +87,35 @@ Run the live guard after any harness upgrade and before trusting or refreshing t
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+The Codex forwarding boundary was refreshed on 2026-09-04 with `codex-multi-auth` 2.12.0 and official `codex-cli` 0.153.2.
+The safe installed-wrapper check runs only version and help surfaces in an empty disposable directory, pins the official executable through `CODEX_MULTI_AUTH_REAL_CODEX_BIN`, and disables wrapper startup sync and app-bind setup.
+It neither sends a model request nor prints or changes account identity, selection, or credentials.
+
+Exact safe verification command:
+
+```sh
+scratch=$(mktemp -d ./scratchpad-codex-multi-auth.XXXXXX)
+codex_bin=$(command -v codex)
+(
+  cd "$scratch" || exit 1
+  CODEX_MULTI_AUTH_APP_BIND_INSTALL=0 CODEX_MULTI_AUTH_APP_LAUNCHER_INSTALL=0 CODEX_MULTI_AUTH_SYNC_CODEX_CLI=0 CODEX_MULTI_AUTH_AUTO_SYNC_ON_STARTUP=0 codex-multi-auth --version
+  CODEX_MULTI_AUTH_REAL_CODEX_BIN="$codex_bin" CODEX_MULTI_AUTH_APP_BIND_INSTALL=0 CODEX_MULTI_AUTH_APP_LAUNCHER_INSTALL=0 CODEX_MULTI_AUTH_SYNC_CODEX_CLI=0 CODEX_MULTI_AUTH_AUTO_SYNC_ON_STARTUP=0 codex-multi-auth-codex --version
+  CODEX_MULTI_AUTH_REAL_CODEX_BIN="$codex_bin" CODEX_MULTI_AUTH_APP_BIND_INSTALL=0 CODEX_MULTI_AUTH_APP_LAUNCHER_INSTALL=0 CODEX_MULTI_AUTH_SYNC_CODEX_CLI=0 CODEX_MULTI_AUTH_AUTO_SYNC_ON_STARTUP=0 codex-multi-auth-codex exec --help | sed -n '1p'
+)
+rmdir "$scratch"
+```
+
+Observed Codex result:
+
+```text
+2.12.0
+codex-cli 0.153.2
+Run Codex non-interactively
+```
+
+`tests/fm-tmux-agent-liveness.test.sh` separately runs real foreground processes in the wrapper-parent plus official-Codex-child shape and proves the existing foreground-process-group classifier still returns `alive`.
+Herdr uses registered-agent state rather than process names, while Zellij, Orca, and cmux have no recovery-grade process classifier, so no backend-specific identity branch changes.
+
 Bounded output from the run that produced the table:
 
 ```text

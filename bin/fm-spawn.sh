@@ -120,6 +120,12 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   Every verified harness=codex launch resolves both codex-multi-auth-codex and
+#   the official codex executable before endpoint creation. It launches the
+#   absolute wrapper path with the official binary pinned through
+#   CODEX_MULTI_AUTH_REAL_CODEX_BIN, and never falls back to bare codex. A raw
+#   launch command whose executable is codex is refused because it would bypass
+#   that required boundary; use --harness codex and the ordinary profile flags.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -167,6 +173,8 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CODEXWRAPPER__ quoted absolute codex-multi-auth-codex forwarding wrapper
+#     __CODEXBIN__ quoted absolute official Codex CLI selected as its vendor binary
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1230,7 +1238,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1280,9 +1288,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'CODEX_MULTI_AUTH_REAL_CODEX_BIN=__CODEXBIN__ __CODEXWRAPPER__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'CODEX_MULTI_AUTH_REAL_CODEX_BIN=__CODEXBIN__ __CODEXWRAPPER__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1418,6 +1426,11 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = codex ]; then
+  echo "error: a raw codex launch would bypass the required codex-multi-auth-codex wrapper; use --harness codex with ordinary model and effort flags" >&2
+  exit 1
+fi
+
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
@@ -1434,8 +1447,18 @@ if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini 
 fi
 
 case "$HARNESS" in
+  codex)
+    CODEX_MULTI_AUTH_BIN=$(resolve_executable codex-multi-auth-codex) || {
+      echo "error: harness=codex requires codex-multi-auth-codex on PATH; install codex-multi-auth or select a different verified harness" >&2
+      exit 1
+    }
+    CODEX_BIN=$(resolve_executable codex) || {
+      echo "error: harness=codex requires the official codex CLI on PATH; install @openai/codex or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -3158,6 +3181,10 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
+  codex)
+    LAUNCH=${LAUNCH//__CODEXWRAPPER__/"$(shell_quote "$CODEX_MULTI_AUTH_BIN")"}
+    LAUNCH=${LAUNCH//__CODEXBIN__/"$(shell_quote "$CODEX_BIN")"}
+    ;;
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;

@@ -258,7 +258,11 @@ fm_test_make_spawn_fakebin() {
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  # Every Firstmate-managed Codex launch requires the forwarding wrapper.
+  # Supplying it in the shared spawn fixture keeps unrelated suites isolated
+  # from the developer machine's installed package; missing-wrapper cases
+  # remove this stub explicitly and narrow PATH.
+  fm_fake_exit0 "$fakebin" treehouse codex codex-multi-auth-codex "$@"
   printf '%s\n' "$fakebin"
 }
 

@@ -53,6 +53,7 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/codex"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
@@ -76,6 +77,16 @@ cat > "$LAB/bin/agent-launcher" <<SH
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
+
+# codex-multi-auth-codex can remain as a parent while the official Codex CLI
+# runs as its child. The wrapper may therefore look like a generic Node or shell
+# process even though the same foreground process group still contains Codex.
+cat > "$LAB/bin/codex-multi-auth-codex" <<SH
+#!/bin/sh
+"$LAB/bin/codex" 900 &
+wait
+SH
+chmod +x "$LAB/bin/codex-multi-auth-codex"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -215,6 +226,13 @@ wait_for_state "$SESSION:launcher" alive \
 comms_classify_agent "$SESSION:launcher" \
   || fail "the launcher's harness child must be visible in the foreground process group"
 pass "tmux liveness: a launcher whose own identity reads as a bare shell classifies alive from its harness child"
+
+new_window codex-wrapper "$LAB/bin/codex-multi-auth-codex"
+wait_for_state "$SESSION:codex-wrapper" alive \
+  || fail "a forwarding wrapper running the official Codex child must classify alive"
+comms_classify_agent "$SESSION:codex-wrapper" \
+  || fail "the official Codex child must remain visible in the wrapper's foreground process group"
+pass "tmux liveness: the codex-multi-auth parent plus official Codex child classifies alive"
 
 # --- an idle shell is still confidently dead --------------------------------
 

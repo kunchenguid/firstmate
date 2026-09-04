@@ -345,7 +345,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-multi-auth-codex' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -412,9 +412,11 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+  assert_contains "$launch" "CODEX_MULTI_AUTH_REAL_CODEX_BIN='$FAKEBIN_DIR/codex' '$FAKEBIN_DIR/codex-multi-auth-codex' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not use the forwarding wrapper with the official CLI, model, and reasoning effort config"
+  assert_grep 'harness=codex' "$HOME_DIR/state/$id.meta" \
+    "the forwarding wrapper replaced codex's durable harness identity"
+  pass "codex uses the forwarding wrapper while preserving its vendor binary, profile, and identity"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -428,10 +430,79 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-multi-auth-codex' --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
+}
+
+test_codex_wrapper_covers_scout_and_secondmate_launches() {
+  local rec scout_id secondmate_id sm out status launch
+  scout_id=profile-codex-scout-z4b
+  secondmate_id=profile-codex-secondmate-z4c
+  rec=$(make_spawn_case profile-codex-all-kinds codex "$scout_id" "$secondmate_id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout_id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "codex scout spawn through the forwarding wrapper should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_MULTI_AUTH_REAL_CODEX_BIN='$FAKEBIN_DIR/codex' '$FAKEBIN_DIR/codex-multi-auth-codex'" \
+    "codex scout launch bypassed the forwarding wrapper"
+  assert_contains "$launch" "notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch " \
+    "codex scout launch lost its turn-end notification config"
+
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$secondmate_id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$secondmate_id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn through the forwarding wrapper should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_MULTI_AUTH_REAL_CODEX_BIN='$FAKEBIN_DIR/codex' '$FAKEBIN_DIR/codex-multi-auth-codex'" \
+    "codex secondmate launch bypassed the forwarding wrapper"
+  assert_not_contains "$launch" "notify=[" \
+    "codex secondmate launch gained the worker-only turn-end notification config"
+  assert_meta_profile "$HOME_DIR/state/$secondmate_id.meta" codex default default
+  pass "codex scouts and secondmates use the same required forwarding wrapper"
+}
+
+test_codex_missing_wrapper_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-codex-wrapper-missing-z4d
+  rec=$(make_spawn_case profile-codex-wrapper-missing codex "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/codex-multi-auth-codex"
+
+  out=$(PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "codex spawn without the forwarding wrapper should fail closed"
+  assert_contains "$out" "harness=codex requires codex-multi-auth-codex on PATH" \
+    "missing-wrapper refusal did not name the required forwarding binary"
+  assert_contains "$out" "install codex-multi-auth" \
+    "missing-wrapper refusal did not provide the smallest recovery action"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "missing-wrapper refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing-wrapper refusal typed a launch command"
+  pass "codex refuses before endpoint creation when its forwarding wrapper is missing"
+}
+
+test_raw_codex_command_cannot_bypass_required_wrapper() {
+  local rec id out status
+  id=profile-codex-raw-bypass-z4e
+  rec=$(make_spawn_case profile-codex-raw-bypass codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --dangerously-bypass-approvals-and-sandbox")
+  status=$?
+  expect_code 1 "$status" "a raw codex command should not bypass the required forwarding wrapper"
+  assert_contains "$out" "raw codex launch would bypass the required codex-multi-auth-codex wrapper" \
+    "raw codex refusal did not identify the unsafe bypass"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "raw codex bypass refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw codex bypass refusal typed a launch command"
+  pass "raw codex commands cannot bypass the required forwarding wrapper"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -809,6 +880,9 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_wrapper_covers_scout_and_secondmate_launches
+test_codex_missing_wrapper_refuses_before_endpoint_or_metadata
+test_raw_codex_command_cannot_bypass_required_wrapper
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

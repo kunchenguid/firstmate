@@ -426,6 +426,7 @@ make_noop_tmux() {
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" codex codex-multi-auth-codex
   printf '%s\n' "$fakebin"
 }
 
@@ -660,7 +661,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" pi
+  fm_fake_exit0 "$fakebin" pi codex codex-multi-auth-codex
   printf '%s\n' "$fakebin"
 }
 
@@ -856,8 +857,8 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
-    "explicit-harness-no-tokens: launch did not use codex"
+  assert_contains "$launch" "codex-multi-auth-codex' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit-harness-no-tokens: launch did not use the codex forwarding wrapper"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"
@@ -913,6 +914,13 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
 FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
+    if [ "$harness" = codex ]; then
+      cat > "$fakebin/codex-multi-auth-codex" <<'SH'
+#!/usr/bin/env bash
+exec "${CODEX_MULTI_AUTH_REAL_CODEX_BIN:?}" "$@"
+SH
+      chmod +x "$fakebin/codex-multi-auth-codex"
+    fi
     launch=$(cat "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
