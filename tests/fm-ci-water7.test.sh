@@ -35,15 +35,14 @@ assert ci.get("permissions") == {"contents": "read"}
 assert fallback.get("permissions") == {"contents": "read"}
 assert required.get("permissions") == {"contents": "read", "pull-requests": "read"}
 # The "Require no-mistakes" gate is reversibly disabled (see the dated top
-# comment in no-mistakes-required.yml): the pull_request trigger is commented
-# out so the workflow cannot run on pull requests. This assertion semantically
-# proves the gate cannot run; restore the pull_request trigger block to
-# revive it. Captured here because a later `for required in ...` loop rebinds
-# the `required` name.
+# comment in no-mistakes-required.yml). Pin the whole trigger set rather than
+# only the absence of `pull_request`, because `pull_request_target` also runs
+# on pull requests and delivers the same payload the retained job reads.
+# Captured here because a later `for required in ...` loop rebinds the
+# `required` name.
 required_on = required.get(True, required.get("on"))
 assert isinstance(required_on, dict)
-assert "pull_request" not in required_on
-assert "workflow_dispatch" in required_on
+assert set(required_on) == {"workflow_dispatch"}, sorted(required_on)
 expected_primary_jobs = [
     "lint",
     "critical-teardown",
@@ -277,9 +276,10 @@ fallback_admission = (
     "github.event_name == 'workflow_dispatch'"
 )
 required_admission = (
-    "github.event.pull_request.head.repo.full_name == github.repository && "
+    "github.event_name == 'workflow_dispatch' || "
+    "(github.event.pull_request.head.repo.full_name == github.repository && "
     "github.event.pull_request.user.login != 'github-actions[bot]' && "
-    "github.event.pull_request.user.login != 'dependabot[bot]'"
+    "github.event.pull_request.user.login != 'dependabot[bot]')"
 )
 assert normalize(fallback_job["if"]) == fallback_admission
 assert normalize(required_job["if"]) == required_admission
@@ -327,6 +327,7 @@ assert verdict["run"] == 'bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_L
 required_runs = [step["run"] for step in required_job["steps"] if "run" in step]
 assert len(required_runs) == 1
 assert "${{" not in required_runs[0]
+assert "GH_TOKEN" not in required_runs[0]
 assert "Updates from [git push no-mistakes]" in required_runs[0]
 
 # The hosted body-compliance lane stays checkout-free and independent.
@@ -358,6 +359,328 @@ PY
     fail "workflow routing or command policy contract failed"
   fi
   pass "hosted slim CI is primary and the self-hosted suite is a failure/manual fallback"
+}
+
+test_disabled_no_mistakes_gate_states_its_own_revival_contract() {
+  if ! python3 - "$ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    print("fm-ci-water7.test.sh: python3 PyYAML is required to parse workflow policy", file=sys.stderr)
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+required_path = root / ".github/workflows/no-mistakes-required.yml"
+required_text = required_path.read_text()
+required = yaml.safe_load(required_text)
+repository = "pedromuller-del/firstmate"
+
+
+def triggers(workflow):
+    # PyYAML resolves an unquoted `on:` key to the boolean True.
+    parsed = workflow.get(True, workflow.get("on"))
+    assert isinstance(parsed, dict), parsed
+    return parsed
+
+
+def runs_on_pull_requests(trigger_map):
+    return bool(set(trigger_map) & {"pull_request", "pull_request_target"})
+
+
+def stood_down(trigger_map):
+    return set(trigger_map) == {"workflow_dispatch"}
+
+
+required_on = triggers(required)
+assert stood_down(required_on), sorted(required_on)
+assert not runs_on_pull_requests(required_on), sorted(required_on)
+
+workflow_lines = required_text.splitlines()
+on_index = workflow_lines.index("on:")
+tail = workflow_lines[on_index + 1 :]
+block_length = next(index for index, line in enumerate(tail) if line and not line[0].isspace())
+head_lines = workflow_lines[: on_index + 1]
+trigger_lines = tail[:block_length]
+rest_lines = tail[block_length:]
+
+
+def parse_with_trigger_block(lines):
+    # Keep the file's trailing newline: without it the final block scalar in
+    # the retained job parses one newline short and every job comparison below
+    # would diff on that alone.
+    return yaml.safe_load("\n".join(head_lines + lines + rest_lines) + "\n")
+
+
+# The file's own declared state must agree with the triggers it actually
+# carries, so a revival that leaves the header behind fails here rather than
+# shipping a workflow that contradicts itself.
+header_lines = [line for line in workflow_lines[: workflow_lines.index("name: Require no-mistakes")]]
+gate_state_lines = [line for line in header_lines if line.startswith("# GATE STATE:")]
+assert len(gate_state_lines) == 1, header_lines
+gate_state = gate_state_lines[0]
+header_says_stood_down = "stood-down" in gate_state
+header_says_enforced = "enforced" in gate_state
+assert header_says_stood_down != header_says_enforced, gate_state
+assert header_says_stood_down == stood_down(required_on), gate_state
+
+# Any pull-request-bearing trigger revives the gate, so the trigger assertion
+# has to reject each one rather than only naming `pull_request`.
+dispatch_block = [
+    "  workflow_dispatch:",
+    "    inputs:",
+    "      pull_request:",
+    "        description: Number of the pull request to check",
+    "        required: true",
+    "        type: string",
+]
+for mutant in (
+    dispatch_block + ["  pull_request_target:", "    branches: [main]"],
+    dispatch_block + ["  pull_request:", "    branches: [main]"],
+    ["  pull_request_target:", "    branches: [main]"],
+):
+    mutant_on = triggers(parse_with_trigger_block(mutant))
+    assert runs_on_pull_requests(mutant_on), mutant
+    assert not stood_down(mutant_on), mutant
+
+# Revival edit 2 is uncommenting the trigger block while keeping the manual
+# entry point. Perform it and prove it restores the pre-stand-down mapping,
+# leaves the retained gate untouched, and necessarily invalidates the
+# stand-down assertion, which is why the header must name that coupled edit.
+revived_lines = [
+    re.sub(r"^(\s*)#\s?", r"\1", line) if line.lstrip().startswith("#") else line
+    for line in trigger_lines
+]
+revived = parse_with_trigger_block(revived_lines)
+revived_on = triggers(revived)
+assert revived_on["pull_request"] == {
+    "types": ["opened", "edited", "synchronize", "reopened"],
+    "branches": ["main"],
+}, revived_on
+assert set(revived_on) == {"workflow_dispatch", "pull_request"}, sorted(revived_on)
+assert runs_on_pull_requests(revived_on), revived_on
+assert not stood_down(revived_on), revived_on
+for retained in ("jobs", "permissions", "concurrency", "name", "run-name"):
+    assert revived[retained] == required[retained], retained
+
+# A manual dispatch is a real entry point: it declares the pull request it
+# checks, the job admits that event, and the step receives that number.
+dispatch = required_on["workflow_dispatch"]
+assert dispatch["inputs"]["pull_request"]["required"] is True, dispatch
+assert dispatch["inputs"]["pull_request"]["type"] == "string", dispatch
+
+required_job = required["jobs"]["check"]
+admission = " ".join(required_job["if"].split())
+assert "github.event_name == 'workflow_dispatch'" in admission, admission
+payload_paths = set(re.findall(r"github\.event\.([A-Za-z0-9_.]+)", admission))
+assert payload_paths, admission
+assert all(path.startswith("pull_request.") for path in payload_paths), sorted(payload_paths)
+
+
+def lookup(event, path):
+    value = event
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def job_admitted(event_name, payload):
+    if event_name == "workflow_dispatch":
+        return True
+    login = lookup(payload, "pull_request.user.login")
+    return (
+        lookup(payload, "pull_request.head.repo.full_name") == repository
+        and login != "github-actions[bot]"
+        and login != "dependabot[bot]"
+    )
+
+
+def pull_request_event(login, head_repository=repository):
+    return {
+        "pull_request": {
+            "head": {"repo": {"full_name": head_repository}},
+            "user": {"login": login},
+        }
+    }
+
+
+assert job_admitted("workflow_dispatch", {})
+assert not job_admitted("pull_request", {})
+assert job_admitted("pull_request", pull_request_event("contributor"))
+for bot in ("github-actions[bot]", "dependabot[bot]"):
+    assert not job_admitted("pull_request", pull_request_event(bot))
+assert not job_admitted("pull_request", pull_request_event("contributor", "fork/firstmate"))
+
+step_env = required_job["steps"][0]["env"]
+assert "inputs.pull_request" in step_env["PR_NUMBER"], step_env["PR_NUMBER"]
+assert "github.event.pull_request.number" in step_env["PR_NUMBER"], step_env["PR_NUMBER"]
+assert step_env["EVENT_NAME"] == "${{ github.event_name }}", step_env["EVENT_NAME"]
+assert step_env["GH_TOKEN"] == "${{ github.token }}", step_env["GH_TOKEN"]
+
+# Revival edits 3 and 4: contributor documentation must declare the same
+# enforcement state this workflow's triggers actually produce.
+contributing = (root / "CONTRIBUTING.md").read_text()
+gate_paragraphs = [
+    paragraph for paragraph in contributing.split("\n\n") if "`Require no-mistakes`" in paragraph
+]
+assert len(gate_paragraphs) == 1, gate_paragraphs
+gate_paragraph = gate_paragraphs[0]
+declared_stood_down = "temporarily stood down" in gate_paragraph
+declared_enforced = "runs on PRs targeting `main`" in gate_paragraph
+assert declared_stood_down != declared_enforced, gate_paragraph
+assert declared_stood_down == stood_down(required_on), gate_paragraph
+if declared_stood_down:
+    assert "2026-09-03" in gate_paragraph, gate_paragraph
+    assert ".github/workflows/no-mistakes-required.yml" in gate_paragraph, gate_paragraph
+PY
+  then
+    fail "no-mistakes gate declared state, triggers, and revival contract disagree"
+  fi
+  pass "the gate's declared state, triggers, manual entry point, and contributor documentation agree"
+}
+
+test_manual_dispatch_resolves_the_pull_request_and_runs_the_refusal_contract() {
+  local script tmp fakebin out rc signed
+  tmp=$(fm_test_tmproot fm-ci-water7-dispatch)
+  if ! script=$(python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+required = yaml.safe_load(
+    (root / ".github/workflows/no-mistakes-required.yml").read_text()
+)
+runs = [
+    step["run"]
+    for step in required["jobs"]["check"]["steps"]
+    if "run" in step
+]
+assert len(runs) == 1
+print(runs[0], end="")
+PY
+  ); then
+    fail "could not load the body-compliance delivered command from workflow YAML"
+  fi
+
+  signed='## Pipeline
+
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"dispatchhead","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
+
+  fakebin="$tmp/fakebin"
+  mkdir -p "$fakebin"
+  # A dispatch supplies no pull_request payload, so the live lookup is the only
+  # source of head, author, and body. Serve a same-repo human PR whose body is
+  # correctly signed for the head the lookup reports.
+  cat > "$fakebin/gh" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/101 ] && [ "\$3" = --jq ]; then
+  case "\$4" in
+    '[.head.repo.full_name, .user.login, .head.sha] | @tsv')
+      printf '%s\t%s\t%s\n' pedromuller-del/firstmate contributor dispatchhead
+      exit 0 ;;
+    '.body // ""')
+      printf '%s' '${signed}'
+      exit 0 ;;
+  esac
+fi
+if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/102 ] && [ "\$3" = --jq ]; then
+  case "\$4" in
+    '[.head.repo.full_name, .user.login, .head.sha] | @tsv')
+      printf '%s\t%s\t%s\n' pedromuller-del/firstmate contributor otherhead
+      exit 0 ;;
+    '.body // ""')
+      printf '%s' 'a body raised by hand, with no pipeline signature'
+      exit 0 ;;
+  esac
+fi
+if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/103 ] && [ "\$3" = --jq ]; then
+  case "\$4" in
+    '[.head.repo.full_name, .user.login, .head.sha] | @tsv')
+      printf '%s\t%s\t%s\n' contributor-fork/firstmate contributor forkhead
+      exit 0 ;;
+    '.body // ""')
+      printf '%s' 'fork body'
+      exit 0 ;;
+  esac
+fi
+if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/104 ]; then
+  echo "gh: Not Found (HTTP 404)" >&2
+  exit 1
+fi
+echo "unexpected gh call: \$*" >&2
+exit 1
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
+  chmod +x "$fakebin/gh" "$fakebin/sleep"
+
+  # A signed, same-repo pull request named on the command line passes the same
+  # attestation contract the pull_request event runs.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=workflow_dispatch PR_NUMBER=101 PR_BODY='' PR_AUTHOR='' PR_HEAD_SHA='' \
+    bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a signed PR named by manual dispatch was rejected: rc=$rc out=$out"
+  assert_contains "$out" "Resolved PR #101 for manual dispatch: head dispatchhead, author contributor." \
+    "manual dispatch did not resolve the live pull request"
+  assert_contains "$out" "Found no-mistakes signature in PR #101 body."
+  assert_contains "$out" "Attestation is bound to pull request head dispatchhead."
+  assert_contains "$out" "Pipeline step attestation is valid: review, test, and document are completed."
+
+  # The refusal path is the same one, reached through the same resolution.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=workflow_dispatch PR_NUMBER=102 PR_BODY='' PR_AUTHOR='' PR_HEAD_SHA='' \
+    bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "manual dispatch accepted an unsigned PR body: rc=$rc out=$out"
+  assert_contains "$out" "::error::This PR was not raised through no-mistakes."
+
+  # A fork head stays exempt on the manual path exactly as the automatic
+  # admission exempts it, instead of being failed by a maintainer's dispatch.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=workflow_dispatch PR_NUMBER=103 PR_BODY='' PR_AUTHOR='' PR_HEAD_SHA='' \
+    bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "manual dispatch failed a fork PR the automatic gate exempts: rc=$rc out=$out"
+  assert_contains "$out" "outside this gate's scope"
+
+  # A number that names no pull request refuses loudly instead of passing.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=workflow_dispatch PR_NUMBER=104 PR_BODY='' PR_AUTHOR='' PR_HEAD_SHA='' \
+    bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "manual dispatch passed an unreadable pull request: rc=$rc out=$out"
+  assert_contains "$out" "Could not read pull request #104"
+
+  # A non-numeric input refuses before any network call.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=workflow_dispatch PR_NUMBER='not-a-number' PR_BODY='' PR_AUTHOR='' PR_HEAD_SHA='' \
+    bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "manual dispatch accepted a non-numeric pull request input: rc=$rc out=$out"
+  assert_contains "$out" "needs the pull_request input set to a pull request number"
+
+  # The pull_request event path is untouched by the dispatch resolution.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    EVENT_NAME=pull_request PR_NUMBER=42 PR_BODY="$signed" PR_AUTHOR=contributor \
+    PR_HEAD_SHA=dispatchhead bash -c "$script" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the pull_request event path regressed: rc=$rc out=$out"
+  assert_contains "$out" "Found no-mistakes signature in PR #42 body."
+  [ "${out#*Resolved PR}" = "$out" ] || fail "the pull_request event path ran the dispatch resolution: out=$out"
+
+  pass "a manual dispatch resolves its named pull request and runs the same refusal contract"
 }
 
 test_herdr_installer_matches_the_presentation_floor() {
@@ -1240,6 +1563,8 @@ chrome" ] || fail "bounded bootstrap did not use exactly the three tracked insta
 }
 
 test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback
+test_disabled_no_mistakes_gate_states_its_own_revival_contract
+test_manual_dispatch_resolves_the_pull_request_and_runs_the_refusal_contract
 test_herdr_installer_matches_the_presentation_floor
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale

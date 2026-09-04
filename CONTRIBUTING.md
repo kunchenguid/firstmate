@@ -9,10 +9,10 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer.
-The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
-It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
+The GitHub Actions check that enforced this automatically (`Require no-mistakes`) is temporarily stood down as of 2026-09-03, so independent review of the exact pull request head is what currently enforces the requirement.
+The policy is unchanged: the retained check in [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer, bound to the current head commit and reporting the review, test, and document steps as completed.
+That workflow's dated top comment owns the revival procedure and the edits revival is coupled to.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor pull requests that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
 

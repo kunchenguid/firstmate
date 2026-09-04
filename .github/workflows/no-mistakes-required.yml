@@ -1,16 +1,39 @@
-# DISABLED 2026-09-03: no-mistakes was stood down for Artemis and Firstmate.
-# The "Require no-mistakes" gate is reversibly disabled: the pull_request
-# trigger below is commented out so the workflow no longer runs on pull
-# requests, while the complete gate implementation (job body, admission
-# condition, concurrency, permissions, and refusal logic) is retained in
-# place unchanged. A workflow_dispatch trigger keeps the file valid and
-# manually runnable for revival checks. To revive: uncomment the pull_request
-# trigger block below (workflow_dispatch may stay or be removed).
+# GATE STATE: stood-down since 2026-09-03 (no automatic pull_request trigger).
+# no-mistakes was stood down for Artemis and Firstmate, so the automatic
+# "Require no-mistakes" gate is reversibly disabled: the pull_request trigger
+# below is commented out. The complete gate implementation (job body,
+# admission condition, concurrency, permissions, and refusal logic) is
+# retained in place, and independent review of the exact pull request head is
+# what enforces the requirement meanwhile.
+#
+# workflow_dispatch is a real manual entry point, not a placeholder. It takes
+# the pull request number as input, resolves that pull request's live head,
+# author, and body from GitHub, and runs the same refusal contract the
+# pull_request event runs.
+#
+# To revive the automatic gate, make all four edits in one change, or the
+# suite goes red and this file contradicts itself:
+#   1. Replace this whole header, GATE STATE line included, with the enforced
+#      wording. A revived gate must not still describe itself as stood down.
+#   2. Uncomment the pull_request trigger block below, keeping
+#      workflow_dispatch and its input as the manual entry point.
+#   3. Update the stand-down assertions and their descriptions in
+#      tests/fm-ci-water7.test.sh, which currently require this workflow's
+#      trigger set to be exactly {workflow_dispatch} and its GATE STATE line
+#      to say stood-down.
+#   4. Restore CONTRIBUTING.md's "Require no-mistakes" paragraph to its
+#      enforced wording. The same test asserts that paragraph's declared
+#      state agrees with this file's triggers.
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number || inputs.pull_request }} body compliance - ${{ github.event.action || 'manual dispatch' }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Number of the pull request to check
+        required: true
+        type: string
   # pull_request:
   #   types: [opened, edited, synchronize, reopened]
   #   branches:
@@ -25,7 +48,7 @@ permissions:
 # an immutable per-event group so first-time-fork approvals can never collapse
 # opened/edited checks. Keep synchronize/reopened coalescing as before.
 concurrency:
-  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
+  group: no-mistakes-required-${{ github.event.pull_request.number || inputs.pull_request }}-${{ (github.event_name == 'workflow_dispatch' || github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
   cancel-in-progress: true
 
 jobs:
@@ -34,22 +57,55 @@ jobs:
     runs-on: ubuntu-slim
     timeout-minutes: 15
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+      github.event.pull_request.user.login != 'dependabot[bot]')
     steps:
       - name: Verify no-mistakes signature in PR body
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           body_file=$(mktemp)
           cleanup() { rm -f "$body_file"; }
           trap cleanup EXIT
+          if [ "${EVENT_NAME:-}" = workflow_dispatch ]; then
+            # A dispatch carries no pull_request payload, so resolve the same
+            # four values that event supplies and let everything below run as
+            # one contract for both events.
+            case "${PR_NUMBER:-}" in
+              ''|*[!0-9]*)
+                echo "::error::A manual run needs the pull_request input set to a pull request number; got '${PR_NUMBER:-}'." >&2
+                exit 1
+                ;;
+            esac
+            if ! meta=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '[.head.repo.full_name, .user.login, .head.sha] | @tsv'); then
+              echo "::error::Could not read pull request #${PR_NUMBER} in ${GITHUB_REPOSITORY}." >&2
+              exit 1
+            fi
+            head_repo=$(printf '%s' "$meta" | cut -f1)
+            PR_AUTHOR=$(printf '%s' "$meta" | cut -f2)
+            PR_HEAD_SHA=$(printf '%s' "$meta" | cut -f3)
+            if ! PR_BODY=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""'); then
+              echo "::error::Could not read the body of pull request #${PR_NUMBER}." >&2
+              exit 1
+            fi
+            if [ "$head_repo" != "${GITHUB_REPOSITORY}" ] ||
+              [ "$PR_AUTHOR" = 'github-actions[bot]' ] ||
+              [ "$PR_AUTHOR" = 'dependabot[bot]' ]; then
+              echo "PR #${PR_NUMBER} is outside this gate's scope (fork head or exempt automation author); nothing to check."
+              exit 0
+            fi
+            echo "Resolved PR #${PR_NUMBER} for manual dispatch: head ${PR_HEAD_SHA}, author ${PR_AUTHOR}."
+          fi
           printf '%s' "${PR_BODY:-}" > "$body_file"
           if ! grep -qF -- "$marker" "$body_file"; then
             attempt=1
