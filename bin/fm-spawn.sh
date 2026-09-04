@@ -742,6 +742,8 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+TMUX_RECREATE_ABORT_CLEANUP=0
+TMUX_RECREATE_ABORT_TARGET=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -830,6 +832,10 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
+  if [ "$TMUX_RECREATE_ABORT_CLEANUP" = 1 ]; then
+    TMUX_RECREATE_ABORT_CLEANUP=0
+    fm_backend_tmux_kill "$TMUX_RECREATE_ABORT_TARGET" || true
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -2213,36 +2219,75 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_RECREATE" -ne 1 ]; then
   WT_TARGET=$T
   SES=${T%%:*}
 elif [ "$RELAUNCH_RECREATE" -eq 1 ]; then
-  # The recorded endpoint vanished entirely. Recreate a fresh one in the SAME
-  # recorded worktree (secondmate is refused above, so this is a ship/scout),
-  # then let the record republish below repoint window= at it. Flat layout only:
-  # a disposable presentation workspace, if any, died with the pane. This reuses
-  # the exact container-ensure + create-task calls a fresh crewmate uses,
-  # differing only in the pane cwd - the existing worktree, so no `treehouse
-  # get` is needed and the relaunch worktree check below confirms the recreated
-  # pane is already in it.
   WT=$RELAUNCH_WT
   case "$BACKEND" in
     tmux)
       SES=$(fm_backend_tmux_container_ensure)
       T="$SES:$W"
       WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
+      TMUX_RECREATE_ABORT_CLEANUP=1
+      TMUX_RECREATE_ABORT_TARGET=$T
       WT_TARGET="$WID"
       ;;
     herdr)
-      HERDR_CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT" launcher-home) || exit 1
-      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-      HERDR_SES=${CONTAINER%%:*}
-      HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      HERDR_LABEL_HOME=$FM_HOME
+      HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      HERDR_PROJECTED=0
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+        fm_backend_herdr_server_ensure "$HERDR_SES" || {
+          echo "error: herdr presentation recovery could not ensure its exact named session" >&2
+          exit 1
+        }
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+          exit 1
+        }
+        herdr_projection_existing_meta_allows_flat "$RELAUNCH_META" || exit 1
+        fm_backend_herdr_projection_recovery_allows_flat \
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        set +e
+        FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
+          "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
+          "$HERDR_PARENT_LABEL" "$W" "$WT"
+        HERDR_RECLAIM_STATUS=$?
+        set -e
+        case "$HERDR_RECLAIM_STATUS" in
+          0)
+            HERDR_PROJECTED=1
+            HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
+            HERDR_SEEDED_DEFAULT_TAB_ID=""
+            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_PROJECTION_ABORT_CLEANUP=1
+            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+            ;;
+          2) spawn_herdr_presentation_order_lock_release ;;
+          *) exit 1 ;;
+        esac
+      fi
+      if [ "$HERDR_PROJECTED" -ne 1 ]; then
+        HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$WT" launcher-home) || exit 1
+        CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+        HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+        HERDR_SES=${CONTAINER%%:*}
+        HERDR_WORKSPACE_ID=${CONTAINER#*:}
+        HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+        read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      fi
       if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
         echo "error: herdr did not return a tab/pane id for $W" >&2
         exit 1
       fi
+      HERDR_PROJECTION_ABORT_CLEANUP=1
+      HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+      HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+      [ "$HERDR_PROJECTED" -eq 1 ] || HERDR_PROJECTION_ABORT_SEEDED_PANE=""
       T="$HERDR_SES:$HERDR_PANE_ID"
       WT_TARGET=$T
       ;;
@@ -3180,6 +3225,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
+  if [ "$RELAUNCH_RECREATE" -eq 1 ]; then
+    TMUX_RECREATE_ABORT_CLEANUP=0
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+  fi
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
 fi

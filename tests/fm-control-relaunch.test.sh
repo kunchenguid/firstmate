@@ -125,6 +125,21 @@ case "${1:-}" in
     printf 'zsh' > "$D/command"
     printf '@%s\n' "$wname"
     exit 0 ;;
+  kill-window)
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    target=${target#=}
+    wname=${target#*:=}
+    grep -Fvx "$wname" "$D/windows" > "$D/windows.next" || true
+    mv "$D/windows.next" "$D/windows"
+    printf '%s\n' "$target" >> "$D/killed"
+    exit 0 ;;
   list-windows)
     if [ -n "${FM_FAKE_LIST_WINDOWS_ERROR:-}" ]; then
       printf '%s\n' "$FM_FAKE_LIST_WINDOWS_ERROR" >&2
@@ -217,6 +232,7 @@ run_spawn() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -1590,6 +1606,26 @@ test_spawn_relaunch_recreates_a_vanished_endpoint() {
   pass "fm-spawn --relaunch: recreates a positively-missing endpoint in the recorded worktree"
 }
 
+test_spawn_relaunch_cleans_an_unpublished_recreated_endpoint() {
+  local dir out rc real_mv meta
+  dir=$(new_case recreateabort rl45)
+  add_ship_task "$dir" rl45 claude
+  meta="$dir/home/state/rl45.meta"
+  : > "$dir/fake/windows"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_spawn "$dir" rl45 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a failed recreation publication should fail closed"$'\n'"$out"
+  [ ! -s "$dir/fake/windows" ] \
+    || fail "an unpublished recreated endpoint must be removed"
+  assert_grep "firstmate:=fm-rl45" "$dir/fake/killed" \
+    "abort cleanup should target the exact recreated endpoint"
+  out=$(FM_REAL_MV="$real_mv" run_spawn "$dir" rl45 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "cleanup should leave recreation retryable"$'\n'"$out"
+  pass "fm-spawn --relaunch: abort removes an unpublished recreated endpoint"
+}
+
 test_spawn_relaunch_refuses_to_recreate_a_secondmate_endpoint() {
   local dir home out rc
   dir=$(new_case smrecreate sm8)
@@ -1676,4 +1712,5 @@ test_relaunch_moves_a_drifted_item_back_in_flight
 test_relaunch_recreates_a_vanished_endpoint
 test_relaunch_refuses_to_recreate_an_unreadable_endpoint
 test_spawn_relaunch_recreates_a_vanished_endpoint
+test_spawn_relaunch_cleans_an_unpublished_recreated_endpoint
 test_spawn_relaunch_refuses_to_recreate_a_secondmate_endpoint
