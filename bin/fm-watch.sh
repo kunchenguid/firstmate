@@ -950,14 +950,19 @@ terminal_then_paused() {  # <lines> <last>
 }
 
 # 0 if no record under <task>'s steering inbox (delivered or already
-# handled/) carries an mtime after <status>'s: i.e. nothing has steered this
-# worker new work since its last status append. A steer landing after a
+# handled/) carries an mtime at or after <status>'s: i.e. nothing has steered
+# this worker new work since its last status append. A steer landing after a
 # declared wait is the fact that means the old wait no longer describes the
 # worker's current pane - bin/fm-brief.sh forbids a plain `working:`
 # acknowledgement of a steer, so the status log alone can never show this, but
 # the inbox delivery timestamp can. Used to keep terminal_then_paused's trust
 # in a declared wait from becoming permanent once new work has actually
-# arrived (a stale `paused:` must not outrank live evidence forever).
+# arrived (a stale `paused:` must not outrank live evidence forever). Uses
+# >= rather than > on purpose: mtimes here are coarse integer seconds, so an
+# inbox record landing in the same second as the status append is
+# indistinguishable from one that landed just after it, and treating that tie
+# as "old" would let a same-second steer hide behind a stale paused
+# classification instead of surfacing it.
 no_inbox_activity_since_status() {  # <status-file> <task>
   local status=$1 task=$2 status_mtime dir f fmtime
   status_mtime=$(stat_mtime "$status")
@@ -967,7 +972,7 @@ no_inbox_activity_since_status() {  # <status-file> <task>
     [ -f "$f" ] || continue
     fmtime=$(stat_mtime "$f")
     case "$fmtime" in ''|*[!0-9]*) continue ;; esac
-    [ "$fmtime" -gt "$status_mtime" ] && return 1
+    [ "$fmtime" -ge "$status_mtime" ] && return 1
   done
   return 0
 }

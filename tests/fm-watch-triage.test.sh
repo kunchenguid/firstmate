@@ -2660,6 +2660,48 @@ test_inbox_activity_after_declared_wait_restores_wedge_detection() {
   pass "an inbox record newer than the last status line restores wedge detection past a done-then-paused sequence"
 }
 
+# Same fix, tied to the exact edge Greptile flagged on PR #3679: mtimes here
+# are coarse integer seconds, so a steer landing in the SAME second as the
+# status append must still count as activity - a strict "newer than" check
+# would let that tie hide behind the stale paused declaration.
+test_same_second_inbox_activity_restores_wedge_detection() {
+  local dir state fakebin out capture_file window key pane_hash sig pid inbox_dir now
+  dir=$(make_case inbox-restore-same-second); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-inbox-restore-tie"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/inbox-tie.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: awaiting merge authority\n'
+  } > "$state/inbox-tie.status"
+  now=$(date +%s)
+  set_mtime "$now" "$state/inbox-tie.status"
+  sig=$(seen_sig "$state/inbox-tie.status"); printf '%s' "$sig" > "$state/.seen-inbox-tie_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A steer delivered in the SAME second as the status file's last write.
+  inbox_dir="$state/inbox-tie.inbox"
+  mkdir -p "$inbox_dir/handled"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-04T00:00:00Z\n--\nnew task, please pivot\n' > "$inbox_dir/handled/001.msg"
+  set_mtime "$now" "$inbox_dir/handled/001.msg"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 \
+    || { reap "$pid"; fail "a same-second steer did not restore wedge tracking past a stale declared wait: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "a same-second steer still trusted the stale pause declaration"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an inbox record with the same mtime as the last status line still restores wedge detection"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -4239,6 +4281,7 @@ test_terminal_then_paused_outranks_authoritative_working
 test_multiple_trailing_pauses_outrank_authoritative_working
 test_invalid_pause_scan_budget_still_outranks_authoritative_working
 test_inbox_activity_after_declared_wait_restores_wedge_detection
+test_same_second_inbox_activity_restores_wedge_detection
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
