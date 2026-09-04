@@ -27,7 +27,13 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
+#                          both surfaced at once. A terminal one is then bounded
+#                          to one wake per episode per PAUSE_RESURFACE_SECS
+#                          (terminal_episode_scope owns what counts as a new
+#                          episode), so a crew parked on a blocked: line cannot
+#                          re-alarm every time its idle pane's footer ticks, and
+#                          still cannot go unreported past that window.
+#                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -313,7 +319,8 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .terminal-resurfaced-), and live
+# homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -983,6 +990,73 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# 0 while <marker> already records <scope> inside the current PAUSE_RESURFACE_SECS
+# window, so a repeat surface of the SAME episode must be absorbed rather than
+# delivered again. The one definition of "this pane has already been reported and
+# nothing about it has changed since", shared by every first-sight path that
+# surfaces before it can absorb: a scope that differs (or a marker that was never
+# written) is a new episode and returns 1 immediately, so nothing is throttled on
+# the clock alone. Callers own their own marker, their own scope, and the decision
+# to advance the marker only from a wake that really fires.
+episode_throttled() {  # <marker> <scope>
+  local marker=$1 scope=$2
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$scope" ] || return 1
+  [ "$(age_of "$marker")" -lt "$PAUSE_RESURFACE_SECS" ]
+}
+
+# The identity of a terminal-status stale episode: everything that can make a
+# quiet pane on an unchanged captain-relevant status line worth reporting AGAIN.
+# The status log's own signature covers a new line and a changed verb; the task's
+# completed-turn marker covers a worker that did something since the last surface
+# (a steer it answered); and a confidently exited agent covers the crew dying
+# under the declaration. Pane content is deliberately NOT part of it: an idle pane
+# still renders a clock or a token counter, and that churn is exactly the noise
+# this scope exists to absorb.
+terminal_episode_scope() {  # <window> <task>
+  local win=$1 task=$2 alive
+  alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || alive=unknown
+  [ "$alive" = dead ] || alive=live
+  printf 'terminal:%s:%s:%s' \
+    "$(fm_wake_signal_sig "$STATE/$task.status" || true)" "$alive" \
+    "$(stat_mtime "$STATE/$task.turn-ended" || true)"
+}
+
+# Surface a stale pane whose crew is sitting on a captain-relevant status line the
+# run step did not override, bounded to one wake per episode per
+# PAUSE_RESURFACE_SECS through this window's own .terminal-resurfaced-<key>
+# marker. "firstmate must act" is a fact the supervisor learns on the FIRST wake;
+# re-delivering it unchanged every time an idle pane's footer ticks costs a whole
+# handling turn per tick and drowns genuinely new events, which is exactly how a
+# `blocked:` crew waiting on the captain used to re-alarm dozens of times in a row.
+# The first sight still wakes promptly, terminal_episode_scope breaks the absorb
+# the moment anything real changes, and the window's end re-surfaces the episode
+# once, so a blocked crew can never become invisible either.
+# Bookkeeping is identical on both branches, so the stale state machine does not
+# depend on whether this particular sight was delivered.
+surface_terminal_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key scope statusf stale_record stale_rest stale_end stale_ident throttled=1
+  key=$(window_key "$win")
+  scope=$(terminal_episode_scope "$win" "$task")
+  episode_throttled "$STATE/.terminal-resurfaced-$key" "$scope" && throttled=0
+  [ "$throttled" -eq 0 ] || fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
+  clear_write_tracking "$key"
+  if [ "$throttled" -eq 0 ]; then
+    triage_log "absorbed terminal stale (already reported this episode): $win"
+    return 0
+  fi
+  printf '%s' "$scope" > "$STATE/.terminal-resurfaced-$key"
+  statusf="$STATE/$task.status"
+  stale_record=$(status_span_first_actionable_record "$statusf" 0)
+  case $? in
+    0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+    *) stale_end=''; stale_ident='' ;;
+  esac
+  mark_surfaced "$statusf" "$stale_end" "$stale_ident"
+  wake "stale: $win"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1007,10 +1081,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused_or_captain_held "$last"; then
     declared=0
     declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
-    if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
-      && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -lt "$PAUSE_RESURFACE_SECS" ]; then
-      throttled=0
-    fi
+    episode_throttled "$STATE/.paused-resurfaced-$key" "$declaration" && throttled=0
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1843,6 +1914,11 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A busy pane is real work resumed, so whatever terminal-status episode this
+    # window was holding on the long cadence is over: the next quiet stretch is a
+    # situation the supervisor has not been told about, even when the crew never
+    # got around to appending a new status line for it.
+    [ "$busy_now" -ne 0 ] || rm -f "$STATE/.terminal-resurfaced-$key"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -1883,18 +1959,7 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
-              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
-              case $? in
-                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
-                *) stale_end=''; stale_ident='' ;;
-              esac
-              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
-              wake "stale: $w"
+              surface_terminal_stale "$w" "$task" "$h"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1902,10 +1967,15 @@ EOF
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+          elif [ "$(age_of "$STATE/.terminal-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+            # Already reported as genuinely terminal on a prior poll of this same
+            # hash. Neither the pane nor (a status append fires its own signal
+            # wake) the log has moved since, so only the clock can make this worth
+            # reporting again - which keeps the common case free and still gives a
+            # perfectly static blocked pane the same bounded recheck a churny one
+            # gets, so no crew waiting on firstmate can rot invisibly.
+            surface_terminal_stale "$w" "$task" "$h"
           fi
-          # else: already surfaced as genuinely terminal on a prior poll of
-          # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
