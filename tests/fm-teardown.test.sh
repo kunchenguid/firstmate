@@ -49,11 +49,33 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers teardown-already-returned: treehouse auto-returns the task copy when
+# the pool shell it opened there exits, so teardown's own return then reports
+# "worktree <path> is not managed by treehouse". Cleanup converges only on positive
+# structural proof from `treehouse status --json` (bin/fm-teardown.sh's
+# teardown_treehouse_already_returned).
+#   (z)  exact copy available, unleased, no process -> ALLOW, one return attempt
+#   (aa) same copy through a symlinked pool root    -> ALLOW  (canonical match)
+#   (ab) another slot available, same basename      -> REFUSE (not this copy)
+#   (ac) exact copy reported in-use                 -> REFUSE
+#   (ad) exact copy still leased                    -> REFUSE
+#   (ae) available slot with a live process         -> REFUSE
+#   (af) copy absent from the pool listing          -> REFUSE
+#   (ag) same copy listed twice (ambiguous)         -> REFUSE
+#   (ah) malformed pool listing                     -> REFUSE
+#   (ai) unreadable pool listing                    -> REFUSE
+#   (al) entry omitting the lease/process fields    -> REFUSE (proves nothing)
+#   (am) entry with a wrong-typed lease/process     -> REFUSE (proves nothing)
+#   (aj) ordinary non-lock error, pool available    -> REFUSE (wrong signature)
+#   (ak) copy owned by another home's clone         -> REFUSE (cross-home)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -430,6 +452,91 @@ fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse double for the already-returned convergence cases. `return --force`
+# reports a configurable failure (default: treehouse's own already-returned line,
+# which names the exact path it was handed), while `status --json` prints the pool
+# listing staged in FM_FAKE_TH_STATUS_FILE. Every invocation is appended to
+# FM_FAKE_TH_LOG so a case can assert that no second return was ever attempted.
+add_status_aware_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_TH_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TH_LOG"
+case "${1:-}" in
+  return)
+    shift
+    wt=""
+    for a in "$@"; do
+      case "$a" in
+        --force) ;;
+        *) wt=$a ;;
+      esac
+    done
+    case "${FM_FAKE_TH_RETURN:-unmanaged}" in
+      ok) exit 0 ;;
+      unmanaged) printf 'worktree %s is not managed by treehouse\n' "$wt" >&2 ; exit 1 ;;
+      *) printf '%s\n' "$FM_FAKE_TH_RETURN" >&2 ; exit 1 ;;
+    esac
+    ;;
+  status)
+    if [ "${FM_FAKE_TH_STATUS_RC:-0}" != 0 ]; then
+      echo "treehouse: pool state is unreadable" >&2
+      exit "${FM_FAKE_TH_STATUS_RC}"
+    fi
+    [ -z "${FM_FAKE_TH_STATUS_FILE:-}" ] || cat "$FM_FAKE_TH_STATUS_FILE"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Stage a `treehouse status --json` pool listing. Args: out-file, then one
+# "<path>|<status>|<lease-id>|<lease-holder>|<live-process-count>" per pool slot.
+write_th_pool_status() {
+  local out=$1; shift
+  local entry path state lease_id lease_holder procs leased_at proc_json sep=""
+  printf '[' > "$out"
+  for entry in "$@"; do
+    IFS='|' read -r path state lease_id lease_holder procs <<< "$entry"
+    if [ -n "$lease_id" ]; then leased_at='"2026-09-01T00:00:00Z"'; else leased_at=null; fi
+    proc_json='[]'
+    if [ "${procs:-0}" -gt 0 ]; then proc_json='[{"pid":424242,"name":"bash"}]'; fi
+    printf '%s{"name":"1","path":"%s","status":"%s","flavor":"git","lease_id":"%s","lease_holder":"%s","leased_at":%s,"processes":%s}' \
+      "$sep" "$path" "$state" "$lease_id" "$lease_holder" "$leased_at" "$proc_json" >> "$out"
+    sep=","
+  done
+  printf ']\n' >> "$out"
+}
+
+# Commit landed work on the task branch so every landed-work gate passes and the
+# case actually reaches the worktree-return step. Args: case_dir
+land_task_branch_on_origin() {
+  local case_dir=$1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/project" fetch -q origin
+}
+
+# Re-create the task worktree from a SECOND clone of the same origin, so the copy's
+# git ownership resolves to another firstmate home's repository while the task
+# record still names this home's project clone. Args: case_dir
+repoint_worktree_to_another_home_clone() {
+  local case_dir=$1
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git clone -q "$case_dir/origin.git" "$case_dir/other-home-project"
+  git -C "$case_dir/other-home-project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/other-home-project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+}
+
+# Count `treehouse return` invocations recorded by the status-aware double.
+th_return_attempts() {
+  local log=$1
+  grep -c '^return ' "$log" 2>/dev/null || true
 }
 
 git_index_lock_path() {
@@ -3199,6 +3306,371 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# --- treehouse already-returned convergence (teardown-already-returned) --------
+#
+# Killing the pool shell treehouse opened in the task copy auto-returns that copy,
+# so teardown's own `treehouse return --force <path>` then reports
+# "worktree <path> is not managed by treehouse". Cleanup must converge when - and
+# only when - the pool positively proves that exact copy is already back.
+
+test_already_returned_copy_converges_without_a_second_return() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-exact)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|available|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+  FM_FAKE_TH_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "already-returned-exact: teardown should converge when the copy is proven already returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "already-returned-exact: teardown left the task record behind after converging"
+  assert_grep "already returned before this cleanup ran" "$case_dir/stderr" \
+    "already-returned-exact: teardown did not report why it converged"
+  [ "$(th_return_attempts "$case_dir/treehouse.log")" = 1 ] \
+    || fail "already-returned-exact: expected exactly one return attempt and no further worktree mutation, got $(th_return_attempts "$case_dir/treehouse.log")"
+  pass "a copy proven already returned lets cleanup finish without a second worktree return"
+}
+
+test_already_returned_copy_matches_through_a_symlinked_pool_root() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-symlink)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  # The production pool root is reached through a symlink, so treehouse spells the
+  # same copy differently from the recorded path. Only canonical paths may match.
+  ln -sfn "$case_dir" "$case_dir/poollink"
+  write_th_pool_status "$case_dir/pool.json" "$case_dir/poollink/wt|available|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+  FM_FAKE_TH_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "already-returned-symlink: a symlinked pool spelling of the exact copy should still converge"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "already-returned-symlink: teardown left the task record behind after converging"
+  [ "$(th_return_attempts "$case_dir/treehouse.log")" = 1 ] \
+    || fail "already-returned-symlink: expected exactly one return attempt, got $(th_return_attempts "$case_dir/treehouse.log")"
+  pass "the already-returned proof matches the exact copy through a symlinked pool root"
+}
+
+test_available_sibling_slot_never_proves_this_copy_returned() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-other-slot)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  # Same repository, same basename, a different pool slot - and the recorded copy
+  # is absent from the listing entirely.
+  mkdir -p "$case_dir/slot2/wt"
+  write_th_pool_status "$case_dir/pool.json" "$case_dir/slot2/wt|available|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-other-slot: teardown should refuse when only another slot is available"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-other-slot: teardown deleted task records without proof"
+  assert_grep "names that exact copy 0 times" "$case_dir/stderr" \
+    "already-returned-other-slot: teardown did not explain the refusal"
+  pass "an available sibling slot with the same basename never proves this copy was returned"
+}
+
+test_in_use_target_never_proves_this_copy_returned() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-in-use)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  # The pool's own verdict decides on its own: an `in-use` slot refuses even when
+  # its process list happens to come back empty.
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|in-use|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-in-use: teardown should refuse while the pool still reports the copy in use"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-in-use: teardown deleted task records for an in-use copy"
+  assert_grep "still reports that copy as 'in-use'" "$case_dir/stderr" \
+    "already-returned-in-use: teardown did not explain the refusal"
+  pass "an in-use pool slot for the exact copy still refuses cleanup"
+}
+
+test_leased_target_never_proves_this_copy_returned() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-leased)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|leased|deadbeefdeadbeef|other-home|0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-leased: teardown should refuse while the copy is still leased"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-leased: teardown deleted task records for a leased copy"
+  assert_grep "still reports that copy as 'leased'" "$case_dir/stderr" \
+    "already-returned-leased: teardown did not explain the refusal"
+  pass "a leased pool slot for the exact copy still refuses cleanup"
+}
+
+test_live_process_on_an_available_slot_refuses() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-live-process)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|available|||1"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-live-process: teardown should refuse while a live process remains in the copy"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-live-process: teardown deleted task records for a copy with a live process"
+  assert_grep "1 live processes" "$case_dir/stderr" \
+    "already-returned-live-process: teardown did not explain the refusal"
+  pass "an available slot that still lists a live process refuses cleanup"
+}
+
+test_missing_target_in_pool_listing_refuses() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-missing)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  write_th_pool_status "$case_dir/pool.json"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-missing: teardown should refuse when the pool lists no such copy"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-missing: teardown deleted task records with no listing entry"
+  assert_grep "names that exact copy 0 times" "$case_dir/stderr" \
+    "already-returned-missing: teardown did not explain the refusal"
+  pass "a pool listing that never names the recorded copy still refuses cleanup"
+}
+
+test_duplicate_pool_entries_for_the_same_copy_refuse() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-ambiguous)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  ln -sfn "$case_dir" "$case_dir/poollink"
+  # The same copy under two spellings: an ambiguous listing proves nothing, even
+  # though each entry on its own would satisfy every other gate.
+  write_th_pool_status "$case_dir/pool.json" \
+    "$wt_canon|available|||0" "$case_dir/poollink/wt|available|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-ambiguous: teardown should refuse an ambiguous pool listing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-ambiguous: teardown deleted task records on an ambiguous listing"
+  assert_grep "names that exact copy 2 times" "$case_dir/stderr" \
+    "already-returned-ambiguous: teardown did not explain the refusal"
+  pass "an ambiguous pool listing naming the same copy twice still refuses cleanup"
+}
+
+test_malformed_pool_listing_refuses() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-malformed)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  printf '%s\n' 'not a pool listing at all' > "$case_dir/pool.json"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-malformed: teardown should refuse on a malformed pool listing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-malformed: teardown deleted task records on a malformed listing"
+  assert_grep "not a readable slot array" "$case_dir/stderr" \
+    "already-returned-malformed: teardown did not explain the refusal"
+  pass "a malformed pool listing proves nothing and still refuses cleanup"
+}
+
+# An entry that names the exact copy as available but never reports its lease and
+# process fields has not OBSERVED them empty - it has not reported them at all, so
+# it cannot prove the copy is unleased and idle.
+test_pool_entry_without_lease_and_process_fields_refuses() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-partial-entry)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  printf '[{"name":"1","path":"%s","status":"available","flavor":"git"}]\n' "$wt_canon" \
+    > "$case_dir/pool.json"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-partial-entry: an entry that never reports lease or process state must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-partial-entry: teardown deleted task records on an entry that proved no lease or process state"
+  assert_grep "in treehouse's own shape" "$case_dir/stderr" \
+    "already-returned-partial-entry: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "already returned before this cleanup ran" \
+    "already-returned-partial-entry: teardown converged on an entry that never observed the required state"
+  pass "a pool entry that never reports lease or process state proves nothing and refuses cleanup"
+}
+
+# Every required key is present, but a field carries a type treehouse never uses.
+# jq's has() is true for a key whose value is null, so key presence alone would let
+# "processes": null read as an empty process list; only the type gate refuses these.
+test_pool_entry_with_wrong_typed_fields_refuses() {
+  local shape name fields case_dir rc wt_canon
+  for shape in \
+    'null-processes|"lease_id":"","lease_holder":"","leased_at":null,"processes":null' \
+    'numeric-lease-id|"lease_id":0,"lease_holder":"","leased_at":null,"processes":[]'
+  do
+    name=${shape%%|*}
+    fields=${shape#*|}
+    case_dir=$(make_case "already-returned-$name")
+    write_meta "$case_dir" no-mistakes ship
+    land_task_branch_on_origin "$case_dir"
+    add_status_aware_treehouse "$case_dir"
+    wt_canon=$(cd "$case_dir/wt" && pwd -P)
+    printf '[{"name":"1","path":"%s","status":"available","flavor":"git",%s}]\n' "$wt_canon" "$fields" \
+      > "$case_dir/pool.json"
+
+    set +e
+    FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "already-returned-$name: a wrong-typed lease or process field must refuse"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "already-returned-$name: teardown deleted task records on a wrong-typed listing entry"
+    assert_grep "in treehouse's own shape" "$case_dir/stderr" \
+      "already-returned-$name: teardown did not explain the refusal"
+    assert_not_contains "$(cat "$case_dir/stderr")" "already returned before this cleanup ran" \
+      "already-returned-$name: teardown converged on a field type treehouse never reports"
+  done
+  pass "a pool entry reporting a lease or process field with the wrong type refuses cleanup"
+}
+
+test_unreadable_pool_listing_refuses() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+
+  set +e
+  FM_FAKE_TH_STATUS_RC=3 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-unreadable: teardown should refuse when the pool listing cannot be read"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-unreadable: teardown deleted task records on an unreadable listing"
+  assert_grep "pool listing could not be read" "$case_dir/stderr" \
+    "already-returned-unreadable: teardown did not explain the refusal"
+  pass "an unreadable pool listing proves nothing and still refuses cleanup"
+}
+
+test_ordinary_treehouse_return_error_still_refuses() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-other-error)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  # The pool would satisfy the structural proof, but this is an ordinary return
+  # failure rather than treehouse's already-returned signature.
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|available|||0"
+
+  set +e
+  FM_FAKE_TH_RETURN="error: failed to reset worktree" \
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+  FM_FAKE_TH_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-other-error: an ordinary return failure must still abort"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-other-error: teardown deleted task records after an ordinary return failure"
+  assert_grep "failed to reset worktree" "$case_dir/stderr" \
+    "already-returned-other-error: teardown hid the underlying return failure"
+  assert_not_contains "$(cat "$case_dir/stderr")" "already returned before this cleanup ran" \
+    "already-returned-other-error: teardown converged on a failure that is not the already-returned signature"
+  pass "an ordinary non-lock treehouse return failure still aborts even when the pool looks available"
+}
+
+test_another_homes_copy_is_never_treated_as_returned() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-cross-home)
+  write_meta "$case_dir" no-mistakes ship
+  repoint_worktree_to_another_home_clone "$case_dir"
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  write_th_pool_status "$case_dir/pool.json" "$wt_canon|available|||0"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-cross-home: teardown should refuse a copy owned by another home's clone"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-cross-home: teardown deleted task records for another home's copy"
+  assert_grep "is not the recorded project's repository" "$case_dir/stderr" \
+    "already-returned-cross-home: teardown did not explain the ownership refusal"
+  pass "a copy whose repository is another home's clone is never treated as this task's returned copy"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3272,3 +3744,17 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_already_returned_copy_converges_without_a_second_return
+test_already_returned_copy_matches_through_a_symlinked_pool_root
+test_available_sibling_slot_never_proves_this_copy_returned
+test_in_use_target_never_proves_this_copy_returned
+test_leased_target_never_proves_this_copy_returned
+test_live_process_on_an_available_slot_refuses
+test_missing_target_in_pool_listing_refuses
+test_duplicate_pool_entries_for_the_same_copy_refuse
+test_malformed_pool_listing_refuses
+test_pool_entry_without_lease_and_process_fields_refuses
+test_pool_entry_with_wrong_typed_fields_refuses
+test_unreadable_pool_listing_refuses
+test_ordinary_treehouse_return_error_still_refuses
+test_another_homes_copy_is_never_treated_as_returned

@@ -543,6 +543,85 @@ teardown gm2 complete; state/gm2.gemini-settings.json removed
 Gemini as a PRIMARY or SECONDMATE runtime is unverified and is refused by `bin/fm-spawn.sh`: no wake protocol exists under `docs/supervision-protocols/` and no turn-end guard adapter was built or exercised.
 No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so the record-and-omit contract applies.
 
+## Treehouse worktree pool
+
+Treehouse is the shared worktree provider for every session-provider-only backend, so this section covers tmux, Herdr, Zellij, and cmux at once; `backend=orca` owns its own worktrees and never reaches these paths.
+
+### Already-returned convergence
+
+The two signals `bin/fm-teardown.sh`'s already-returned convergence depends on were observed on 2026-09-02 with Treehouse v2.3.0 on Linux x86_64, in a disposable pool over a throwaway repository.
+Long temporary prefixes below are shortened to `<pool>` and `<alt-pool>` (the same pool through its symlink) for readability; nothing else is altered.
+
+```sh
+treehouse --version
+WT=$(treehouse get --lease --no-fetch)
+treehouse return --force "$WT"
+treehouse status --json
+ln -sfn "$TREEHOUSE_ROOT" "$ALT_ROOT"          # same pool reached through a symlink
+treehouse return --force "${WT/$TREEHOUSE_ROOT/$ALT_ROOT}"
+```
+
+Observed output:
+
+```text
+v2.3.0
+🌳 Worktree returned to pool.
+[{"name":"1","path":"<pool>/.treehouse/repo-0ee1d9/1/repo","status":"available","flavor":"git","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
+worktree <alt-pool>/.treehouse/repo-0ee1d9/1/repo is not managed by treehouse
+```
+
+Two facts hold this guarantee up.
+`treehouse status --json` is the supported structured pool listing, and a returned slot reads `available` with an empty lease id, an empty lease holder, a null `leased_at`, and an empty process list, which is the exact shape the convergence requires of one canonically matching entry.
+A copy addressed through a non-canonical spelling of its own pool root is reported `is not managed by treehouse` even while the pool lists that same copy as available, which is why the convergence compares canonical paths rather than the strings either side happens to use.
+
+That error string is the narrow precondition gate, never the proof.
+If a later Treehouse release rewords it, the convergence simply stops firing and cleanup returns to its previous loud refusal with the tool's own message printed, so the failure direction stays safe rather than silent.
+
+The whole path was then driven end to end against the real binary on the same date, in a disposable pool over a throwaway project clone, with only the runtime and forge CLIs stubbed.
+A leased copy was returned to simulate the pool shell's exit, the task record named that copy through the symlinked pool spelling, and `bin/fm-teardown.sh` ran on it before and after the change.
+
+```text
+# before
+worktree <alt-pool>/.treehouse/project-4d0e2d/1/project is not managed by treehouse
+error: treehouse return failed for worktree <alt-pool>/.treehouse/project-4d0e2d/1/project; teardown aborted
+exit 1, task record retained
+
+# after
+worktree <alt-pool>/.treehouse/project-4d0e2d/1/project is not managed by treehouse
+teardown: worktree was already returned before this cleanup ran - the pool lists exactly that copy as available, unleased, with no live process - so cleanup continues without a second return
+teardown task-x1 complete
+exit 0, task record retired
+```
+
+The pool read back one `available` slot before and after the converging run, and the copy stayed present on a detached clean head, so the convergence performed no further worktree mutation.
+
+The portable half is enforced without Treehouse installed by the `teardown-already-returned` cases in `tests/fm-teardown.test.sh`, which drive the pool listing through a double.
+
+```sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh
+```
+
+That file runs its whole teardown matrix; the `teardown-already-returned` lines excerpted from that run are:
+
+```text
+ok - a copy proven already returned lets cleanup finish without a second worktree return
+ok - the already-returned proof matches the exact copy through a symlinked pool root
+ok - an available sibling slot with the same basename never proves this copy was returned
+ok - an in-use pool slot for the exact copy still refuses cleanup
+ok - a leased pool slot for the exact copy still refuses cleanup
+ok - an available slot that still lists a live process refuses cleanup
+ok - a pool listing that never names the recorded copy still refuses cleanup
+ok - an ambiguous pool listing naming the same copy twice still refuses cleanup
+ok - a malformed pool listing proves nothing and still refuses cleanup
+ok - a pool entry that never reports lease or process state proves nothing and refuses cleanup
+ok - a pool entry reporting a lease or process field with the wrong type refuses cleanup
+ok - an unreadable pool listing proves nothing and still refuses cleanup
+ok - an ordinary non-lock treehouse return failure still aborts even when the pool looks available
+ok - a copy whose repository is another home's clone is never treated as this task's returned copy
+```
+
+Rerun both halves after a Treehouse upgrade: the commands above refresh the version-scoped observation, and the regression file pins the decision logic.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
