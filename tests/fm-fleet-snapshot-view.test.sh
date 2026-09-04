@@ -197,6 +197,39 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
 }
 
+test_canonical_snapshot_and_view_include_background_work() {
+  local home progress pid out view
+  home=$(make_home background-work)
+  progress="$home/read-progress"
+  cat > "$progress" <<'SH'
+#!/usr/bin/env bash
+printf '12 rows\n'
+SH
+  chmod +x "$progress"
+  sleep 60 &
+  pid=$!
+  FM_HOME="$home" "$ROOT/bin/fm-background-work.sh" register collector \
+    --description "Collecting fixture rows" --task fixture-investigation \
+    --pid "$pid" --started-at 2026-09-03T22:25:13Z \
+    --progress "$progress" >/dev/null \
+    || fail "could not register canonical snapshot background work"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "canonical snapshot failed with registered background work"
+  printf '%s\n' "$out" | jq -e '
+    .background_work.schema == "fm-background-work-list.v1"
+      and .background_work.records[0].id == "collector"
+      and .background_work.records[0].liveness.status == "alive"
+      and .background_work.records[0].progress.value == "12 rows"
+  ' >/dev/null || fail "canonical snapshot omitted registered background work: $out"
+  view=$(FM_HOME="$home" "$VIEW") || fail "fleet view failed with registered background work"
+  assert_contains "$view" "## Background Work" "fleet view should expose its background-work section"
+  assert_contains "$view" "| collector | alive |" "fleet view should render the live background-work row"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "canonical fleet snapshot and human view expose registered background work"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_main_inventory_orphan_and_unstructured_disclosure() {
@@ -898,6 +931,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_canonical_snapshot_and_view_include_background_work
 test_home_summary_excludes_secondmate_from_child_inventory
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

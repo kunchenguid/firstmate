@@ -194,6 +194,38 @@ test_reused_pid_reads_dead() {
   pass "PID reuse is reported as the registered process being dead"
 }
 
+test_ps_fallback_identity_survives_terminal_width_changes() {
+  local home progress fakebin pid result
+  home=$(make_home ps-width)
+  progress=$(make_progress_command ps-width-progress 'printf "cycle 1\n"')
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'stat='*) printf 'S\n' ;;
+  *'lstart='*)
+    identity='Thu Sep  3 22:25:13 2026 fixture worker with a deliberately long command line'
+    printf '%.*s\n' "${COLUMNS:-40}" "$identity"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  start_sleeper
+  pid=$STARTED_PID
+  COLUMNS=30 PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/missing-proc" \
+    register_fixture "$home" width-stable "$pid" "$progress" ''
+
+  result=$(COLUMNS=70 PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/missing-proc" \
+    list_json "$home") || fail "could not observe the ps fallback under a different width"
+  printf '%s\n' "$result" | jq -e '
+    .records[0].liveness.status == "alive"
+      and .records[0].liveness.reason == "identity-match"
+  ' >/dev/null || fail "terminal width change falsely looked like PID reuse: $result"
+  pass "ps fallback identity is stable across registration and observation terminal widths"
+}
+
 test_unregistered_process_is_not_listed() {
   local home result
   home=$(make_home unregistered)
@@ -457,6 +489,7 @@ test_dead_process_remains_listed_as_dead
 test_unchanged_progress_becomes_stalled_while_process_stays_alive
 test_hung_progress_command_reads_unknown
 test_reused_pid_reads_dead
+test_ps_fallback_identity_survives_terminal_width_changes
 test_unregistered_process_is_not_listed
 test_retire_removes_visibility_without_signalling_process
 test_unknown_process_state_is_never_adopted_or_reported_alive

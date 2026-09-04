@@ -1853,6 +1853,7 @@ MAIN_INVENTORY_JSON_FILE="$JSON_TRANSPORT_DIR/main-inventory.json"
 SCOUT_REPORTS_JSON_FILE="$JSON_TRANSPORT_DIR/scout-reports.json"
 SECONDMATE_CURRENT_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-current.json"
 SECONDMATE_LANDED_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-landed.json"
+BACKGROUND_WORK_JSON_FILE="$JSON_TRANSPORT_DIR/background-work.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
@@ -1862,6 +1863,11 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
+fi
+
+if ! "$SCRIPT_DIR/fm-background-work.sh" list --json > "$BACKGROUND_WORK_JSON_FILE"; then
+  jq -n '{schema:"fm-background-work-list.v1",collection:{status:"unknown",reason:"collection-failed",truncated:true},records:[{id:"(registry)",description:"Background-work visibility unavailable",task:null,pid:null,started_at:null,expected_finish_at:null,liveness:{status:"unknown",reason:"collection-failed"},progress:{status:"unknown",reason:"collection-failed",value:null}}]}' > "$BACKGROUND_WORK_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: background-work fallback failed" >&2; exit 1; }
 fi
 
 scout_report_lines > "$SCOUT_REPORTS_JSON_FILE" \
@@ -1887,12 +1893,14 @@ jq -n \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
+  --slurpfile background_work "$BACKGROUND_WORK_JSON_FILE" \
   '($backlog[0]) as $backlog
    | ($tasks[0]) as $tasks
    | ($main_inventory[0]) as $main_inventory
    | ($scout_reports[0]) as $scout_reports
    | ($secondmate_current[0]) as $secondmate_current
    | ($secondmate_landed[0]) as $secondmate_landed
+   | ($background_work[0]) as $background_work
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1905,6 +1913,7 @@ jq -n \
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
+     background_work:$background_work,
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
      secondmate_guidance:{

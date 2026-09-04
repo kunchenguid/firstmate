@@ -58,6 +58,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+  def background_row($r):
+    "| \($r.id) | \($r.liveness.status) | \($r.progress.status) | \(dash($r.progress.value)) | \(dash($r.description)) | tracked-only |";
 
   "# Fleet View",
   "",
@@ -80,6 +82,15 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| ID | Title | Repo | Kind | Blocked By | Artifact |",
     "| --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "queued") | backlog_row(.))
+   end),
+  "",
+  "## Background Work",
+  (if (.background_work.records | length) == 0 then
+    "No registered background work found."
+   else
+    "| ID | Liveness | Progress | Value | Description | Supervision |",
+    "| --- | --- | --- | --- | --- | --- |",
+    (.background_work.records[] | background_row(.))
    end),
   "",
   "## Done",
