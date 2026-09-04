@@ -195,6 +195,13 @@ cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or b
 cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
 Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectable as a runtime backend.
 
+### Virtual-display launch safety
+
+A virtual display such as Xvfb can turn fail-fast startup into wait-forever behavior because software that would exit without a display may instead open an unrecoverable-error dialog and wait indefinitely once a display exists.
+Process liveness is not progress, so an alive process that has made no bounded startup or operational progress is not evidence that it is working.
+Before selecting a virtual display, determine what the application does on an unrecoverable error when a display exists; if it opens a dialog, any liveness-only launch check is invalid.
+Prefer the application's own no-GUI flag so rejected startup exits non-zero, and require a bounded startup or progress probe whose timeout fails the launch.
+
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
