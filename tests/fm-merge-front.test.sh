@@ -248,6 +248,51 @@ SH
   pass "promote never holds the queue lock across its live merge poll"
 }
 
+# `none` is the empty-queue label promote prints, and it is also a valid task ID.
+# The promoted output must name the real next front rather than claim the queue
+# drained because the next task happens to be called none.
+test_promote_reports_a_next_front_named_none() {
+  local dir promoted status
+  dir=$(make_home promote-none)
+  run_front "$dir" enqueue project-alpha task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "promote-none fixture front enqueue failed"
+  run_front "$dir" enqueue project-alpha none https://github.com/o/r/pull/2 >/dev/null \
+    || fail "promote-none fixture parked enqueue failed"
+
+  promoted=$(run_front "$dir" promote project-alpha) || fail "promotion failed"
+  assert_contains "$promoted" $'front=none\thttps://github.com/o/r/pull/2' \
+    "promotion reported a drained queue while a task named none held the front"
+  status=$(run_front "$dir" status project-alpha) || fail "promote-none status failed"
+  assert_contains "$status" $'front=none\thttps://github.com/o/r/pull/2' \
+    "promotion did not leave the task named none as the front"
+  pass "promotion names a next front whose task ID is exactly none"
+}
+
+# The common retirement path - a task whose metadata still resolves its project
+# and whose row is already gone - is answered from that one project queue. An
+# unrelated project's unreadable queue must not turn it into a reported failure.
+test_retirement_of_an_absent_row_ignores_unrelated_queues() {
+  local dir key err
+  dir=$(make_home retire-absent)
+  write_meta "$dir" task-a
+  write_meta "$dir" task-b
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
+  run_front "$dir" enqueue "$key" task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "retire-absent own-project enqueue failed"
+  run_front "$dir" enqueue zzz task-x https://github.com/o/r/pull/5 >/dev/null \
+    || fail "retire-absent sibling enqueue failed"
+  printf 'not-a-merge-front-queue\n' > "$dir/home/state/merge-front/zzz.queue"
+  chmod 0600 "$dir/home/state/merge-front/zzz.queue"
+
+  err=$(run_outcome "$dir" task-a https://github.com/o/r/pull/1 2>&1 >/dev/null) \
+    || fail "a merge outcome for an unqueued task could not be published"
+  case "$err" in
+    *"could not retire"*)
+      fail "retiring an already-absent row reported a failure from an unrelated queue" ;;
+  esac
+  pass "retirement of an absent row never consults unrelated project queues"
+}
+
 test_pr_check_enqueues_project_front() {
   local dir status key
   dir=$(make_home pr-check)
@@ -648,6 +693,7 @@ test_queue_conflicts_and_paths_fail_closed
 test_same_task_replacement_and_removal_recovery
 test_removal_requires_the_exact_task_and_url_pair
 test_promote_leaves_the_queue_usable_during_its_merge_poll
+test_promote_reports_a_next_front_named_none
 test_pr_check_enqueues_project_front
 test_pr_check_registers_any_checkout_basename
 test_pr_check_refuses_bound_url_before_mutating
@@ -656,6 +702,7 @@ test_confirmed_merge_retires_front_without_task_metadata
 test_retirement_scan_survives_an_unreadable_project_queue
 test_retirement_clears_a_row_whose_recorded_url_diverged
 test_retirement_scan_reports_the_identity_it_retired
+test_retirement_of_an_absent_row_ignores_unrelated_queues
 test_greptile_gate_refusals_and_single_action
 test_greptile_gate_accepts_skipped_and_neutral_required_checks
 test_greptile_kick_leaves_the_queue_usable_during_github_reads

@@ -1042,14 +1042,14 @@ validate_pr_poll_cleanup() {
 # Retire this task's merge-front queue entry alongside its PR poll. The queue
 # entry outlives the task record otherwise, and a retired front that stays
 # queued parks every later PR in that project with no update-branch or Greptile
-# authority. Runs while the meta still exists, so the entry is retired by its
-# recorded identity; a failure is reported with the operator recovery command
-# rather than blocking a landed teardown.
+# authority. Runs while the meta still exists, so the entry is resolved through
+# the task's own project queue; a failure is reported with the operator recovery
+# command rather than blocking a landed teardown.
 retire_merge_front_entry() {
   local state_dir=$1 id=$2 url
   url=$(grep '^pr=' "$state_dir/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$url" ] || return 0
-  fm_merge_front_retire_task "$state_dir" "$id" "$url" && return 0
+  fm_merge_front_retire_task "$state_dir" "$id" && return 0
   printf 'actionable: %s is torn down but its merge-front queue entry could not be retired; run bin/fm-merge-front.sh remove <project-key> %s %s\n' \
     "$id" "$id" "$url" >&2
   return 0

@@ -25,15 +25,17 @@
 # one named row is retired and a stale identity retires nothing rather than
 # dropping another task's live entry. It advances nothing by itself, so retiring
 # a stuck front simply exposes the next entry and unblocks the project. The
-# internal teardown and missing-metadata retirement tries that exact pair first
-# and then falls back to the trusted task identity alone, because a replacement
-# registration that committed the task metadata but failed its enqueue leaves
-# the queue holding a stale URL for that very task; without the fallback the row
-# would stay the project's front forever with nothing reported. Teardown and a
-# confirmed merge whose task metadata is already gone reach the same retirement
-# automatically (bin/fm-teardown.sh, bin/fm-merge-outcome-lib.sh), scanning every
-# project queue when the task's own project key can no longer be derived, so a
-# torn-down front cannot silently park the PRs behind it.
+# internal teardown and missing-metadata retirement keys on the trusted task
+# identity alone, because a replacement registration that committed the task
+# metadata but failed its enqueue leaves the queue holding a stale URL for that
+# very task; keyed on the pair the row would stay the project's front forever
+# with nothing reported. A task ID is unique within a queue, so that still names
+# at most one row. Teardown and a confirmed merge whose task metadata is already
+# gone reach the same retirement automatically (bin/fm-teardown.sh,
+# bin/fm-merge-outcome-lib.sh): the task's own project key resolves the queue in
+# one locked read, and only a task whose project key can no longer be derived
+# pays a scan of every project queue, so a torn-down front cannot silently park
+# the PRs behind it.
 #
 # The shared already-confirmed merge-outcome path uses the same identity-bound
 # retirement. A confirmed merge is a fact the queue may never veto: an

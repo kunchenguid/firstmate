@@ -346,7 +346,7 @@ fm_merge_front_status() {  # <state> <project-key>
 }
 
 fm_merge_front_promote() {  # <state> <project-key>
-  local state=$1 project=$2 task url next_task=none next_url= rc
+  local state=$1 project=$2 task url next_task= next_url= has_next=0 rc
   local provider host path number merged
   fm_merge_front_project_key_valid "$project" || return 2
   if fm_merge_front_paths "$state" "$project" 0; then
@@ -398,12 +398,13 @@ fm_merge_front_promote() {  # <state> <project-key>
     return 1
   fi
   if [ "${#FM_MERGE_FRONT_TASKS[@]}" -gt 0 ]; then
+    has_next=1
     next_task=${FM_MERGE_FRONT_TASKS[0]}
     next_url=${FM_MERGE_FRONT_URLS[0]}
   fi
   fm_merge_front_unlock
   printf 'promoted=%s\t%s\n' "$task" "$url"
-  if [ "$next_task" = none ]; then
+  if [ "$has_next" -eq 0 ]; then
     printf 'front=none\n'
   else
     printf 'front=%s\t%s\n' "$next_task" "$next_url"
@@ -539,47 +540,30 @@ fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url-or-empty>
   return 3
 }
 
-# Retire this task's row in its own project queue when the metadata still names
-# one, otherwise anywhere. Returns 0 on a drop, 3 when nothing matched, 1 on a
-# lock or state failure.
-_fm_merge_front_retire_scoped() {  # <state> <task-id> <pr-url-or-empty>
-  local state=$1 task=$2 url=$3 project rc=0
-  if project=$(fm_merge_front_project_key_from_meta "$state" "$task" 2>/dev/null); then
-    _fm_merge_front_drop_scoped "$state" "$project" "$task" "$url" || rc=$?
-    case "$rc" in
-      0|3) ;;
-      *) return 1 ;;
-    esac
-    [ "$rc" -eq 3 ] || return 0
-  fi
-  rc=0
-  fm_merge_front_drop_anywhere "$state" "$task" "$url" || rc=$?
-  return "$rc"
-}
-
 # The one identity-bound retirement entry point for a task leaving the queue -
 # a confirmed merge, or a teardown. A merge is a fact the queue may never veto:
-# only the matching row is retired, wherever it sits, so an out-of-order merge
+# only this task's row is retired, wherever it sits, so an out-of-order merge
 # leaves the current front untouched and an unqueued identity is nothing to do.
-# It prefers the task's own project key and
-# falls back to a scan of every project queue when the task metadata is already
-# gone, so a completed or torn-down front can never stay queued in front of the
-# live PRs behind it. The recorded URL is tried first; when it finds nothing the
-# trusted task identity alone retires the row, because a replacement
-# registration that committed the metadata but failed its enqueue leaves the
-# queue holding a stale URL for this very task. A task with no queued row at all
-# is nothing to do, never a failure.
-fm_merge_front_retire_task() {  # <state> <task-id> <pr-url>
-  local state=$1 task=$2 url=$3 rc=0
+# The row is identified by the trusted task identity alone, because a
+# replacement registration that committed the metadata but failed its enqueue
+# leaves the queue holding a stale URL for this very task; a task ID is unique
+# within a queue, so that still names at most one row. The task's own project
+# key resolves the queue in a single locked read, and only a task whose metadata
+# is already gone pays the cross-project scan, so a completed or torn-down front
+# can never stay queued in front of the live PRs behind it. A task with no
+# queued row is nothing to do, never a failure.
+fm_merge_front_retire_task() {  # <state> <task-id>
+  local state=$1 task=$2 project rc=0
   [ -e "$state/merge-front" ] || [ -L "$state/merge-front" ] || return 0
-  _fm_merge_front_retire_scoped "$state" "$task" "$url" || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    3) ;;
-    *) return 1 ;;
-  esac
+  if project=$(fm_merge_front_project_key_from_meta "$state" "$task" 2>/dev/null); then
+    _fm_merge_front_drop_scoped "$state" "$project" "$task" '' || rc=$?
+    case "$rc" in
+      0|3) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   rc=0
-  _fm_merge_front_retire_scoped "$state" "$task" '' || rc=$?
+  fm_merge_front_drop_anywhere "$state" "$task" '' || rc=$?
   case "$rc" in
     0|3) return 0 ;;
     *) return 1 ;;
