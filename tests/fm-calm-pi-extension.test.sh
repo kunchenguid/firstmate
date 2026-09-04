@@ -36,17 +36,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Gate every pane assertion on this helper. Pi persists a completed turn to its
+# session file before it repaints the TUI, and under full-suite load that repaint
+# has been observed to lag persistence by seconds, so a pane read taken straight
+# off a session-file wait can hold none of the turn. The bound is generous for
+# that reason: it only removes false negatives, since a genuinely absent row
+# still fails once the loop runs out.
 wait_for_text() {
   local file=$1 text=$2 i=0
-  while [ "$i" -lt 120 ]; do
+  # Stage each capture through a scratch path and promote it only when tmux
+  # succeeds. Writing straight to $file truncates it before tmux runs, so a
+  # capture against a session that has already exited would discard the last
+  # good frame - the one holding PI_EXIT and any startup error, and the only
+  # thing the dump below has to report.
+  local scratch="$TMP_ROOT/wait-for-text-capture.txt"
+  : >"$file"
+  while [ "$i" -lt 400 ]; do
     # Include recent scrollback: expanding a long restored transcript can move
     # the asserted tool output above the current viewport while the footer and
     # editor remain visible.
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
-    grep -Fq "$text" "$file" 2>/dev/null && return 0
+    if tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$scratch" 2>/dev/null; then
+      mv -f "$scratch" "$file"
+      grep -Fq "$text" "$file" 2>/dev/null && return 0
+    fi
     sleep 0.05
     i=$((i + 1))
   done
+  # Emit the frame that never showed the text: TMP_ROOT is removed by the EXIT
+  # trap even on failure, so this is the only surviving evidence for a caller.
+  cat "$file" >&2
   return 1
 }
 
@@ -1618,7 +1636,7 @@ JS
 }
 
 test_operational_followup_turn_e2e() {
-  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
+  local project home config sessions version label case_name calm_state expected_notifications session_file pane pane_file captain_answers i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi operational follow-up E2E"
     return 0
@@ -1792,14 +1810,8 @@ TS
 
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-    i=0
-    while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' && break
-      sleep 0.05
-      i=$((i + 1))
-    done
-    printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' \
+    pane_file="$TMP_ROOT/followup-composer-$label.txt"
+    wait_for_text "$pane_file" 'followup-e2e.ts' \
       || fail "Pi follow-up $case_name case ($label) did not reach the ready composer"
 
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/followup-e2e $label $shape"
@@ -1817,11 +1829,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+    # The session-file wait above proves persistence, not rendering, so wait for
+    # the turn's last row to actually reach the pane before reading it. The
+    # captain-answer count below cannot tell an unrendered turn from a duplicated
+    # one, and would report the former as the latter.
+    pane_file="$TMP_ROOT/followup-pane-$label.txt"
+    wait_for_text "$pane_file" "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case did not render the intended processing result"
+    pane=$(cat "$pane_file")
+    captain_answers=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
+    [ "$captain_answers" -eq 1 ] \
+      || fail "Pi follow-up $label case rendered $captain_answers captain answer rows instead of exactly one"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
       if [ "$label" = exact_watcher ]; then
@@ -1920,15 +1939,11 @@ JS
     printf '%s\n' on >"$home/config/calm"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-    i=0
-    while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'MONITOR_HANDLED_exact_watcher_ONE' && break
-      sleep 0.05
-      i=$((i + 1))
-    done
+    pane_file="$TMP_ROOT/followup-pane-restart-replay.txt"
+    wait_for_text "$pane_file" 'MONITOR_HANDLED_exact_watcher_ONE' \
+      || fail "Pi restart lost the operational processing response"
+    pane=$(cat "$pane_file")
     assert_contains "$pane" "CAPTAIN_PROMPT_exact_watcher" "Pi restart lost the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_exact_watcher_ONE" "Pi restart lost the operational processing response"
     assert_not_contains "$pane" "FIRSTMATE WATCHER WAKE: signal: /home/fixture/github/kunchenguid/firstmate/state/oss-triage-t4.status" \
       "Pi restart replayed the Calm-hidden exact watcher row"
     captain_line=$(printf '%s\n' "$pane" | grep -Fn 'CAPTAIN_ANSWER_exact_watcher' | tail -1 | cut -d: -f1)
