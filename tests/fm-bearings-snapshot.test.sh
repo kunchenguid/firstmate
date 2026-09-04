@@ -1394,27 +1394,32 @@ EOF
 # tasks-axi clears the held flag on close but retains hold-kind/hold reason as the
 # history of that call, and the recorded answer stays as an indented block under the
 # entry. Recently Landed is delivered work, so a captain-approved merge belongs in it
-# in every home. A captain-kind question never becomes a delivery merely because its
-# title names a PR. Local, deterministic, no GitHub call.
+# in every home. A rejected captain-held work item never becomes a delivery merely
+# because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
   local home mate fakebin json backlog
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
-  cat >> "$home/data/backlog.md" <<'EOF'
-- [x] approved-merge - Fix the anchor https://github.com/kunchenguid/firstmate/pull/1365 (repo: firstmate) (kind: ship) (merged 2026-07-10) (hold: PR 1365 open, all green; awaiting your merge word) (hold-kind: captain)
-  Resolution recorded by fm-captain-hold.
-  Captain decision:
-  Merge now, chosen on the board on 2026-07-10.
-- [x] approved-scout - Trace the redirect data/scout-x/report.md (repo: firstmate) (kind: scout) (reported 2026-07-10) (hold: report ready; awaiting your read) (hold-kind: captain)
-EOF
-  cat >> "$mate/data/backlog.md" <<'EOF'
-- [x] mate-approved-merge - Secondmate fix https://github.com/kunchenguid/firstmate/pull/1361 (repo: firstmate) (kind: ship) (merged 2026-07-11) (hold: PR 1361 open, all green; awaiting your merge word) (hold-kind: captain)
-  Captain decision:
-  Merge now.
-EOF
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   backlog="$home/data/backlog.md"
+  "$TASKS_AXI_BIN" add approved-merge "Fix the anchor" --kind ship --repo firstmate \
+    --file "$backlog" >/dev/null || fail "could not create the approved merge fixture"
+  "$TASKS_AXI_BIN" hold approved-merge --reason "PR 1365 is ready; awaiting your merge word" \
+    --kind captain --file "$backlog" >/dev/null || fail "could not hold the approved merge fixture"
+  PATH="$fakebin:$PATH" bash -c '
+    . "$1"
+    . "$2"
+    fm_backlog_retain "$3" approved-merge --pr "$4"
+  ' _ "$ROOT/bin/fm-tasks-axi-lib.sh" "$ROOT/bin/fm-backlog-transition-lib.sh" \
+    "$home/data" "https://github.com/kunchenguid/firstmate/pull/1365" \
+    || fail "could not retain the approved merge deliverable"
+  printf 'Merge now.\n' > "$home/merge-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer approved-merge --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not record the approved merge answer"
   "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate --file "$backlog" >/dev/null \
     || fail "could not create the local delivery fixture"
   "$TASKS_AXI_BIN" hold approved-local --reason "ready on the local branch; awaiting your word" \
@@ -1427,28 +1432,41 @@ EOF
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer approved-local --decision-file "$home/local-answer.txt" >/dev/null \
     || fail "could not record the local delivery answer"
-  "$TASKS_AXI_BIN" add answered-question \
+  "$TASKS_AXI_BIN" add rejected-merge \
     "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
-    --kind captain --repo firstmate --file "$backlog" >/dev/null \
-    || fail "could not create the answered question fixture"
-  "$TASKS_AXI_BIN" hold answered-question --reason "captain choice pending" \
-    --kind captain --file "$backlog" >/dev/null || fail "could not hold the answered question fixture"
+    --kind ship --repo firstmate --file "$backlog" >/dev/null \
+    || fail "could not create the rejected merge fixture"
+  "$TASKS_AXI_BIN" hold rejected-merge --reason "captain choice pending" \
+    --kind captain --file "$backlog" >/dev/null || fail "could not hold the rejected merge fixture"
   printf 'Do not merge it.\n' > "$home/question-answer.txt"
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer answered-question --decision-file "$home/question-answer.txt" >/dev/null \
-    || fail "could not record the answered question"
+    answer rejected-merge --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not record the rejected merge answer"
+  "$TASKS_AXI_BIN" add mate-approved-merge "Secondmate fix" --kind ship --repo firstmate \
+    --file "$mate/data/backlog.md" >/dev/null || fail "could not create the secondmate merge fixture"
+  "$TASKS_AXI_BIN" hold mate-approved-merge --reason "PR 1361 is ready; awaiting your merge word" \
+    --kind captain --file "$mate/data/backlog.md" >/dev/null \
+    || fail "could not hold the secondmate merge fixture"
+  printf 'Merge the secondmate fix.\n' > "$mate/merge-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$mate" \
+    FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
+    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer mate-approved-merge --release --decision-file "$mate/merge-answer.txt" >/dev/null \
+    || fail "could not release the secondmate merge fixture"
+  "$TASKS_AXI_BIN" done mate-approved-merge \
+    --pr "https://github.com/kunchenguid/firstmate/pull/1361" \
+    --file "$mate/data/backlog.md" >/dev/null || fail "could not complete the secondmate merge fixture"
   json=$(run "$home" "$fakebin" --json --all-landed)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "approved-merge" and (.artifact | test("/pull/1365"))))
-      and (.landed | any(.[]; .id == "approved-scout"))
       and (.landed | any(.[]; .id == "approved-local"))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
-      and (.landed | any(.[]; .id == "answered-question") | not)
+      and (.landed | any(.[]; .id == "rejected-merge") | not)
   ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"
   [ ! -s "$home/net.log" ] || fail "landed must make no gh/gh-axi call, got: $(cat "$home/net.log")"
-  pass "captain-approved deliveries stay in landed while an answered question does not"
+  pass "captain-approved deliveries stay in landed while a rejected merge does not"
 }
 
 test_include_prs_is_the_only_fetch_path() {

@@ -2016,7 +2016,7 @@ SH
 # A home whose data directory is relocated keeps one backlog; the predicate and
 # the retention must address it the way teardown does, not FM_HOME/data.
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
-  local home data id show
+  local home data id show json
   home=$(make_home teardown-relocated-hold)
   data="$home/records"
   mv "$home/data" "$data"
@@ -2062,7 +2062,19 @@ EOF
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
   assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
-  pass "cleanup retains captain calls in the configured backlog"
+  printf 'Accept the relocated report.\n' > "$home/relocated-answer.txt"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" \
+    --decision-file "$home/relocated-answer.txt" >/dev/null \
+    || fail "could not answer the relocated captain hold"
+  json=$(FM_DATA_OVERRIDE="$data" run_bearings "$home") \
+    || fail "Bearings failed for the relocated completed report"
+  printf '%s' "$json" | jq -e --arg id "$id" \
+    --arg report "records/$id/report.md" '
+      .landed | any(.id == $id and .artifact == $report)
+    ' >/dev/null || fail "Bearings omitted the relocated completed report: $json"
+  pass "cleanup retains and Bearings lands captain calls in relocated data"
 }
 
 # "Cannot tell" is not permission to close. A ship row has no separate
