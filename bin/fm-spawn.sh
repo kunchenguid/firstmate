@@ -18,7 +18,8 @@
 #   full development contract, adding the compact contract to a legacy brief
 #   through `launch-brief.md` when needed. For a no-mistakes ship, that artifact
 #   also carries the current `--intent` contract and the extracted captain intent.
-#   The pipeline agent's Ponytail lifecycle plugin is verified before launch. A legacy mixed Task is
+#   The selected no-mistakes CLI's --require-ponytail support is verified before
+#   launch. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
 #   unmarked legacy Tasks stop for migration rather than becoming intent. That
 #   library owns the parsing and intent rules. When the explicit mode carries

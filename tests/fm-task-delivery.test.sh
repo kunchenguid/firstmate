@@ -26,13 +26,13 @@ PIPELINE_BIN="$TMP_ROOT/pipeline-bin"
 mkdir -p "$PIPELINE_BIN"
 cat > "$PIPELINE_BIN/no-mistakes" <<'STUB'
 #!/bin/sh
-printf '%s\n' '  ✓ gate validation  codex is runnable'
+if [ "$*" = 'axi run --help' ]; then
+  printf '%s\n' '      --require-ponytail   require Ponytail full for pipeline agents'
+  exit 0
+fi
+exit 2
 STUB
-cat > "$PIPELINE_BIN/codex" <<'STUB'
-#!/bin/sh
-printf '%s\n' '{"installed":[{"pluginId":"ponytail@test","enabled":true}]}'
-STUB
-chmod +x "$PIPELINE_BIN/no-mistakes" "$PIPELINE_BIN/codex"
+chmod +x "$PIPELINE_BIN/no-mistakes"
 PATH="$PIPELINE_BIN:$PATH"
 export PATH
 
@@ -191,28 +191,32 @@ EOF
   pass "fm-spawn: a missing Ponytail guarantee fails before launch with a clear diagnostic"
 }
 
-test_pluginless_no_mistakes_delivery_is_refused() {
+test_unsupported_no_mistakes_delivery_is_refused() {
   local rec home proj fakebin out status id meta
-  rec=$(make_home pluginless-pipeline)
+  rec=$(make_home unsupported-pipeline)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
   id=delivery-pluginless-refusal-b5
   write_brief "$home" "$id" no-mistakes
-  cat > "$fakebin/codex" <<'STUB'
+  cat > "$fakebin/no-mistakes" <<'STUB'
 #!/bin/sh
-printf '%s\n' '{"installed":[]}'
+if [ "$*" = 'axi run --help' ]; then
+  printf '%s\n' '      --intent string   what the user set out to accomplish'
+  exit 0
+fi
+exit 2
 STUB
-  chmod +x "$fakebin/codex"
+  chmod +x "$fakebin/no-mistakes"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "pluginless no-mistakes spawn should be refused"
-  assert_contains "$out" "pipeline agent codex has no enabled Ponytail plugin" \
-    "pluginless pipeline refusal did not identify the missing operational boundary"
+  [ "$status" -ne 0 ] || fail "unsupported no-mistakes spawn should be refused"
+  assert_contains "$out" "does not expose axi run --require-ponytail" \
+    "unsupported CLI refusal did not identify the missing handoff"
   assert_contains "$out" "refusing to launch $id" \
-    "pluginless pipeline refusal did not stop before worker launch"
+    "unsupported CLI refusal did not stop before worker launch"
   assert_absent "$home/state/$id.meta" \
-    "pluginless pipeline refusal still published task metadata"
+    "unsupported CLI refusal still published task metadata"
 
   id=promote-pluginless-refusal-b6
   write_brief "$home" "$id"
@@ -221,16 +225,16 @@ STUB
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" PATH="$fakebin:$PATH" \
     "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "pluginless no-mistakes promotion should be refused"
-  assert_contains "$out" "pipeline agent codex has no enabled Ponytail plugin" \
-    "pluginless promotion did not identify the missing operational boundary"
+  [ "$status" -ne 0 ] || fail "unsupported no-mistakes promotion should be refused"
+  assert_contains "$out" "does not expose axi run --require-ponytail" \
+    "unsupported CLI refusal did not identify the missing promotion handoff"
   assert_contains "$out" "refusing to promote $id" \
-    "pluginless promotion did not stop before changing the task"
+    "unsupported CLI refusal did not stop before changing the task"
   assert_grep 'kind=scout' "$meta" \
-    "pluginless promotion changed the task kind"
+    "unsupported CLI refusal changed the task kind"
   assert_absent "$home/data/$id/ship-instructions.md" \
-    "pluginless promotion published ship instructions"
-  pass "fm-spawn/fm-promote: pluginless no-mistakes delivery fails closed"
+    "unsupported CLI refusal published ship instructions"
+  pass "fm-spawn/fm-promote: unsupported no-mistakes delivery is refused"
 }
 
 # The registry is the captain's standing posture, so dropping below its rigor is
@@ -453,6 +457,8 @@ STUB
     "promoted no-mistakes worker put execution directives into sanitized intent"
   assert_grep "only the authorized captain intent" "$payload" \
     "promoted no-mistakes worker lost the intent provenance boundary"
+  assert_grep 'no-mistakes axi run --require-ponytail --intent "$captain_intent"' "$payload" \
+    "promoted no-mistakes worker lost the operational Ponytail handoff"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
@@ -598,6 +604,9 @@ EOF
   assert_grep "Pass the serialized captain intent below plus any later words the captain actually supplied as \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "launch contract did not preserve the intent provenance boundary"
+  assert_grep 'no-mistakes axi run --require-ponytail --intent "$captain_intent"' \
+    "$home/data/$id/launch-brief.md" \
+    "legacy no-mistakes launch omitted the operational Ponytail handoff"
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
@@ -845,7 +854,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_reports_when_ponytail_contract_cannot_be_published
-test_pluginless_no_mistakes_delivery_is_refused
+test_unsupported_no_mistakes_delivery_is_refused
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

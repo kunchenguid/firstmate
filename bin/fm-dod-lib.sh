@@ -25,7 +25,7 @@
 # than a copied ruleset. New ship briefs receive it from fm_dod_block; spawn adds
 # it to legacy ship briefs before launch and validates the final worker-facing
 # artifact. No-mistakes treats --intent as sanitized acceptance data, so spawn
-# and promotion require an enabled host lifecycle plugin for its pipeline agent.
+# and promotion require its operational --require-ponytail handoff.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
@@ -58,53 +58,20 @@ fm_brief_ponytail_contract_present() {  # <file>
 }
 
 fm_no_mistakes_ponytail_ready() {
-  local doctor agent plugins mode config_root config_file
+  local help
   FM_PONYTAIL_PIPELINE_ERROR=
   command -v no-mistakes >/dev/null 2>&1 || {
     FM_PONYTAIL_PIPELINE_ERROR="no-mistakes is unavailable"
     return 1
   }
-  doctor=$(NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes doctor 2>&1) || {
-    FM_PONYTAIL_PIPELINE_ERROR="no-mistakes doctor could not resolve a pipeline agent"
+  help=$(NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi run --help 2>&1) || {
+    FM_PONYTAIL_PIPELINE_ERROR="no-mistakes axi run --help failed"
     return 1
   }
-  agent=$(printf '%s\n' "$doctor" | awk '/gate validation/ && / is runnable$/ { print $(NF - 2); exit }')
-  case "$agent" in
-    codex|claude) ;;
-    *)
-      FM_PONYTAIL_PIPELINE_ERROR="no supported Ponytail lifecycle boundary was reported for pipeline agent ${agent:-unknown}"
-      return 1 ;;
-  esac
-  command -v "$agent" >/dev/null 2>&1 || {
-    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent is unavailable"
+  printf '%s\n' "$help" | grep -Eq '^[[:space:]]*--require-ponytail([[:space:]]|$)' || {
+    FM_PONYTAIL_PIPELINE_ERROR="installed no-mistakes does not expose axi run --require-ponytail; update no-mistakes"
     return 1
   }
-  plugins=$("$agent" plugin list --json 2>/dev/null) || {
-    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent could not report its plugins"
-    return 1
-  }
-  printf '%s\n' "$plugins" | awk '
-    /"(pluginId|id)"[[:space:]]*:[[:space:]]*"ponytail@/ { ponytail = 1 }
-    ponytail && /"enabled"[[:space:]]*:[[:space:]]*true/ { enabled = 1; exit }
-    END { exit enabled ? 0 : 1 }
-  ' || {
-    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent has no enabled Ponytail plugin"
-    return 1
-  }
-  mode=$(printf '%s' "${PONYTAIL_DEFAULT_MODE:-full}" | tr '[:upper:]' '[:lower:]')
-  [ "$mode" = full ] || {
-    FM_PONYTAIL_PIPELINE_ERROR="Ponytail defaults to $mode instead of full"
-    return 1
-  }
-  config_root=${XDG_CONFIG_HOME:-$HOME/.config}
-  config_file="$config_root/ponytail/config.json"
-  if [ -r "$config_file" ]; then
-    mode=$(sed -n 's/.*"defaultMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -n 1 | tr '[:upper:]' '[:lower:]')
-    [ -z "$mode" ] || [ "$mode" = full ] || {
-      FM_PONYTAIL_PIPELINE_ERROR="Ponytail config defaults to $mode instead of full"
-      return 1
-    }
-  fi
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
@@ -228,6 +195,10 @@ EOF
 
 Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
+
+## Required no-mistakes handoff
+
+Store that exact string in `captain_intent`, then start the run with `no-mistakes axi run --require-ponytail --intent "$captain_intent"`; `--require-ponytail` is mandatory for every Firstmate no-mistakes handoff.
 EOF
 }
 
