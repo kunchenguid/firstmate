@@ -61,6 +61,51 @@ The third is recorded below.
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
+### Session identity behind the fleet lock
+
+The fleet lock records which session acquired it, because process ancestry is not a stable session identity: Claude Code serves one session's hooks and tool calls from more than one worker pool, and a pool whose top process is reparented to init yields a contiguous harness run that never reaches the session's own lineage.
+Whether the harness supplies a usable identity at all is vendor behavior, so it was measured on 2026-08-15 against Claude Code 2.1.232 and 2.1.233 in a throwaway lab whose only `SessionStart` hook logged the delivered payload, the exported environment, and the full process ancestry.
+
+Six session opens were recorded, covering every source the run tier routes on.
+
+| Source | Delivery | `CLAUDE_PID` | Session process | Hook's parent | Ancestry resolves to |
+| --- | --- | --- | --- | --- | --- |
+| `startup` | 2.1.233 headless `-p` | 26545 | 26545 | 26545 | 26545 |
+| `startup` | 2.1.233 interactive | 37003 | 37003 | 37003 | 37003 |
+| `compact` | 2.1.233 interactive `/compact` | 37003 | 37003 | 37003 | 37003 |
+| `startup` | 2.1.232 interactive | 72191 | 72191 | 72191 | 72191 |
+| `clear` | 2.1.232 `/clear` | 72191 | 72191 | 72191 | 72191 |
+| `resume` | 2.1.232 `--continue` | 19340 | 19340 | 19340 | 19340 |
+
+Two facts hold across all six, and both are what the durable binding rests on.
+Every payload carried a `session_id`, byte-equal to the `CLAUDE_CODE_SESSION_ID` the session exported, with no mismatch.
+`CLAUDE_PID` named the session process itself, and the hook command ran as a direct child of that process.
+
+The second fact bounds the defect rather than describing it: on this path ancestry already reaches the session, so a foreground session is never refused its own lock at its own session open.
+The refusal observed in the field came from a session hosted in a Claude Code background job, whose calls are served by a reparented pool (`claude bg-spare` under `claude bg-pty-host`, itself reparented to init) that stops short of the lock owner.
+That is why the binding is required and why `CLAUDE_PID` equality alone would not answer it.
+One reparented pool was measured, on the TOOL CALL path, from the refused session itself:
+
+| Path | `CLAUDE_PID` | Process it names | That process's parent | Observed harness ancestry | `state/.lock` |
+| --- | --- | --- | --- | --- | --- |
+| tool call served by a reparented worker pool, 2026-08-15, Claude Code 2.1.233 | 27316 | 27316 `claude bg-spare --bg-spare /tmp/cc-daemon-501/51f9f9bc/spare/d6bfe5e1.claim.sock` | 27305 `claude bg-pty-host ... d6bfe5e1.pty.sock ...`, PPID 1 | [27316, 27305] | 89187, live, `claude --dangerously-skip-permissions` |
+
+On that path `CLAUDE_PID` does name a pool process, and that process is a member of the current ancestry, so `fm_harness_session_is_ours` answers true while ancestry itself never reaches 89187.
+That row confirms the premise for the tool-call path and for nothing else.
+The case "the `SessionStart` hook itself fires from a reparented pool" is NOT covered by any recorded measurement: every session open in the six-row table above was served by the session process itself.
+Were `CLAUDE_PID` to name the session rather than the pool on such a path, corroboration would fail and the read-only refusal would stand.
+`CLAUDE_PID` remains load-bearing as corroboration either way, since a session identity inherited through the environment can otherwise be replayed by any process the session launched.
+
+`tests/fm-session-lock-identity.test.sh` pins the resulting logic portably with a deterministic process table, verified on 2026-08-15 under both GNU bash 3.2.57 on Darwin 25.6.0 and GNU bash 5.3.9 on aarch64 Alpine.
+`tests/fm-sessionstart-hook-live-e2e.test.sh` refreshes only the session-open half of this record, the six-row table above: it reaches no reparented worker pool, so the tool-call row stays a hand-recorded measurement.
+Run it after every Claude Code upgrade before trusting those six rows.
+Its 2026-08-15 run against Claude Code 2.1.233 checked five real session opens and found a corroborated session identity on every one:
+
+```text
+# claude 2.1.233 (Claude Code): session identity usable on 5 session-open(s)
+ok - claude 2.1.233 (Claude Code): every session open carries a corroborated session identity for the fleet lock
+```
+
 Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
@@ -314,7 +359,8 @@ That inertness result is scoped to the builds it exercised: it did not establish
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+The Stop auto-arm's own ownership proof in `bin/fm-session-lock-lib.sh` is the ancestry one alone, decided against a session's whole contiguous harness ancestry rather than one chosen pid, so it reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+The session-start ownership gates additionally accept the recorded session identity described in [Session identity behind the fleet lock](#session-identity-behind-the-fleet-lock); the Stop auto-arm and the Cursor turn-end guard deliberately still ask for ancestry only.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.

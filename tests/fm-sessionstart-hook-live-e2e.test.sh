@@ -117,7 +117,7 @@ make_lab() {  # <harness> -> echoes lab dir
     chmod +x "$lab/bin/$stub"
   done
 
-  # The REAL deferred-network stage plus the two libraries it sources, so fact
+  # The REAL deferred-network stage plus the libraries it sources, so fact
   # (c) is proven against the actual detach this ship relies on rather than a
   # re-creation of it. Its bootstrap child is a stub: what is under test here is
   # survival across the hook boundary, not the sweeps, which
@@ -126,6 +126,7 @@ make_lab() {  # <harness> -> echoes lab dir
   ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
   ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
   ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
+  ln -sf "$ROOT/bin/fm-cursor-lib.sh" "$lab/bin/fm-cursor-lib.sh"
   cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
 #!/usr/bin/env bash
 # Outlives the hook on purpose: the marker can only appear if the worker was
@@ -143,7 +144,7 @@ SH
 # supplied and prints a source-stamped token for the model to quote back.
 set -u
 record=${FM_LIVE_RECORD:?}
-source=
+source= payload=
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) source=${2:-}; shift 2 || exit 0 ;;
@@ -151,7 +152,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$source" ]; then
-  source=$(cat 2>/dev/null | awk '
+  payload=$(cat 2>/dev/null || true)
+  source=$(printf '%s' "$payload" | awk '
     BEGIN { RS = "\"" }
     seen == 2 { print; exit }
     seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
@@ -161,6 +163,24 @@ if [ -z "$source" ]; then
 fi
 [ -n "$source" ] || source=none
 printf '%s\n' "$source" >> "$record"
+# The session-identity evidence the fleet lock's durable binding rests on. It is
+# vendor-emitted, so only a real harness can confirm it: the payload names a
+# session, the harness exported that same session, and the served-session
+# process it names is genuinely inside this hook's own harness ancestry.
+if [ -n "${FM_LIVE_IDENTITY_RECORD:-}" ]; then
+  payload_session=$(printf '%s' "$payload" \
+    | tr ',{}' '\n' \
+    | sed -n 's/^[[:space:]]*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._-]\{1,\}\)"[[:space:]]*$/\1/p' \
+    | sed -n '1p')
+  corroborated=no
+  if . "$(dirname "$0")/fm-session-lock-lib.sh" 2>/dev/null \
+    && fm_harness_session_is_ours 2>/dev/null; then
+    corroborated=yes
+  fi
+  printf '%s|%s|%s|%s|%s\n' "$source" "${payload_session:-none}" \
+    "${CLAUDE_CODE_SESSION_ID:-none}" "${CLAUDE_PID:-none}" "$corroborated" \
+    >> "$FM_LIVE_IDENTITY_RECORD"
+fi
 # Exactly what bin/fm-session-start.sh does after taking the lock.
 if [ -n "${FM_LIVE_DETACH_MARKER:-}" ]; then
   "$(dirname "$0")/fm-startup-network.sh" start --locked 0 --harvest-pid $$ >/dev/null 2>&1 || true
@@ -205,6 +225,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   : > "$record"
   rm -f "$marker" "$lab/state/.startup-network."*
   out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    FM_LIVE_IDENTITY_RECORD="$lab/identity" \
     FM_LIVE_DETACH_MARKER="$marker" \
     "${cold[@]}" "$ASK" < /dev/null 2>&1 )
   source=$(head -n 1 "$record")
@@ -229,6 +250,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
 
   : > "$record"
   ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    FM_LIVE_IDENTITY_RECORD="$lab/identity" \
     "${resume[@]}" 'Say only OK.' < /dev/null >/dev/null 2>&1 ) || true
   source=$(head -n 1 "$record")
   [ -n "$source" ] \
@@ -246,6 +268,39 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
 # --- (b) context-reset opens --------------------------------------------------
 #
 # Only reachable through the TUI, so this one drives a real pane.
+# --- (d) the session identity the fleet lock's durable binding rests on -------
+#
+# The lock records WHICH session acquired it, because process ancestry is not a
+# stable session identity: a call served by a reparented worker pool never
+# reaches its own session, and the owner is then refused its own home. Whether
+# the harness supplies a usable identity at all is vendor behavior, so it is
+# proven here rather than assumed. Every session open recorded above must show
+# a session in the payload, the SAME session exported to the hook, and a served
+# session process this hook's own ancestry really contains - the corroboration
+# that stops an inherited environment from proving ownership.
+assert_session_identity() {  # <harness> <version> <lab>
+  local harness=$1 version=$2 lab=$3
+  local record="$lab/identity" n=0
+  [ -s "$record" ] \
+    || fail "$harness $version: no session-open recorded any identity evidence, so this check verified nothing"
+  while IFS='|' read -r source payload_session env_session claude_pid corroborated; do
+    [ -n "$source" ] || continue
+    n=$((n + 1))
+    [ "$payload_session" != none ] \
+      || fail "$harness $version: the $source session-open payload carried no session_id"
+    [ "$env_session" = "$payload_session" ] \
+      || fail "$harness $version: the $source session-open exported session '$env_session' but its payload named '$payload_session'"
+    [ "$claude_pid" != none ] \
+      || fail "$harness $version: the $source session-open named no served session process"
+    [ "$corroborated" = yes ] \
+      || fail "$harness $version: the $source session-open's served session process $claude_pid was not inside the hook's own harness ancestry"
+  done < "$record"
+  [ "$n" -ge 2 ] \
+    || fail "$harness $version: only $n session-open(s) were checked for identity; a context reset must be among them"
+  note "$harness $version: session identity usable on $n session-open(s)"
+  pass "$harness $version: every session open carries a corroborated session identity for the fleet lock"
+}
+
 probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-argv...>
   local harness=$1 version=$2 lab=$3 clear_cmd=$4
   shift 4
@@ -253,7 +308,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   : > "$record"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
-    -e FM_LIVE_NONCE="$LIVE_NONCE" \
+    -e FM_LIVE_NONCE="$LIVE_NONCE" -e FM_LIVE_IDENTITY_RECORD="$lab/identity" \
     "$*" \
     || fail "$harness $version: could not start an interactive lab session"
 
@@ -606,6 +661,7 @@ for harness in claude codex pi; do
         -- claude --continue -p --permission-mode bypassPermissions
       probe_context_reset claude "$version" "$lab" /clear \
         claude --permission-mode bypassPermissions
+      assert_session_identity claude "$version" "$lab"
       ;;
     codex)
       probe_process_opens codex "$version" "$lab" resume \
