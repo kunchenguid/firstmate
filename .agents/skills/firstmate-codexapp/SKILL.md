@@ -61,8 +61,9 @@ For a Firstmate-managed task, include an explicit status instruction:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
-Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
+Use only these prefixes for status changes: working:, ready:, needs-decision:, blocked:, paused:, done:, failed:.
 Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
+Use ready: for an implementation that is committed but not yet validated, and done: only for the terminal claim in the exact shape your task brief gives you; it names what you are claiming and firstmate verifies it.
 Before doing substantive work, append "working: Codex Desktop thread started".
 ```
 

@@ -3,6 +3,10 @@
 Maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a captain-facing outcome recorded inside a secondmate home reaches the parent channel without the mate model writing it.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 
+The 2026-09-03 transcript below predates the terminal-claim gate and has not been rerun since; the guarantee it proves is unchanged, but two of its recorded lines are no longer what the current scripts print.
+The child's `done: PR ... checks green` line carries no commit identity, so `bin/fm-inactive-reconcile.sh` now publishes it as a `blocked` line with `claim=unverified` under a different fingerprint key ([`secondmate-parent-channel.md`](../secondmate-parent-channel.md) owns that rule), and `bin/fm-pr-check.sh` prints its advisory `claim:` verdict before `armed:`.
+Rerun the fixture to replace the transcript rather than editing the recorded output.
+
 ## What was run
 
 Date: 2026-09-03.

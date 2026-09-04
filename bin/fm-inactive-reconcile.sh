@@ -10,13 +10,17 @@
 # not a watcher, daemon, PR poll, or forge client of its own.
 # In a secondmate home every `scan` invocation, which is every watcher poll,
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
-# ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
-# so that line is published on the parent channel at once through
-# bin/fm-parent-channel-lib.sh as
-#   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
+# ledger ends in a whole `done:` or `failed:` line spoken in its own voice has
+# stated its own outcome, so that line is published on the parent channel at
+# once through bin/fm-parent-channel-lib.sh as
+#   <verb> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md] [claim=<verdict>]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh and without waiting for
-# the inactive cadence. A line still being appended (no trailing newline yet)
+# the inactive cadence. The leading <verb> is the child's own state, except
+# that a `done` whose terminal claim is not established is published as
+# `blocked` with `claim=<verdict>` naming what the claim actually is, so the
+# parent's durable record cannot read done while the child's home reports
+# done-unverified. A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them
 # (docs/secondmate-parent-channel.md). A main home has no parent channel and
@@ -44,11 +48,15 @@
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. In a secondmate home a child whose ledger already ends in a
-# terminal done or failed line belongs to the ledger-first path above and is
-# skipped here, so one outcome is never reported twice. It then uses
-# fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
+# terminal done or failed line spoken in its own voice belongs to the
+# ledger-first path above and is skipped here, so one outcome is never reported
+# twice. It then uses fm-crew-state.sh as the sole current-state source.
+# Only a done, done-unverified, or failed state, or the pre-validation `ready`
+# handoff, is suspicious enough to create a durable terminal outcome record or
+# wake the supervisor: an unestablished claim is an outcome nobody delivered,
+# and a stopped worker waiting on firstmate is an action nobody took, which is
+# what this backstop exists to catch. `ready` is reported as the handoff it is
+# rather than as a terminal outcome.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #

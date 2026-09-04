@@ -33,6 +33,8 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | An outcome that exists only in the mate's reasoning | none | the charter and the `AGENTS.md` carve-outs only |
 
 The ledger delivery reads files only: it calls no harness, no forge, and no current-state reader, so it is identical for every harness and runtime backend.
+It publishes what the mate home actually holds, which for a `done:` line includes whether anything established it: a claim that is not verified is published as a `blocked` line carrying `claim=<state>` and the child's own words, so the parent's durable record cannot read `done` while the child's home reports `done-unverified` ([`bin/fm-done-claim-lib.sh`](../bin/fm-done-claim-lib.sh) owns that verdict, read locally from the child's record).
+The verdict is part of the event's identity, so a claim established later publishes a corrected line while an unchanged verdict stays deduplicated.
 Each delivery is keyed with the first eight hexadecimal characters of its receipt fingerprint and appended at most once by exact line, and the ledger path reuses the inactive scan's per-fingerprint receipts, so a replayed poll or restart cannot deliver an event twice while a genuinely new terminal event is delivered again.
 A duplicate line is harmless and a missed one is not, so the mate may still append its own judgement about a delivered outcome, and the parent reads the script's line as the fact and the mate's line as commentary.
 
