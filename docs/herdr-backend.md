@@ -234,6 +234,8 @@ The poll density bounds the residual possibility of an extremely fast complete t
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
+Alternative-screen harnesses, including Claude Code, expose no scrollback history to Herdr at all.
+Any capture of such a pane is therefore bounded to the visible window regardless of the requested `--lines`.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.

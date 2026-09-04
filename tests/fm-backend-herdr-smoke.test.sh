@@ -285,6 +285,39 @@ case "$p" in
 esac
 pass "real herdr: current_path reads the pane's live cwd"
 
+# --- viewport stability: a firstmate capture never moves the pane scroll -----
+# (fm-herdr-scroll-scout, section 8) Alternative-screen harnesses expose no
+# scrollback history to Herdr, so every capture of an agent pane is bounded to
+# the visible window. The one behavior of OUR code worth pinning is that a
+# capture never MOVES the viewport: exactly like tmux capture-pane, `herdr
+# pane read` must leave the pane's scroll untouched. This fails the moment a
+# Herdr version or an adapter change introduces a capture that scrolls the
+# view. Uses its own throwaway pane so the 500 lines of seeded history cannot
+# interfere with the rest of the suite.
+SCROLL_LABEL="fm-smoke-scroll"
+SCROLL_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$SCROLL_LABEL" /tmp) || fail "could not create the viewport-stability scenario's tab"
+read -r _SCROLL_TAB_ID SCROLL_PANE_ID <<EOF
+$SCROLL_IDS
+EOF
+if [ -z "$SCROLL_PANE_ID" ]; then
+  fail "viewport-stability scenario tab creation did not return a pane id"
+fi
+SCROLL_TARGET="$SESSION:$SCROLL_PANE_ID"
+fm_backend_herdr_send_text_line "$SCROLL_TARGET" 'seq 1 500' || fail "could not seed scrollback for the viewport-stability check"
+sleep 0.5
+scroll_before=$(herdr pane get "$SCROLL_PANE_ID" --session "$SESSION" | jq -c '.result.pane.scroll')
+{ [ -n "$scroll_before" ] && [ "$scroll_before" != null ]; } \
+  || fail "could not read .result.pane.scroll before the captures"
+fm_backend_herdr_capture "$SCROLL_TARGET" 40 >/dev/null \
+  || fail "capture failed during the viewport-stability check"
+fm_backend_herdr_capture_ansi "$SCROLL_TARGET" 20 >/dev/null \
+  || fail "capture_ansi failed during the viewport-stability check"
+fm_backend_herdr_composer_state "$SCROLL_TARGET" >/dev/null
+scroll_after=$(herdr pane get "$SCROLL_PANE_ID" --session "$SESSION" | jq -c '.result.pane.scroll')
+[ "$scroll_before" = "$scroll_after" ] || fail "a firstmate capture moved the pane viewport: $scroll_before -> $scroll_after"
+pass "real herdr: a firstmate capture never moves the pane viewport (no scroll for alternative-screen harnesses)"
+fm_backend_herdr_kill "$SESSION:$SCROLL_PANE_ID"
+
 # --- busy_state on a real claude harness (verified in herdr-verification-p2.md) ---
 
 if [ "${FM_HERDR_SMOKE_REAL_CLAUDE:-0}" = 1 ] && command -v claude >/dev/null 2>&1; then
