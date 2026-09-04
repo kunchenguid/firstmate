@@ -390,13 +390,10 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home pool_root proxy
+  local id=$1 home pool_root
+  fm_treehouse_require_config_free_project "$FM_ROOT" || return 1
   pool_root=$(fm_treehouse_pool_root "$FM_HOME") || {
     echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
-    return 1
-  }
-  proxy=$(fm_treehouse_prepare_proxy "$pool_root" "$FM_ROOT") || {
-    echo "error: could not prepare a per-home Treehouse control directory for '$FM_ROOT'" >&2
     return 1
   }
   # Durably lease a firstmate worktree from the per-home pool. The lease persists
@@ -404,7 +401,7 @@ acquire_treehouse_home() {
   # restarts until teardown or rollback returns it. treehouse prints only the
   # worktree path to stdout (banners go to stderr), so command substitution
   # captures the path.
-  home=$(cd "$proxy" && HOME="$pool_root" treehouse get --lease --lease-holder "$id") || {
+  home=$(cd "$FM_ROOT" && HOME="$pool_root" treehouse get --lease --lease-holder "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
@@ -602,17 +599,13 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 abs_home pool_root
+  local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
-  pool_root=$(fm_treehouse_pool_root "$FM_HOME") || {
-    echo "warning: failed to resolve the per-home Treehouse root while returning $abs_home during seed rollback" >&2
-    return 0
-  }
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  fm_treehouse_return "$pool_root" "$FM_ROOT" "$abs_home" >/dev/null || {
+  fm_treehouse_return "$FM_HOME" "$FM_ROOT" "$abs_home" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }

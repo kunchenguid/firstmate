@@ -13,44 +13,34 @@ fm_treehouse_pool_root() { # <home> -> <absolute-root>
   printf '%s/state/treehouse\n' "$resolved"
 }
 
-fm_treehouse_common_dir() { # <directory> -> <absolute-git-common-dir>
-  local dir=$1 common
-  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
-  ( CDPATH='' cd -- "$dir" && CDPATH='' cd -- "$common" && pwd -P )
-}
-
-fm_treehouse_proxy_path() { # <absolute-root> <project> -> <path>
-  local root=$1 project=$2 key
-  key=$(printf '%s' "$project" | git -C "$project" hash-object --stdin) || return 1
-  printf '%s/proxy/%s\n' "$root" "$key"
-}
-
-fm_treehouse_prepare_proxy() { # <absolute-root> <project> -> <path>
-  local root=$1 project=$2 proxy project_real proxy_real project_common proxy_common git_dir
-  proxy=$(fm_treehouse_proxy_path "$root" "$project") || return 1
-  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
-  mkdir -p "$(dirname "$proxy")" || return 1
-  if [ ! -e "$proxy" ] && [ ! -L "$proxy" ]; then
-    mkdir "$proxy" || return 1
-    git_dir=$(git -C "$project_real" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-    printf 'gitdir: %s\n' "$git_dir" > "$proxy/.git" || return 1
+fm_treehouse_require_config_free_project() { # <project> -> empty
+  local project=$1 config="$1/treehouse.toml"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    echo "error: treehouse get refused for '$project': '$config' exists; per-home pools require a project without treehouse.toml" >&2
+    return 1
   fi
-  [ -d "$proxy" ] && [ ! -L "$proxy" ] || return 1
-  [ -f "$proxy/.git" ] && [ ! -L "$proxy/.git" ] || return 1
-  [ ! -e "$proxy/treehouse.toml" ] && [ ! -L "$proxy/treehouse.toml" ] || return 1
-  proxy_real=$(CDPATH='' cd -- "$proxy" 2>/dev/null && pwd -P) || return 1
-  [ "$(git -C "$proxy_real" rev-parse --show-toplevel 2>/dev/null || true)" = "$proxy_real" ] || return 1
-  project_common=$(fm_treehouse_common_dir "$project_real") || return 1
-  proxy_common=$(fm_treehouse_common_dir "$proxy_real") || return 1
-  [ "$project_common" = "$proxy_common" ] || return 1
-  printf '%s\n' "$proxy_real"
 }
 
-fm_treehouse_get_command() { # <absolute-root> <project-proxy> -> shell command
+fm_treehouse_root_for_worktree() { # <home> <worktree> -> <absolute-root>
+  local home=$1 worktree=$2 root
+  case "$worktree" in
+    */.treehouse/*)
+      root=${worktree%%/.treehouse/*}
+      [ -n "$root" ] || root=/
+      ;;
+    *)
+      root=$(fm_treehouse_pool_root "$home") || return 1
+      ;;
+  esac
+  printf '%s\n' "$root"
+}
+
+fm_treehouse_get_command() { # <absolute-root> <project> -> shell command
   printf 'cd %q && HOME=%q treehouse get' "$2" "$1"
 }
 
-fm_treehouse_return() { # <absolute-root> <working-directory> <worktree>
-  local root=$1 cd_dir=$2 worktree=$3
+fm_treehouse_return() { # <home> <working-directory> <worktree>
+  local home=$1 cd_dir=$2 worktree=$3 root
+  root=$(fm_treehouse_root_for_worktree "$home" "$worktree") || return 1
   ( CDPATH='' cd -- "$cd_dir" && HOME="$root" treehouse return --force "$worktree" )
 }

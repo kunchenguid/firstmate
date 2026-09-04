@@ -4264,20 +4264,15 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  fm_treehouse_require_config_free_project "$PROJ_ABS_REAL" || exit 1
   TREEHOUSE_POOL_ROOT=$(fm_treehouse_pool_root "$FM_HOME") || {
     echo "error: could not resolve the per-home Treehouse root from FM_HOME '$FM_HOME'" >&2
     exit 1
   }
-  TREEHOUSE_PROXY=$(fm_treehouse_prepare_proxy "$TREEHOUSE_POOL_ROOT" "$PROJ_ABS_REAL") || {
-    echo "error: could not prepare a per-home Treehouse control directory for '$PROJ_ABS'" >&2
-    exit 1
-  }
   # Treehouse v2.0.0 uses HOME as its default root; keep this assignment on the
   # acquisition command only, then restore the launching home's HOME before the
-  # worker starts so harness credentials still resolve normally. The control
-  # directory has no project config, so a repository treehouse.toml cannot
-  # redirect this per-home pool.
-  spawn_send_text_line "$WT_TARGET" "$(fm_treehouse_get_command "$TREEHOUSE_POOL_ROOT" "$TREEHOUSE_PROXY")"
+  # worker starts so harness credentials still resolve normally.
+  spawn_send_text_line "$WT_TARGET" "$(fm_treehouse_get_command "$TREEHOUSE_POOL_ROOT" "$PROJ_ABS_REAL")"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

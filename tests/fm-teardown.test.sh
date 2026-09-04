@@ -188,13 +188,14 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [worktree]
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
+  local worktree=${4:-$case_dir/wt}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
-    "worktree=$case_dir/wt" \
+    "worktree=$worktree" \
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
@@ -4095,6 +4096,30 @@ EOF
   pass "fm-teardown.sh scopes treehouse return to the launching home's pool"
 }
 
+test_return_uses_legacy_treehouse_root() {
+  local case_dir rc legacy_wt expected_root
+  case_dir=$(make_case legacy-treehouse-root)
+  legacy_wt="$case_dir/legacy-pool/.treehouse/legacy-project/1/legacy-project"
+  mkdir -p "$(dirname "$legacy_wt")"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1-legacy "$legacy_wt" main
+  write_meta "$case_dir" local-only ship "$legacy_wt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\${HOME:-}" > "$case_dir/treehouse-home.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "legacy-treehouse-root: teardown should succeed"
+  expected_root="$case_dir/legacy-pool"
+  assert_present "$case_dir/treehouse-home.log" \
+    "legacy-treehouse-root: treehouse return did not run"
+  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root" ] || \
+    fail "legacy-treehouse-root: treehouse return used HOME '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
+  pass "teardown derives the legacy Treehouse root from the recorded worktree path"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4414,4 +4439,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_return_uses_per_home_treehouse_root
+test_return_uses_legacy_treehouse_root
 test_run_abort_precedes_process_reap_precedes_worktree_removal

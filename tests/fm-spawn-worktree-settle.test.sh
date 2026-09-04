@@ -143,7 +143,7 @@ test_single_stale_first_read_is_not_accepted() {
 # The get command must carry the launching home's pool root, and the shell must
 # resume with its original HOME before the harness launch.
 test_spawn_get_uses_per_home_treehouse_root() {
-  local rec id out status expected_root expected_home project_key expected_proxy
+  local rec id out status expected_root expected_home
   id=settle-per-home-root-z3
   rec=$(make_settle_case settle-per-home-root "$id" 0)
   read_settle_record "$rec"
@@ -153,13 +153,29 @@ test_spawn_get_uses_per_home_treehouse_root() {
   expect_code 0 "$status" "spawn should succeed while recording the per-home Treehouse root"
   expected_root=$(cd "$HOME_DIR" && pwd -P)/state/treehouse
   expected_home=$(cd "$HOME_DIR/user-home" && pwd -P)
-  project_key=$(printf '%s' "$PROJ_DIR" | git -C "$PROJ_DIR" hash-object --stdin)
-  expected_proxy="$expected_root/proxy/$project_key"
-  assert_grep "cd $expected_proxy && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
-    "treehouse get did not receive the per-home root and control directory"
+  assert_grep "cd $PROJ_DIR && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
+    "treehouse get did not receive the per-home root"
   assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
     "spawn did not restore the launching HOME after Treehouse acquisition"
   pass "fm-spawn.sh scopes treehouse get to the launching home's pool and restores HOME"
+}
+
+test_spawn_refuses_project_treehouse_config() {
+  local rec id out status config
+  id=settle-project-config-z4
+  rec=$(make_settle_case settle-project-config "$id" 0)
+  read_settle_record "$rec"
+  config="$PROJ_DIR/treehouse.toml"
+  : > "$config"
+  : > "$HOME_DIR/launch.log"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse a project treehouse.toml"
+  assert_contains "$out" "$config" "spawn refusal did not name the project treehouse.toml"
+  assert_no_grep "treehouse get" "$HOME_DIR/launch.log" \
+    "spawn attempted Treehouse acquisition despite the project treehouse.toml"
+  pass "fm-spawn.sh refuses project treehouse.toml before Treehouse acquisition"
 }
 
 # A pane that reports the real worktree from the very first read costs exactly
@@ -251,6 +267,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 
 test_single_stale_first_read_is_not_accepted
 test_spawn_get_uses_per_home_treehouse_root
+test_spawn_refuses_project_treehouse_config
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
