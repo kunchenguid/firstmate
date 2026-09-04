@@ -1827,8 +1827,55 @@ test_bare_relaunch_is_not_a_claude_local_dispatch_default() {
   pass "fm-spawn --relaunch: a claude-local dispatch default cannot refuse a task's own recorded harness"
 }
 
+# bin/fm-pr-check.sh tells an operator to hand the single check slot over
+# (bin/fm-check-unregister.sh <id>) before arming a merge poll, and the record
+# still says harness=claude-local afterwards. A later bare `fm-spawn <id>
+# --relaunch` must not silently delete the poll shim it finds there: that would
+# strand <id>.pr-poll and <id>.pr-poll-registration with merge detection gone
+# and no message at all. The slot is left alone and the arming failure is the
+# loud part.
+test_bare_relaunch_keeps_a_merge_poll_it_did_not_arm() {
+  local dir state out
+  dir=$(new_case spawn-relaunch-poll rl48)
+  add_claude_local_task "$dir" rl48 loaded
+  state="$dir/home/state"
+  arm_pr_poll "$dir" rl48 https://github.com/my-org/repo/pull/7
+  fm_pr_poll_artifacts_valid "$state" rl48 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture was not valid before the relaunch"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl48 --relaunch) || true
+  fm_pr_poll_artifacts_valid "$state" rl48 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "a bare relaunch deleted the merge poll occupying the check slot: $out"
+  case "$out" in
+    *"could not arm the local-model watcher check"*) : ;;
+    *) fail "the occupied check slot was not reported: $out" ;;
+  esac
+  pass "fm-spawn --relaunch: a merge poll holding the check slot is left intact, not silently replaced"
+}
+
+# The other half of the same slot rule: a genuine eviction watcher this adapter
+# armed IS still retired when the task moves off claude-local, so the narrowed
+# retirement did not simply stop retiring.
+test_bare_relaunch_still_retires_a_real_eviction_watcher() {
+  local dir state out
+  dir=$(new_case spawn-relaunch-watcher rl49)
+  add_claude_local_task "$dir" rl49 loaded
+  state="$dir/home/state"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl49 --relaunch)
+  fm_custom_check_registered "$state" rl49 \
+    || fail "fixture: the claude-local relaunch did not arm an eviction watcher: $out"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl49 --relaunch --harness claude)
+  [ ! -e "$state/rl49.check.sh" ] && [ ! -e "$state/rl49.check-trust" ] \
+    || fail "a relaunch off claude-local left its own eviction watcher armed: $out"
+  pass "fm-spawn --relaunch: a genuine eviction watcher is still retired when the task leaves claude-local"
+}
+
 test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
 test_claude_local_relaunch_refuses_before_stop_when_the_task_ships_no_mistakes
+test_bare_relaunch_keeps_a_merge_poll_it_did_not_arm
+test_bare_relaunch_still_retires_a_real_eviction_watcher
 test_bare_relaunch_is_not_a_claude_local_dispatch_default
 test_claude_local_relaunch_refuses_an_armed_pr_poll_before_stop
 test_claude_local_relaunch_refuses_before_stop_when_the_note_overflows_the_brief

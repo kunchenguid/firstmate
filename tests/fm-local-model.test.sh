@@ -367,8 +367,13 @@ test_remote_endpoint_is_refused() {
   status=$?
   [ "$status" -eq 3 ] || fail "a loopback address must reach the endpoint check, got exit $status"
 
+  # The last three are the same trick through each delimiter that ends a URL
+  # authority: a loopback address placed after '@', '?' or '#' is userinfo or
+  # query/fragment text, never the host a client resolves.
   for bad in http://remote-host.example:1234 http://127.0.0.1.evil.example:1234 \
-    'http://[2001:db8::1]:1234' http://127.0.0.1@evil.example:1234 file://evil.example/catalog; do
+    'http://[2001:db8::1]:1234' file://evil.example/catalog \
+    http://127.0.0.1@evil.example:1234 \
+    'http://evil.example?@127.0.0.1' 'http://evil.example#@127.0.0.1'; do
     FM_LOCAL_MODEL_ENDPOINT="$bad" FM_LOCAL_MODEL_TIMEOUT=2 \
       "$LOCAL_MODEL" model-state local-coder >/dev/null 2>&1
     status=$?

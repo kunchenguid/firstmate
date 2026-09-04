@@ -317,6 +317,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -945,7 +947,17 @@ clear_relaunch_harness_wiring() {
   # no wiring was armed to begin with.
   original_harness=$harness
   harness=$(fm_control_harness_family "$harness") || harness=
-  if [ "$original_harness" = claude-local ]; then
+  # state/<id>.check.sh is a single slot the local-model eviction watcher and a
+  # merge poll both want. Retire it only when it still holds THIS adapter's
+  # watcher: an operator who handed the slot over (bin/fm-pr-check.sh names that
+  # handover) leaves a poll whose registration is present and whose trust
+  # binding is not the watcher's, and removing that shim would strand
+  # <id>.pr-poll and <id>.pr-poll-registration with merge detection silently
+  # gone.
+  if [ "$original_harness" = claude-local ] \
+     && [ ! -e "$state/$id.pr-poll-registration" ] \
+     && [ ! -L "$state/$id.pr-poll-registration" ] \
+     && fm_custom_check_registered "$state" "$id"; then
     FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-check-unregister.sh" "$id" >/dev/null || return 1
   fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1

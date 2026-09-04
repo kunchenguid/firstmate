@@ -109,10 +109,17 @@ is_loopback_ipv4() {  # <host>
 # The host portion of the configured endpoint, with scheme, userinfo, port and
 # path removed. A bracketed IPv6 literal is unwrapped. An endpoint with no
 # authority at all (file:///path) yields the empty string.
+# The authority ends at the FIRST '/', '?' or '#', all three of which terminate
+# it per RFC 3986. Stopping at '/' alone would read the host out of the query
+# or fragment instead: in http://evil.example?@127.0.0.1 the '@' that follows
+# the '?' is query text, not userinfo, and the host every client resolves is
+# evil.example.
 endpoint_host() {
   local rest
   rest=${ENDPOINT#*://}
   rest=${rest%%/*}
+  rest=${rest%%\?*}
+  rest=${rest%%#*}
   rest=${rest##*@}
   case "$rest" in
     \[*\]*) rest=${rest#\[}; printf '%s\n' "${rest%%\]*}" ;;
