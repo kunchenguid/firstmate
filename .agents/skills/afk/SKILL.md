@@ -24,17 +24,22 @@ batched digest rather than per-wake injections.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
-   Its hosting differs by harness.
+   Its hosting differs by harness AND backend.
    Pick the right path:
-   - **Harness WITH a native in-pane tracked-background tool** (e.g. claude's
-     background bash, grok's background tool): first run
+   - **Claude on the herdr backend: always use the terminal-backed path below, never `start-native`.**
+     A Claude Code background shell hosting the daemon in the captain's own pane leaves a `· 1 shell ·` token in that pane's rendered footer for as long as the daemon lives.
+     Herdr's own claude agent-detection ruleset maps that exact token to `agent_status = "working"` at a priority that beats the idle rule, so the away-mode busy guard reads the captain's pane as permanently busy and can never deliver an escalation into it for the life of the session - proven in `data/firstmate-afk-daemon-wedged-investigation/report.md` (2026-08-26), which found this in every claude+herdr away run since 2026-08-19.
+     Do not "fix" this by teaching the busy guard to subtract the daemon's own footer contribution; that couples firstmate to a private, versioned herdr ruleset that already changes without notice.
+     `bin/fm-afk-launch.sh start-native` enforces this rule itself: on claude+herdr it refuses before writing any lifecycle state, so a refusal there is the guard working and there is nothing to roll back - re-enter with `bin/fm-afk-launch.sh start`.
+   - **Harness WITH a native in-pane tracked-background tool, on any OTHER combination** (e.g. claude's
+     background bash on tmux, grok's background tool): first run
      `bin/fm-afk-launch.sh start-native`, then run
      `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
+   - **Harness WITHOUT a native in-pane tool (e.g. pi), and claude on herdr per above**: run `bin/fm-afk-launch.sh start`. It is
      the single owner of the daemon terminal: it creates a NON-VISIBLE tracked
      terminal for the current backend (a herdr dedicated `--no-focus` workspace,
      a detached tmux session), records its exact id, and passes the captain pane
