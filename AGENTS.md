@@ -64,6 +64,7 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
+config/board.json    captain dashboard sources and LAN access; LOCAL, gitignored; schema owned by bin/fm-board.py
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-autocompact  optional worker auto-compaction threshold (absolute token count or 1%-100%); LOCAL, gitignored; absent leaves launch commands unchanged; inherited by secondmate homes; see docs/configuration.md "Harness support"
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
@@ -89,6 +90,10 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
+  board.sqlite       captain dashboard database; bin/fm-board.py
+  board-inbox/       captain dashboard exception transport; bin/fm-board.py
+  backups/           retained captain dashboard database backups; bin/fm-board.py
+  logs/              captain dashboard daemon logs; bin/fm-board.py
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown

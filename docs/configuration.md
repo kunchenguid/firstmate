@@ -655,3 +655,11 @@ Only after those retries exhaust does it remove the lock, and only when it is pr
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+## Captain dashboard
+
+Bridge, the local captain dashboard, is served by `bin/fm-board.sh serve`; the [`bin/fm-board.py`](../bin/fm-board.py) header owns configuration, HTTP routes, authentication, and runtime storage.
+Copy [`board.example.json`](../bin/board/board.example.json) to the owning home's private `config/board.json`, replace its placeholder paths and secret, and restrict the file to mode `0600`.
+The [`launchd example`](../bin/board/com.wondermedia.firstmate-board.plist.example) requires absolute paths to Python 3.14 and the home, with `state/logs/` created before loading it.
+The bookmark carries `?k=<secret>` once; the page stores it locally and immediately removes it from the URL.
+Plain HTTP is supported only on the trusted private LAN.

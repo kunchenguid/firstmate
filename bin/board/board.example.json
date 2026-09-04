@@ -1,0 +1,16 @@
+{
+  "homes": [
+    {"id": "Main", "path": "/ABSOLUTE/PATH/firstmate"},
+    {"id": "MF", "path": "/ABSOLUTE/PATH/secondmates/mf"}
+  ],
+  "lan_host": "192.168.0.135",
+  "port": 4399,
+  "secret": "REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_24_CHARACTERS",
+  "repo_tags": {
+    "wonderok": "WOK",
+    "firstmate": "FM",
+    "ces": "CES",
+    "csls-og": "CSLS-OG"
+  },
+  "github_boards": {}
+}

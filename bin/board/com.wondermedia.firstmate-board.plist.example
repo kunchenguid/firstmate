@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.wondermedia.firstmate-board</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/PATH/TO/PYTHON3.14</string>
+    <string>/ABSOLUTE/PATH/firstmate/bin/fm-board.py</string>
+    <string>serve</string><string>--config</string><string>/ABSOLUTE/PATH/firstmate/config/board.json</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/firstmate</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>FM_HOME</key><string>/ABSOLUTE/PATH/firstmate</string>
+    <key>FM_BOARD_PYTHON</key><string>/ABSOLUTE/PATH/TO/PYTHON3.14</string>
+    <key>PATH</key><string>/ABSOLUTE/PATH/TO/USER/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/firstmate/state/logs/board-stdout.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/firstmate/state/logs/board-stderr.log</string>
+</dict></plist>
