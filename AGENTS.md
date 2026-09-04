@@ -526,6 +526,7 @@ Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) wit
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+Every generated brief - ship, scout, and secondmate charter alike - must also retain its credentials hard safety contract: a worker never fetches its own credentials from the operator's password vault or any credential store, it stops and asks, because dispatch is where a credential should be deliberately supplied, never discovered.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.

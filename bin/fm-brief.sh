@@ -48,6 +48,9 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every variant - ship, scout, and secondmate charter alike - also carries a
+# credentials hard safety contract: a worker never fetches its own credentials
+# from the operator's password vault or any credential store, it stops and asks.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -88,6 +91,15 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+
+# Every scaffold variant carries this clause verbatim (AGENTS.md section 11):
+# a worker must never go looking for its own credentials.
+IFS= read -r -d '' CREDENTIALS_SECTION <<'EOF' || true
+# Credentials - HARD SAFETY CONTRACT
+Never read from the operator's password vault or any other credential store, run its CLI, or source any helper whose purpose is to populate credentials from one - even for a task that looks local or offline.
+If this task genuinely needs a credential, stop: append `needs-decision: credential needed - {what and why}` to the status file and wait for it to be supplied, rather than going to look for it yourself.
+EOF
+CREDENTIALS_SECTION=${CREDENTIALS_SECTION%$'\n'}
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -242,6 +254,8 @@ $SECONDMATE_SCOPE
 # Project clones
 $PROJECT_CLONES_BODY
 
+$CREDENTIALS_SECTION
+
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
@@ -358,6 +372,8 @@ $TASK_SECTION
 
 $HERDR_SECTION
 
+$CREDENTIALS_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -432,6 +448,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$CREDENTIALS_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

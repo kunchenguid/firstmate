@@ -760,6 +760,46 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+# Every generated variant must carry the credentials hard safety contract
+# verbatim: a worker never fetches its own credentials, it stops and asks.
+test_credentials_contract_renders_in_every_variant() {
+  local home id brief
+  home="$TMP_ROOT/credentials-contract-home"
+  mkdir -p "$home/data"
+
+  id="brief-credentials-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Credentials - HARD SAFETY CONTRACT" "$brief" \
+    "ship brief missing the credentials hard safety contract"
+  assert_grep "Never read from the operator's password vault or any other credential store" "$brief" \
+    "ship brief did not forbid reading the operator's password vault"
+  # shellcheck disable=SC2016  # Literal backticks and braces must remain unexpanded.
+  assert_grep 'append `needs-decision: credential needed' "$brief" \
+    "ship brief did not require stopping to ask rather than fetching a credential"
+  assert_no_grep "EOF" "$brief" \
+    "ship brief leaked a heredoc EOF marker after adding the credentials section"
+
+  id="brief-credentials-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Credentials - HARD SAFETY CONTRACT" "$brief" \
+    "scout brief missing the credentials hard safety contract"
+  assert_grep "Never read from the operator's password vault or any other credential store" "$brief" \
+    "scout brief did not forbid reading the operator's password vault"
+
+  id="brief-credentials-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "# Credentials - HARD SAFETY CONTRACT" "$brief" \
+    "secondmate charter missing the credentials hard safety contract"
+  assert_grep "Never read from the operator's password vault or any other credential store" "$brief" \
+    "secondmate charter did not forbid reading the operator's password vault"
+
+  pass "fm-brief.sh: every scaffold variant carries the credentials hard safety contract"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/pause-verb-home"
@@ -868,3 +908,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_credentials_contract_renders_in_every_variant
