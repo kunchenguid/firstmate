@@ -353,6 +353,123 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+# Initialize a git repo fixture with a tracked AGENTS.md (and optionally more),
+# committing whatever is staged. Mirrors the shape that reproduced the teardown
+# refusal: a project tracking AGENTS.md but not CLAUDE.md.
+git_fixture() {
+  local repo=$1
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main || fail "git init failed for fixture $repo"
+  git -C "$repo" -c user.email=t@test -c user.name=t commit -q --allow-empty -m init \
+    || fail "git initial commit failed for fixture $repo"
+}
+
+git_fixture_commit() {
+  local repo=$1
+  shift
+  git -C "$repo" add -- "$@" || fail "git add failed in fixture $repo"
+  git -C "$repo" -c user.email=t@test -c user.name=t commit -q -m fixture \
+    || fail "git commit failed in fixture $repo"
+}
+
+exclude_file_of() {
+  local p
+  p=$(git -C "$1" rev-parse --git-path info/exclude) || fail "could not resolve info/exclude for $1"
+  case "$p" in
+    /*) printf '%s\n' "$p" ;;
+    *) printf '%s/%s\n' "$1" "$p" ;;
+  esac
+}
+
+test_untracked_pointer_is_excluded_and_status_clean() {
+  local repo out excl
+  repo="$TMP_ROOT/git-tracked-agents-project"
+  git_fixture "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  git_fixture_commit "$repo" AGENTS.md
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed in a git repo tracking only AGENTS.md"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  excl=$(exclude_file_of "$repo")
+  grep -qxF "/CLAUDE.md" "$excl" || fail "untracked pointer was not added to info/exclude"
+  out=$(git -C "$repo" status --porcelain)
+  [ -z "$out" ] || fail "git status is not clean after writing the pointer (got: $out)"
+  pass "fm-ensure-agents-md.sh: untracked pointer is excluded and git status stays clean"
+}
+
+test_exclude_is_idempotent_across_reruns() {
+  local repo excl count
+  repo="$TMP_ROOT/git-idempotent-exclude-project"
+  git_fixture "$repo"
+  printf '# memory\n' > "$repo/AGENTS.md"
+  git_fixture_commit "$repo" AGENTS.md
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed on the first git-repo run"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed on the second git-repo run"
+  excl=$(exclude_file_of "$repo")
+  count=$(grep -cxF "/CLAUDE.md" "$excl")
+  [ "$count" -eq 1 ] || fail "expected exactly one /CLAUDE.md exclude line, got $count"
+  pass "fm-ensure-agents-md.sh: re-run appends no duplicate exclude line"
+}
+
+test_tracked_claude_pointer_is_never_excluded() {
+  local repo out excl
+  repo="$TMP_ROOT/git-tracked-claude-project"
+  git_fixture "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  write_fixture_claude_pointer "$repo"
+  git_fixture_commit "$repo" AGENTS.md CLAUDE.md
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed in a git repo tracking CLAUDE.md"
+  excl=$(exclude_file_of "$repo")
+  if [ -e "$excl" ] && grep -qxF "/CLAUDE.md" "$excl"; then
+    fail "a tracked CLAUDE.md was added to info/exclude"
+  fi
+  out=$(git -C "$repo" status --porcelain)
+  [ -z "$out" ] || fail "tracked-CLAUDE.md repo is no longer clean (got: $out)"
+  pass "fm-ensure-agents-md.sh: a tracked CLAUDE.md is never excluded"
+}
+
+test_real_distinct_claude_file_is_never_excluded() {
+  local repo excl
+  repo="$TMP_ROOT/git-real-claude-project"
+  git_fixture "$repo"
+  printf '# Agents memory\n' > "$repo/AGENTS.md"
+  git_fixture_commit "$repo" AGENTS.md
+  printf '# A real captain-authored CLAUDE.md\n' > "$repo/CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    && fail "expected a conflict for a distinct real CLAUDE.md"
+  excl=$(exclude_file_of "$repo")
+  if [ -e "$excl" ] && grep -qxF "/CLAUDE.md" "$excl"; then
+    fail "a real non-pointer CLAUDE.md was added to info/exclude"
+  fi
+  printf '# A real captain-authored CLAUDE.md\n' | cmp -s - "$repo/CLAUDE.md" \
+    || fail "the real CLAUDE.md file was modified"
+  pass "fm-ensure-agents-md.sh: a real non-pointer CLAUDE.md is refused and never excluded"
+}
+
+test_linked_worktree_pointer_leaves_status_clean() {
+  local repo wt out excl
+  repo="$TMP_ROOT/git-worktree-main"
+  wt="$TMP_ROOT/git-worktree-task"
+  git_fixture "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  git_fixture_commit "$repo" AGENTS.md
+  git -C "$repo" worktree add -q "$wt" HEAD \
+    || fail "could not add a linked worktree fixture"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$wt" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed inside a linked worktree"
+  assert_claude_pointer "$wt/CLAUDE.md"
+  out=$(git -C "$wt" status --porcelain)
+  [ -z "$out" ] || fail "linked worktree is not clean after writing the pointer (got: $out)"
+  # The exclude lands in the shared common-dir file by design; assert the
+  # observable contract rather than the byte location: the worktree is clean.
+  excl=$(exclude_file_of "$wt")
+  grep -qxF "/CLAUDE.md" "$excl" || fail "linked worktree run did not record the exclude"
+  pass "fm-ensure-agents-md.sh: linked-worktree pointer no longer dirties git status"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
@@ -369,3 +486,8 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_untracked_pointer_is_excluded_and_status_clean
+test_exclude_is_idempotent_across_reruns
+test_tracked_claude_pointer_is_never_excluded
+test_real_distinct_claude_file_is_never_excluded
+test_linked_worktree_pointer_leaves_status_clean

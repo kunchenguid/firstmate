@@ -18,6 +18,10 @@
 # filesystem (issue #389). The real-file pointer also eliminates the old
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
+# In a git repo whose index does not track CLAUDE.md, the canonical pointer it
+# writes (or finds) is best-effort added to the repo's info/exclude so the
+# untracked pointer never blocks fm-teardown's dirty check or leaks into a
+# commit; a tracked CLAUDE.md is never excluded (see exclude_untracked_pointer).
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -114,20 +118,53 @@ is_canonical_claude_pointer() {
   claude_pointer_content | cmp -s - "$CLAUDE"
 }
 
+# Keep the untracked canonical pointer out of git's view so it never blocks
+# fm-teardown's dirty check or leaks into a commit - the same requirement and
+# tolerant shape as fm-spawn.sh's exclude_path for worktree-resident hooks.
+# Verified empirically (git 2.50.1): inside a linked worktree,
+# `git rev-parse --git-path info/exclude` resolves to the SHARED common-dir
+# exclude (git treats info/ as a common path), and a per-worktree
+# $GIT_DIR/info/exclude is NOT honored by git at all, so a per-worktree
+# mechanism does not exist short of extensions.worktreeConfig. The shared
+# exclude is deliberate and acceptable here: the line is written only for
+# this fixed firstmate-owned filename, only while the repo does not track
+# CLAUDE.md, and only when the file present is the canonical pointer this
+# script owns; and `git add CLAUDE.md` on an excluded path refuses loudly
+# with a hint naming the exclude, so tracking it later stays discoverable.
+# Excluding is best-effort housekeeping: outside a git work tree, off the
+# repo's top level, or on any write failure, do nothing and never fail.
+exclude_untracked_pointer() {
+  local top excl
+  is_canonical_claude_pointer || return 0
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  # The exclude pattern is anchored to the repo root, so only write it when
+  # the pointer actually lives there.
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [ "$top" = "$DIR" ] || return 0
+  # Never exclude a tracked path.
+  if git ls-files --error-unmatch -- "$CLAUDE" >/dev/null 2>&1; then
+    return 0
+  fi
+  excl=$(git rev-parse --git-path info/exclude 2>/dev/null) || return 0
+  [ -n "$excl" ] || return 0
+  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 0
+  grep -qxF "/$CLAUDE" "$excl" 2>/dev/null || echo "/$CLAUDE" >> "$excl" || return 0
+}
+
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
 # write cannot follow it and destroy AGENTS.md. Never overwrite a distinct real
 # file; callers classify that as a conflict before invoking this.
 install_claude_pointer() {
-  if is_canonical_claude_pointer; then
-    return 0
+  if ! is_canonical_claude_pointer; then
+    if [ -L "$CLAUDE" ]; then
+      rm -- "$CLAUDE"
+    elif [ -e "$CLAUDE" ]; then
+      echo "error: internal: refuse to overwrite existing CLAUDE.md" >&2
+      exit 1
+    fi
+    claude_pointer_content > "$CLAUDE"
   fi
-  if [ -L "$CLAUDE" ]; then
-    rm -- "$CLAUDE"
-  elif [ -e "$CLAUDE" ]; then
-    echo "error: internal: refuse to overwrite existing CLAUDE.md" >&2
-    exit 1
-  fi
-  claude_pointer_content > "$CLAUDE"
+  exclude_untracked_pointer
 }
 
 is_correct_claude_symlink() {
@@ -206,6 +243,7 @@ if [ -e "$AGENTS" ]; then
   if [ -f "$CLAUDE" ]; then
     if is_canonical_claude_pointer; then
       ensure_maintenance_section
+      exclude_untracked_pointer
       if [ "$MAINT_INJECTED" -eq 1 ]; then
         echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
       else
@@ -235,6 +273,7 @@ if [ -e "$CLAUDE" ]; then
   if [ -f "$CLAUDE" ]; then
     if is_canonical_claude_pointer; then
       write_skeleton
+      exclude_untracked_pointer
       echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
       exit 0
     fi
