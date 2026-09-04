@@ -67,6 +67,13 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        *"git fm-isolation-check"*)
+          (cd "${FM_FAKE_PANE_PATH:?}" && /bin/bash -c "$arg") || exit $?
+          ;;
+      esac
+    done
     prev=
     literal=
     for arg in "$@"; do
