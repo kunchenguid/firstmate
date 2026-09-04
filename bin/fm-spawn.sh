@@ -1543,7 +1543,7 @@ fi
 
 # A named Codex home is only meaningful to the codex CLI, and an unusable one
 # would silently fall back to ~/.codex - the wrong ACCOUNT, not a visible
-# failure. Prove the three facts that make it usable before anything exists to
+# failure. Prove the required facts that make it usable before anything exists to
 # unwind: harness, absolute path, and a logged-in home. auth.json is only ever
 # tested for presence; nothing here reads a credential.
 if [ -n "$CODEX_HOME_ARG" ]; then
@@ -1551,6 +1551,9 @@ if [ -n "$CODEX_HOME_ARG" ]; then
     echo "error: --codex-home applies only to the codex harness, but this spawn resolved harness '$HARNESS'" >&2
     exit 1
   fi
+  case "$CODEX_HOME_ARG" in
+    *[[:cntrl:]]*) echo "error: --codex-home contains an invalid control byte" >&2; exit 1 ;;
+  esac
   case "$CODEX_HOME_ARG" in
     /*) ;;
     *) echo "error: --codex-home must be an absolute path, got '$CODEX_HOME_ARG'" >&2; exit 1 ;;

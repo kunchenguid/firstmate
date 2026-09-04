@@ -516,6 +516,25 @@ ROWS
   pass "an unusable Codex home refuses the spawn instead of falling back to the default account"
 }
 
+test_codex_home_refuses_control_bytes_before_launch() {
+  local rec id out status codex_home
+  id=profile-codex-home-control-z3e
+  rec=$(make_spawn_case profile-codex-home-control codex "$id")
+  read_case_record "$rec"
+  codex_home="$CASE_DIR/"$'codex\nwindow=other-target'
+  make_codex_home "$codex_home" >/dev/null
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a Codex home containing a control byte should refuse the spawn"
+  assert_contains "$out" "--codex-home contains an invalid control byte" \
+    "control-byte refusal did not name the actionable problem"
+  assert_absent "$HOME_DIR/state/$id.meta" "control-byte refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "control-byte refusal typed a launch command"
+  pass "a control byte in a Codex home refuses before launch or metadata publication"
+}
+
 test_codex_home_is_refused_for_other_harnesses() {
   local rec id out status codex_home
   id=profile-claude-home-z3e
@@ -1206,6 +1225,7 @@ test_codex_omits_invalid_max_effort
 test_codex_home_exports_selected_account_into_the_launch
 test_codex_without_home_launches_unchanged
 test_codex_home_refuses_unusable_paths_before_launch
+test_codex_home_refuses_control_bytes_before_launch
 test_codex_home_is_refused_for_other_harnesses
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

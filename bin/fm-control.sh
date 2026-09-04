@@ -696,6 +696,9 @@ resolve_relaunch_profile() {
   fi
   if [ -n "$TARGET_CODEX_HOME" ]; then
     case "$TARGET_CODEX_HOME" in
+      *[[:cntrl:]]*) die "--codex-home contains an invalid control byte; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation" ;;
+    esac
+    case "$TARGET_CODEX_HOME" in
       /*) ;;
       *) die "--codex-home must be an absolute path, got '$TARGET_CODEX_HOME'; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation" ;;
     esac

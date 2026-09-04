@@ -672,6 +672,30 @@ test_missing_codex_home_refuses_before_stopping_anything() {
   pass "fm-control relaunch: a missing Codex home refuses before the worker is touched"
 }
 
+test_control_byte_codex_home_refuses_before_stopping_anything() {
+  local dir out rc home
+  dir=$(new_case controlcodexhome rl6d)
+  add_ship_task "$dir" rl6d codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/"$'codex\tpersonal'
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6d.meta"
+
+  out=$(run_control "$dir" rl6d relaunch --note "same account"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded Codex home contains a control byte should refuse"
+  assert_contains "$out" "--codex-home contains an invalid control byte" \
+    "the refusal should identify the unsafe recorded Codex home"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "an unsafe recorded Codex home must not stop the running worker"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "an unsafe recorded Codex home must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl6d.control-relaunch" ] \
+    || fail "an unsafe recorded Codex home must refuse before creating a durable journal"
+  pass "fm-control relaunch: an unsafe Codex home refuses before the worker is touched"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1597,6 +1621,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_relaunch_keeps_the_codex_account_until_the_harness_changes
 test_missing_codex_home_refuses_before_stopping_anything
+test_control_byte_codex_home_refuses_before_stopping_anything
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
