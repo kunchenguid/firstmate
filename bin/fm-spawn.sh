@@ -2547,6 +2547,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # oh-my-zsh's periodic update check prompts "[oh-my-zsh] Would you like to
+  # update? [Y/n]" in every NEW interactive shell once it comes due, and
+  # `treehouse get` starts exactly such a shell inside the worktree. The prompt
+  # blocks on stdin, the cd never lands, and every spawn then dies on the 60s
+  # "did not enter a worktree" timeout below - fleet-wide, with nothing wrong in
+  # firstmate, treehouse or the pool. Observed 2026-08-13: spawns worked all
+  # session, then failed on both herdr and tmux the moment the check came due.
+  # Exported BEFORE treehouse get so the subshell it spawns inherits it.
+  spawn_send_text_line "$WT_TARGET" 'export DISABLE_AUTO_UPDATE=true'
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
