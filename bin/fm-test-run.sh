@@ -961,6 +961,14 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
+    bin/board/*)
+      # Bridge's answer helpers, static UI, and documented config/plist
+      # examples are loaded by path at runtime, so no suite names them and the
+      # basename reference scan below cannot resolve them. The board suite is
+      # their single consuming test; a retired board file selects nothing
+      # because the script marker only resolves against an existing suite.
+      printf '%s\n' "__script__:fm-board.test.sh"
+      ;;
     bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-install-actionlint.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
