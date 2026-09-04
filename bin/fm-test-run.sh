@@ -820,9 +820,32 @@ select_lane() {
   [ "$found" -eq 1 ] || die "lane '$want' selected no tests"
 }
 
+# Every set operation below sorts with LC_ALL=C and must COMPARE with LC_ALL=C
+# too. `comm` collates under the ambient locale, and en_US.UTF-8 orders
+# punctuation differently from C, so a C-sorted file reads as unsorted there.
+# This repo's own file set diverges: C compares byte by byte and puts
+# `fm-backend-herdr-workspace-per-home-e2e.test.sh` first because '-' (0x2D)
+# precedes '.' (0x2E), while glibc drops punctuation at the primary level and
+# then compares 't' against 'w', putting `fm-backend-herdr.test.sh` first.
+# That mismatch made the guard fail on any developer machine with a UTF-8
+# locale while staying green in CI's C locale, and it failed in the worst way:
+# `comm` exits non-zero on a sort-order complaint, so the unguarded overlap
+# comparison below aborted the whole script under `set -e` with no diagnostic
+# beyond a bare "comm: input is not in sorted order". Pinning the collation for
+# the function keeps the sorts and the comparisons in one order and restores
+# the real diagnostics.
+#
+# Sharing a prefix is not enough to diverge, so check any replacement example
+# by running `sort` under both locales rather than by eye:
+# `fm-backend-herdr-smoke.test.sh` sorts before `fm-backend-herdr.test.sh`
+# under both, because there the characters that decide are 's' and 't', which
+# order the same way byte-wise and at the primary level alike.
 run_coverage_guard() {
   local tmp missing extra a b shard unhinted serial_total
   local -a saved_scripts=()
+  # -x so `comm`, `sort` and `uniq` in the subprocesses actually see it; bash
+  # restores the caller's value on return.
+  local -x LC_ALL=C
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
