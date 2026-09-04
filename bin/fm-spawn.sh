@@ -142,10 +142,9 @@
 #   configured host for a remote home. Skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Every ship/scout spawn also freezes bin/fm-worker-git-guard.sh under the
-#   task temp root and places that copy first on the worker's PATH before launch.
-#   The guard refuses any PATH-resolved Git invocation whose effective cwd,
-#   -C target, work tree, or git dir resolves into the primary checkout.
+#   Every ship/scout spawn also freezes bin/fm-worker-git-guard.sh under the task temp root and places that copy first on the worker's PATH before launch.
+#   The guard is a documented best-effort speed bump for accidental working-directory drift into the primary checkout, not an evasion-resistant Git parser.
+#   Its header and the generated brief name unsupported Git-routing forms and the legacy same-id cross-home temp-root collision.
 #   Existing running workers are untouched, and secondmates remain unwrapped.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
@@ -2634,15 +2633,13 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Freeze a per-task Git guard before every ship/scout worker launches. The copy
-# is first on that worker's PATH for its whole process tree, so a later test or
-# tool that resolves Git from the project's primary checkout is refused before
-# it can switch the shared checkout's branch. The adjacent config binds the copy
-# to this exact task root, primary checkout, and real Git executable. Nothing is
-# installed into the project or the harness's global configuration, and a
-# secondmate remains unwrapped because its own home is intentionally primary.
-# bin/fm-worker-git-guard.sh owns the invocation-time decision and fails closed
-# when these spawn-validated bindings cannot be re-established.
+# Freeze a per-task Git guard before every ship/scout worker launches.
+# The copy is first on that worker's initial PATH, so a later accidental Git invocation from the project's primary checkout is refused before it can switch the shared checkout's branch.
+# This is intentionally a best-effort guard rather than a complete Git-routing parser, and bin/fm-worker-git-guard.sh documents its known bypasses.
+# The adjacent config binds the copy to this exact task root, primary checkout, and real Git executable.
+# Nothing is installed into the project or the harness's global configuration, and a secondmate remains unwrapped because its own home is intentionally primary.
+# The legacy /tmp/fm-<task-id> root can collide across homes, so the guard header and generated brief disclose that cleanup lifetime gap.
+# bin/fm-worker-git-guard.sh owns the invocation-time decision and fails closed when these spawn-validated bindings cannot be re-established.
 WORKER_GIT_GUARD_DIR=
 if [ "$KIND" != secondmate ]; then
   WORKER_GIT_GUARD_SOURCE="$FM_ROOT/bin/fm-worker-git-guard.sh"
@@ -3318,8 +3315,7 @@ spawn_record_traceparent() {
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # A ship/scout gets the frozen Git guard first on PATH before the harness starts.
 # Existing workers are untouched because this export reaches only this launch.
-# The pane-level export is the same cross-backend inheritance boundary GOTMPDIR
-# already uses, so harness tools and test subprocesses inherit one binding.
+# The pane-level export is the same cross-backend inheritance boundary GOTMPDIR already uses, so descendants that preserve PATH inherit one binding.
 if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
   spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GIT_GUARD_DIR"):\"\$PATH\""
 fi

@@ -116,6 +116,23 @@ test_disposable_fixture_git_remains_available() {
   pass "worker Git guard: unrelated disposable fixture repositories remain available"
 }
 
+test_nested_task_worktree_is_allowed() {
+  local nested_primary nested_worktree nested_guard out rc
+  nested_primary="$TMP_ROOT/nested-project"
+  nested_worktree="$nested_primary/task-worktree"
+  nested_guard="$TMP_ROOT/nested-guard/bin"
+  fm_git_worktree "$nested_primary" "$nested_worktree" nested-task-base
+  install_guard "$nested_primary" "$nested_worktree" "$nested_guard"
+
+  out=$(cd "$nested_worktree" && PATH="$nested_guard:$BASE_PATH" git status --short 2>&1); rc=$?
+  expect_code 0 "$rc" "a legitimate task worktree nested below primary must not be mistaken for primary"
+  out=$(cd "$TMP_ROOT" && PATH="$nested_guard:$BASE_PATH" git -C "$nested_worktree" status --short 2>&1); rc=$?
+  expect_code 0 "$rc" "an explicit target inside a nested task worktree must remain available"
+  out=$(cd "$nested_worktree" && PATH="$nested_guard:$BASE_PATH" git -C "$nested_primary" status 2>&1); rc=$?
+  expect_code 126 "$rc" "the nested-worktree exception must not allow the primary checkout itself"
+  pass "worker Git guard: a nested assigned worktree is allowed without exposing its primary checkout"
+}
+
 test_missing_binding_fails_closed() {
   local bad_dir out rc
   bad_dir="$TMP_ROOT/bad/bin"
@@ -203,5 +220,6 @@ test_setup_assertion_and_worktree_git_succeed
 test_mid_task_resolved_primary_checkout_is_refused
 test_explicit_primary_targets_are_refused
 test_disposable_fixture_git_remains_available
+test_nested_task_worktree_is_allowed
 test_missing_binding_fails_closed
 test_spawn_freezes_and_exports_guard

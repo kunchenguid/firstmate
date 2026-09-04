@@ -217,7 +217,15 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_grep "git fm-isolation-check" "$brief" \
-      "$id: brief missing the executable continuous-isolation assertion"
+      "$id: brief missing the executable best-effort isolation assertion"
+    assert_grep "deliberately not an evasion-resistant Git parser" "$brief" \
+      "$id: brief overstates the best-effort Git guard"
+    assert_grep "Known bypasses are an absolute Git binary; a login shell that resets" "$brief" \
+      "$id: brief does not disclose PATH-replacement bypasses"
+    assert_grep "unknown global-option arity; non-shell alias injection; an unrecognized linked-primary Git directory" "$brief" \
+      "$id: brief does not disclose Git-routing bypasses"
+    assert_grep "same task id in another home can collide" "$brief" \
+      "$id: brief does not disclose the legacy task-temp collision"
     assert_grep "Run any test that creates, deletes, or switches its own Git refs only against a disposable fixture repository" "$brief" \
       "$id: brief missing the disposable Git-ref test rule"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -836,7 +844,7 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
   assert_grep "git fm-isolation-check" "$brief" \
-    "scout brief missing the executable continuous-isolation assertion"
+    "scout brief missing the executable best-effort isolation assertion"
   assert_grep "Do not replace \`PATH\` or invoke Git by an absolute binary path" "$brief" \
     "scout brief missing the Git-guard bypass prohibition"
 

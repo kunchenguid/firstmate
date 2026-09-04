@@ -352,8 +352,11 @@ EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
 IFS= read -r -d '' GIT_ISOLATION_SECTION <<'EOF' || true
-## Continuous Git isolation
-The worker launch places a task-frozen Git guard first on `PATH` for this process tree, so Git remains bound after setup rather than relying only on the initial directory check.
+## Best-effort Git isolation
+The worker launch places a task-frozen Git guard first on `PATH` as a speed bump against accidental Git invocations whose working directory drifts into the primary checkout.
+The guard catches that incident class plus basic explicit targets, but it is deliberately not an evasion-resistant Git parser because the planned D2 delivery cutover retires the shared-primary-landing premise.
+Known bypasses are an absolute Git binary; a login shell that resets `PATH`; `core.worktree` through `-c`, `--config-env`, or `GIT_CONFIG_*`; unknown global-option arity; non-shell alias injection; an unrecognized linked-primary Git directory; and `GIT_INDEX_FILE` or related file-target redirection.
+The guard also shares the legacy `/tmp/fm-<task-id>` parent, so the same task id in another home can collide and its cleanup can remove this guard while this worker remains alive.
 Run `git fm-isolation-check` now; it must report the assigned worktree and its distinct primary checkout before any task work begins.
 If that assertion is unavailable or refuses the binding, append `blocked: worker Git isolation guard is not active` to the status file and stop.
 Do not replace `PATH` or invoke Git by an absolute binary path, because either would bypass the task guard.

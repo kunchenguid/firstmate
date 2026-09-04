@@ -2,11 +2,9 @@
 # Per-task Git guard copied to <tasktmp>/git-guard.<nonce>/git by bin/fm-spawn.sh.
 #
 # The copy is placed first on PATH before a ship or scout worker launches.
-# Every ordinary `git` child therefore passes through one task-frozen guard for
-# the lifetime of that worker, including Git started by a test subprocess.
-# The guard refuses when Git's effective cwd, -C target, work tree, or git dir
-# resolves into the project's primary checkout instead of the assigned task
-# worktree.
+# Ordinary descendants that preserve PATH pass through one task-frozen guard, including Git started by a test subprocess.
+# The guard catches the incident class: an accidental PATH-resolved Git invocation whose working directory resolves inside the project's primary checkout.
+# It also rejects the basic explicit -C, --work-tree, --git-dir, GIT_WORK_TREE, GIT_DIR, and GIT_COMMON_DIR forms it can classify cheaply.
 #
 # The adjacent git.conf is written by fm-spawn with exactly five
 # lines: worktree, primary, real_git, task_git_dir, and primary_git_dir.
@@ -18,9 +16,12 @@
 # It verifies the wrapper is still first on PATH, both configured Git roots and
 # git dirs remain bound, and the assigned root remains distinct from primary.
 #
-# This is a seatbelt against accidental path resolution, not a security sandbox.
-# An absolute Git binary or a process that replaces PATH can bypass it, so the
-# generated brief forbids both.
+# This is deliberately a best-effort seatbelt against accidental path drift, not a security sandbox or an evasion-resistant Git parser.
+# An absolute Git binary or a login shell that resets PATH bypasses it.
+# It does not fully interpret core.worktree supplied through -c, --config-env, or GIT_CONFIG_*; unknown global-option arity; or non-shell alias injection.
+# It can also miss an unrecognized linked-primary git dir and GIT_INDEX_FILE or related file-target redirection.
+# Its legacy /tmp/fm-<task-id> parent can collide with the same task id in another home, whose cleanup can remove this guard while the worker remains alive.
+# These limits are accepted because this mechanism guards mistakes rather than evasion, and the planned D2 delivery cutover retires the shared-primary-landing premise.
 set -u
 
 refuse_binding() {
@@ -69,6 +70,12 @@ inside_path() {
     "$2"|"$2"/*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+inside_primary_outside_worktree() {
+  inside_path "$1" "$PRIMARY" || return 1
+  inside_path "$1" "$WORKTREE" && return 1
+  return 0
 }
 
 CONFIG=$0.conf
@@ -133,7 +140,7 @@ if [ "$#" -eq 1 ] && [ "$1" = fm-isolation-check ]; then
 fi
 
 CURRENT=$(pwd -P 2>/dev/null) || refuse_binding "cannot resolve the current directory."
-inside_path "$CURRENT" "$PRIMARY" && refuse_primary
+inside_primary_outside_worktree "$CURRENT" && refuse_primary
 
 TARGET=$CURRENT
 GIT_DIR_VALUE=${GIT_DIR:-}
@@ -176,23 +183,23 @@ while [ "$INDEX" -lt "${#ARGS[@]}" ]; do
   INDEX=$((INDEX + 1))
 done
 
-inside_path "$TARGET" "$PRIMARY" && refuse_primary
+inside_primary_outside_worktree "$TARGET" && refuse_primary
 if [ -n "$WORK_TREE_VALUE" ]; then
   WORK_TREE_TARGET=$(physical_path "$TARGET" "$WORK_TREE_VALUE") \
     || refuse_binding "cannot resolve Git's work-tree target."
-  inside_path "$WORK_TREE_TARGET" "$PRIMARY" && refuse_primary
+  inside_primary_outside_worktree "$WORK_TREE_TARGET" && refuse_primary
 fi
 if [ -n "$GIT_DIR_VALUE" ]; then
   GIT_DIR_TARGET=$(physical_path "$TARGET" "$GIT_DIR_VALUE") \
     || refuse_binding "cannot resolve Git's git-dir target."
-  if inside_path "$GIT_DIR_TARGET" "$PRIMARY" && [ "$GIT_DIR_TARGET" != "$TASK_GIT_DIR" ]; then
+  if inside_primary_outside_worktree "$GIT_DIR_TARGET" && [ "$GIT_DIR_TARGET" != "$TASK_GIT_DIR" ]; then
     refuse_primary
   fi
 fi
 if [ -n "${GIT_COMMON_DIR:-}" ]; then
   COMMON_DIR_TARGET=$(physical_path "$TARGET" "$GIT_COMMON_DIR") \
     || refuse_binding "cannot resolve Git's common-dir target."
-  if inside_path "$COMMON_DIR_TARGET" "$PRIMARY" \
+  if inside_primary_outside_worktree "$COMMON_DIR_TARGET" \
       && { [ "$COMMON_DIR_TARGET" != "$PRIMARY_GIT_DIR" ] || ! inside_path "$TARGET" "$WORKTREE"; }; then
     refuse_primary
   fi
