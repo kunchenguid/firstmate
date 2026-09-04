@@ -20,11 +20,16 @@
 # it, so a front that changed meanwhile is refused rather than mis-promoted.
 #
 # remove is the operator recovery path for a queued PR that will never merge -
-# a closed or superseded PR, or a torn-down task. Every retirement is keyed on
+# a closed or superseded PR, or a torn-down task. The remove command is keyed on
 # the exact task and canonical URL together, never either alone, so at most the
 # one named row is retired and a stale identity retires nothing rather than
 # dropping another task's live entry. It advances nothing by itself, so retiring
-# a stuck front simply exposes the next entry and unblocks the project. Teardown and a
+# a stuck front simply exposes the next entry and unblocks the project. The
+# internal teardown and missing-metadata retirement tries that exact pair first
+# and then falls back to the trusted task identity alone, because a replacement
+# registration that committed the task metadata but failed its enqueue leaves
+# the queue holding a stale URL for that very task; without the fallback the row
+# would stay the project's front forever with nothing reported. Teardown and a
 # confirmed merge whose task metadata is already gone reach the same retirement
 # automatically (bin/fm-teardown.sh, bin/fm-merge-outcome-lib.sh), scanning every
 # project queue when the task's own project key can no longer be derived, so a

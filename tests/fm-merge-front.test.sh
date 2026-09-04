@@ -403,6 +403,56 @@ test_retirement_scan_survives_an_unreadable_project_queue() {
   pass "retirement scans every project queue past an unreadable one"
 }
 
+# A replacement registration that commits the task metadata but fails its
+# enqueue leaves the queue holding a stale URL for that very task. Retirement
+# must still clear the row, or it stays the project's front forever with nothing
+# reported to name it.
+test_retirement_clears_a_row_whose_recorded_url_diverged() {
+  local dir status key
+  dir=$(make_home diverged-url)
+  write_meta "$dir" task-a
+  write_meta "$dir" task-b
+  key=$(project_key "$dir/project-alpha") || fail "project key could not be derived"
+  run_front "$dir" enqueue "$key" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "diverged-url fixture front enqueue failed"
+  run_front "$dir" enqueue "$key" task-b https://github.com/o/r/pull/2 >/dev/null \
+    || fail "diverged-url fixture parked enqueue failed"
+
+  run_outcome "$dir" task-a https://github.com/o/r/pull/9 >/dev/null \
+    || fail "a diverged merge outcome could not be published"
+  status=$(run_front "$dir" status "$key") || fail "diverged-url status failed"
+  assert_contains "$status" $'front=task-b\thttps://github.com/o/r/pull/2' \
+    "the stale row for the retiring task stayed the project's front"
+  assert_no_grep 'task-a' "$dir/home/state/merge-front/$key.queue" \
+    "the diverged row was not retired"
+  pass "retirement clears a task's row whose recorded URL diverged"
+}
+
+run_drop_anywhere() {  # <dir> <task> <url>
+  local dir=$1 task=$2 url=$3
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$1"; fm_merge_front_drop_anywhere "$2" "$3" "$4" \
+      && printf "dropped=%s\t%s\n" "$FM_MERGE_FRONT_DROPPED_TASK" "$FM_MERGE_FRONT_DROPPED_URL"' \
+      _ "$ROOT/bin/fm-merge-front-lib.sh" "$dir/home/state" "$task" "$url"
+}
+
+# The scan reports the identity it retired; a later unrelated queue must not
+# clear it, and must not be locked and parsed once the row is already gone.
+test_retirement_scan_reports_the_identity_it_retired() {
+  local dir dropped
+  dir=$(make_home scan-identity)
+  run_front "$dir" enqueue aaa task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "scan-identity target enqueue failed"
+  run_front "$dir" enqueue zzz task-z https://github.com/o/r/pull/9 >/dev/null \
+    || fail "scan-identity sibling enqueue failed"
+
+  dropped=$(run_drop_anywhere "$dir" task-a https://github.com/o/r/pull/1) \
+    || fail "the retirement scan did not retire the queued row"
+  assert_contains "$dropped" $'dropped=task-a\thttps://github.com/o/r/pull/1' \
+    "the retirement scan lost the identity it retired"
+  pass "the retirement scan reports the exact identity it retired"
+}
+
 install_github_gate_fake() {  # <dir>
   local dir=$1
   cat > "$dir/fakebin/gh" <<'SH'
@@ -604,6 +654,8 @@ test_pr_check_refuses_bound_url_before_mutating
 test_confirmed_merge_reconciles_exact_identity
 test_confirmed_merge_retires_front_without_task_metadata
 test_retirement_scan_survives_an_unreadable_project_queue
+test_retirement_clears_a_row_whose_recorded_url_diverged
+test_retirement_scan_reports_the_identity_it_retired
 test_greptile_gate_refusals_and_single_action
 test_greptile_gate_accepts_skipped_and_neutral_required_checks
 test_greptile_kick_leaves_the_queue_usable_during_github_reads

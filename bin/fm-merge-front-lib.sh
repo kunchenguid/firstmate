@@ -22,7 +22,6 @@ FM_MERGE_FRONT_LOCK=
 FM_MERGE_FRONT_STATE_DEVICE=
 FM_MERGE_FRONT_TASKS=()
 FM_MERGE_FRONT_URLS=()
-FM_MERGE_FRONT_EXISTS=0
 FM_MERGE_FRONT_DROPPED_TASK=
 FM_MERGE_FRONT_DROPPED_URL=
 FM_MERGE_FRONT_CONFLICT_TASK=
@@ -65,7 +64,6 @@ fm_merge_front_file_load() {  # <project-key>
   local line_number=0 bytes seen_tasks seen_urls
   FM_MERGE_FRONT_TASKS=()
   FM_MERGE_FRONT_URLS=()
-  FM_MERGE_FRONT_EXISTS=0
   [ -e "$FM_MERGE_FRONT_FILE" ] || [ -L "$FM_MERGE_FRONT_FILE" ] || return 0
   fm_pr_private_file_valid "$FM_MERGE_FRONT_FILE" 600 "$FM_MERGE_FRONT_STATE_DEVICE" || return 1
   bytes=$(wc -c < "$FM_MERGE_FRONT_FILE" 2>/dev/null | tr -d '[:space:]') || return 1
@@ -103,7 +101,6 @@ fm_merge_front_file_load() {  # <project-key>
   [ "$line_number" -ge 2 ] || return 1
   [ "$version" = fm-merge-front-v1 ] || return 1
   [ "$stored_project" = "$project" ] || return 1
-  FM_MERGE_FRONT_EXISTS=1
 }
 
 fm_merge_front_file_write() {  # <project-key>
@@ -413,20 +410,24 @@ fm_merge_front_promote() {  # <state> <project-key>
   fi
 }
 
-# Retire the one queue entry bound to exactly this task and this canonical URL.
-# Task IDs and URLs are each unique within a queue, so the pair identifies at
-# most one row: a stale or mismatched identity retires nothing rather than
-# silently dropping some other task's live entry. Sets FM_MERGE_FRONT_DROPPED_*
-# to the retired identity and leaves the loaded arrays holding the survivors.
-# Returns 3 when the pair is not queued.
-_fm_merge_front_drop_locked() {  # <project-key> <task-id> <canonical-url>
+# Retire the one queue entry bound to this task. With a canonical URL the task
+# and the URL must both match, so a stale or mismatched identity retires nothing
+# rather than silently dropping some other task's live entry; that is the only
+# mode the operator-facing remove command uses. With an empty URL the row is
+# identified by the trusted task identity alone, which the internal
+# teardown/missing-metadata retirement uses to clear a row whose recorded URL
+# has diverged. Task IDs and URLs are each unique within a queue, so either mode
+# identifies at most one row. Sets FM_MERGE_FRONT_DROPPED_* to the retired
+# identity and leaves the loaded arrays holding the survivors. Returns 3 when no
+# row matched.
+_fm_merge_front_drop_locked() {  # <project-key> <task-id> <canonical-url-or-empty>
   local project=$1 task=$2 url=$3 index=0 removed=0
   local tasks=() urls=()
   FM_MERGE_FRONT_DROPPED_TASK=
   FM_MERGE_FRONT_DROPPED_URL=
   while [ "$index" -lt "${#FM_MERGE_FRONT_TASKS[@]}" ]; do
     if [ "${FM_MERGE_FRONT_TASKS[$index]}" = "$task" ] \
-      && [ "${FM_MERGE_FRONT_URLS[$index]}" = "$url" ]; then
+      && { [ -z "$url" ] || [ "${FM_MERGE_FRONT_URLS[$index]}" = "$url" ]; }; then
       FM_MERGE_FRONT_DROPPED_TASK=${FM_MERGE_FRONT_TASKS[$index]}
       FM_MERGE_FRONT_DROPPED_URL=${FM_MERGE_FRONT_URLS[$index]}
       removed=$((removed + 1))
@@ -444,15 +445,18 @@ _fm_merge_front_drop_locked() {  # <project-key> <task-id> <canonical-url>
   fm_merge_front_file_write "$project"
 }
 
-# Shared identity-bound retirement. Returns 0 when an entry was removed, 3 when
-# the identity is absent (including a project with no queue at all), 1 on a
-# lock or state failure, and 2 on an invalid request.
-fm_merge_front_drop() {  # <state> <project-key> <task-id> <pr-url>
-  local state=$1 project=$2 task=$3 raw_url=$4 url rc
+# Shared identity-bound retirement. An empty URL selects the trusted task-scoped
+# mode described on _fm_merge_front_drop_locked. Returns 0 when an entry was
+# removed, 3 when the identity is absent (including a project with no queue at
+# all), 1 on a lock or state failure, and 2 on an invalid request.
+_fm_merge_front_drop_scoped() {  # <state> <project-key> <task-id> <pr-url-or-empty>
+  local state=$1 project=$2 task=$3 raw_url=$4 url='' rc
   fm_merge_front_project_key_valid "$project" || return 2
   fm_pr_task_id_valid "$task" || return 2
-  fm_pr_url_parse "$raw_url" || return 2
-  url=$FM_PR_URL
+  if [ -n "$raw_url" ]; then
+    fm_pr_url_parse "$raw_url" || return 2
+    url=$FM_PR_URL
+  fi
   FM_MERGE_FRONT_DROPPED_TASK=
   FM_MERGE_FRONT_DROPPED_URL=
   if fm_merge_front_paths "$state" "$project" 0; then
@@ -473,15 +477,10 @@ fm_merge_front_drop() {  # <state> <project-key> <task-id> <pr-url>
   return "$rc"
 }
 
-# Reconcile one already-confirmed merged PR. A merge is a fact the queue may
-# never veto: the exact entry is removed wherever it sits, an out-of-order
-# merge leaves the current front untouched, and an identity that is not queued
-# is simply nothing to do.
-fm_merge_front_reconcile_merged() {  # <state> <project-key> <task-id> <pr-url>
-  local rc=0
-  fm_merge_front_drop "$@" || rc=$?
-  [ "$rc" -ne 3 ] || rc=0
-  return "$rc"
+# The exact task-and-URL retirement every operator-facing path uses.
+fm_merge_front_drop() {  # <state> <project-key> <task-id> <pr-url>
+  [ -n "${4-}" ] || return 2
+  _fm_merge_front_drop_scoped "$@"
 }
 
 # Operator recovery for a front or parked PR that will never merge: a closed or
@@ -508,12 +507,14 @@ fm_merge_front_remove() {  # <state> <project-key> <task-id> <pr-url>
 }
 
 # Retire an identity from whichever project queue holds it when the task's own
-# project key is no longer derivable. One busy or unreadable queue never aborts
-# the scan: every queue is examined, and the failure only surfaces when no queue
-# yielded the drop. Returns 3 when nothing matched anywhere, 1 when the target
-# could not be safely retired.
-fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url>
-  local state=$1 task=$2 url=$3 file project rc dropped=0 failed=0
+# project key is no longer derivable. The scan stops at the first queue that
+# yields the drop, so FM_MERGE_FRONT_DROPPED_* keeps the retired identity and no
+# unrelated project's lock is taken once the row is gone. One busy or unreadable
+# queue never aborts the scan: the remaining queues are still examined, and the
+# failure only surfaces when none of them yielded the drop. Returns 3 when
+# nothing matched anywhere, 1 when the target could not be safely retired.
+fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url-or-empty>
+  local state=$1 task=$2 url=${3-} file project rc failed=0
   if fm_merge_front_root_prepare "$state" 0; then
     :
   else
@@ -527,33 +528,62 @@ fm_merge_front_drop_anywhere() {  # <state> <task-id> <pr-url>
     project=${project%.queue}
     fm_merge_front_project_key_valid "$project" || continue
     rc=0
-    fm_merge_front_drop "$state" "$project" "$task" "$url" || rc=$?
+    _fm_merge_front_drop_scoped "$state" "$project" "$task" "$url" || rc=$?
     case "$rc" in
-      0) dropped=1 ;;
+      0) return 0 ;;
       3) ;;
       *) failed=1 ;;
     esac
   done
-  [ "$dropped" -eq 0 ] || return 0
   [ "$failed" -eq 0 ] || return 1
   return 3
 }
 
+# Retire this task's row in its own project queue when the metadata still names
+# one, otherwise anywhere. Returns 0 on a drop, 3 when nothing matched, 1 on a
+# lock or state failure.
+_fm_merge_front_retire_scoped() {  # <state> <task-id> <pr-url-or-empty>
+  local state=$1 task=$2 url=$3 project rc=0
+  if project=$(fm_merge_front_project_key_from_meta "$state" "$task" 2>/dev/null); then
+    _fm_merge_front_drop_scoped "$state" "$project" "$task" "$url" || rc=$?
+    case "$rc" in
+      0|3) ;;
+      *) return 1 ;;
+    esac
+    [ "$rc" -eq 3 ] || return 0
+  fi
+  rc=0
+  fm_merge_front_drop_anywhere "$state" "$task" "$url" || rc=$?
+  return "$rc"
+}
+
 # The one identity-bound retirement entry point for a task leaving the queue -
-# a confirmed merge, or a teardown. It prefers the task's own project key and
+# a confirmed merge, or a teardown. A merge is a fact the queue may never veto:
+# only the matching row is retired, wherever it sits, so an out-of-order merge
+# leaves the current front untouched and an unqueued identity is nothing to do.
+# It prefers the task's own project key and
 # falls back to a scan of every project queue when the task metadata is already
 # gone, so a completed or torn-down front can never stay queued in front of the
-# live PRs behind it. A missing identity is nothing to do, never a failure.
+# live PRs behind it. The recorded URL is tried first; when it finds nothing the
+# trusted task identity alone retires the row, because a replacement
+# registration that committed the metadata but failed its enqueue leaves the
+# queue holding a stale URL for this very task. A task with no queued row at all
+# is nothing to do, never a failure.
 fm_merge_front_retire_task() {  # <state> <task-id> <pr-url>
-  local state=$1 task=$2 url=$3 project rc=0
+  local state=$1 task=$2 url=$3 rc=0
   [ -e "$state/merge-front" ] || [ -L "$state/merge-front" ] || return 0
-  if project=$(fm_merge_front_project_key_from_meta "$state" "$task" 2>/dev/null); then
-    fm_merge_front_reconcile_merged "$state" "$project" "$task" "$url" || return 1
-    [ -z "$FM_MERGE_FRONT_DROPPED_TASK" ] || return 0
-  fi
-  fm_merge_front_drop_anywhere "$state" "$task" "$url" || rc=$?
-  [ "$rc" -ne 3 ] || rc=0
-  return "$rc"
+  _fm_merge_front_retire_scoped "$state" "$task" "$url" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) ;;
+    *) return 1 ;;
+  esac
+  rc=0
+  _fm_merge_front_retire_scoped "$state" "$task" '' || rc=$?
+  case "$rc" in
+    0|3) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_merge_front_checks_json() {  # <github-check-command...>
