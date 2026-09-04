@@ -326,9 +326,12 @@ log_reports_ci_ready() {
 # word itself is matched loosely: an unrecognized or newly added status must
 # still be read and reported, not silently dropped.
 #
-# Verified by re-running this positional reader over the whole local v1.60.2
+# Verified by re-running this positional reader over every run in the local
 # store: it reads 657 of 657 step rows across all 73 runs `no-mistakes axi
-# status --run` renders. That 657 is not the reader counting its own matches -
+# status --run` renders with v1.60.2. Rendered by, not produced by - the shape
+# is set by the binary printing the status, and most of those runs were written
+# by an older version, so the scan says this reader handles what v1.60.2 prints
+# for them too. That 657 is not the reader counting its own matches -
 # a regex counting the rows it accepts verifies nothing - it is the per-run row
 # count compared against the daemon's own step_results table as ground truth,
 # with zero mismatched runs. All but one of those runs was terminal at scan
@@ -337,9 +340,9 @@ log_reports_ci_ready() {
 # 2026-08-29), sampled on three different running steps - three distinct step
 # names, not three runs - renders the running step as `<step>,running,0,0` in
 # the steps table beside `<step>,running,<duration>,...` in active_steps. Both
-# that count and that shape are facts about one version and one local store,
-# not laws; the table boundary this reads is the part of the shape the format
-# itself defines.
+# that count and that shape are facts about one rendering version and one local
+# store, not laws; the table boundary this reads is the part of the shape the
+# format itself defines.
 nm_step_rows() {
   printf '%s\n' "$RUN_OUT" | awk '
     {
@@ -412,7 +415,7 @@ nm_passed_pr_detail() {
   step_status=$(nm_step_status pr)
   case "$step_status" in
     completed) ;;
-    skipped)   printf 'run passed, PR step skipped: no PR was opened or merged, merge state unknown to the run'; return ;;
+    skipped)   printf 'run passed, PR step skipped: no PR was opened or merged by the run, merge state unknown to the run'; return ;;
     '')        printf 'run passed, no PR step reported: merge state unknown to the run'; return ;;
     *)         printf 'run passed, PR step %s: merge state unknown to the run' "$step_status"; return ;;
   esac
