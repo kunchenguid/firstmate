@@ -1750,7 +1750,11 @@ pass "an adapter with no silence verdict keeps announcing every result"
 
 # --- reviewer links use separate HTTP pools without opening a board --------
 LINK_HOME="$TMP_ROOT/links"
+LINK_HOME_TWO="$TMP_ROOT/links-two"
 LINK_BIN=$(fm_fakebin "$LINK_HOME")
+new_home "$LINK_HOME_TWO"
+export LAVISH_AXI_STATE_DIR="$TMP_ROOT/lavish-shared-state"
+(umask 077; mkdir -p "$LAVISH_AXI_STATE_DIR")
 export FM_TEST_LINK_LISTING="$LINK_HOME/sessions"
 export FM_TEST_LINK_PROBE_LOG="$LINK_HOME/probes"
 cat > "$LINK_BIN/lavish-axi" <<'SH'
@@ -1765,7 +1769,12 @@ printf '%s' "${FM_TEST_LINK_STATUS:-403}"
 exit "${FM_TEST_LINK_CURL_EXIT:-0}"
 SH
 chmod +x "$LINK_BIN/lavish-axi" "$LINK_BIN/curl"
-link_out() { PATH="$LINK_BIN:$PATH" FM_HOME="$LINK_HOME" "$ROOT/bin/fm-procevent-lavish.sh" link "$@"; }
+link_out_home() {
+  local home=$1
+  shift
+  PATH="$LINK_BIN:$PATH" FM_HOME="$home" "$ROOT/bin/fm-procevent-lavish.sh" link "$@"
+}
+link_out() { link_out_home "$LINK_HOME" "$@"; }
 link_listing() {
   printf 'sessions[1]{status,file,url,pending_prompts}:\n  open,"a,\\"quoted\\" file.html","%s",0\n' \
     "$1" > "$FM_TEST_LINK_LISTING"
@@ -1790,8 +1799,17 @@ for n in $(seq 1 128); do
   if [ $((LINK_SELECTED % 2)) -eq 1 ]; then LINK_EXPECTED_HOST=localhost; else LINK_EXPECTED_HOST=127.0.0.1; fi
   link_listing "http://localhost:4876/session/$LINK_KEY?no_gate=1"
   LINK_EXPECTED="http://$LINK_EXPECTED_HOST:4876/session/$LINK_KEY?no_gate=1"
-  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link did not allocate the key or preserve the served port/query"
-  [ "$(link_out "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] || fail "link changed on an unchanged rerun"
+  if [ $((LINK_SELECTED % 2)) -eq 1 ]; then
+    LINK_CALL_HOME=$LINK_HOME
+    LINK_RERUN_HOME=$LINK_HOME_TWO
+  else
+    LINK_CALL_HOME=$LINK_HOME_TWO
+    LINK_RERUN_HOME=$LINK_HOME
+  fi
+  [ "$(link_out_home "$LINK_CALL_HOME" "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] \
+    || fail "links from separate homes did not share one balanced server allocation"
+  [ "$(link_out_home "$LINK_RERUN_HOME" "$LINK_ARTIFACT")" = "$LINK_EXPECTED" ] \
+    || fail "link changed when another home reran the same session key"
   LINK_HOSTS+="$LINK_EXPECTED_HOST\n"
   LINK_KEYS+="$LINK_KEY\n"
   [ "$LINK_SELECTED" -lt 6 ] || break
@@ -1799,10 +1817,10 @@ done
 [ "$LINK_SELECTED" -eq 6 ] || fail "link regression could not construct six colliding legacy keys"
 [ "$(printf '%b' "$LINK_HOSTS" | sort | uniq -c | awk '{print $1}' | sort -u)" = 3 ] \
   || fail "link did not balance six arbitrary keys across both fallback addresses"
-[ "$(awk -F '\t' '$1 == "v1" && $2 == 4876 { print $3 }' "$LINK_HOME/state/lavish-reviewer-addresses.tsv" | sort)" \
+[ "$(awk -F '\t' '$1 == "v1" && $2 == 4876 { print $3 }' "$LAVISH_AXI_STATE_DIR/firstmate-reviewer-addresses-4876.tsv" | sort)" \
     = "$(printf '%b' "$LINK_KEYS" | sort)" ] || fail "link did not persist every board assignment"
 LINK_MAP_MODE=$(bash -c \
-  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$LINK_HOME/state/lavish-reviewer-addresses.tsv")
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$LAVISH_AXI_STATE_DIR/firstmate-reviewer-addresses-4876.tsv")
 [ "$LINK_MAP_MODE" = 600 ] \
   || fail "link did not keep its fallback allocation map private"
 pass "link stably balances six colliding session keys across both loopback hosts"

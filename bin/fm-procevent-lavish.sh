@@ -34,14 +34,15 @@
 #            URL in lavish-axi's session listing, never opening or polling it.
 #            For HTTP IPv4 loopback sessions, prefer lavish-<key>.localhost if
 #            a bounded /health probe with that Host returns exactly 200.
-#            Otherwise a private state map assigns the key first come,
-#            round-robin to localhost or 127.0.0.1 and preserves that choice.
+#            Otherwise a private per-port map beside Lavish's shared user state
+#            assigns the key first come, round-robin to localhost or 127.0.0.1
+#            under an OS flock and preserves that choice across Firstmate homes.
 #            This fallback is bounded to six boards per server until the
 #            event-stream transport fix lands; a seventh prints the accepted
 #            alias path and the three-board-per-address limit. Scheme, port,
 #            and session suffix come from the served URL (an omitted HTTP port
 #            means 80). HTTPS, IPv6, and remote URLs remain unchanged. No
-#            allow-list, server, listener, or browser state is changed.
+#            allow-list, running server, listener, or browser state is changed.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -156,17 +157,29 @@ cmd_source_id() {
 }
 
 fallback_host_for_key() (
-  local key=$1 port=$2 alias=$3 map lock tmp host localhost_count ip_count host_count
-  map="$STATE/lavish-reviewer-addresses.tsv"
-  lock="$STATE/.lavish-reviewer-addresses.lock"
-  fm_lock_acquire_wait "$lock" || die "cannot lock the Lavish reviewer address map"
-  trap 'fm_lock_release "$lock" >/dev/null 2>&1 || true' EXIT
+  local key=$1 port=$2 alias=$3 shared_state map lock tmp host localhost_count ip_count host_count map_lock_fd
+  shared_state=${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}
+  [ -d "$shared_state" ] && [ ! -L "$shared_state" ] \
+    || die "Lavish user state is not a regular directory: $shared_state"
+  map="$shared_state/firstmate-reviewer-addresses-$port.tsv"
+  lock="$shared_state/.firstmate-reviewer-addresses-$port.lock"
+  command -v flock >/dev/null 2>&1 || die "flock is required to allocate reviewer addresses"
+  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+    (umask 077; set -C; : > "$lock") 2>/dev/null || [ -e "$lock" ] \
+      || die "cannot create the Lavish reviewer address lock"
+  fi
+  [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(fm_pr_file_mode "$lock")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$lock")" = 1 ] \
+    || die "Lavish reviewer address lock is not a private regular file"
+  exec {map_lock_fd}<>"$lock" || die "cannot open the Lavish reviewer address lock"
+  flock -x "$map_lock_fd" || die "cannot lock the Lavish reviewer address map"
+  trap 'flock -u "$map_lock_fd" >/dev/null 2>&1 || true; exec {map_lock_fd}>&-' EXIT
   if [ -e "$map" ]; then
     [ -f "$map" ] && [ ! -L "$map" ] && [ "$(fm_pr_file_mode "$map")" = 600 ] \
       && [ "$(fm_pr_file_link_count "$map")" = 1 ] \
       || die "Lavish reviewer address map is not a private regular file"
-    awk -F '\t' '
-      NF != 4 || $1 != "v1" || $2 !~ /^[0-9]+$/ || length($3) != 16 ||
+    awk -F '\t' -v port="$port" '
+      NF != 4 || $1 != "v1" || $2 != port || length($3) != 16 ||
         $3 ~ /[^0-9a-f]/ || ($4 != "localhost" && $4 != "127.0.0.1") ||
         seen[$2 FS $3]++ { exit 1 }
     ' "$map" || die "Lavish reviewer address map is invalid"
@@ -187,7 +200,7 @@ fallback_host_for_key() (
     else
       host=127.0.0.1
     fi
-    tmp=$(umask 077; mktemp "$STATE/.lavish-reviewer-addresses.XXXXXX") \
+    tmp=$(umask 077; mktemp "$shared_state/.firstmate-reviewer-addresses-$port.XXXXXX") \
       || die "cannot stage the Lavish reviewer address map"
     if { [ ! -e "$map" ] || cat "$map"; } > "$tmp" \
       && printf 'v1\t%s\t%s\t%s\n' "$port" "$key" "$host" >> "$tmp" \

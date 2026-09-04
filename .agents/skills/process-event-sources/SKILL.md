@@ -35,6 +35,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 
 After the listener is armed, hand the captain the URL from `bin/fm-procevent-lavish.sh link <artifact.html>`.
 The script's header owns hostname selection and its read-only probe mechanics.
+Its fallback map follows Lavish's shared user-state directory, so links produced from different Firstmate homes still share one per-server allocation.
 The fallback allocation is bounded to six boards per server until the event-stream transport fix lands.
 If `link` warns that an address exceeds three boards, enable the exact alias path it prints before handing out that board.
 Drain each queued tab on its original address before moving it, because changing origins does not carry over its unsent items.

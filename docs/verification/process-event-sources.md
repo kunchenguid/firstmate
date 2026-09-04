@@ -267,11 +267,12 @@ bin/fm-lint.sh
 bin/fm-doc-audience-check.sh
 ```
 
-It covers stable first-come round-robin fallback allocation, exact 200-only alias preference, failed probes, quoted listing fields, served ports and queries, missing or ended sessions, and the bearings producer's serve-before-arm ordering with automatic browser opening suppressed.
+It covers stable first-come round-robin fallback allocation across two Firstmate homes, exact 200-only alias preference, failed probes, quoted listing fields, served ports and queries, missing or ended sessions, and the bearings producer's serve-before-arm ordering with automatic browser opening suppressed.
 It also checks that remote, IPv6, and HTTPS session URLs retain their original authority, avoiding an unverified endpoint or TLS hostname rewrite.
 The command is independent of the primary harness and runtime backend: it reads the CLI session listing and probes HTTP health, without starting an agent, invoking a backend adapter, opening a browser, or consuming feedback.
 The script header owns exact link mechanics; the process-event skill owns the hosting procedure and capacity limit.
-The private fallback map keeps first-time assignments balanced and stable across reruns, so six boards use no more than three connections on either accepted address.
+The private per-port fallback map lives beside Lavish's shared user state and is written under an OS flock, so first-time assignments from every Firstmate home stay balanced and stable across reruns.
+Six boards on one Lavish server therefore use no more than three connections on either accepted address even when different homes produce their links.
 This mitigation is bounded to six boards per server until the event-stream transport fix lands.
 A seventh fallback board emits a one-line warning with the three-board-per-address limit and the exact alias path that must be enabled.
 
