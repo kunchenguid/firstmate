@@ -213,6 +213,47 @@ test_terminal_line_followed_by_declared_pause_still_delivers() {
   pass "a terminal ledger line immediately followed by a declared pause still delivers its result to the parent"
 }
 
+# A live 2026-09-04 reproduction: a worker rechecking the same declared wait
+# (or firstmate steering it, which also writes `paused:` per
+# fm-classify-lib.sh) appends a SECOND trailing pause line. A one-line lookback
+# would see last=paused, prior=paused, fail to find the terminal report, and
+# silently drop an already-landed PR from parent-channel delivery - this test
+# fails before the fix and passes after it.
+test_multiple_trailing_pauses_still_deliver_terminal_line() {
+  local expected key
+  make_world multi-paused; bind_secondmate local
+  write_child "$MATE" child $'done: PR https://example.test/owner/repo/pull/1 checks green\npaused: waiting on the rebase head\npaused: still waiting, rechecked'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "a multi-paused ledger did not retain a terminal receipt key"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+  grep -Fxq "$expected" "$MAIN/state/mate.status" \
+    || fail "two trailing declared pauses hid the terminal PR result from parent delivery: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "two consecutive trailing declared pauses still deliver the terminal report underneath them"
+}
+
+# The exact duplicate-delivery mechanism the reviewer traced: once
+# child_terminal_ledger_line can return the line BEFORE a trailing pause, the
+# predecessor fingerprint used to detect an already-published inactive
+# fallback must name the line before THAT terminal line, not the file's raw
+# next-to-last line (which a trailing pause makes identical to the terminal
+# line itself and can never match). Extends the existing single-`done:` race
+# test with a trailing pause on the raced completion.
+test_done_then_paused_still_dedupes_against_inactive_fallback() {
+  make_world done-then-paused-dedup; bind_secondmate local
+  write_child "$MATE" child 'working: finishing now'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(grep -c 'inactive-outcome-mate-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "inactive fallback did not publish exactly once"
+
+  printf 'done: completion landed after reconciliation\npaused: awaiting merge authority\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "a trailing pause on the raced completion caused it to publish twice: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
+    || fail "the raced done-then-paused ledger event was not durably reconciled with the fallback receipt"
+  pass "a done: immediately followed by paused: still dedupes against an already-published inactive fallback"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -812,6 +853,8 @@ test_reconciliation_never_calls_forge() {
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_terminal_line_followed_by_declared_pause_still_delivers
+test_multiple_trailing_pauses_still_deliver_terminal_line
+test_done_then_paused_still_dedupes_against_inactive_fallback
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

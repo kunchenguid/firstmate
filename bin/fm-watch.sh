@@ -923,30 +923,69 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
-# 0 if a status file's last non-blank line is a declared pause AND the
-# non-blank line immediately before it is a terminal done/failed report: the
-# "finished into a wait" shape a worker emits when it completes correctly but a
-# still-outstanding external dependency (merge authority, a halted build
-# service, an upstream branch landing) keeps its pane idling (bin/fm-brief.sh's
-# status protocol instructs exactly this: a `done:` line immediately followed
-# by `paused: <why>`). pause_state_class below trusts this exact two-line shape
-# outright, so a worker's own declared wait is not overridden by inferred
-# run/agent state into a restarted wedge timer. Does not match a standalone
-# declared pause with no preceding terminal line, which keeps its existing
-# run-step precedence (crew_absorb_class="working" still wins there).
-terminal_then_paused() {  # <status-file>
-  local f=$1 lines n last prior
-  [ -e "$f" ] || return 1
-  lines=$(grep -v '^[[:space:]]*$' "$f" 2>/dev/null) || return 1
+# 0 if <last> (a status file's last non-blank line, already read by the
+# caller) is a declared pause and, scanning backward across any run of
+# consecutive declared-pause lines immediately before it, the first non-pause
+# line found is a terminal done/failed report: the "finished into a wait"
+# shape a worker emits when it completes correctly but a still-outstanding
+# external dependency (merge authority, a halted build service, an upstream
+# branch landing) keeps its pane idling (bin/fm-brief.sh's status protocol
+# instructs exactly this: a `done:` line immediately followed by
+# `paused: <why>`). More than one trailing pause is routine, not exotic: a
+# worker rechecking the same wait appends another `paused:` line, and so does
+# firstmate steering that worker (fm-classify-lib.sh documents both), so a
+# single-line lookback would re-hide the terminal report and reopen the false
+# wedge. The scan is bounded by FM_TERMINAL_PAUSE_SCAN_MAX (default 20 lines)
+# so a pathological log cannot make it expensive; exhausting the budget
+# without finding a non-pause line is "no terminal report", never a guess.
+# <lines> is the full non-blank line list (newest last), already read once by
+# the caller, so this does not re-read the file. pause_state_class below
+# trusts this exact shape outright, so a worker's own declared wait is not
+# overridden by inferred run/agent state into a restarted wedge timer. Does
+# not match a standalone declared pause with no preceding terminal line, which
+# keeps its existing run-step precedence (crew_absorb_class="working" still
+# wins there).
+terminal_then_paused() {  # <lines> <last>
+  local lines=$1 last=$2 n budget i idx line
+  status_is_paused "$last" || return 1
   n=$(printf '%s\n' "$lines" | grep -c .)
   [ "$n" -ge 2 ] || return 1
-  last=$(printf '%s\n' "$lines" | tail -1)
-  prior=$(printf '%s\n' "$lines" | tail -2 | head -1)
-  status_is_paused "$last" || return 1
-  case "$(status_line_verb "$prior")" in
-    done|failed) return 0 ;;
-    *) return 1 ;;
-  esac
+  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
+  [ "$n" -lt "$budget" ] && budget=$n
+  i=2
+  while [ "$i" -le "$budget" ]; do
+    idx=$(( n - i + 1 ))
+    line=$(printf '%s\n' "$lines" | sed -n "${idx}p")
+    case "$(status_line_verb "$line")" in
+      done|failed) return 0 ;;
+    esac
+    status_is_paused "$line" || return 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# 0 if no record under <task>'s steering inbox (delivered or already
+# handled/) carries an mtime after <status>'s: i.e. nothing has steered this
+# worker new work since its last status append. A steer landing after a
+# declared wait is the fact that means the old wait no longer describes the
+# worker's current pane - bin/fm-brief.sh forbids a plain `working:`
+# acknowledgement of a steer, so the status log alone can never show this, but
+# the inbox delivery timestamp can. Used to keep terminal_then_paused's trust
+# in a declared wait from becoming permanent once new work has actually
+# arrived (a stale `paused:` must not outrank live evidence forever).
+no_inbox_activity_since_status() {  # <status-file> <task>
+  local status=$1 task=$2 status_mtime dir f fmtime
+  status_mtime=$(stat_mtime "$status")
+  case "$status_mtime" in ''|*[!0-9]*) return 0 ;; esac
+  dir=$(fm_task_inbox_dir "$STATE" "$task")
+  for f in "$dir"/*.msg "$dir/handled"/*.msg; do
+    [ -f "$f" ] || continue
+    fmtime=$(stat_mtime "$f")
+    case "$fmtime" in ''|*[!0-9]*) continue ;; esac
+    [ "$fmtime" -gt "$status_mtime" ] && return 1
+  done
+  return 0
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -954,18 +993,24 @@ terminal_then_paused() {  # <status-file>
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key lines last recheck_file class agent_alive kind
   key=$(window_key "$win")
-  last=$(last_status_line "$STATE/$task.status")
+  lines=$(grep -v '^[[:space:]]*$' "$STATE/$task.status" 2>/dev/null) || true
+  last=$(printf '%s\n' "$lines" | tail -1)
   recheck_file="$STATE/.paused-rechecked-$key"
-  if terminal_then_paused "$STATE/$task.status"; then
-    rm -f "$recheck_file"
-    printf 'paused'
-    return
-  fi
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"
+    return
+  fi
+  # terminal_then_paused only runs once we already know a declared wait is in
+  # play (the far more common no-declaration path above still costs none), and
+  # reuses the single snapshot read above rather than re-reading the file, so
+  # this cannot classify against a different snapshot than the one that just
+  # confirmed the declaration.
+  if terminal_then_paused "$lines" "$last" && no_inbox_activity_since_status "$STATE/$task.status" "$task"; then
+    rm -f "$recheck_file"
+    printf 'paused'
     return
   fi
   # Read once past the declared-wait gate and reused by both liveness gates below,

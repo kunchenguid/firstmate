@@ -349,30 +349,52 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 
 # The whole terminal line a child's ledger ends in, or non-zero when the ledger
 # is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line. A trailing declared pause does not hide the
-# terminal line underneath it: a worker that finishes correctly into a known
-# external wait (merge authority, a halted build service, an upstream branch
-# landing) appends `paused: <why>` right after its `done:`/`failed:` line per
-# bin/fm-brief.sh's status protocol, and that terminal result must still reach
-# a secondmate's parent channel rather than being read as merely paused.
+# not end in a done or failed line optionally followed by a run of declared
+# pauses. A worker that finishes correctly into a known external wait (merge
+# authority, a halted build service, an upstream branch landing) appends
+# `paused: <why>` right after its `done:`/`failed:` line per bin/fm-brief.sh's
+# status protocol, and that terminal result must still reach a secondmate's
+# parent channel rather than being read as merely paused. More than one
+# trailing pause is routine, not exotic: a worker rechecking the same wait
+# appends another `paused:` line, and so does firstmate steering that worker
+# (fm-classify-lib.sh documents both), so a single-line lookback would
+# silently drop an already-landed PR from parent-channel delivery. Scans
+# backward across any run of consecutive trailing declared-pause lines,
+# bounded by FM_TERMINAL_PAUSE_SCAN_MAX (default 20 lines) so a pathological
+# ledger cannot make this expensive; exhausting the budget without finding a
+# done/failed line is "no terminal report", never a guess.
+# Prints the terminal line, then a second line holding whatever non-blank line
+# immediately precedes it (empty when there is none): a caller run through
+# command substitution cannot receive a side-channel global (it executes in a
+# subshell), so both facts travel out as the one stdout stream, split on the
+# first newline. A caller reading only the terminal line may pipe to
+# `head -1`, or check truthiness alone as one caller here already does.
 child_terminal_ledger_line() { # <status>
-  local status=$1 snapshot lines n last prior marker='__FM_LEDGER_SNAPSHOT_END__'
+  local status=$1 snapshot lines n budget i idx line predecessor marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
   snapshot=${snapshot%"$marker"}
   lines=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$') || true
   n=$(printf '%s\n' "$lines" | grep -c .)
-  last=$(printf '%s\n' "$lines" | tail -1)
-  case "$(status_line_verb "$last")" in
-    done|failed) printf '%s\n' "$last"; return 0 ;;
-  esac
-  if [ "$n" -ge 2 ] && status_is_paused "$last"; then
-    prior=$(printf '%s\n' "$lines" | tail -2 | head -1)
-    case "$(status_line_verb "$prior")" in
-      done|failed) printf '%s\n' "$prior"; return 0 ;;
+  [ "$n" -ge 1 ] || return 1
+  budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
+  [ "$n" -lt "$budget" ] && budget=$n
+  i=1
+  while [ "$i" -le "$budget" ]; do
+    idx=$(( n - i + 1 ))
+    line=$(printf '%s\n' "$lines" | sed -n "${idx}p")
+    case "$(status_line_verb "$line")" in
+      done|failed)
+        predecessor=''
+        [ "$idx" -ge 2 ] && predecessor=$(printf '%s\n' "$lines" | sed -n "$((idx - 1))p")
+        printf '%s\n%s\n' "$line" "$predecessor"
+        return 0
+        ;;
     esac
-  fi
+    status_is_paused "$line" || return 1
+    i=$((i + 1))
+  done
   return 1
 }
 
@@ -407,15 +429,16 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status ledger_output last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
-  last=$(child_terminal_ledger_line "$status") || return 0
+  ledger_output=$(child_terminal_ledger_line "$status") || return 0
+  last=${ledger_output%%$'\n'*}
+  previous=${ledger_output#*$'\n'}
+  [ "$previous" != "$ledger_output" ] || previous=''
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
-  previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
-    | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
   predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1

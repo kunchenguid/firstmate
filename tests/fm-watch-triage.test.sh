@@ -2533,6 +2533,92 @@ test_terminal_then_paused_outranks_authoritative_working() {
   pass "a done: immediately followed by paused: outranks authoritative working state and never wedge-escalates"
 }
 
+# A live 2026-09-04 reproduction: a worker rechecking the same declared wait
+# (or firstmate steering it, which also writes `paused:` per
+# fm-classify-lib.sh) appends a SECOND trailing pause line. A one-line lookback
+# would see last=paused, prior=paused (not done/failed), fail to recognize the
+# declared-wait sequence, and fall back to the authoritative working verdict -
+# reopening the exact false wedge the fix closes for a single trailing pause.
+test_multiple_trailing_pauses_outrank_authoritative_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case multiple-trailing-pauses-outrank-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-multi-paused"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/multi-paused.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: waiting on the rebase head\n'
+    printf 'paused: still waiting, rechecked\n'
+  } > "$state/multi-paused.status"
+  sig=$(seen_sig "$state/multi-paused.status"); printf '%s' "$sig" > "$state/.seen-multi-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "two trailing declared pauses exited instead of staying absorbed: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "two trailing declared pauses did not enter paused mode despite authoritative working state"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "two trailing declared pauses started a wedge timer despite the declared wait outranking run-step state"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "two consecutive trailing declared pauses still outrank authoritative working state"
+}
+
+# The 2026-09-04 exit-path fix: once a log ends done-then-paused, run/agent
+# state alone could never restore wedge detection - a worker steered new work
+# through its inbox (bin/fm-brief.sh forbids a plain `working:`
+# acknowledgement of a steer) would hang invisibly behind the stale
+# declaration. An inbox record delivered AFTER the status file's last append
+# is the fact that the old wait no longer describes the pane, so it must
+# restore ordinary run-step-based wedge tracking.
+test_inbox_activity_after_declared_wait_restores_wedge_detection() {
+  local dir state fakebin out capture_file window key pane_hash sig pid inbox_dir
+  dir=$(make_case inbox-activity-restores-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-inbox-restore"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/inbox-restore.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: awaiting merge authority\n'
+  } > "$state/inbox-restore.status"
+  set_mtime "$(( $(date +%s) - 120 ))" "$state/inbox-restore.status"
+  sig=$(seen_sig "$state/inbox-restore.status"); printf '%s' "$sig" > "$state/.seen-inbox-restore_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A steer delivered strictly AFTER the status file was last written.
+  inbox_dir="$state/inbox-restore.inbox"
+  mkdir -p "$inbox_dir/handled"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-04T00:00:00Z\n--\nnew task, please pivot\n' > "$inbox_dir/handled/001.msg"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 \
+    || { reap "$pid"; fail "a steer delivered after a declared wait did not restore wedge tracking: $(cat "$out")"; }
+  [ ! -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "a steer delivered after a declared wait still trusted the stale pause declaration"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an inbox record newer than the last status line restores wedge detection past a done-then-paused sequence"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -4109,6 +4195,8 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_terminal_then_paused_outranks_authoritative_working
+test_multiple_trailing_pauses_outrank_authoritative_working
+test_inbox_activity_after_declared_wait_restores_wedge_detection
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
