@@ -43,13 +43,29 @@ case "${1:-}" in
   display-message)
     target=
     cursor=0
+    identity=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -t) target=$2; shift 2 ;;
         *cursor_y*) cursor=1; shift ;;
+        *session_name*) identity=1; shift ;;
         *) shift ;;
       esac
     done
+    # The target-presence read asks for one identity record and checks that the
+    # identity that came back is the one it asked for. Real tmux answers a
+    # target it cannot find from the ACTIVE window instead of failing, so this
+    # fake echoes the requested identity for a live target and a DIFFERENT
+    # window for FM_FAKE_TMUX_DEAD_TARGET - the fallback the probe must catch.
+    if [ "$identity" = 1 ]; then
+      t=${target#=}
+      want=${t#*:}
+      if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$t" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+        want=fm-fake-active-window
+      fi
+      printf '%s\0370\037%s\0370\037%%1\037@0\n' "${t%%:*}" "$want"
+      exit 0
+    fi
     if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
       exit 1
     fi

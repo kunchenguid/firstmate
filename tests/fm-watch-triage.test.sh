@@ -3019,6 +3019,16 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+      *session_name*)
+        # Answer the endpoint-presence identity record for the window this fake
+        # represents; real tmux would answer an unknown target from the active
+        # window rather than failing.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "${_t#*:}"
+        exit 0
+        ;;
     esac ;;
 esac
 exit 1

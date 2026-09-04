@@ -833,14 +833,41 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# This is the one shared primitive for callers that need a fast alive/dead read
+# (recovery digests, the session-start fleet digest); fm-crew-state.sh's
+# pane_readable now dispatches through it rather than carrying its own copy.
+#
+# WHY THIS COLLAPSES `unreadable` INTO FALSE, while the recovery-grade
+# fm_backend_agent_state below deliberately does not: the two answers buy
+# different things. A false here never authorizes an action - it is consumed
+# only by reporting surfaces (the session-start fleet digest's endpoint line,
+# fm-fleet-snapshot.sh's endpoint_exists field) and by callers that REFUSE on
+# it (fm-send.sh declines to steer an unverifiable target, fm-control.sh aborts
+# further control, and fm-supervise-daemon.sh defers its injection, backs off,
+# or fails startup). None of them spawn, kill, or discard on a false, so an
+# unreadable backend degrading to "treat it as gone" costs at most a retry,
+# which every one of those callers already performs. `fm_backend_agent_state`
+# is the one whose verdict CAN license a relaunch onto a live worktree, which
+# is exactly why it keeps `missing` and `unreadable` apart, and why an
+# ambiguous target resolves to `unreadable` there rather than `missing`. Any
+# future caller that wants to act destructively on a negative must use that
+# classifier instead of widening this boolean.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # One question, one owner: fm_backend_tmux_target_presence
+      # (bin/backends/tmux.sh) resolves the target through tmux and verifies
+      # the identity that came back. Nothing about tmux target shapes is
+      # decided here, because three separate approximations of that parsing -
+      # this probe, the recovery classifier, and fm-crew-state.sh's
+      # pane_readable - were the root cause of a family of false alive/dead
+      # answers.
+      #
+      # It stays a passive probe: one read-only tmux call that starts no
+      # server, spawns no process, and takes no lock.
+      fm_backend_source tmux || return 1
+      [ "$(fm_backend_tmux_target_presence "$target")" = present ]
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -882,14 +909,16 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
-#   unreadable - a target or inventory read failed or contradicted itself.
+#   unreadable - the target could not be judged at all: a read failed, or the
+#                target's shape cannot be parsed unambiguously.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
-# successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# Only `dead` and `missing` license recovery. The tmux adapter delegates target
+# resolution to fm_backend_tmux_target_presence, which returns `missing` when
+# the identity tmux resolved differs from the identity that was requested, or
+# on an authoritative can't-find-session, no-server, or socket-connect error;
+# the Herdr adapter reuses its husk classifier. Zellij remains unverified
+# because its secondmate ghost-tab and agent-process recovery path has not been
+# empirically validated. Orca and cmux do not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

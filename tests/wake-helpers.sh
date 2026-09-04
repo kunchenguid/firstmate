@@ -95,6 +95,24 @@ fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    *session_name*)
+      # Endpoint presence is one identity record, verified against the target it
+      # was asked about, because real tmux answers an unknown target from the
+      # ACTIVE window instead of failing. Report the requested identity for the
+      # window this fake represents and a decoy for anything else.
+      _t=; _p=
+      for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+      _t=${_t#=}
+      _want=${_t#*:}
+      _have=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW:-}}
+      _have=${_have#*:}
+      if [ -z "$_have" ] || [ "$_have" = "$_want" ]; then
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+      else
+        printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+      fi
+      exit 0
+      ;;
   esac
 fi
 exit 1
@@ -166,6 +184,30 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    case "$*" in
+      *session_name*)
+        # Endpoint presence is one identity record, verified against the target
+        # it was asked about, because real tmux answers a target it cannot find
+        # from the ACTIVE window instead of failing. Report the requested
+        # identity for the window this fake hosts (any target when the test
+        # declared no inventory) and a decoy for anything else. The window is
+        # reported at index 0 under the requested name, so an index target
+        # (the FM_SUPERVISOR_TARGET_DEFAULT form firstmate:0) and a name target
+        # both resolve, exactly as they do on a real server.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _want=${_t#*:}
+        _have=${FM_FAKE_TMUX_WINDOW:-}
+        _have=${_have#*:}
+        if [ -z "$_have" ] || [ "$_have" = "$_want" ]; then
+          printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+        fi
+        exit 0
+        ;;
+    esac
     _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
@@ -258,6 +300,20 @@ write_composer() {
 case "${1:-}" in
   display-message)
     print=0
+    case "$*" in
+      *session_name*)
+        # Same identity record as the other fakes: real tmux answers a target it
+        # cannot find from the active window rather than failing, so the probe
+        # verifies the identity it gets back. This fake declares no window
+        # inventory, so it hosts whatever target it is asked about, reported at
+        # index 0 under the requested name so index and name forms both resolve.
+        t=; prev=
+        for a in "$@"; do [ "$prev" = -t ] && t=$a; prev=$a; done
+        t=${t#=}
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "${t%%:*}" "${t#*:}"
+        exit 0
+        ;;
+    esac
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'

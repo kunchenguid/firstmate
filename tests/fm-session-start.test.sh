@@ -295,9 +295,23 @@ SH
 # fm_backend_target_exists uses for a tmux endpoint liveness read.
 make_fake_tmux() {
   local fakebin=$1 live=$2
+  local live_session=${live%%:*} live_window=${live#*:}
+  # This fake MODELS TMUX'S ACTIVE-WINDOW FALLBACK on purpose. Real tmux answers
+  # a `-t` target it cannot find from the session's active window and still
+  # exits 0, which is the whole defect the endpoint probe exists to contain. The
+  # previous fake exited 1 for an unknown target, so it agreed with the
+  # implementation instead of reproducing the bug, and `test_endpoint_liveness_tmux`
+  # passed both before and after the containment - it proved the fake.
+  #
+  # So: an exactly-matching target answers with the live window's identity, and
+  # ANY other target in a resolvable shape answers with that same identity
+  # anyway - the fallback. The probe must reject the latter by comparing the
+  # identity it asked for against the one that came back.
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+sep=\$(printf '\037')
+identity() { printf '%s' "$live_session\${sep}0\${sep}$live_window\${sep}0\${sep}%1\${sep}@0"; printf '\n'; }
 case "\${1:-}" in
   display-message)
     target=""
@@ -306,8 +320,20 @@ case "\${1:-}" in
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
-    exit 1
+    target=\${target#=}
+    # A designated target models a NON-AUTHORITATIVE read failure: tmux exits
+    # non-zero without any of the "can't find session" wording that proves
+    # absence, so the target can only be judged unreadable.
+    [ -n "\${FM_FAKE_TMUX_UNREADABLE_TARGET:-}" ] \\
+      && [ "\$target" = "\$FM_FAKE_TMUX_UNREADABLE_TARGET" ] && exit 1
+    # An unknown SESSION resolves to nothing at all; an unknown window inside a
+    # known session is what falls back to the active window.
+    case "\$target" in
+      "$live_session":*) identity; exit 0 ;;
+      %*|@*) [ "\$target" = "%1" ] || [ "\$target" = "@0" ] && { identity; exit 0; } ;;
+    esac
+    printf '\${sep}\${sep}\${sep}\${sep}\${sep}\n'
+    exit 0
     ;;
 esac
 exit 1
@@ -317,8 +343,15 @@ SH
 
 # make_fake_tmux_secondmate_recovery <fakebin>: a stateful tmux boundary
 # fixture for the real session-start -> bootstrap -> spawn path.
-# FM_FAKE_TMUX_MODE selects missing, ambiguous, unreadable, or shell; missing
-# reproduces real tmux's active-window fallback while inventory omits the mate.
+# FM_FAKE_TMUX_MODE selects missing, ambiguous, unreadable, or shell, and a
+# window this fake has already spawned answers as present regardless of mode.
+# Every answering mode returns a full identity record rather than an error,
+# because real tmux resolves rather than refuses: `missing` answers with a
+# DIFFERENT window (tmux's active-window fallback), so the probe can only
+# catch it by comparing the identity it asked for against the one that came
+# back; `unreadable` fails the read outright; and the present, `ambiguous` and
+# `shell` answers all carry the requested identity and vary only the reported
+# process name.
 make_fake_tmux_secondmate_recovery() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -331,6 +364,15 @@ killed=${spawned}.killed
 mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
+sep=$(printf '\037')
+# The target-presence read asks for one #{session_name}...#{window_id} record.
+# `identity <window-name>` answers it as the window tmux actually reached, so a
+# `missing` mode can answer with a DIFFERENT window - the active-window
+# fallback - instead of an error the real tmux would never return.
+identity() {
+  printf '%s' "${target%%:*}${sep}0${sep}${1}${sep}0${sep}%1${sep}@0"
+  printf '\n'
+}
 case "${1:-}" in
   display-message)
     target=
@@ -341,10 +383,12 @@ case "${1:-}" in
       prev=$arg
       case "$arg" in '#{'*) format=$arg ;; esac
     done
+    target=${target#=}
     if [ "${target#%}" != "$target" ]; then
       case "$format" in
         *pane_current_path*) printf '%s\n' "$mate_home" ;;
         *pane_current_command*) printf '%s\n' node ;;
+        *session_name*) printf '%s%s0%s%s%s0%s%s%s@0\n' "" "$sep" "$sep" "$mate_window" "$sep" "$sep" "$target" "$sep" ;;
         *) printf '%s\n' "$target" ;;
       esac
       exit 0
@@ -352,21 +396,35 @@ case "${1:-}" in
     if [ -e "$spawned" ]; then
       case "$format" in
         *pane_current_command*) printf '%s\n' node ;;
+        *session_name*) identity "${target#*:}" ;;
         *) printf '%%1\n' ;;
       esac
       exit 0
     fi
     case "$mode" in
       ambiguous)
-        case "$format" in *pane_current_command*) printf '%s\n' node ;; *) printf '%%1\n' ;; esac
+        case "$format" in
+          *pane_current_command*) printf '%s\n' node ;;
+          *session_name*) identity "${target#*:}" ;;
+          *) printf '%%1\n' ;;
+        esac
         exit 0
         ;;
       shell)
-        case "$format" in *pane_current_command*) printf '%s\n' zsh ;; *) printf '%%1\n' ;; esac
+        case "$format" in
+          *pane_current_command*) printf '%s\n' zsh ;;
+          *session_name*) identity "${target#*:}" ;;
+          *) printf '%%1\n' ;;
+        esac
         exit 0
         ;;
       missing)
-        case "$format" in *pane_current_command*) printf '%s\n' node ;; *) printf '%%fallback\n' ;; esac
+        case "$format" in
+          *pane_current_command*) printf '%s\n' node ;;
+          # The requested window is gone, so tmux answers from the active one.
+          *session_name*) identity main ;;
+          *) printf '%%fallback\n' ;;
+        esac
         exit 0
         ;;
       unreadable) exit 1 ;;
@@ -1263,8 +1321,11 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later cheap presence read should surface the offline symptom without claiming the endpoint is gone"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the digest declared a transiently unreadable endpoint dead"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
@@ -1319,12 +1380,64 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  # A multi-colon recorded target names no window tmux can be asked about, so
+  # the adapter refuses to judge it rather than calling it absent.
+  printf 'window=fm-sess:multi:colon\nkind=ship\n' > "$home/state/task-shape.meta"
+  # A non-authoritative read failure on a well-shaped target is the other way
+  # in: the read broke, which is not evidence the window is gone.
+  printf 'window=fm-sess:flaky-window\nkind=ship\n' > "$home/state/task-flaky.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_TMUX_UNREADABLE_TARGET=fm-sess:flaky-window \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  # The digest is the one endpoint verdict a human acts on, and AGENTS.md's
+  # stuck-crewmate-recovery trigger keys on a dead endpoint, so a target the
+  # adapter refused to judge must never be printed as dead.
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=fm-sess:multi:colon)" \
+    "an unjudgeable tmux target shape was not reported as unreadable"
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=fm-sess:flaky-window)" \
+    "a non-authoritative tmux read failure was not reported as unreadable"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:multi:colon)" \
+    "the digest declared an unjudgeable target dead"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:flaky-window)" \
+    "the digest declared a target it could not read dead"
+
+  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one, unreadable when it cannot be judged"
+}
+
+# A remote secondmate's endpoint lives on another machine: its parent metadata
+# records window=remote:<id> with remote_host/remote_backend/remote_target. The
+# digest must not judge that route with a LOCAL tmux probe - it has no evidence
+# either way, and docs/remote-secondmates.md is explicit that unreachable
+# remote state is not proof of death. bin/fm-fleet-snapshot.sh already skips the
+# local probe for this metadata; this pins the digest to the same rule.
+test_endpoint_liveness_remote_not_probed_locally() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=remote:rsm\nkind=secondmate\nremote_host=box\nremote_backend=tmux\nremote_target=firstmate:fm-rsm\n' \
+    > "$home/state/rsm.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: remote, not checked locally (host=box" \
+    "a remote secondmate endpoint must be reported as remote rather than probed as local tmux"
+  case "$out" in
+    *"endpoint: dead (backend=tmux window=remote:rsm)"*)
+      fail "the digest declared a remote endpoint dead from a local tmux probe that cannot see it"
+      ;;
+  esac
+
+  pass "remote secondmate endpoints are reported as remote, never judged by a local tmux probe"
 }
 
 test_endpoint_liveness_herdr() {
@@ -2586,6 +2699,7 @@ test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
+test_endpoint_liveness_remote_not_probed_locally
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep

@@ -66,6 +66,33 @@ case "${1:-}" in
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    case "$*" in
+      *session_name*)
+        # The target-presence read asks for one identity record and checks that
+        # the identity that came back is the one it asked for. Real tmux answers
+        # an unknown target from the ACTIVE window rather than failing, so this
+        # fake models that: it echoes the requested identity only for a window
+        # it actually hosts, and a decoy identity for anything else.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _want=${_t#*:}
+        _hosted=0
+        for _m in "${FM_HOME:-}"/state/*.meta; do
+          [ -f "$_m" ] || continue
+          _w=$(sed -n 's/^window=//p' "$_m" | head -1)
+          [ -n "$_w" ] || continue
+          [ "${_w#*:}" = "$_want" ] && _hosted=1
+        done
+        [ "${FM_FAKE_TMUX_WINDOWS:-win}" = "$_want" ] && _hosted=1
+        if [ "$_hosted" = 1 ]; then
+          printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+        fi
+        exit 0
+        ;;
+    esac
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -516,8 +543,11 @@ test_flag_misuse_refuses() {
   [ "$rc" -ne 0 ] || fail "an empty answer message should refuse"
   assert_contains "$(cat "$err")" "nonempty answer message" "the empty-message refusal should be explicit"
 
-  # An explicit backend target has no task ledger in this home.
+  # An explicit backend target has no task ledger in this home. The fake tmux
+  # has to host that window, or the send would refuse for an absent endpoint
+  # before it ever reaches the ledger check this case is about.
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_FAKE_TMUX_WINDOWS=elsewhere \
     "$SEND" sess:elsewhere --resolve-key k "answer" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "an explicit backend target should refuse --resolve-key"
   assert_contains "$(cat "$err")" "no decision ledger" "the explicit-target refusal should be explicit"

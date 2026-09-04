@@ -123,6 +123,31 @@ case "${1:-}" in
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
+    case "$*" in
+      *session_name*)
+        # The endpoint probe verifies the identity that comes back against the
+        # one it asked for, because real tmux answers an unknown target from the
+        # active window rather than failing. This fake hosts whatever $D/windows
+        # lists, defaulting to the target itself when the test set no inventory.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _want=${_t#*:}
+        _hosted=1
+        if [ -f "$D/windows" ]; then
+          _hosted=0
+          while IFS= read -r _w; do
+            [ "$_w" = "$_want" ] && _hosted=1
+          done < "$D/windows"
+        fi
+        if [ "$_hosted" = 1 ]; then
+          printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+        fi
+        exit 0
+        ;;
+    esac
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi

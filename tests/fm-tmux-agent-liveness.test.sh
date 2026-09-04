@@ -255,6 +255,154 @@ fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
 pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
 
+# The same fallback reached the CHEAP probe too. fm_backend_target_exists is a
+# boolean that could not return false: its tmux arm was a bare
+# `display-message -t <target>`, which the fallback answers from the active
+# window for ANY name, so the session-start fleet digest printed `endpoint:
+# alive` for a task whose window had been gone for days. The raw-primitive
+# assertion first is what keeps this case non-vacuous: it proves the trap is
+# still live in this tmux, so the probe's false is the containment working and
+# not tmux having changed under the test.
+tmux display-message -p -t "$SESSION:no-such-window" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "the raw pane read no longer resolves an absent window, so this case would prove nothing about the probe"
+if fm_backend_target_exists tmux "$SESSION:no-such-window" "no-such-window"; then
+  fail "the cheap existence probe must reject an absent window instead of inheriting tmux's active-window fallback"
+fi
+pass "tmux liveness: the cheap existence probe rejects an absent window"
+
+fm_backend_target_exists tmux "$SESSION:idle" "idle" \
+  || fail "the cheap existence probe must still accept a window that really exists"
+pass "tmux liveness: the cheap existence probe still accepts a present window"
+
+if fm_backend_target_exists tmux "no-such-session-$$:idle" "idle"; then
+  fail "the cheap existence probe must reject a target in a session that does not exist"
+fi
+pass "tmux liveness: the cheap existence probe rejects an absent session"
+
+# --- the shared tmux target parser -----------------------------------------
+# Every tmux liveness read now resolves through one owner,
+# fm_backend_tmux_target_presence, because three separate approximations of
+# tmux target parsing (this probe, the recovery classifier, and
+# fm-crew-state.sh's pane_readable) each mis-parsed a different target shape.
+# The cases below are the shapes that were mis-parsed, each reproduced against
+# a real tmux server. Every one of them FAILS against the pre-parser code.
+#
+# The probe's boolean collapses both `missing` and `unreadable` onto false,
+# while the recovery-grade classifier keeps them apart, so the presence
+# vocabulary is asserted directly alongside the boolean.
+
+[ "$(fm_backend_tmux_target_presence "$SESSION:idle")" = present ] \
+  || fail "a real window must read present"
+[ "$(fm_backend_tmux_target_presence "$SESSION:no-such-window")" = missing ] \
+  || fail "an absent window in a readable session must read missing"
+[ "$(fm_backend_tmux_target_presence "no-such-session-$$:idle")" = missing ] \
+  || fail "an authoritatively absent session must read missing"
+[ "$(fm_backend_tmux_target_presence "$SESSION:a:b")" = unreadable ] \
+  || fail "a multi-colon target cannot be parsed safely and must read unreadable, never missing"
+if fm_backend_target_exists tmux "$SESSION:a:b"; then
+  fail "a multi-colon tmux target must not fall through to a raw pane read, which tmux answers from the active window"
+fi
+[ "$(fm_backend_tmux_target_presence ":idle")" = unreadable ] \
+  || fail "an empty session component is ambiguous and must read unreadable"
+pass "tmux liveness: the shared target parser keeps missing and unreadable apart"
+
+# A window INDEX is a valid tmux target and firstmate ships one as a default:
+# bin/fm-supervisor-target-lib.sh sets FM_SUPERVISOR_TARGET_DEFAULT=firstmate:0,
+# the documented away-mode fallback. Rejecting it would stop the supervise
+# daemon starting and make it defer every escalation to the captain.
+idle_index=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:idle" '#{window_index}')
+[ -n "$idle_index" ] || fail "could not read the idle window's index"
+fm_backend_target_exists tmux "$SESSION:$idle_index" \
+  || fail "a live window addressed by INDEX must be accepted; firstmate's own documented supervisor default is session:0"
+if fm_backend_target_exists tmux "$SESSION:99999"; then
+  fail "an ABSENT window index must still be rejected; tmux answers it from the active window just like an absent name"
+fi
+pass "tmux liveness: live window indexes are accepted and absent ones are not"
+
+# Index beats name in tmux's own resolution, and the parser must not invert it.
+# With index 0 named `zero` and index 1 named `0`, tmux resolves `:0` to INDEX
+# 0. A name-first parser would answer about a DIFFERENT window than every other
+# tmux call reaches - confidently wrong, which is worse than the fallback this
+# whole change removes.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s ambig -n zero \
+  || fail "could not create the ambiguity session"
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t ambig: -n 0 \
+  || fail "could not create the name-versus-index collision window"
+collide=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t 'ambig:0' '#{window_index}#{window_name}')
+[ "$collide" = "0zero" ] \
+  || fail "this tmux did not resolve ambig:0 to index 0 (got '$collide'), so the collision case would prove nothing"
+[ "$(fm_backend_tmux_target_presence 'ambig:0')" = present ] \
+  || fail "the parser must accept the collision target that tmux itself resolves"
+[ "$(fm_backend_tmux_target_presence 'ambig:zero')" = present ] \
+  || fail "the window named zero must still resolve by name"
+pass "tmux liveness: window index beats window name exactly as tmux resolves it"
+
+# tmux accepts a unique session-name PREFIX, so a recorded target for a session
+# that no longer exists could resolve against a different, longer-named one and
+# report liveness about an unrelated window.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s prefixlong -n only \
+  || fail "could not create the prefix session"
+"$REAL_TMUX" -L "$SOCKET" display-message -p -t 'prefix:only' '#{session_name}' >/dev/null 2>&1 \
+  || fail "this tmux does not prefix-match sessions, so the prefix case would prove nothing"
+[ "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t 'prefix:only' '#{session_name}')" = prefixlong ] \
+  || fail "expected the unanchored prefix target to resolve against prefixlong"
+if fm_backend_target_exists tmux "prefix:only"; then
+  fail "a target naming a session that does not exist must be rejected, even when a unique prefix match does"
+fi
+fm_backend_target_exists tmux "prefixlong:only" \
+  || fail "the exact session must still be accepted"
+pass "tmux liveness: the session component is exact, not a unique prefix"
+
+# tmux splits a target at the dot itself, so `session:fm-task.a` reaches window
+# `fm-task` even when a window named `fm-task.a` exists beside it. Stripping at
+# the last dot and accepting the prefix window therefore confirms presence
+# about the wrong window. Task ids may contain dots (bin/fm-pr-lib.sh permits
+# them), so the ambiguous form reads unreadable - never missing, which would
+# license a duplicate spawn - while a real pane selector still resolves.
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n 'fm-dotted' \
+  || fail "could not create the dotted-prefix window"
+[ "$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:fm-dotted.a" '#{window_name}')" = fm-dotted ] \
+  || fail "this tmux did not split fm-dotted.a at the dot, so the dotted case would prove nothing"
+if fm_backend_target_exists tmux "$SESSION:fm-dotted.a"; then
+  fail "an ambiguous dotted target must not be reported alive off the prefix window it accidentally reaches"
+fi
+[ "$(fm_backend_tmux_target_presence "$SESSION:fm-dotted.a")" = unreadable ] \
+  || fail "an ambiguous dotted target must read unreadable, so it can never license a duplicate spawn"
+pass "tmux liveness: an ambiguous dotted target is never confirmed off a prefix window"
+
+# tmux's own id handles carry no session component at all. The supervisor
+# target is one of these: bin/fm-supervisor-target-lib.sh returns $TMUX_PANE
+# directly, which tmux sets to a bare %N, and away mode reaches the captain
+# through it. Verified on tmux 3.6b: an absent %pane or @window id also exits
+# 0 printing an empty line, so exit status alone could not reject them either.
+idle_pane=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:idle" '#{pane_id}')
+idle_window=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:idle" '#{window_id}')
+[ -n "$idle_pane" ] && [ -n "$idle_window" ] \
+  || fail "could not read the idle window's own tmux ids"
+case "$idle_pane" in %*) ;; *) fail "expected a %-prefixed pane id, got '$idle_pane'" ;; esac
+
+fm_backend_target_exists tmux "$idle_pane" \
+  || fail "a bare pane id with no session component must be accepted; it is the captain's own supervisor target"
+fm_backend_target_exists tmux "$idle_window" \
+  || fail "the cheap existence probe must accept a live window id"
+if fm_backend_target_exists tmux '%99999'; then
+  fail "the cheap existence probe must reject an absent pane id"
+fi
+if fm_backend_target_exists tmux '@99999'; then
+  fail "the cheap existence probe must reject an absent window id"
+fi
+pass "tmux liveness: bare pane and window ids resolve, and absent ones are rejected"
+
+# A pane-qualified target must still work, and an absent pane index inside a
+# PRESENT window must not ride in on the window alone - tmux answers that from
+# the window's active pane.
+fm_backend_target_exists tmux "$SESSION:idle.0" \
+  || fail "a session:window.pane target for a real pane must be accepted"
+if fm_backend_target_exists tmux "$SESSION:idle.99999"; then
+  fail "an absent pane index inside a present window must be rejected, not answered from the active pane"
+fi
+pass "tmux liveness: a pane selector is verified, not assumed from its window"
+
 # --- Cursor's composer: the terminal cursor is NOT a composer locator --------
 # Cursor Agent CLI parks its terminal cursor below its footer with cursor_flag 0,
 # so tmux's #{cursor_y} answers `unknown` for every Cursor pane state and the

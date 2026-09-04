@@ -85,6 +85,19 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    # The target-presence read asks for one identity record and verifies that
+    # what came back is the window it asked for, because real tmux answers an
+    # unknown target from the active window instead of failing. Echo the
+    # requested identity so a present target reads present.
+    case "$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        printf '%s\037%s\037%s\0370\037%%1\037@0\n' "${_t%%:*}" 0 "${_t#*:}"
+        exit 0
+        ;;
+    esac
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1

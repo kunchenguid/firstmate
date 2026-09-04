@@ -14,8 +14,9 @@
 # The guarantees under test:
 #   - fm_backend_agent_state is the detailed owner that distinguishes alive,
 #     dead, missing, ambiguous, unreadable, and unverified.
-#   - The tmux classifier returns missing only after a readable session
-#     inventory omits the exact window, regardless of display-message fallback.
+#   - The tmux classifier returns missing only when the identity tmux resolved
+#     differs from the one requested, or a confirmed session, server, or socket
+#     failure proves the endpoint absent.
 #   - The Herdr classifier preserves the proven husk mapping while separating a
 #     missing pane from an existing agent-less pane.
 #   - fm_backend_agent_alive preserves the older three-state compatibility view.
@@ -54,6 +55,18 @@ set -u
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
+    # The target-presence read asks for one identity record. This fake hosts
+    # whatever target it is asked about, so echo the request straight back; the
+    # cases that must NOT resolve use make_failed_probe_tmux below.
+    case "\$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "\$@"; do [ "\$_p" = -t ] && _t=\$_a; _p=\$_a; done
+        _t=\${_t#=}
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "\${_t%%:*}" "\${_t#*:}"
+        exit 0
+        ;;
+    esac
     exit 0 ;;
   list-windows) printf '%s\n' win; exit 0 ;;
 esac
@@ -63,22 +76,44 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# make_failed_probe_tmux <dir> <inventory>: missing and present fail the pane
-# read, while unreadable returns a misleading fallback node process but fails
-# the inventory that must be authoritative.
+# make_failed_probe_tmux <dir> <mode>: missing answers the presence read with a
+# DIFFERENT window (tmux's active-window fallback), the missing-session,
+# missing-server and missing-socket modes fail it with tmux's own error text,
+# and present and unreadable leave it unjudgeable - unreadable still returning a
+# misleading fallback node process that the presence read must not trust.
 make_failed_probe_tmux() {
-  local dir=$1 inventory=$2 fakebin
+  local dir=$1 mode=$2 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
   display-message)
-    [ '$inventory' = unreadable ] && { printf '%s\n' node; exit 0; }
+    # Presence and the pane read are now the same primitive, so every mode is
+    # expressed here: a target that resolves to a DIFFERENT window is
+    # the active-window fallback (missing), the confirmed session/server/socket
+    # failures keep their exact tmux error text (missing), and any other
+    # failure stays unreadable so it can never license a duplicate spawn.
+    case "\$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "\$@"; do [ "\$_p" = -t ] && _t=\$_a; _p=\$_a; done
+        _t=\${_t#=}
+        case '$mode' in
+          missing) printf '%s\0370\037main\0370\037%%1\037@0\n' "\${_t%%:*}"; exit 0 ;;
+          missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
+          missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
+          missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
+          present) exit 1 ;;
+          *) printf '%s\n' "permission denied" >&2; exit 1 ;;
+        esac
+        ;;
+    esac
+    [ '$mode' = unreadable ] && { printf '%s\n' node; exit 0; }
     exit 1
     ;;
   list-windows)
-    case '$inventory' in
+    case '$mode' in
       missing) printf '%s\n' main ; exit 0 ;;
       missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
       missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
@@ -117,20 +152,20 @@ test_tmux_agent_state_classifies() {
 
   fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-missing" missing)
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
-  [ "$out" = missing ] || fail "a readable inventory omitting the target should classify as missing, got '$out'"
+  [ "$out" = missing ] || fail "a target that resolves to a different window should classify as missing, got '$out'"
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:fm-sm1' "$ROOT")" = dead ] \
     || fail "the compatibility view should treat an authoritatively missing target as dead"
 
-  for inventory in present unreadable; do
-    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
+  for mode in present unreadable; do
+    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$mode" "$mode")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
-    [ "$out" = unreadable ] || fail "a $inventory inventory case should stay unreadable, got '$out'"
+    [ "$out" = unreadable ] || fail "a $mode case should stay unreadable, got '$out'"
   done
 
-  for inventory in missing-session missing-server missing-socket; do
-    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
+  for mode in missing-session missing-server missing-socket; do
+    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$mode" "$mode")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
-    [ "$out" = missing ] || fail "a confirmed $inventory inventory failure should classify as missing, got '$out'"
+    [ "$out" = missing ] || fail "a confirmed $mode failure should classify as missing, got '$out'"
   done
 
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
@@ -262,8 +297,8 @@ SH
 }
 
 # make_liveness_tmux <dir>: a controllable tmux stub. FM_TEST_PANE_CMD may be
-# a foreground command, `missing` (readable inventory omits the window), or
-# `unreadable` (both pane and inventory reads fail).
+# a foreground command, `missing` (the presence read resolves to a DIFFERENT
+# window), or `unreadable` (both the presence read and the pane read fail).
 make_liveness_tmux() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -284,6 +319,31 @@ case "${1:-}" in
           ;;
       esac
     done
+    # Endpoint presence comes from one identity record rather than a window
+    # inventory, so the modes are expressed here: `missing` answers with a
+    # DIFFERENT window (real tmux's active-window fallback), `unreadable` fails,
+    # and an endpoint that has been killed stops resolving.
+    case "$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _w=${_t#*:}
+        _w=${_w#=}
+        case "$mode" in
+          missing) printf '%s\0370\037main\0370\037%%1\037@0\n' "${_t%%:*}"; exit 0 ;;
+          unreadable) exit 1 ;;
+          *)
+            if [ -e "${FM_TMUX_CALL_LOG:?}.killed" ]; then
+              printf '%s\0370\037main\0370\037%%1\037@0\n' "${_t%%:*}"
+            else
+              printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_w"
+            fi
+            exit 0
+            ;;
+        esac
+        ;;
+    esac
     exit 0
     ;;
   list-windows)

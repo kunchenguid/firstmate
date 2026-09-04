@@ -207,9 +207,16 @@ fi
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
+# The tmux arm dispatches through the shared existence primitive rather than
+# reading a pane directly. A raw `display-message -t <target>` cannot answer
+# whether the target exists: tmux resolves one it cannot find by falling back
+# to the session's active window and still exits 0, so a torn-down worker's
+# window read as readable, execution reached crew_busy_verdict, and the
+# CAPTAIN's own busy pane was classified as that task - reporting a dead
+# crewmate as working indefinitely.
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    tmux) fm_backend_target_exists tmux "$1" "$EXPECTED_LABEL" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }

@@ -820,9 +820,43 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    # A remote secondmate records window=remote:<id> plus its own remote_host,
+    # remote_backend and remote_target, and its endpoint lives on another
+    # machine. Probing that as a local tmux target judges a route local tmux
+    # cannot see, and unreachable remote state is explicitly not proof of death
+    # (docs/remote-secondmates.md). bin/fm-fleet-snapshot.sh already skips the
+    # local probe for this metadata; the digest follows that same pattern
+    # rather than printing a verdict it has no evidence for.
+    remote_backend=$(fm_meta_get "$meta" remote_backend)
+    printf 'endpoint: remote, not checked locally (host=%s backend=%s target=%s)\n' \
+      "$remote_host" "${remote_backend:-unknown}" "$(fm_meta_get "$meta" remote_target)"
+  elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+    probe_target=${target:-$window}
+    if [ "$backend" = tmux ]; then
+      # This digest is the one endpoint verdict a HUMAN acts on, so it reads the
+      # tmux adapter's tri-state directly instead of fm_backend_target_exists'
+      # boolean. That boolean deliberately collapses `unreadable` into false,
+      # which is right for the machine-facing callers that only refuse or defer
+      # on it, but printing "dead" for a target the code refused to call absent
+      # is exactly the false certainty this probe exists to remove - and
+      # AGENTS.md's stuck-crewmate-recovery trigger keys on a dead endpoint.
+      # The tri-state is a tmux-adapter concept, so every other backend keeps
+      # the boolean.
+      if fm_backend_source tmux; then
+        presence=$(fm_backend_tmux_target_presence "$probe_target")
+      else
+        presence=unreadable
+      fi
+      case "$presence" in
+        present) printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window" ;;
+        missing) printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window" ;;
+        *) printf 'endpoint: unreadable - could not be read, not confirmed gone (backend=%s window=%s)\n' \
+          "$backend" "$window" ;;
+      esac
+    elif fm_backend_target_exists "$backend" "$probe_target" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"

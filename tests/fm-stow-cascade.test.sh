@@ -58,6 +58,15 @@ set -u
 case "$*" in
   *list-windows*) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
   *list-panes*) printf '%s\n' "${FM_FAKE_TMUX_PANE:-}" ;;
+  *display-message*'#{session_name}'*)
+    # Endpoint presence is one identity record verified against the request,
+    # because real tmux answers an unknown target from the active window
+    # instead of failing. This fake hosts every target it is asked about.
+    _t=; _p=
+    for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+    _t=${_t#=}
+    printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "${_t#*:}"
+    ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}" ;;
   *display-message*'#{pane_pid}'*) printf '%s\n' "$$" ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1' ;;

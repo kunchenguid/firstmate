@@ -46,8 +46,20 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ### Agent liveness probe
 
-A target-existence check proves only that the pane exists.
-The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
+Every tmux liveness read resolves its target through one shared owner first, because tmux answers a target it cannot find by silently falling back rather than failing.
+An absent window name, an absent window index, an absent pane index, and a malformed multi-colon target all resolve to the session's active window or pane, and a unique session-name prefix resolves to the longer session that matches it, each with exit status 0.
+The shared parser therefore asks tmux to echo the identity it actually reached and verifies that identity against the one requested, rather than reimplementing tmux's own precedence rules.
+It anchors the session component with tmux's `=` exact-match form, accepts `session:name`, `session:index`, `session:window.pane`, bare `%pane` and `@window` ids, and preserves tmux's own rule that a window index beats a window name, so the answer always describes the window every other tmux call will reach.
+A target it cannot parse unambiguously is reported unreadable rather than absent, so it can never license recovery.
+
+One shape is deliberately out of reach, because tmux itself cannot address it.
+tmux splits a target at the dot and reads the tail as a pane selector, so a window whose own name contains a dot is reachable only while no window is named by its dot-prefix.
+Verified on tmux 3.6b: with only `fm-task.a` present that target resolves to itself, while adding a window named `fm-task` makes the same target resolve to `fm-task` instead.
+Such an endpoint could never be confirmed alive, and would be invisible to stale detection, which keys on a confirmed-gone endpoint.
+Task ids may legally contain a dot, so the limit is closed at the source rather than left to chance: the tmux backend refuses to create a window whose name contains a dot, and reports that refusal at spawn.
+Preferring the prefix window instead would confirm liveness about a different worker's pane, and steering that target would type into it.
+The cheap target-existence check is that verdict as a boolean, and proves only that the endpoint exists.
+The deeper tmux agent-liveness probe starts from the same verdict, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 

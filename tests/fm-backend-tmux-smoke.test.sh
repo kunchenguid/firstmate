@@ -73,6 +73,28 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# A dotted window name is refused at creation, because tmux cannot address one:
+# it splits a target at the dot and reads the tail as a pane selector. The two
+# assertions below prove the hazard is real on THIS tmux before proving the
+# refusal, so the case cannot pass vacuously if tmux ever changes.
+tmux new-window -d -t "$SESSION:" -n 'fm-dotcheck' \
+  || fail "could not create the prefix window for the dotted-name check"
+tmux new-window -d -t "$SESSION:" -n 'fm-dotcheck.a' \
+  || fail "could not create the dotted window for the dotted-name check"
+[ "$(tmux display-message -p -t "=$SESSION:fm-dotcheck.a" '#{window_name}')" = 'fm-dotcheck' ] \
+  || fail "this tmux did not resolve a dotted target to its prefix window, so the refusal would prove nothing"
+[ "$(fm_backend_tmux_target_presence "$SESSION:fm-dotcheck.a")" = unreadable ] \
+  || fail "a dotted target shadowed by its prefix window must read unreadable, never present or missing"
+tmux kill-window -t "=$SESSION:=fm-dotcheck.a" 2>/dev/null || true
+tmux kill-window -t "=$SESSION:=fm-dotcheck" 2>/dev/null || true
+
+if fm_backend_tmux_create_task "$SESSION" 'fm-dotted.id' "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_create_task must refuse a dotted window name; tmux cannot address one unambiguously"
+fi
+tmux list-windows -t "=$SESSION" -F '#{window_name}' | grep -qx 'fm-dotted.id' \
+  && fail "the refused dotted window must not have been created"
+pass "real tmux: a dotted window name is refused at creation rather than becoming an unaddressable endpoint"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line
@@ -167,7 +189,7 @@ state=$(fm_backend_agent_state tmux "$TARGET")
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
-pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
+pass "real tmux: kill removes the window, the killed target resolves to the active window, and the identity comparison rejects it as missing"
 
 cleanup_all
 trap - EXIT

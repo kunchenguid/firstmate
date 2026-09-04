@@ -40,6 +40,26 @@ case "${1:-}" in
           *) printf 'codex\n' ;;
         esac
         ;;
+      *session_name*)
+        # Answer the endpoint probe's identity record from the same metadata
+        # this fake lists windows from, so a recorded target reads present and
+        # anything else gets the active-window answer real tmux would give.
+        # The probe anchors the session with tmux's `=` exact-match form, so
+        # strip it before echoing the identity back.
+        _tgt=${target#=}
+        _want=${_tgt#*:}
+        _hosted=0
+        while IFS= read -r _w; do
+          [ "$_w" = "$_want" ] && _hosted=1
+        done <<EOF
+$(sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta)
+EOF
+        if [ "$_hosted" = 1 ]; then
+          printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_tgt%%:*}" "$_want"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_tgt%%:*}"
+        fi
+        ;;
       *) printf '%%1\n' ;;
     esac
     ;;

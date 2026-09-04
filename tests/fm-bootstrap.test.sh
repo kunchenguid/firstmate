@@ -842,6 +842,18 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *'#{cursor_y}'*) printf '%s\n' 0 ;;
+      *session_name*)
+        # Answer the endpoint probe's identity record: this fake hosts fm-sm,
+        # and real tmux answers anything else from the active window.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        if [ "${_t#*:}" = fm-sm ]; then
+          printf '%s\0370\037fm-sm\0370\037%%1\037@0\n' "${_t%%:*}"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+        fi
+        ;;
       *) printf '%s\n' codex ;;
     esac
     ;;

@@ -37,7 +37,27 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  display-message)
+    # The endpoint probe asks for one identity record and verifies that what
+    # came back is the target it asked for, because real tmux answers an
+    # unknown target from the active window instead of failing. Echo the
+    # requested identity for a window this fake hosts, and a decoy for the
+    # dead-* ones the plain pane read below already refuses.
+    case "$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        case "$_t" in
+          *dead-*) printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}" ;;
+          *) printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "${_t#*:}" ;;
+        esac
+        exit 0
+        ;;
+      *dead-*) exit 1 ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;

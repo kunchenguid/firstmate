@@ -342,6 +342,29 @@ case "$*" in
     sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
     exit 0
     ;;
+  *display-message*'#{session_name}'*)
+    # The endpoint probe asks for one identity record and verifies that what
+    # came back is the target it asked for, because real tmux answers a target
+    # it cannot find from the active window instead of failing. Report the
+    # requested identity for a window this home's own records declare, and the
+    # active-window decoy for anything else.
+    _t=; _p=
+    for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+    _t=${_t#=}
+    _want=${_t#*:}
+    _hosted=0
+    while IFS= read -r _w; do
+      [ "$_w" = "$_want" ] && _hosted=1
+    done <<EOF
+$(sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta 2>/dev/null)
+EOF
+    if [ "$_hosted" = 1 ]; then
+      printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+    else
+      printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+    fi
+    exit 0
+    ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;

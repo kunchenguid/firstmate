@@ -56,6 +56,25 @@ case "${1:-}" in
         id=${target##*fm-}
         if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'claude\n'; fi
         ;;
+      *session_name*)
+        # The endpoint probe verifies the identity tmux returns against the one
+        # requested, because real tmux answers an unknown target from the active
+        # window instead of failing. Report the requested identity for a window
+        # this fake's inventory lists, and the active-window decoy otherwise.
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _want=${_t#*:}
+        _hosted=0
+        while IFS= read -r _w; do
+          [ "$_w" = "$_want" ] && _hosted=1
+        done < "$FM_FAKE_DIR/windows"
+        if [ "$_hosted" = 1 ]; then
+          printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+        else
+          printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+        fi
+        ;;
       *) printf '\n' ;;
     esac
     ;;
