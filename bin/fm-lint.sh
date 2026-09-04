@@ -31,9 +31,11 @@
 # Each shard writes separate diagnostics, and the parent replays those outputs in
 # deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
 # runs the same shards serially with byte-identical diagnostics and exit selection.
-# Each shard's ShellCheck runs under a virtual-address-space cap of
+# Each shard's ShellCheck runs under a best-effort virtual-address-space cap of
 # FM_LINT_SHELLCHECK_MAX_MB (default 4096) so a pathological analysis fails that
-# shard instead of triggering the kernel OOM killer machine-wide.
+# shard instead of triggering the kernel OOM killer machine-wide. The cap is
+# only enforced where the platform honors RLIMIT_AS (Linux); on macOS bash
+# accepts ulimit -v but the kernel does not enforce it, so lint still runs.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -84,8 +86,9 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     fi
     # Bound shellcheck's address space so a pathological analysis fails this
     # shard loudly instead of triggering the kernel OOM killer machine-wide.
+    # The parent validated FM_LINT_SHELLCHECK_MAX_MB and passes it in KiB.
     (
-      ulimit -v "$(( ${FM_LINT_SHELLCHECK_MAX_MB:-4096} * 1024 ))" 2>/dev/null || true
+      ulimit -v "$FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB" 2>/dev/null || true
       exec "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}"
     ) > "$output.out" 2>&1 &
     FM_LINT_WORKER_SHELLCHECK_PID=$!
@@ -105,7 +108,8 @@ if [ "${1:-}" = "--internal-worker" ]; then
     printf 'fm-lint.sh: --internal-worker is private to the lint owner.\n' >&2
     exit 2
   }
-  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] \
+    && [ -n "${FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB:-}" ] || exit 2
   fm_lint_worker "$2" "$3" "$4"
   exit $?
 fi
@@ -131,6 +135,7 @@ fm_lint_run_workflows() {
 }
 
 JOBS=${FM_LINT_JOBS:-2}
+SHELLCHECK_MAX_MB=${FM_LINT_SHELLCHECK_MAX_MB:-4096}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
@@ -180,6 +185,15 @@ case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
+
+case "$SHELLCHECK_MAX_MB" in
+  0*|*[!0-9]*)
+    printf 'fm-lint.sh: FM_LINT_SHELLCHECK_MAX_MB must be a positive integer (MB), got %s.\n' \
+      "$SHELLCHECK_MAX_MB" >&2
+    exit 2
+    ;;
+esac
+SHELLCHECK_MAX_KIB=$(( SHELLCHECK_MAX_MB * 1024 ))
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -417,17 +431,20 @@ fm_lint_run_worker() {  # <worker-index>
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -lp -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
       env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }

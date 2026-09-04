@@ -328,6 +328,30 @@ SH
   pass "fm-lint.sh bounds ShellCheck memory (default 4096 MB, FM_LINT_SHELLCHECK_MAX_MB override)"
 }
 
+test_rejects_malformed_memory_cap() {
+  local tmp fakebin log fixture value out rc
+  tmp=$(fm_test_tmproot fm-lint-memory-cap-invalid)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$fixture"
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  for value in abc 4G 0 -1; do
+    rc=0
+    out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+      FM_LINT_SHELLCHECK_MAX_MB="$value" "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] \
+      || fail "FM_LINT_SHELLCHECK_MAX_MB=$value should exit 2, got $rc"$'\n'"$out"
+    case "$out" in
+      *"FM_LINT_SHELLCHECK_MAX_MB must be a positive integer"*) ;;
+      *) fail "FM_LINT_SHELLCHECK_MAX_MB=$value did not report the memory cap clearly:"$'\n'"$out" ;;
+    esac
+    [ ! -s "$log" ] || fail "FM_LINT_SHELLCHECK_MAX_MB=$value still ran ShellCheck"
+  done
+  pass "fm-lint.sh rejects a malformed FM_LINT_SHELLCHECK_MAX_MB with a clear message"
+}
+
 test_ci_defaults_to_full_analysis() {
   local tmp fakebin log mode_log fixture out
   tmp=$(fm_test_tmproot fm-lint-ci-analysis)
@@ -1035,6 +1059,7 @@ test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
 test_shellcheck_runs_under_a_memory_cap
+test_rejects_malformed_memory_cap
 test_ci_defaults_to_full_analysis
 test_ci_rejects_explicit_fast_mode
 test_fast_mode_catches_a_real_lint_defect
