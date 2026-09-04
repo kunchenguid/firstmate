@@ -21,7 +21,14 @@ The decision persists for the repository, so later worktrees of the same project
 
 Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
 Firstmate's interactive launch includes `--disable hooks`, which disables hooks for the invocation and avoids the dialog without trusting or running effective hook sources.
-If an already-parked worker shows this dialog, choose "Continue without trusting" with `../../../bin/fm-send.sh --key Down --key Down --key Enter` and verify that the brief starts processing.
+If an already-parked worker shows this dialog, choose "Continue without trusting" by running these commands in order, then verify that the brief starts processing.
+Replace `TASK_ID` with the recorded task ID.
+
+```sh
+../../../bin/fm-send.sh TASK_ID --key Down
+../../../bin/fm-send.sh TASK_ID --key Down
+../../../bin/fm-send.sh TASK_ID --key Enter
+```
 Turn-end detection rides the launch `notify=` signal, not Codex hooks.
 
 ## Skill popup
