@@ -3597,7 +3597,11 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  # Carry the harness output into the failure message: this case drives a real
+  # node harness whose diagnostics are the only way to tell an assertion failure
+  # apart from a crash, and expect_code reports the exit status alone.
+  [ "$status" -eq 0 ] \
+    || fail "OpenCode watch plugin must not treat external healthy output as an owned arm (exit $status): $out"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
