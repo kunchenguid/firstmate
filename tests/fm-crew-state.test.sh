@@ -4116,6 +4116,30 @@ test_pre_run_done_log_does_not_mask_failed_run() {
   pass "a pre-run done line does not mask a failed run"
 }
 
+test_same_minute_done_log_does_not_mask_failed_run() {
+  reset_fakes
+  local d short minute_epoch ledger_stamp status_stamp
+  d=$(new_case same-minute-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-s6b
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6b.meta" "window=fm:fm-feat-s6b" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s6b.status"
+  minute_epoch=$(( $(date +%s) / 60 * 60 - 120 ))
+  ledger_stamp=$(date -r "$minute_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null \
+    || date -d "@$minute_epoch" '+%Y-%m-%d %H:%M')
+  status_stamp=$(date -r "$((minute_epoch + 20))" '+%Y%m%d%H%M.%S' 2>/dev/null \
+    || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
+  touch -t "$status_stamp" "$d/state/feat-s6b.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6b)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b ${short}  ${ledger_stamp}"
+  local out; out=$(run_crew_state "$d" feat-s6b)
+  assert_contains "$out" "state: failed" "a done line inside the ledger minute cannot mask the failure"
+  assert_contains "$out" "source: run-step" "same-minute ordering leaves the failure authoritative"
+  assert_not_contains "$out" "state: done" "minute truncation cannot convert the failure into success"
+  pass "a same-minute done line does not mask a failed run"
+}
+
 # Opposite direction 2: with no ledger row to order the records against, there is
 # no evidence the status line is newer, so the failed run stands.
 test_failed_run_without_ordering_evidence_still_surfaces() {
@@ -6626,6 +6650,7 @@ test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
 test_pre_run_done_log_does_not_mask_failed_run
+test_same_minute_done_log_does_not_mask_failed_run
 test_failed_run_without_ordering_evidence_still_surfaces
 test_needs_decision_log_never_supersedes_failed_run
 test_failed_run_detail_carries_no_pr_it_never_opened

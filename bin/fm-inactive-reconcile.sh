@@ -357,18 +357,21 @@ state_line_pr() { # <state-line>
 # 2026-08-27 false report named the task's previously recorded PR beside a state
 # read from a different run, so one record asserted two things that were never
 # true together. A run-step state carries the PR its own run opened, or none; a
-# status-log state carries the PR its own line names in a mode's ready-signal
-# shape (the same scrape pr_for_task owns), and a scout never carries one. A
-# separately recorded task PR is neither, so it is never borrowed here.
-terminal_outcome_pr() { # <meta> <state-line> <last-line>
-  local meta=$1 line=$2 last=$3
+# status-log state carries the PR its own state-line detail names in a mode's
+# ready-signal shape, and a scout never carries one. A separately recorded task
+# PR is neither, so it is never borrowed here.
+terminal_outcome_pr() { # <meta> <state-line>
+  local meta=$1 line=$2 detail
   if [ "$(state_line_source "$line")" = run-step ]; then
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
-  clean_field "$(printf '%s\n' "$last" \
-    | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
+  detail=${line#*"$STATE_LINE_SEP"source: status-log"$STATE_LINE_SEP"}
+  [ "$detail" != "$line" ] || return 0
+  detail=${detail%%"$STATE_LINE_SEP"*}
+  clean_field "$(printf '%s\n' "$detail" \
+    | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
     | head -1 || true)"
 }
 
@@ -600,7 +603,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     *) return 0 ;;
   esac
   terminal_outcome_corroborated "$state" "$last" || return 0
-  pr=$(terminal_outcome_pr "$meta" "$state_line" "$last")
+  pr=$(terminal_outcome_pr "$meta" "$state_line")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
   # keeps appending routine prose after one terminal outcome must not mint a

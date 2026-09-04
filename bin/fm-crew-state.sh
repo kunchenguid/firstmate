@@ -134,10 +134,11 @@
 #      bin/fm-inactive-reconcile.sh. Three records may outrank it: a later run
 #      the ledger PROVES is current (answering from that run), a later
 #      self-declared pause or done in the status log that the ledger's date
-#      proves post-dates the failed run, and finally a later run on this branch
-#      that cannot be bound here (reported as unknown - history, but no proof of
-#      the present). Because the ledger has no run ID, an equal head does not
-#      identify a rerun; a terminal row supplies newer truth when its observable
+#      proves post-dates the failed run by clearing its whole minute, and finally
+#      a later run on this branch that cannot be bound here (reported as unknown
+#      - history, but no proof of the present). Because the ledger has no run ID,
+#      an equal head does not identify a rerun; a terminal row supplies newer
+#      truth when its observable
 #      status, head, or PR differs, or when the state came from the coarse
 #      fallback. Nothing else does, and with no ordering evidence the failure
 #      stands, so a real failure is never hidden. Independently of outcome, a
@@ -1461,7 +1462,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
     # readers to keep the line and its ordering evidence consistent.
     if [ -n "$NEWEST_EPOCH" ] && snapshot_ordered_log; then
-      if [ "$ORDERED_LOG_MTIME" -gt "$NEWEST_EPOCH" ]; then
+      if [ "$ORDERED_LOG_MTIME" -ge "$((NEWEST_EPOCH + 60))" ]; then
         LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
         case "$LOG_STATE" in
           paused|done)

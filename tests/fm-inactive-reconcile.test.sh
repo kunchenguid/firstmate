@@ -1138,6 +1138,22 @@ test_status_log_outcome_never_borrows_an_earlier_pr() {
   pass "a status-log outcome without its own pull request carries none"
 }
 
+test_status_log_outcome_never_borrows_the_fresh_last_line_pr() {
+  local payload
+  make_world outcome-pr-log-fresh-line
+  write_child "$MAIN" child 'done: implementation complete'
+  printf 'working: PR https://example.test/owner/repo/pull/55 resumed\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='implementation complete' run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr='*) fail "the terminal outcome borrowed a pull request from the corroboration line: $payload" ;;
+  esac
+  pass "a status-log outcome takes no pull request from another line"
+}
+
 # The independent captain protection: when the reader reports a failure the
 # crew's own last self-declared word contradicts, the two records disagree and
 # nothing is manufactured for presentation. Ordinary supervision still owns it.
@@ -1241,6 +1257,7 @@ test_terminal_outcome_never_names_a_pr_the_run_did_not_open
 test_terminal_outcome_takes_the_pr_its_run_opened
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_never_borrows_an_earlier_pr
+test_status_log_outcome_never_borrows_the_fresh_last_line_pr
 test_contradicted_failure_is_not_promoted_for_presentation
 test_contradicted_success_is_not_promoted_for_presentation
 test_uncontradicted_failure_is_still_presented
