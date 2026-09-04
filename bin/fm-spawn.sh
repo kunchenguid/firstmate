@@ -1925,6 +1925,15 @@ if [ "$KIND" = ship ]; then
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+  # Admission gate (fleet engineering plan workstream 2, "closes A + E"): refuse
+  # before any worktree or endpoint is created unless the push path, the
+  # requested delivery mode, quota headroom, and host concurrency are all
+  # independently proven, not assumed. FM_PREFLIGHT_GATE_BYPASS=1 is the
+  # hermetic-test escape hatch (tests/lib.sh; mirrors FM_GATE_REFUSE_BYPASS in
+  # bin/fm-gate-refuse-lib.sh) - a real spawn never sets it.
+  if [ "${FM_PREFLIGHT_GATE_BYPASS:-}" != 1 ]; then
+    "$SCRIPT_DIR/fm-preflight-gate.sh" "$PROJ_ABS" --mode "$MODE" --harness "$HARNESS" >&2 || exit 4
+  fi
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)

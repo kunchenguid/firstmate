@@ -35,6 +35,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Exempt the suite from the pre-dispatch admission gate (bin/fm-preflight-gate.sh,
+# wired into fm-spawn.sh's ship-spawn path). The existing hermetic ship-spawn
+# suites fake tmux and git but not gh-axi/quota-axi/no-mistakes, so without this
+# every one of them would be refused by a gate whose behavior they never intended
+# to exercise. A real spawn never sets this. tests/fm-preflight-gate.test.sh
+# unsets it to verify the real refusal path, mirroring FM_GATE_REFUSE_BYPASS above.
+export FM_PREFLIGHT_GATE_BYPASS=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
