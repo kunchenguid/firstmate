@@ -811,8 +811,6 @@ spawn_abort_cleanup() {
         "$RELAUNCH_REPLACEMENT_STATE" \
         "$ID"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
-    else
-      LOCAL_MODEL_CHECK_PENDING=0
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
       if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
@@ -939,13 +937,17 @@ spawn_herdr_presentation_order_lock_acquire() {
 # state/<id>.check.sh is a single slot the local-model eviction watcher and a
 # merge poll both want. True only when it still holds THIS adapter's watcher:
 # an operator who handed the slot over (bin/fm-pr-check.sh names that handover)
-# leaves a poll whose registration is present and whose trust binding is not
-# the watcher's. Retiring that shim would strand <id>.pr-poll and
-# <id>.pr-poll-registration with merge detection silently gone, and arming over
-# it would replace the poll just as silently.
+# leaves a LIVE poll there, and retiring that shim would strand <id>.pr-poll
+# and <id>.pr-poll-registration with merge detection silently gone, while
+# arming over it would replace the poll just as silently.
+# The poll is identified by the same detector bin/fm-control.sh uses, which
+# re-verifies the shim against fm-pr-poll.sh and the registration's own
+# recorded hashes. A bare <id>.pr-poll-registration left behind by an operator
+# who already retired the poll therefore does not answer for a slot the poll no
+# longer occupies.
 local_model_check_slot_is_ours() {  # <state> <id>
   local state=$1 id=$2
-  [ ! -e "$state/$id.pr-poll-registration" ] && [ ! -L "$state/$id.pr-poll-registration" ] || return 1
+  ! fm_pr_poll_artifacts_valid "$state" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   fm_custom_check_registered "$state" "$id"
 }
 

@@ -125,14 +125,26 @@ is_loopback_ipv4() {  # <host>
 # configure, and it is rejected instead of parsed.
 endpoint_host() {
   local rest host port
+  # An explicit scheme is required. Without one, ${ENDPOINT#*://} is a no-op and
+  # a protocol-relative //evil.example:1234 truncates to an empty authority,
+  # making "no authority" and "an authority this parser never reached"
+  # indistinguishable. An empty authority is accepted ONLY under file://, which
+  # addresses a path on this machine and reaches no host at all; that is the
+  # scheme the portable catalog fixtures in tests/ serve from.
+  case "$ENDPOINT" in
+    http://*|https://*|file://*) : ;;
+    *) return 1 ;;
+  esac
   rest=${ENDPOINT#*://}
   rest=${rest%%/*}
   rest=${rest%%\?*}
   rest=${rest%%#*}
   rest=${rest%%\\*}
   if [ -z "$rest" ]; then
-    printf '\n'
-    return 0
+    case "$ENDPOINT" in
+      file://*) printf '\n'; return 0 ;;
+    esac
+    return 1
   fi
   case "$rest" in
     \[*\])   host=${rest#\[}; host=${host%\]}; port= ;;

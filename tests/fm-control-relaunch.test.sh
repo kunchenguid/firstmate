@@ -1879,8 +1879,69 @@ test_bare_relaunch_still_retires_a_real_eviction_watcher() {
   pass "fm-spawn --relaunch: a genuine eviction watcher is still retired when the task leaves claude-local"
 }
 
+# bin/fm-check-unregister.sh removes only <id>.check.sh and <id>.check-trust,
+# so the handover bin/fm-pr-check.sh documents leaves <id>.pr-poll and
+# <id>.pr-poll-registration behind. Slot ownership has to be decided by the
+# poll actually IN the slot, not by that leftover: reading the leftover as an
+# owner would mean the task can never arm its own watcher again, and can never
+# retire it when it moves to a hosted harness either.
+test_a_retired_polls_leftover_registration_does_not_own_the_slot() {
+  local dir state out
+  dir=$(new_case spawn-relaunch-stale-reg rl50)
+  add_claude_local_task "$dir" rl50 loaded
+  state="$dir/home/state"
+  arm_pr_poll "$dir" rl50 https://github.com/my-org/repo/pull/9
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-unregister.sh" rl50 >/dev/null \
+    || fail "fixture: the documented slot handover could not be reversed"
+  [ -e "$state/rl50.pr-poll-registration" ] \
+    || fail "fixture: the retired poll left no stale registration to test against"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl50 --relaunch)
+  fm_custom_check_registered "$state" rl50 \
+    || fail "the freed slot did not take this adapter's own watcher: $out"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl50 --relaunch) \
+    || fail "a later claude-local relaunch was refused over a stale registration: $out"
+  fm_custom_check_registered "$state" rl50 \
+    || fail "the accepted relaunch did not re-arm the eviction watcher: $out"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 run_spawn "$dir" rl50 --relaunch --harness claude)
+  [ ! -e "$state/rl50.check.sh" ] && [ ! -e "$state/rl50.check-trust" ] \
+    || fail "a relaunch onto a hosted harness left the eviction watcher armed: $out"
+  pass "fm-spawn --relaunch: a retired poll's leftover registration does not own the check slot"
+}
+
+# The same abort as above, with that leftover registration present. A relaunch
+# that produced no worker may never leave a registered check behind, whatever
+# else is sitting beside it in the state directory.
+test_claude_local_relaunch_abort_retires_the_watcher_beside_a_stale_registration() {
+  local dir state out rc real_mv
+  dir=$(new_case claude-local-abort-stale rl51)
+  add_claude_local_task "$dir" rl51 loaded
+  state="$dir/home/state"
+  arm_pr_poll "$dir" rl51 https://github.com/my-org/repo/pull/11
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-unregister.sh" rl51 >/dev/null \
+    || fail "fixture: the documented slot handover could not be reversed"
+  [ -e "$state/rl51.pr-poll-registration" ] \
+    || fail "fixture: the retired poll left no stale registration to test against"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 FM_REAL_MV="$real_mv" \
+    FM_FAKE_META_PUBLISH_MV_FAIL="$state/rl51.meta" \
+    run_control "$dir" rl51 relaunch --note "abort beside a stale registration"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  [ ! -e "$state/rl51.check.sh" ] && [ ! -e "$state/rl51.check-trust" ] \
+    || fail "an aborted relaunch left its eviction watcher armed beside a stale registration: $out"
+  pass "fm-spawn relaunch: an abort retires its watcher even beside a retired poll's registration"
+}
+
 test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
 test_claude_local_relaunch_refuses_before_stop_when_the_task_ships_no_mistakes
+test_a_retired_polls_leftover_registration_does_not_own_the_slot
+test_claude_local_relaunch_abort_retires_the_watcher_beside_a_stale_registration
 test_bare_relaunch_keeps_a_merge_poll_it_did_not_arm
 test_bare_relaunch_still_retires_a_real_eviction_watcher
 test_bare_relaunch_is_not_a_claude_local_dispatch_default
