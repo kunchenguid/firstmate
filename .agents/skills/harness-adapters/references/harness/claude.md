@@ -27,8 +27,7 @@ A visible trust dialog means pre-registration did not take effect, so inspect th
 The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
 An operator accepts it once per machine instead, and it stays accepted, so answering it from a worker pane is never the normal path.
-Firstmate's own key vocabulary is Enter, Escape, and C-c, but `--key` is not limited to it: `fm_send_normalize_key` rewrites only the Escape spellings and passes every other name through, so what a selection-moving arrow can reach depends on the backend rather than on Firstmate.
-`Down` is verified on tmux alone.
+Firstmate's own key vocabulary is Enter, Escape, and C-c, but `--key` is not limited to it: the name is forwarded to the backend, so moving a selection inside a harness confirmation dialog means sending whatever key the backend in use accepts rather than a name Firstmate defines.
 Each backend guide under `../../../docs/` owns its own key vocabulary and what is verified there, so confirm the name in `tmux-backend.md`, `cmux-backend.md`, `herdr-backend.md`, `zellij-backend.md`, or `orca-backend.md` before spending gate time on it; a backend that will not take the name leaves the dialog to be answered from the pane.
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 
