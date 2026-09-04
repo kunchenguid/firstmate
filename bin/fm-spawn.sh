@@ -399,6 +399,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -2983,7 +2985,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  TREEHOUSE_ROOT_OPTION=$(fm_treehouse_root_option_for_home "$FM_ROOT" "$FM_HOME")
+  spawn_send_text_line "$WT_TARGET" "treehouse get${TREEHOUSE_ROOT_OPTION}"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
