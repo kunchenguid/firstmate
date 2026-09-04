@@ -252,7 +252,7 @@ run_spawn_record() {
 }
 
 test_spawn_tmux_window_construction() {
-  local home proj fakebin rec wt out status
+  local home proj fakebin rec wt out status expected_root expected_proxy project_key
   home="$TMP_ROOT/spawn-rec-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
@@ -279,8 +279,11 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  expected_root=$(cd "$home" && pwd -P)/state/treehouse
+  project_key=$(printf '%s' "$proj" | git -C "$proj" hash-object --stdin)
+  expected_proxy="$expected_root/proxy/$project_key"
+  assert_grep "send-keys -t @spawnwid cd $expected_proxy && HOME=$expected_root treehouse get Enter" "$rec" \
+    "treehouse get must carry the per-home root and use the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

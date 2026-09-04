@@ -424,6 +424,12 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 
+Each firstmate home uses its own absolute Treehouse root at `$FM_HOME/state/treehouse`, so its pooled slots can link only to that home's project clone.
+The spawn and cleanup paths scope Treehouse's default root to this directory for every get and return operation.
+Spawns use a private Git control directory under the same root so a project's `treehouse.toml` cannot redirect acquisition to another pool.
+The main home therefore uses this per-home root instead of the historical `~/.treehouse` pools, and existing shared pools are not migrated.
+The next spawn in each home creates its own pool, while old shared pools drain as their existing tasks finish.
+
 ### Backend selection order
 
 New spawns choose the backend in this order:

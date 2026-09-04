@@ -56,7 +56,12 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -104,13 +109,14 @@ EOF
 
 run_settle_spawn() {
   local id=$1
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  mkdir -p "$HOME_DIR/user-home"
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$HOME_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
@@ -132,6 +138,28 @@ test_single_stale_first_read_is_not_accepted() {
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
+}
+
+# The get command must carry the launching home's pool root, and the shell must
+# resume with its original HOME before the harness launch.
+test_spawn_get_uses_per_home_treehouse_root() {
+  local rec id out status expected_root expected_home project_key expected_proxy
+  id=settle-per-home-root-z3
+  rec=$(make_settle_case settle-per-home-root "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should succeed while recording the per-home Treehouse root"
+  expected_root=$(cd "$HOME_DIR" && pwd -P)/state/treehouse
+  expected_home=$(cd "$HOME_DIR/user-home" && pwd -P)
+  project_key=$(printf '%s' "$PROJ_DIR" | git -C "$PROJ_DIR" hash-object --stdin)
+  expected_proxy="$expected_root/proxy/$project_key"
+  assert_grep "cd $expected_proxy && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
+    "treehouse get did not receive the per-home root and control directory"
+  assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
+    "spawn did not restore the launching HOME after Treehouse acquisition"
+  pass "fm-spawn.sh scopes treehouse get to the launching home's pool and restores HOME"
 }
 
 # A pane that reports the real worktree from the very first read costs exactly
@@ -222,6 +250,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 }
 
 test_single_stale_first_read_is_not_accepted
+test_spawn_get_uses_per_home_treehouse_root
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

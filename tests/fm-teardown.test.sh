@@ -4073,6 +4073,28 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
+test_return_uses_per_home_treehouse_root() {
+  local case_dir rc expected_root
+  case_dir=$(make_case per-home-treehouse-root)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\${HOME:-}" > "$case_dir/treehouse-home.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "per-home-treehouse-root: teardown should succeed"
+  expected_root=$(cd "$case_dir" && pwd -P)/state/treehouse
+  assert_present "$case_dir/treehouse-home.log" \
+    "per-home-treehouse-root: teardown did not call treehouse return"
+  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root" ] || \
+    fail "per-home-treehouse-root: treehouse return used HOME '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
+  pass "fm-teardown.sh scopes treehouse return to the launching home's pool"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4391,4 +4413,5 @@ test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
+test_return_uses_per_home_treehouse_root
 test_run_abort_precedes_process_reap_precedes_worktree_removal
