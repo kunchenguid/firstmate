@@ -108,6 +108,7 @@ FM_TELEGRAM_CHAT_ID=
 # shellcheck disable=SC2034 # Read by sourcing callers.
 FM_TELEGRAM_TOKEN_FILE=
 FM_TELEGRAM_SECRET_ERROR_PATH=
+FM_TELEGRAM_CONFIG_ERROR=
 
 _fm_telegram_config_dir() {  # <home>
   printf '%s\n' "${FM_CONFIG_OVERRIDE:-$1/config}"
@@ -146,9 +147,10 @@ _fm_telegram_chat_id_valid() {  # <id>
 # the token file is present and usable; every other case returns 1 in silence,
 # which keeps every automatic caller unchanged in an unconfigured home.
 fm_telegram_config_load() {  # <home>
-  local home=$1 chat token
+  local home=$1 chat token device
   FM_TELEGRAM_CHAT_ID=
   FM_TELEGRAM_TOKEN_FILE=
+  FM_TELEGRAM_CONFIG_ERROR=
   chat=$(_fm_telegram_config_read "$home" telegram-chat-id) || return 1
   _fm_telegram_chat_id_valid "$chat" || return 1
   token=$(_fm_telegram_config_read "$home" telegram-token-path) \
@@ -156,8 +158,17 @@ fm_telegram_config_load() {  # <home>
   # A leading "~/" in the recorded path is expanded here, because the path is
   # config data rather than shell input and never passes through an expansion.
   [ "${token#\~/}" = "$token" ] || token="$HOME/${token#\~/}"
-  [ -f "$token" ] && [ ! -L "$token" ] && [ -r "$token" ] || return 1
+  [ -e "$token" ] || [ -L "$token" ] || return 1
+  if [ ! -f "$token" ] || [ -L "$token" ] || [ ! -r "$token" ]; then
+    FM_TELEGRAM_CONFIG_ERROR="token file $token must be owned by the current user with mode 0600"
+    return 2
+  fi
   [ -s "$token" ] || return 1
+  device=$(fm_pr_file_device "$token") || return 1
+  if ! fm_pr_private_file_valid "$token" 600 "$device"; then
+    FM_TELEGRAM_CONFIG_ERROR="token file $token must be owned by the current user with mode 0600"
+    return 2
+  fi
   fm_telegram_token_usable "$token" || return 1
   # shellcheck disable=SC2034 # Read by sourcing callers.
   FM_TELEGRAM_CHAT_ID=$chat

@@ -51,8 +51,9 @@
 # FM_TELEGRAM_STALE_SECS (default 3600, 0 disables) is how long the queue may
 # stop moving before that silence is itself reported, so a channel that has
 # quietly stopped delivering cannot pass for a quiet one.
-# FM_TELEGRAM_API_BASE (default https://api.telegram.org) exists so a test can
-# point the sender at a local server; production never sets it.
+# FM_TELEGRAM_API_BASE defaults to https://api.telegram.org and accepts an
+# override only for 127.0.0.1, ::1, or localhost, so tests cannot redirect a
+# credential or card off-box.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,6 +89,11 @@ STALE_SECS=${FM_TELEGRAM_STALE_SECS:-3600}
 case "$STALE_SECS" in ''|*[!0-9]*) STALE_SECS=3600 ;; esac
 
 API_BASE=${FM_TELEGRAM_API_BASE:-https://api.telegram.org}
+
+telegram_api_base_valid() {
+  [ "$API_BASE" = https://api.telegram.org ] && return 0
+  [[ "$API_BASE" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?/?$ ]]
+}
 
 usage() {
   cat <<'EOF'
@@ -269,8 +275,17 @@ report_stalled_queue() {  # <oldest-card>
 }
 
 action_check() {
-  local card code body sent=0 oldest='' text secret_rc
-  fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1 || exit 0
+  local card code body sent=0 oldest='' text secret_rc config_rc=0
+  fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1 || config_rc=$?
+  case "$config_rc" in
+    0) ;;
+    2) emit_error_once "$FM_TELEGRAM_CONFIG_ERROR"; exit 0 ;;
+    *) exit 0 ;;
+  esac
+  telegram_api_base_valid || {
+    emit_error_once "refused non-loopback Telegram API endpoint: $API_BASE"
+    exit 0
+  }
   command -v curl >/dev/null 2>&1 || { emit_error_once "cannot send: curl is not installed"; exit 0; }
   body=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-body.XXXXXX") || exit 0
   trap 'rm -f -- "$body"' EXIT
@@ -332,9 +347,12 @@ action_check() {
 }
 
 action_status() {
-  local dir count=0 card
-  if fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1; then
+  local dir count=0 card config_rc=0
+  fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1 || config_rc=$?
+  if [ "$config_rc" -eq 0 ]; then
     printf 'configured: yes (token path %s)\n' "$FM_TELEGRAM_TOKEN_FILE"
+  elif [ "$config_rc" -eq 2 ]; then
+    printf 'configured: error (%s)\n' "$FM_TELEGRAM_CONFIG_ERROR"
   else
     printf 'configured: no\n'
   fi
@@ -373,8 +391,13 @@ arm_rollback() {
 }
 
 action_arm() {
-  local home want device tmp config_dir
-  if ! fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1; then
+  local home want device tmp config_dir config_rc=0
+  fm_telegram_config_load "$FM_HOME" >/dev/null 2>&1 || config_rc=$?
+  if [ "$config_rc" -ne 0 ]; then
+    if [ "$config_rc" -eq 2 ]; then
+      printf 'fm-telegram-send: %s\n' "$FM_TELEGRAM_CONFIG_ERROR" >&2
+      return 1
+    fi
     config_dir=$(_fm_telegram_config_dir "$FM_HOME")
     printf 'fm-telegram-send: arm requires a numeric chat id in %s/telegram-chat-id and a mode-0600 bot token at the path in %s/telegram-token-path (default %s/.mist-telegram-token)\n' \
       "$config_dir" "$config_dir" "$HOME" >&2

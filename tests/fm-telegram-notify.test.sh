@@ -235,6 +235,50 @@ test_an_unusable_token_file_is_inert() {
   pass "a token file that is not one line of credential is the absent feature, and a padded config value is not"
 }
 
+test_unsafe_token_permissions_are_a_visible_configuration_error() {
+  local dir base out rc=0
+  dir=$(make_home unsafe-token)
+  chmod 0644 "$dir/token"
+  out=$(report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
+    "project=alpha" "note=the build broke" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "unsafe token permissions changed the publisher result"
+  [ -z "$out" ] || fail "unsafe token permissions made a publisher speak: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "unsafe token permissions allowed a card to queue"
+
+  rc=0
+  out=$(run_send "$dir" '' arm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted an over-permissive token file"
+  case "$out" in
+    *"$dir/token"*"0600"*) ;;
+    *) fail "arm did not name the unsafe token and required mode: $out" ;;
+  esac
+  out=$(run_send "$dir" '' status 2>&1) || fail "status failed for an unsafe token"
+  case "$out" in
+    *"configured: error"*"$dir/token"*"0600"*) ;;
+    *) fail "status hid the unsafe token configuration: $out" ;;
+  esac
+
+  chmod 0600 "$dir/token"
+  report "$dir" "failed [key=k2]: child t1 failed: x" failed k2 \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  [ "$(card_count "$dir")" = 1 ] || fail "repairing token permissions did not allow queueing"
+  base=$(start_api "$dir")
+  chmod 0644 "$dir/token"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the unsafe-token drain failed"
+  case "$out" in
+    *"$dir/token"*"0600"*) ;;
+    *) fail "the drain did not report unsafe token permissions: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "unsafe token permissions discarded the queued card"
+  [ ! -s "$dir/api.log" ] || fail "unsafe token permissions allowed a send"
+  chmod 0600 "$dir/token"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the repaired-token drain failed"
+  [ -z "$out" ] || fail "the repaired-token drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the repaired token did not send the queued card"
+  stop_api
+  pass "unsafe token permissions are visible and prevent queueing and sending"
+}
+
 test_absent_token_is_inert() {
   local dir out rc=0
   dir=$(make_home no-token)
@@ -690,6 +734,30 @@ test_semantic_success_response_is_accepted() {
   pass "Telegram success is read semantically independent of field order"
 }
 
+test_non_loopback_api_override_is_refused() {
+  local dir base out
+  dir=$(make_home unsafe-api-base)
+  report "$dir" "failed [key=k1]: child t1 failed: x" failed k1 \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  base=$(start_api "$dir")
+  out=$(run_send "$dir" 'https://attacker.example' check 2>&1) \
+    || fail "the rejected-endpoint drain failed"
+  case "$out" in
+    *"https://attacker.example"*) ;;
+    *) fail "the rejected API endpoint was not reported: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "a rejected API endpoint discarded the card"
+  [ ! -s "$dir/api.log" ] || fail "a rejected API endpoint sent card data"
+  out=$(run_send "$dir" 'https://attacker.example' check 2>&1) \
+    || fail "the repeated rejected-endpoint drain failed"
+  [ -z "$out" ] || fail "a rejected API endpoint was reported more than once: $out"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the loopback recovery drain failed"
+  [ -z "$out" ] || fail "the loopback recovery drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the accepted loopback endpoint did not send the card"
+  stop_api
+  pass "API overrides are restricted to loopback and rejected without card loss"
+}
+
 test_malformed_success_response_is_rejected() {
   local dir base out
   dir=$(make_home malformed-response)
@@ -783,6 +851,7 @@ test_arm_and_disarm() {
 test_unconfigured_home_is_inert
 test_absent_token_is_inert
 test_an_unusable_token_file_is_inert
+test_unsafe_token_permissions_are_a_visible_configuration_error
 test_card_is_built_from_typed_fields
 test_all_four_classes_render
 test_multibyte_fields_remain_valid_utf8_when_truncated
@@ -798,6 +867,7 @@ test_secondmate_failure_cards_track_incarnations
 test_merge_recording_survives_card_digest_failure
 test_drain_sends_and_never_listens
 test_semantic_success_response_is_accepted
+test_non_loopback_api_override_is_refused
 test_malformed_success_response_is_rejected
 test_outage_retries_silently_and_a_rejection_reports_once
 test_arm_and_disarm

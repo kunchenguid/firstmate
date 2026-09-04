@@ -265,7 +265,7 @@ fm_pr_sha256() {
 
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
   [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
