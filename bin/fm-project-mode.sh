@@ -32,10 +32,12 @@
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
+# --strict exits nonzero instead of falling back when the registry, project, or
+# registered mode is unresolved.
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] [--] <project-name>
+# Usage: fm-project-mode.sh [--raw] [--strict] [--] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,16 +46,22 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-if [ "${1:-}" = "--" ]; then
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] [--] <project-name>}
+STRICT=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --raw) RAW=1; shift ;;
+    --strict) STRICT=1; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+NAME=${1:?usage: fm-project-mode.sh [--raw] [--strict] [--] <project-name>}
 
 if [ ! -f "$REG" ]; then
+  if [ "$STRICT" -eq 1 ]; then
+    echo "warn: no registry at $REG; cannot resolve $NAME" >&2
+    exit 1
+  fi
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
@@ -76,6 +84,10 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  if [ "$STRICT" -eq 1 ]; then
+    echo "warn: project \"$NAME\" not in registry; cannot resolve mode" >&2
+    exit 1
+  fi
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
@@ -85,7 +97,15 @@ mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  *)
+    if [ "$STRICT" -eq 1 ]; then
+      echo "warn: unknown mode \"$mode\" for $NAME; cannot resolve mode" >&2
+      exit 1
+    fi
+    echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2
+    mode=no-mistakes
+    yolo=off
+    ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 # A conditional policy is not a task mode. Mechanical callers get its most

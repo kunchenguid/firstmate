@@ -400,7 +400,7 @@ STUB
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
 test_project_mode_maps_the_conditional_policy() {
-  local home out err
+  local home missing_home out err status
   home="$TMP_ROOT/project-mode/home"
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
@@ -427,11 +427,31 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" -- --raw 2>/dev/null)
   [ "$out" = "local-only off" ] || fail "the option boundary did not preserve an option-shaped project name (got '$out')"
 
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- flatproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "strict lookup rejected a recognized registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a project missing from the registry"
+  [ -z "$out" ] || fail "strict missing-project lookup emitted fallback output '$out'"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
-  pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- typoproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted an unknown registered mode"
+  [ -z "$out" ] || fail "strict unknown-mode lookup emitted fallback output '$out'"
+
+  missing_home="$TMP_ROOT/project-mode/missing-home"
+  mkdir -p "$missing_home/data"
+  out=$(FM_HOME="$missing_home" "$PROJECT_MODE" --strict -- prodproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted an absent registry"
+  [ -z "$out" ] || fail "strict absent-registry lookup emitted fallback output '$out'"
+  pass "fm-project-mode: registered modes map normally while strict lookup rejects unresolved registry state"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the

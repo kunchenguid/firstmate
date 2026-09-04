@@ -83,18 +83,19 @@ project_label() {
 }
 
 project_mode_allows_pruning() (
-  local clone_root=$1 candidate candidate_root registry_key mode_line mode
+  local clone_root=$1 candidate candidate_root registry_key mode_line mode matched=0
   shopt -s dotglob nullglob
   for candidate in "$PROJECTS"/*; do
     [ -d "$candidate" ] || continue
     candidate_root=$(CDPATH='' cd -P -- "$candidate" 2>/dev/null && pwd -P) || continue
     [ "$candidate_root" = "$clone_root" ] || continue
+    matched=1
     registry_key=$(basename -- "$candidate")
-    mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" -- "$registry_key" 2>/dev/null) || return 1
+    mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" --strict -- "$registry_key" 2>/dev/null) || return 1
     mode=${mode_line%% *}
     [ "$mode" != "local-only" ] || return 1
   done
-  return 0
+  [ "$matched" -eq 1 ]
 )
 
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
