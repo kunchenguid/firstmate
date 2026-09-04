@@ -276,7 +276,8 @@ family_for_basename() {
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
-    fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
+    fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-trust-live-e2e.test.sh|\
+    fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
@@ -569,6 +570,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm.test.sh 60709
 tests/fm-cmux-claude-composer-live-e2e.test.sh 23
 tests/fm-codex-continuity-live-e2e.test.sh 21
+tests/fm-codex-hook-trust-live-e2e.test.sh 21
 tests/fm-composer-matrix-live-e2e.test.sh 23
 tests/fm-control-relaunch.test.sh 48210
 tests/fm-control.test.sh 37798
@@ -1295,6 +1297,8 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      [ "$path" != bin/fm-spawn.sh ] \
+        || printf '%s\n' "__script__:fm-codex-hook-trust-live-e2e.test.sh"
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
