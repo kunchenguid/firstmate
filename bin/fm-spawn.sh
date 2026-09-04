@@ -3327,7 +3327,12 @@ if [ -n "$WORKER_GIT_GUARD_DIR" ]; then
     WORKER_GIT_VERIFY_ATTEMPT=$((WORKER_GIT_VERIFY_ATTEMPT + 1))
   done
   [ -f "$WORKER_GIT_GUARD_READY" ] || {
-    echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command" >&2
+    if [ "$RELAUNCH" -eq 0 ]; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+      echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command and preserving task record $STATE/$ID.meta for endpoint $T and local copy $WT recovery" >&2
+    else
+      echo "error: worker Git isolation guard could not be verified first on PATH; refusing to append the launch command" >&2
+    fi
     exit 1
   }
 fi

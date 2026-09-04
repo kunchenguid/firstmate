@@ -148,7 +148,7 @@ test_missing_binding_fails_closed() {
 
 test_spawn_freezes_and_exports_guard() {
   local id tasktmp guard_path guard_dir case_dir home primary worktree fakebin launch_log out rc path_line launch_line
-  local dropped_id dropped_tasktmp dropped_home dropped_primary dropped_worktree dropped_log
+  local dropped_id dropped_tasktmp dropped_home dropped_primary dropped_worktree dropped_log dropped_meta endpoint_state
   id="worker-git-spawn-$$"
   tasktmp="/tmp/fm-$id"
   FM_TEST_CLEANUP_DIRS+=("$tasktmp")
@@ -170,7 +170,18 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_ENDPOINT_STATE:-}" ] || cat "$FM_FAKE_ENDPOINT_STATE" 2>/dev/null || true
+    exit 0
+    ;;
+  new-window)
+    if [ -n "${FM_FAKE_ENDPOINT_STATE:-}" ]; then
+      printf '%s\n' "${FM_FAKE_ENDPOINT_WINDOW:?}" > "$FM_FAKE_ENDPOINT_STATE"
+    fi
+    printf '@1\n'
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     shift
     while [ "$#" -gt 0 ]; do
@@ -232,11 +243,14 @@ SH
   dropped_primary="$case_dir/dropped-project"
   dropped_worktree="$case_dir/dropped-worktree"
   dropped_log="$case_dir/dropped-launch.log"
+  dropped_meta="$dropped_home/state/$dropped_id.meta"
+  endpoint_state="$case_dir/dropped-endpoint"
   fm_test_spawn_home "$dropped_home" codex
   fm_test_spawn_brief "$dropped_home" "$dropped_id"
   fm_git_worktree "$dropped_primary" "$dropped_worktree" guard-dropped-base
   : > "$dropped_log"
   out=$(FM_FAKE_DROP_GIT_GUARD_EXPORT=1 FM_FAKE_LAUNCH_LOG="$dropped_log" \
+    FM_FAKE_ENDPOINT_STATE="$endpoint_state" FM_FAKE_ENDPOINT_WINDOW="fm-$dropped_id" \
     fm_test_run_spawn "$dropped_home" "$dropped_worktree" "$fakebin" \
     "$dropped_id" "$dropped_primary" --harness codex --mode no-mistakes --yolo off)
   rc=$?
@@ -246,6 +260,24 @@ SH
   if grep -q 'encode launch-brief' "$dropped_log"; then
     fail "spawn appended the worker launch after its Git guard activation was unverified"
   fi
+  assert_present "$dropped_meta" "the refused fresh spawn discarded its endpoint recovery record"
+  assert_grep "window=firstmate:fm-$dropped_id" "$dropped_meta" \
+    "the recovery record lost the exact refused endpoint"
+  assert_grep "endpoint_task_id=$dropped_id" "$dropped_meta" \
+    "the recovery record lost its task identity binding"
+  assert_grep "worktree=$dropped_worktree" "$dropped_meta" \
+    "the recovery record lost the exact local copy"
+  assert_grep "project=$dropped_primary" "$dropped_meta" \
+    "the recovery record lost the exact primary checkout"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$dropped_log" \
+    FM_FAKE_ENDPOINT_STATE="$endpoint_state" FM_FAKE_ENDPOINT_WINDOW="fm-$dropped_id" \
+    fm_test_run_spawn "$dropped_home" "$dropped_worktree" "$fakebin" \
+    "$dropped_id" "$dropped_primary" --harness codex --mode no-mistakes --yolo off)
+  rc=$?
+  expect_code 1 "$rc" "a retry must refuse the retained fresh endpoint"
+  assert_contains "$out" "window firstmate:fm-$dropped_id already exists" \
+    "the retry did not refuse the exact retained endpoint"
   pass "fm-spawn: every new ship/scout process tree verifies its frozen Git guard before launch"
 }
 
