@@ -50,9 +50,11 @@
 #   project=<project-key>
 #   task=<task-id><TAB>url=<canonical-pr-url>
 #   ...
-# The task rows are queue order. Writers hold the per-project lock, validate the
-# complete old state, publish a complete same-device temporary by atomic rename,
-# and validate the result. Project keys and task IDs are confined path-safe
+# The task rows are queue order, and a drained queue keeps its two-line file
+# with no task rows: an existing empty queue and no queue at all both mean the
+# project has no front. Writers hold the per-project lock, validate the complete
+# old state, publish a complete same-device temporary by atomic rename, and
+# validate the result. Project keys and task IDs are confined path-safe
 # slugs; PR/MR URLs use bin/fm-pr-lib.sh's canonical parser. PR registration
 # derives the project key from the task metadata's project= path with a pure,
 # deterministic mapping: the checkout basename with every character outside
