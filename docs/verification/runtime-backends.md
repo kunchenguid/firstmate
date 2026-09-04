@@ -951,10 +951,11 @@ Observed output, trimmed to the fields the script reads:
 
 ```text
 {"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t2","workspace_id":"w1"},"type":"pane_info"}}
-{"shell_pid":310746,"foreground_process_group_id":311020,"fg":[{"pid":311020,"name":"no-mistakes","argv":["no-mistakes","attach","--run","01M1N34KQRJG1Z3PFWDHTNBPTH"]}]}
-{"shell_pid":310746,"foreground_process_group_id":310746,"fg":[{"pid":310746,"name":"zsh","argv":["/usr/bin/zsh"]}]}
+{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":310746,"foreground_process_group_id":311020,"foreground_processes":[{"pid":311020,"name":"no-mistakes","argv":["no-mistakes","attach","--run","01M1N34KQRJG1Z3PFWDHTNBPTH"]}]}}}
+{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":310746,"foreground_process_group_id":310746,"foreground_processes":[{"pid":310746,"name":"zsh","argv":["/usr/bin/zsh"]}]}}}
 ```
 
+The script classifies the foreground from `result.process_info` alone: `pane_id` must match, `foreground_process_group_id` equal to `shell_pid` is the idle shell, a `foreground_processes` entry named `no-mistakes` whose `argv` contains `attach` is the viewer, and anything else is the waiting loop.
 The viewer on a finished run stayed attached until `q`, a plain `no-mistakes attach` with no active run exited immediately with status 0, and a `while ...; do ...; done` string passed as one `pane run` argument executed as a single command line whose `sleep` became the foreground process until `ctrl+c` returned the shell.
 `tests/fm-nm-review-pane.test.sh` pins the script's logic against a fake that models exactly these shapes; rerun the lab commands above after a Herdr or no-mistakes upgrade before trusting this record.
 

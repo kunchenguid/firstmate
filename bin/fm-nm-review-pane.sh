@@ -50,20 +50,31 @@
 # bin/fm-nm-run-lib.sh's fm_nm_run_checked, FM_NM_REVIEW_PANE_NM_TIMEOUT seconds,
 # default 20). Only the top-level `run:` block counts, and only when its branch
 # equals the worktree's current branch; an `other_branch_run:` block, a run list
-# without a `run:` block, and an absent no-mistakes CLI all mean "no run yet". A
-# failed or timed-out status call is unknown and leaves the pane untouched.
+# without a `run:` block, and an absent no-mistakes CLI all mean "no run yet".
+# The status read is repo-wide, so a `run:` block naming another branch says
+# nothing about this task (another ship task on the same project may be running)
+# and is unknown, exactly like a failed or timed-out status call; unknown leaves
+# an existing pane untouched and gives a freshly split pane the waiting loop.
 #
 # Pointing. The desired viewer is `no-mistakes attach --run <id>` when a run
 # exists, otherwise a small shell loop that reprints a waiting line every few
 # seconds. When the record already names that exact run and viewer, the call is
-# a no-op (the status call is its whole cost). Otherwise the pane is quiesced
-# and the viewer is started with `herdr pane run <pane> "<one shell string>"`.
+# a no-op (the status call is its whole cost). A pane already pointed at a run
+# is never returned to the waiting loop, because a run id never disappears:
+# "no run yet" against a record that names a run is a no-op too. Otherwise the
+# pane is quiesced and the viewer is started with
+# `herdr pane run <pane> "<one shell string>"`.
 # Quiescing reads `herdr pane process-info --pane <pane>` and acts only on what
 # it proves: a foreground `no-mistakes attach` gets `q`, any other foreground
 # process (the waiting loop's sleep) gets ctrl+c, an idle shell needs nothing,
 # and an unreadable process table refuses to send keys or run anything, so a
-# stray key can never be typed into an unknown program. A freshly split pane
-# skips quiescing.
+# stray key can never be typed into an unknown program. The key is sent once
+# per foreground classification change and then the pane is only polled for
+# the shell, because a viewer that process-info still lists can be gone by the
+# time the next key lands and `q` typed at a prompt would corrupt the next
+# `pane run` command line; it is re-sent only after
+# FM_NM_REVIEW_PANE_QUIESCE_RESEND_POLLS (default 3) consecutive polls still
+# show the same non-shell foreground. A freshly split pane skips quiescing.
 #
 # Empirical observations (no-mistakes 2026-09-03, Herdr 0.8.2 protocol 20,
 # Linux, isolated fm-herdr-lab session):
@@ -98,7 +109,9 @@
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE as everywhere
 # else; FM_NM_REVIEW_PANE_NM_TIMEOUT (seconds, default 20) bounds the status
-# call; FM_NM_REVIEW_PANE_QUIESCE_POLLS (default 10) bounds the detach wait.
+# call; FM_NM_REVIEW_PANE_QUIESCE_POLLS (default 10) bounds the detach wait;
+# FM_NM_REVIEW_PANE_QUIESCE_RESEND_POLLS (default 3) is the number of
+# consecutive unchanged non-shell polls before the detach key is sent again.
 set -u
 
 FM_NM_REVIEW_PANE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -183,7 +196,7 @@ fm_nm_review_pane_record_write() {  # <record> <session> <pane> <run> <viewer>
 # fm_nm_review_pane_current_run <worktree>: print "<run-id>" for the current
 # branch's active or most recent run and return 0; print nothing and return 0
 # when no run exists yet; return 1 when the answer is unknown (status call
-# failed or timed out).
+# failed or timed out, or the top-level run belongs to another branch).
 fm_nm_review_pane_current_run() {  # <worktree>
   local wt=$1 timeout=${FM_NM_REVIEW_PANE_NM_TIMEOUT:-20} out block id branch head_branch
   command -v no-mistakes >/dev/null 2>&1 || return 0
@@ -195,7 +208,7 @@ fm_nm_review_pane_current_run() {  # <worktree>
   branch=$(fm_nm_strip_quotes "$(fm_nm_field "$block" branch)")
   head_branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
   if [ -n "$branch" ] && [ -n "$head_branch" ] && [ "$head_branch" != HEAD ] && [ "$branch" != "$head_branch" ]; then
-    return 0
+    return 1
   fi
   printf '%s' "$id"
 }
@@ -220,19 +233,30 @@ fm_nm_review_pane_foreground() {  # <session> <pane>
 }
 
 # fm_nm_review_pane_quiesce <session> <pane>: return the pane to an idle shell
-# by detaching a viewer (`q`) or interrupting the waiting loop (ctrl+c). 0 once
-# the shell is the foreground; 1 when the foreground stays unknown or busy
-# after the bounded budget, in which case nothing else may be sent.
+# by detaching a viewer (`q`) or interrupting the waiting loop (ctrl+c). The
+# key is sent when the foreground classification changes and again only after
+# several consecutive polls still show the same non-shell foreground; between
+# sends the pane is only polled. 0 once the shell is the foreground; 1 when the
+# foreground stays unknown or busy after the bounded budget, in which case
+# nothing else may be sent.
 fm_nm_review_pane_quiesce() {  # <session> <pane>
   local session=$1 pane=$2 polls=${FM_NM_REVIEW_PANE_QUIESCE_POLLS:-10} attempt=0 fg
+  local resend=${FM_NM_REVIEW_PANE_QUIESCE_RESEND_POLLS:-3} last='' since_send=0 key
   while :; do
     fg=$(fm_nm_review_pane_foreground "$session" "$pane")
     case "$fg" in
       shell) return 0 ;;
-      viewer) fm_backend_herdr_cli "$session" pane send-keys "$pane" q >/dev/null 2>&1 || return 1 ;;
-      other) fm_backend_herdr_cli "$session" pane send-keys "$pane" ctrl+c >/dev/null 2>&1 || return 1 ;;
+      viewer) key=q ;;
+      other) key=ctrl+c ;;
       *) return 1 ;;
     esac
+    if [ "$fg" != "$last" ] || [ "$since_send" -ge "$resend" ]; then
+      fm_backend_herdr_cli "$session" pane send-keys "$pane" "$key" >/dev/null 2>&1 || return 1
+      since_send=0
+    else
+      since_send=$((since_send + 1))
+    fi
+    last=$fg
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$polls" ] || break
     sleep "${FM_NM_REVIEW_PANE_QUIESCE_SLEEP:-0.3}"
@@ -316,6 +340,10 @@ fm_nm_review_pane_ensure() {  # <state-dir> <config-dir> <task-id>
   fi
   if [ -n "$run" ]; then desired_viewer="attach"; else desired_viewer="wait"; fi
   if [ "$fresh" = 0 ] && [ "$FM_NM_REVIEW_REC_RUN" = "$run" ] && [ "$FM_NM_REVIEW_REC_VIEWER" = "$desired_viewer" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  if [ -z "$run" ] && [ -n "$FM_NM_REVIEW_REC_RUN" ]; then
     fm_lock_release "$lock"
     return 0
   fi

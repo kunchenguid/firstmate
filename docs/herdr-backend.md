@@ -179,7 +179,9 @@ The pane runs `no-mistakes attach --run <id>` for the branch's current run, so t
 It is created once, right after a successful spawn, and shows a small waiting line until the branch's first run exists.
 Supervision re-reads the branch's current run on a bounded cadence and re-points the same pane at each new run id instead of opening another pane: a still-attached viewer is detached with `q`, the waiting loop is interrupted with `ctrl+c`, and the next viewer is started with Herdr's run primitive.
 Keys are sent only after `pane process-info` proves what is in the foreground; an unreadable process table leaves the pane alone rather than typing into an unknown program.
+The detach key is sent once per foreground change and the pane is then only polled for its shell, with a re-send only after several consecutive polls still show the same program, so a viewer that exits between polls never receives a stray `q` at its shell prompt.
 A call that finds the pane already pointed at the current run does nothing beyond the status read.
+The status read is repo-wide, so a run that belongs to another branch, like a failed or timed-out read, leaves the pane untouched, and a pane already pointed at a run is never returned to the waiting line.
 A pane the captain closed by hand is recreated once; an ambiguous presence read refuses and keeps the record.
 The home opts out with `off` in local gitignored `config/nm-review-pane`, which is inherited into secondmate homes; [`configuration.md`](configuration.md#no-mistakes-review-pane-confignm-review-pane) owns the accepted values and cadence knobs.
 

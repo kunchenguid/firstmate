@@ -23,10 +23,20 @@
 #   (e) re-point on a new run id: ctrl+c to the loop, attach --run <id>; the
 #       same run again is a no-op; a newer run gets q then attach; one split total
 #   (f) an other-branch run and a run whose branch is not the worktree's both
-#       mean "no run yet"
+#       mean "no run yet" for a fresh pane, and a run: block for another branch
+#       or no run at all leaves a pane already pointed at a run untouched
 #   (g) a record whose pane is gone is recreated once; an ambiguous presence refuses
 #   (h) teardown closes the review pane under the session lock and removes the
 #       record; a pane that will not close keeps its record with a warning
+#   (i) quiesce sends q once and only polls afterwards, so a viewer that exits
+#       between polls never gets a stray q at its shell; a viewer that ignores
+#       the first q gets it again only after several unchanged polls
+#
+# Fake knobs: FM_FAKE_HERDR_DETACH_LAG=<n> keeps a viewer listed by
+# process-info for n reads after q (a second q in that window lands on the
+# shell); FM_FAKE_HERDR_IGNORE_Q=<n> makes the viewer ignore its first n q keys.
+# Any key that arrives while the shell is the foreground is appended to the
+# pane's "typed" field, the observable stray-key evidence.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -101,6 +111,12 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"pane":%s,"type":"pane_info"}}\n' "$(pane_json "$new")" ;;
   "pane process-info")
     p=$4
+    if [ "$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].detach_after // empty')" != "" ]; then
+      state=$(printf '%s' "$state" | jq -c --arg p "$p" '
+        .panes[$p].detach_after -= 1
+        | if .panes[$p].detach_after <= 0 then .panes[$p] |= (del(.detach_after) | .fg = "shell" | .run = "") else . end')
+      save "$state"
+    fi
     fg=$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].fg // empty')
     run=$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].run // empty')
     case "$fg" in
@@ -112,10 +128,22 @@ case "${1:-} ${2:-}" in
   "pane send-keys")
     p=$3; key=$4
     fg=$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].fg // empty')
-    if { [ "$key" = q ] && [ "$fg" = viewer ]; } || { [ "$key" = ctrl+c ] && [ "$fg" = loop ]; }; then
+    if [ "$fg" = shell ]; then
+      state=$(printf '%s' "$state" | jq -c --arg p "$p" --arg k "$key" '.panes[$p].typed = ((.panes[$p].typed // "") + $k)')
+    elif [ "$key" = q ] && [ "$fg" = viewer ]; then
+      if [ "$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].detach_after // empty')" != "" ]; then
+        state=$(printf '%s' "$state" | jq -c --arg p "$p" --arg k "$key" '.panes[$p] |= (del(.detach_after) | .fg = "shell" | .run = "" | .typed = ((.typed // "") + $k))')
+      elif [ "$(printf '%s' "$state" | jq -r --arg p "$p" '.panes[$p].ignored_q // 0')" -lt "${FM_FAKE_HERDR_IGNORE_Q:-0}" ]; then
+        state=$(printf '%s' "$state" | jq -c --arg p "$p" '.panes[$p].ignored_q = ((.panes[$p].ignored_q // 0) + 1)')
+      elif [ "${FM_FAKE_HERDR_DETACH_LAG:-0}" -gt 0 ]; then
+        state=$(printf '%s' "$state" | jq -c --arg p "$p" --argjson n "$FM_FAKE_HERDR_DETACH_LAG" '.panes[$p].detach_after = $n')
+      else
+        state=$(printf '%s' "$state" | jq -c --arg p "$p" '.panes[$p].fg = "shell" | .panes[$p].run = ""')
+      fi
+    elif [ "$key" = ctrl+c ] && [ "$fg" = loop ]; then
       state=$(printf '%s' "$state" | jq -c --arg p "$p" '.panes[$p].fg = "shell" | .panes[$p].run = ""')
-      save "$state"
-    fi ;;
+    fi
+    save "$state" ;;
   "pane run")
     p=$3; cmd=$4
     case "$cmd" in
@@ -184,6 +212,14 @@ herdr_calls() {  # <case> <verb> <subverb>
 
 pane_fg() {  # <case> <pane>
   jq -r --arg p "$2" '.panes[$p].fg // "gone"' "$1/herdr-state.json"
+}
+
+pane_run() {  # <case> <pane>
+  jq -r --arg p "$2" '.panes[$p].run // ""' "$1/herdr-state.json"
+}
+
+pane_typed() {  # <case> <pane>
+  jq -r --arg p "$2" '.panes[$p].typed // ""' "$1/herdr-state.json"
 }
 
 record_field() {  # <case> <id> <key>
@@ -363,6 +399,114 @@ test_other_branch_runs_are_not_this_tasks_run() {
   pass "fm-nm-review-pane: only the worktree branch's own run: block counts as the current run"
 }
 
+test_foreign_branch_run_and_missing_run_leave_pointed_pane_alone() {
+  local dir id=foreign rc
+  dir=$(make_case foreign)
+  write_meta "$dir" "$id"
+  write_status_run "$dir" 01RUNMINEAAAAAAAAAAAAAAAAA "fm/$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "setup attach failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(pane_fg "$dir" w1:p3)" = viewer ] || fail "setup: the pane should run the viewer"
+  [ "$(record_field "$dir" "$id" run)" = 01RUNMINEAAAAAAAAAAAAAAAAA ] || fail "setup: record must hold the run"
+
+  # another ship task's run is the repo-wide top-level run: block
+  : > "$dir/herdr.log"
+  write_status_run "$dir" 01RUNTHEIRSAAAAAAAAAAAAAAA fm/other-ship-task
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "foreign-branch call failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(herdr_calls "$dir" pane send-keys)" = 0 ] || fail "another branch's run must not detach the live viewer: $(cat "$dir/herdr.log")"
+  [ "$(herdr_calls "$dir" pane run)" = 0 ] || fail "another branch's run must not re-point the pane"
+  [ "$(pane_fg "$dir" w1:p3)" = viewer ] || fail "the viewer must still be attached after a foreign-branch status"
+  [ "$(pane_run "$dir" w1:p3)" = 01RUNMINEAAAAAAAAAAAAAAAAA ] || fail "the viewer must still follow this task's run"
+  [ "$(record_field "$dir" "$id" run)" = 01RUNMINEAAAAAAAAAAAAAAAAA ] || fail "record must keep this task's run"
+  [ "$(record_field "$dir" "$id" viewer)" = attach ] || fail "record viewer must stay attach"
+
+  # no run at all against a record that names one: a run id never disappears
+  : > "$dir/herdr.log"
+  write_status_none "$dir"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "no-run call failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(herdr_calls "$dir" pane send-keys)" = 0 ] || fail "a pointed pane must never be sent back to the waiting loop: $(cat "$dir/herdr.log")"
+  [ "$(herdr_calls "$dir" pane run)" = 0 ] || fail "a pointed pane must not be re-pointed at the waiting loop"
+  [ "$(pane_fg "$dir" w1:p3)" = viewer ] || fail "the viewer must survive a status without a run"
+  [ "$(record_field "$dir" "$id" run)" = 01RUNMINEAAAAAAAAAAAAAAAAA ] || fail "record must keep the run when status shows none"
+
+  # this task's next run still re-points
+  : > "$dir/herdr.log"
+  write_status_run "$dir" 01RUNMINEBBBBBBBBBBBBBBBBB "fm/$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "own next run failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(pane_run "$dir" w1:p3)" = 01RUNMINEBBBBBBBBBBBBBBBBB ] || fail "this task's next run must still re-point the pane"
+  [ "$(herdr_calls "$dir" pane split)" = 0 ] || fail "the whole sequence must reuse one pane"
+
+  # a fresh pane with only another branch's run: block still gets the waiting loop
+  id=foreign-fresh
+  dir=$(make_case "$id")
+  write_meta "$dir" "$id"
+  write_status_run "$dir" 01RUNTHEIRSAAAAAAAAAAAAAAA fm/other-ship-task
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "fresh foreign-branch call failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(herdr_calls "$dir" pane split)" = 1 ] || fail "a fresh pane must still be created under a foreign-branch status"
+  [ "$(pane_fg "$dir" w1:p3)" = loop ] || fail "a fresh pane under a foreign-branch status runs the waiting loop"
+  [ "$(record_field "$dir" "$id" viewer)" = wait ] || fail "fresh record viewer must be wait"
+  [ -z "$(record_field "$dir" "$id" run)" ] || fail "fresh record run must be empty"
+  pass "fm-nm-review-pane: another branch's run or no run leaves a pointed pane alone; a fresh pane still waits"
+}
+
+test_quiesce_sends_detach_key_once_and_resends_after_unchanged_polls() {
+  local dir id=lag rc
+  dir=$(make_case lag)
+  write_meta "$dir" "$id"
+  write_status_run "$dir" 01RUNLAGAAAAAAAAAAAAAAAAAA "fm/$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "setup attach failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(pane_fg "$dir" w1:p3)" = viewer ] || fail "setup: the pane should run the viewer"
+
+  # the viewer is still listed for two polls after q, then gone
+  : > "$dir/herdr.log"
+  write_status_run "$dir" 01RUNLAGBBBBBBBBBBBBBBBBBB "fm/$id"
+  rc=$(FM_FAKE_HERDR_DETACH_LAG=2 run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "lagging re-point failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(tr '\037' ' ' < "$dir/herdr.log" | grep -c '^pane send-keys w1:p3 q ')" = 1 ] || fail "q must be sent exactly once while the viewer is exiting: $(cat "$dir/herdr.log")"
+  [ -z "$(pane_typed "$dir" w1:p3)" ] || fail "no key may reach the shell prompt, got typed '$(pane_typed "$dir" w1:p3)'"
+  [ "$(herdr_calls "$dir" pane process-info)" -ge 3 ] || fail "the pane must be polled until the shell shows"
+  [ "$(pane_fg "$dir" w1:p3)" = viewer ] || fail "the new viewer should be running"
+  [ "$(pane_run "$dir" w1:p3)" = 01RUNLAGBBBBBBBBBBBBBBBBBB ] || fail "the new viewer must follow the newer run"
+  [ "$(record_field "$dir" "$id" run)" = 01RUNLAGBBBBBBBBBBBBBBBBBB ] || fail "record must advance to the newer run"
+
+  # a viewer that swallows the first q gets it again only after unchanged polls
+  id=ignore
+  dir=$(make_case "$id")
+  write_meta "$dir" "$id"
+  write_status_run "$dir" 01RUNIGNAAAAAAAAAAAAAAAAAA "fm/$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "setup attach failed (rc=$rc): $(cat "$dir/stderr")"
+  : > "$dir/herdr.log"
+  write_status_run "$dir" 01RUNIGNBBBBBBBBBBBBBBBBBB "fm/$id"
+  rc=$(FM_FAKE_HERDR_IGNORE_Q=1 FM_NM_REVIEW_PANE_QUIESCE_RESEND_POLLS=3 run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "re-point after an ignored q failed (rc=$rc): $(cat "$dir/stderr")"
+  [ "$(tr '\037' ' ' < "$dir/herdr.log" | grep -c '^pane send-keys w1:p3 q ')" = 2 ] || fail "q must be re-sent once after the unchanged polls: $(cat "$dir/herdr.log")"
+  [ "$(herdr_calls "$dir" pane process-info)" -ge 5 ] || fail "three unchanged polls must pass before the re-send, got $(herdr_calls "$dir" pane process-info) polls"
+  [ -z "$(pane_typed "$dir" w1:p3)" ] || fail "no key may reach the shell prompt, got typed '$(pane_typed "$dir" w1:p3)'"
+  [ "$(pane_run "$dir" w1:p3)" = 01RUNIGNBBBBBBBBBBBBBBBBBB ] || fail "the new viewer must follow the newer run"
+
+  # a viewer that never detaches within the budget refuses without a run
+  id=stuck
+  dir=$(make_case "$id")
+  write_meta "$dir" "$id"
+  write_status_run "$dir" 01RUNSTKAAAAAAAAAAAAAAAAAA "fm/$id"
+  rc=$(run_script "$dir" "$id")
+  [ "$rc" = 0 ] || fail "setup attach failed (rc=$rc): $(cat "$dir/stderr")"
+  : > "$dir/herdr.log"
+  write_status_run "$dir" 01RUNSTKBBBBBBBBBBBBBBBBBB "fm/$id"
+  rc=$(FM_FAKE_HERDR_IGNORE_Q=99 FM_NM_REVIEW_PANE_QUIESCE_POLLS=4 run_script "$dir" "$id")
+  [ "$rc" = 1 ] || fail "a viewer that will not detach must refuse with rc 1 (rc=$rc)"
+  assert_contains "$(cat "$dir/stderr")" "could not be returned to its shell" "stuck viewer must warn"
+  [ "$(herdr_calls "$dir" pane run)" = 0 ] || fail "nothing may be run into a busy pane"
+  [ "$(record_field "$dir" "$id" run)" = 01RUNSTKAAAAAAAAAAAAAAAAAA ] || fail "record must keep the old run when the re-point is refused"
+  pass "fm-nm-review-pane: quiesce sends q once, polls for the shell, re-sends only after unchanged polls, and refuses a stuck viewer"
+}
+
 test_dead_pane_recreated_and_ambiguous_presence_refuses() {
   local dir id=recreate rc
   dir=$(make_case recreate)
@@ -470,6 +614,8 @@ test_not_applicable_tasks_exit_silently
 test_opt_out_disables_and_other_values_enable
 test_create_once_reuse_and_repoint
 test_other_branch_runs_are_not_this_tasks_run
+test_foreign_branch_run_and_missing_run_leave_pointed_pane_alone
+test_quiesce_sends_detach_key_once_and_resends_after_unchanged_polls
 test_dead_pane_recreated_and_ambiguous_presence_refuses
 test_teardown_closes_review_pane_and_removes_record
 test_close_refusal_retains_record_and_names_rerun
