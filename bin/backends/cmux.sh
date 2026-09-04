@@ -483,8 +483,8 @@ fm_backend_cmux_send_literal() {  # <target> <text> [expected-label]
 # Escape, C-c) onto cmux's `send-key` names. Verified empirically: enter,
 # escape, and ctrl-c all work directly (lowercase, hyphenated). cmux's own
 # key vocabulary is genuinely richer (ctrl-d/ctrl-z/ctrl-\\, semantic aliases
-# sigint/sigtstp/sigquit - `TerminalSurface+Input.swift`), but firstmate's
-# shared vocabulary across backends only needs these three today.
+# sigint/sigtstp/sigquit - `TerminalSurface+Input.swift`), and an unmapped
+# name falls through verbatim, so cmux's own vocabulary is the limit.
 fm_backend_cmux_normalize_key() {  # <key>
   case "$1" in
     Enter|enter) printf 'enter' ;;
