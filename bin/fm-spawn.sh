@@ -2549,8 +2549,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  TREEHOUSE_ROOT_OPTION=$(fm_treehouse_root_option_for_home "$FM_ROOT" "$FM_HOME")
-  spawn_send_text_line "$WT_TARGET" "treehouse get${TREEHOUSE_ROOT_OPTION}"
+  TREEHOUSE_HOME_ROOT=$(fm_treehouse_root_for_home "$FM_ROOT" "$FM_HOME")
+  if [ -n "$TREEHOUSE_HOME_ROOT" ]; then
+    TREEHOUSE_GET_COMMAND="treehouse get --root $(printf '%q' "$TREEHOUSE_HOME_ROOT")"
+  else
+    TREEHOUSE_GET_COMMAND='treehouse get'
+  fi
+  spawn_send_text_line "$WT_TARGET" "$TREEHOUSE_GET_COMMAND"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

@@ -1379,16 +1379,21 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} pool_home=${5:-$FM_HOME}
-  local out lock attempt=0 max_retries lock_desc treehouse_root_option
+  local out lock attempt=0 max_retries lock_desc treehouse_root
+  local -a treehouse_args
 
-  treehouse_root_option=$(fm_treehouse_root_option_for_home "$FM_ROOT" "$pool_home") || {
+  treehouse_root=$(fm_treehouse_root_for_home "$FM_ROOT" "$pool_home") || {
     echo "teardown: could not resolve the Treehouse root for $label; leaving it in place" >&2
     return 1
   }
+  treehouse_args=(return --force "$dir")
+  if [ -n "$treehouse_root" ]; then
+    treehouse_args=(return --root "$treehouse_root" --force "$dir")
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return${treehouse_root_option} --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse "${treehouse_args[@]}" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1413,7 +1418,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return${treehouse_root_option} --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse "${treehouse_args[@]}" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1440,7 +1445,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return${treehouse_root_option} --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse "${treehouse_args[@]}" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
