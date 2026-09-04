@@ -9,8 +9,8 @@
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # Ponytail full development contract and mode-specific Definition of done, so a
 # promoted worker receives exactly the same delivery contract as a briefed one,
-# including the no-mistakes mode's pipeline-agent handoff, ask-user escalation
-# rule, and --yes ban. The instructions also carry `# Task` with
+# including the no-mistakes mode's lifecycle-plugin preflight, ask-user
+# escalation rule, and --yes ban. The instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
@@ -153,12 +153,16 @@ if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
   exit 1
 fi
+if [ "$MODE" = no-mistakes ] && ! fm_no_mistakes_ponytail_ready; then
+  echo "error: Ponytail full guarantee cannot be established for no-mistakes pipeline: $FM_PONYTAIL_PIPELINE_ERROR; refusing to promote $ID" >&2
+  exit 1
+fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
 # promoted no-mistakes worker that never received the ask-user escalation rule,
-# the --yes ban, or the Ponytail pipeline handoff is the delivery hole this file
+# the --yes ban, or the Ponytail pipeline preflight is the delivery hole this file
 # used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 PROMOTION_ASK_USER_BLOCK=

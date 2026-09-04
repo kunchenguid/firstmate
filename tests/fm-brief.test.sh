@@ -355,8 +355,8 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must render literal backticks around help"
   assert_grep "construct \`--intent\` exactly as the appended \`# Current no-mistakes intent contract\` directs" "$brief" \
     "no-mistakes DOD must route --intent through the launch-time contract"
-  assert_grep "authorized captain intent plus its fixed Ponytail pipeline discipline" "$brief" \
-    "no-mistakes DOD did not hand Ponytail to pipeline agents"
+  assert_grep "only the authorized captain intent" "$brief" \
+    "no-mistakes DOD mixed execution directives into sanitized intent"
   assert_grep "Include any later words the captain actually supplied" "$brief" \
     "no-mistakes DOD must allow later captain words in --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \

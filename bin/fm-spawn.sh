@@ -17,8 +17,8 @@
 #   Every ship spawn validates that the worker-facing brief carries the Ponytail
 #   full development contract, adding the compact contract to a legacy brief
 #   through `launch-brief.md` when needed. For a no-mistakes ship, that artifact
-#   also carries the current `--intent` contract, the extracted captain intent,
-#   and the Ponytail pipeline-agent handoff. A legacy mixed Task is
+#   also carries the current `--intent` contract and the extracted captain intent.
+#   The pipeline agent's Ponytail lifecycle plugin is verified before launch. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
 #   unmarked legacy Tasks stop for migration rather than becoming intent. That
 #   library owns the parsing and intent rules. When the explicit mode carries
@@ -1880,6 +1880,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
+    fi
+    if ! fm_no_mistakes_ponytail_ready; then
+      echo "error: Ponytail full guarantee cannot be established for no-mistakes pipeline: $FM_PONYTAIL_PIPELINE_ERROR; refusing to launch $ID" >&2
+      exit 1
     fi
   fi
   if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || ! fm_brief_ponytail_contract_present "$BRIEF"; }; then

@@ -24,9 +24,8 @@
 # The Ponytail contract is deliberately one compact generated instruction rather
 # than a copied ruleset. New ship briefs receive it from fm_dod_block; spawn adds
 # it to legacy ship briefs before launch and validates the final worker-facing
-# artifact. For no-mistakes, the current intent overlay carries the same compact
-# discipline into every pipeline agent invocation because --intent is the only
-# versioned prompt surface no-mistakes exposes at run start.
+# artifact. No-mistakes treats --intent as sanitized acceptance data, so spawn
+# and promotion require an enabled host lifecycle plugin for its pipeline agent.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
@@ -56,6 +55,56 @@ fm_brief_ponytail_contract_present() {  # <file>
   actual=$(fm_brief_heading_body "$1" "# Development discipline")
   expected=$(fm_ponytail_contract_block | sed '1d')
   [ "$actual" = "$expected" ]
+}
+
+fm_no_mistakes_ponytail_ready() {
+  local doctor agent plugins mode config_root config_file
+  FM_PONYTAIL_PIPELINE_ERROR=
+  command -v no-mistakes >/dev/null 2>&1 || {
+    FM_PONYTAIL_PIPELINE_ERROR="no-mistakes is unavailable"
+    return 1
+  }
+  doctor=$(NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes doctor 2>&1) || {
+    FM_PONYTAIL_PIPELINE_ERROR="no-mistakes doctor could not resolve a pipeline agent"
+    return 1
+  }
+  agent=$(printf '%s\n' "$doctor" | awk '/gate validation/ && / is runnable$/ { print $(NF - 2); exit }')
+  case "$agent" in
+    codex|claude) ;;
+    *)
+      FM_PONYTAIL_PIPELINE_ERROR="no supported Ponytail lifecycle boundary was reported for pipeline agent ${agent:-unknown}"
+      return 1 ;;
+  esac
+  command -v "$agent" >/dev/null 2>&1 || {
+    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent is unavailable"
+    return 1
+  }
+  plugins=$("$agent" plugin list --json 2>/dev/null) || {
+    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent could not report its plugins"
+    return 1
+  }
+  printf '%s\n' "$plugins" | awk '
+    /"(pluginId|id)"[[:space:]]*:[[:space:]]*"ponytail@/ { ponytail = 1 }
+    ponytail && /"enabled"[[:space:]]*:[[:space:]]*true/ { enabled = 1; exit }
+    END { exit enabled ? 0 : 1 }
+  ' || {
+    FM_PONYTAIL_PIPELINE_ERROR="pipeline agent $agent has no enabled Ponytail plugin"
+    return 1
+  }
+  mode=$(printf '%s' "${PONYTAIL_DEFAULT_MODE:-full}" | tr '[:upper:]' '[:lower:]')
+  [ "$mode" = full ] || {
+    FM_PONYTAIL_PIPELINE_ERROR="Ponytail defaults to $mode instead of full"
+    return 1
+  }
+  config_root=${XDG_CONFIG_HOME:-$HOME/.config}
+  config_file="$config_root/ponytail/config.json"
+  if [ -r "$config_file" ]; then
+    mode=$(sed -n 's/.*"defaultMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config_file" | head -n 1 | tr '[:upper:]' '[:lower:]')
+    [ -z "$mode" ] || [ "$mode" = full ] || {
+      FM_PONYTAIL_PIPELINE_ERROR="Ponytail config defaults to $mode instead of full"
+      return 1
+    }
+  fi
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
@@ -169,7 +218,7 @@ fm_brief_intent_overlay() {  # <captain-intent>
 
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Pass the serialized captain intent below plus any later words the captain actually supplied, followed by the exact `## Required pipeline discipline` text below, as `--intent`.
+Pass the serialized captain intent below plus any later words the captain actually supplied as `--intent`.
 Never include Firstmate specification or other mixed Task content.
 
 ## Captain intent authorized for --intent
@@ -179,13 +228,6 @@ EOF
 
 Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
-
-## Required pipeline discipline
-EOF
-  fm_ponytail_instruction
-  cat <<'EOF'
-
-This fixed execution directive is the only non-captain text authorized in `--intent`; it keeps Ponytail active in every no-mistakes review and fix agent without admitting task-specific Firstmate specification.
 EOF
 }
 
@@ -253,10 +295,10 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, construct \`--intent\` exactly as the appended \`# Current no-mistakes intent contract\` directs: the authorized captain intent plus its fixed Ponytail pipeline discipline.
+When starting no-mistakes, construct \`--intent\` exactly as the appended \`# Current no-mistakes intent contract\` directs: only the authorized captain intent.
 Include any later words the captain actually supplied as that overlay directs.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs; the fixed Ponytail pipeline discipline is the sole non-captain exception.
+Do not include \`## Firstmate spec\`, later Firstmate build constraints, execution directives, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
