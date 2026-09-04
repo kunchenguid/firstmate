@@ -823,6 +823,7 @@ test_status_protocol_covers_done_into_a_wait() {
       "$kind brief does not clarify that done is a terminal report, not a wait declaration"
     assert_grep 'not a declaration of a wait' "$brief" \
       "$kind brief does not clarify that done is a terminal report, not a wait declaration"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
     assert_grep 'right after the `done:` line' "$brief" \
       "$kind brief does not tell a worker finishing into a wait to declare it with paused right after done"
   done
