@@ -78,8 +78,59 @@ test_no_secret_leaked_to_status() {
   pass "fm-mail: status never prints the password"
 }
 
+test_send_passes_body() {
+  local fakebin body_file stdin_file
+  fakebin=$(fm_fakebin fm-mail)
+  stdin_file="$TMP_ROOT/stdin_capture.txt"
+
+  # Fake python3 that reads stdin (the body pipe) and writes it to a file.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+cat > "${FM_MAIL_TEST_STDIN_FILE:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/python3"
+
+  body_file="$TMP_ROOT/body.txt"
+  printf '%s' "hello world" > "$body_file"
+  export FM_MAIL_TEST_STDIN_FILE="$stdin_file"
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" send to@example.com subj "hello world" 2>&1) || rc=$?
+  expect_code 0 "$rc" "send with body must succeed"
+  local captured
+  captured=$(cat "$stdin_file" 2>/dev/null || echo "")
+  assert_contains "$captured" "hello world" "send passes body through stdin to python3"
+  pass "fm-mail: send passes body not empty through stdin"
+}
+
+test_poll_error_propagates() {
+  local fakebin
+  fakebin=$(fm_fakebin fm-mail)
+
+  # Fake python3 that exits with an error (simulating IMAP failure).
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+echo "fm-mail poll error: connection refused" >&2
+exit 1
+SH
+  chmod +x "$fakebin/python3"
+
+  local out rc=0
+  out=$(env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_SMTP_HOST \
+    FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must propagate python3 errors"
+  assert_contains "$out" "connection refused" "poll error message is visible"
+  pass "fm-mail: poll propagates errors instead of swallowing them"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
 test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status
+test_send_passes_body
+test_poll_error_propagates

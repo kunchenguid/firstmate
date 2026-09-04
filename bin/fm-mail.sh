@@ -81,11 +81,12 @@ mkdir -p "$STATE_DIR"
 CURSOR="$STATE_DIR/.mail-seen"
 
 # Delegate IMAP/SMTP to python3 (in-core TLS + mime, no shell byte-juggling).
+# Write the script to a temp file so stdin stays free for piping body data
+# through the pipe from the caller (e.g. send body via printf | run_py).
 run_py() {
-  FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
-  FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
-  FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
-    "$PY" - "$@" <<'PYEOF'
+  local py_script rc=0
+  py_script="$(mktemp)"
+  cat > "$py_script" <<'PYEOF'
 import imaplib, ssl, sys, os, email
 from email.header import decode_header, make_header
 
@@ -203,6 +204,12 @@ if cmd == 'poll_list':
 
 raise SystemExit('unknown command')
 PYEOF
+  FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
+  FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
+  FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
+    "$PY" "$py_script" "$@" || rc=$?
+  rm -f "$py_script"
+  return $rc
 }
 
 usage() {
@@ -256,7 +263,7 @@ case "${1:-}" in
     # List recent mail (uid,date,from,subj), then diff against already-surfaced
     # uids to find NEW messages and surface one wake each. Never marks anything
     # read. The cursor file holds one surfaced uid per line.
-    LIST="$(run_py poll_list || true)"
+    LIST="$(run_py poll_list)"
     declare -A SEEN
     [ -f "$CURSOR" ] || : > "$CURSOR"
     while IFS= read -r u; do
