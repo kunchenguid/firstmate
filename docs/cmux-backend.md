@@ -93,10 +93,7 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.
-Enter, Escape, Ctrl-C, and C-u are supported (C-u is the composer-clear key the muse interrupt path sends after Escape, from `fm_control_interrupt_clear_key` through `fm_send_clear_after_interrupt`).
-Any other name, such as the arrows needed to move a selection inside a harness confirmation dialog, is forwarded verbatim to `cmux send-key`, so the limit is cmux's own key vocabulary rather than the `fm-send.sh` path.
-Keep sending through the task-selector form `fm-send.sh <id> --key <name>`, which sets the expected label so the backend can refresh a workspace id that an app relaunch invalidated.
-An explicit `<window>` target never sets that label, so a workspace id an app relaunch invalidated fails the readiness check and the send is refused outright rather than recovered by scoped title.
+Enter, Escape, and Ctrl-C are supported.
 The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
 `read-screen` is plain text with no cursor primitive, so the shared classifier degrades a glyph row carrying trailing text to `unknown` rather than misreading a harness's own idle suggestion as unsent input.
 An unstructured bare prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.

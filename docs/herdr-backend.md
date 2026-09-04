@@ -212,8 +212,7 @@ Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
-Enter, Escape, Ctrl-C, and C-u are supported (C-u is the composer-clear key the muse interrupt path sends after Escape, from `fm_control_interrupt_clear_key` through `fm_send_clear_after_interrupt`).
-Any other name, such as the arrows needed to move a selection inside a harness confirmation dialog, is forwarded verbatim to Herdr's `pane send-keys`, so the limit is Herdr's own key vocabulary rather than the `fm-send.sh` path; only these four are verified.
+Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
 
