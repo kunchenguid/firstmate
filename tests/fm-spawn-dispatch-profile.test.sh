@@ -523,6 +523,7 @@ test_copilot_threads_autonomy_model_and_effort() {
   assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
   hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
   assert_present "$hooks" "copilot spawn did not install the worker lifecycle hook"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "copilot crew spawn did not arm the busy-state contract"
   hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
   printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "copilot userPromptSubmitted worker hook failed"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
@@ -681,6 +682,28 @@ test_copilot_worker_hooks_ignore_foreign_sessions() {
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
     "child agentStop should not settle the parent's busy state"
   pass "copilot worker hooks ignore foreign child sessions"
+}
+
+test_copilot_secondmate_skips_task_worker_hook_and_busy_gen() {
+  local rec id sm out status hooks
+  id=profile-copilot-secondmate-z6i
+  rec=$(make_spawn_case profile-copilot-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' copilot > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "copilot secondmate spawn should succeed without task-specific worker hooks"
+  assert_contains "$out" "spawned $id harness=copilot kind=secondmate" \
+    "copilot secondmate spawn did not preserve the resolved harness and kind"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot default default
+  hooks="$sm/.github/hooks/fm-busy-state-$id.json"
+  assert_absent "$hooks" "copilot secondmate spawn must not install a task-specific worker hook"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "copilot secondmate spawn must not arm a task busy generation"
+  pass "copilot secondmate skips task-specific worker hooks while crew spawns keep them"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -1014,6 +1037,7 @@ test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
 test_copilot_worker_hook_rejects_symlink_paths
 test_copilot_worker_hooks_ignore_foreign_sessions
+test_copilot_secondmate_skips_task_worker_hook_and_busy_gen
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
