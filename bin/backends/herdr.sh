@@ -1207,9 +1207,8 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 # It prints the foreground shell pid. With <root-only>=1, that shell must also
 # be Herdr's pane root shell; presentation cleanup depends on that stronger
 # identity because it signals the returned pid to remove the pane. With
-# <root-only>=0, the root-to-foreground subtree may be one unbranched wrapper
-# chain (the normal spawn shape is root shell -> treehouse -> task shell), but
-# no sibling or descendant process may survive anywhere under the pane root.
+# <root-only>=0, the only accepted subtree is root shell -> treehouse -> task
+# shell, with no sibling or descendant process anywhere under the pane root.
 fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only>
   local info=$1 pane=$2 root_only=$3 shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
@@ -1248,11 +1247,12 @@ fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only
     fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
     fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$process_pid" || return 1
   fi
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 1
   printf '%s\n' "$rows" | awk -v root="$shell_pid" -v foreground="$process_pid" '
     {
       pid[NR] = $1
       parent[$1] = $2
+      command[$1] = $3
       present[$1]++
     }
     END {
@@ -1264,6 +1264,12 @@ fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only
         current = parent[current]
       }
       path[root] = 1
+      if (foreground != root) {
+        wrapper = parent[foreground]
+        if (wrapper == root || parent[wrapper] != root) exit 1
+        sub(/^.*\//, "", command[wrapper])
+        if (command[wrapper] != "treehouse") exit 1
+      }
       for (i = 1; i <= NR; i++) {
         current = pid[i]
         walk++
