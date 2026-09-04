@@ -422,10 +422,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
+    def delivery_value:
+      if startswith("<!-- firstmate-completion.v1 ") and endswith(" -->") then
+        (sub("^<!-- firstmate-completion\\.v1 "; "")
+         | sub(" -->$"; "")
+         | fromjson?
+         | select(type == "object" and keys == ["value"] and (.value | type == "string") and (.value | length > 0))
+         | .value)
+      elif startswith("Deliverable of the finished work: ") then
+        sub("^Deliverable of the finished work: "; "")
+      else empty end;
     def delivery_values($lines):
-      ([ $lines[]
-         | select(startswith("Deliverable of the finished work: "))
-         | sub("^Deliverable of the finished work: "; "") ]
+      ([ $lines[] | delivery_value ]
        | if length > 0 then [.[-1]] else [] end);
     def delivery_links($values):
       [$values[] | scan("https?://[^[:space:]);\"<>]+")];
