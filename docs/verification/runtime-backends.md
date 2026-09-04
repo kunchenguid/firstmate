@@ -338,6 +338,211 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+## Gemini
+
+The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
+Every check below ran in throwaway scratch worktrees against the real CLI; no task worktree was used and no agent was left running.
+The credential was supplied only through the `GEMINI_API_KEY` environment variable and its value appears nowhere in this record.
+
+### Trust options are not equivalent
+
+The refusal an untrusted launch produces, and its headless exit status:
+
+```sh
+gemini -p 'say OK'; echo "rc=$?"
+```
+
+```text
+Gemini CLI is not running in a trusted directory. To proceed, either use `--skip-trust`, set the `GEMINI_CLI_TRUST_WORKSPACE=true` environment variable, or trust this directory in interactive mode.
+rc=55
+```
+
+Both documented options clear that refusal, but only one loads project configuration.
+The A/B below ran twice in ONE worktree carrying a project `AfterAgent` hook, with the same config home and the same prompt, changing only the trust mechanism:
+
+```text
+--skip-trust                 project-hook-fired=NO   untrusted-warnings=0   turn=✦ ECHO
+TRUST_WORKSPACE=true         project-hook-fired=YES  untrusted-warnings=0   turn=✦ FOXTROT
+```
+
+`gemini skills list` names the cause directly in the untrusted case:
+
+```text
+Skipping project agents due to untrusted folder. To enable, ensure that the project root is trusted.
+Project hooks disabled because the folder is not trusted.
+```
+
+This is why `bin/fm-spawn.sh` launches with `GEMINI_CLI_TRUST_WORKSPACE=true` and why `--skip-trust` must not be substituted for it.
+
+### Busy signal
+
+A full turn was captured every two seconds. The status row above the separator carries the one ASCII token, and the phase text beside it is model-generated:
+
+```text
+busy_1 | 1 |  ⠸ Thinking... (esc to cancel, 1s)
+busy_5 | 1 |  ⠸ Begin Counting Methodically (esc to cancel, 9s)
+busy_6 | 1 |  ⠇ Continue Enumerating Concepts (esc to cancel, 11s)
+busy_7 | 0 |
+busy_12 | 0 |
+```
+
+The idle capture taken before the prompt also contained no `(esc to cancel,`.
+Because the phase text varies per turn and the spinner is braille, neither is usable; `(esc to cancel,` is the only stable rendered token, and the adapter uses the semantic hooks below as its actual state source.
+
+### Hook lifecycle
+
+`BeforeAgent`, `AfterAgent`, `SessionStart`, and `SessionEnd` were registered on one probe that appends its event name, then driven through a normal turn, an Escape interrupt, and `/quit`:
+
+```text
+--- after startup ---   SessionStart
+--- mid-turn ---        SessionStart, BeforeAgent
+--- after INTERRUPT --- SessionStart, BeforeAgent, AfterAgent
+--- after /quit ---     SessionStart, BeforeAgent, AfterAgent, SessionEnd, SessionEnd
+```
+
+Two facts the adapter depends on come from that run: `AfterAgent` closes a turn that was CANCELLED, not only one that completed, and `SessionEnd` fired TWICE for a single `/quit`, so the repeated idle event must be harmless.
+The `AfterAgent` payload carried the worktree as `cwd`, which is what binds a hook to its task:
+
+```text
+keys: ['cwd', 'hook_event_name', 'prompt', 'prompt_response', 'session_id', 'stop_hook_active', 'timestamp', 'transcript_path']
+hook_event_name = AfterAgent
+stop_hook_active = False
+prompt = 'Say the single word CEDAR and stop.'
+```
+
+On the cancelled turn the same payload carried `prompt_response = '[no response text]'`.
+
+### Autonomous end-to-end worker
+
+One throwaway worker was launched exactly as the spawn launches one - positional brief, `-y`, workspace trust - and observed from start to idle:
+
+```text
+t=5s   (esc to cancel, 2s)
+t=30s  busy marker present
+idle at ~34s, busy marker count 0
+worker-output.txt: DELIVERED
+turn-end hook fires: 1
+```
+
+Its pane showed `✓ WriteFile worker-output.txt → Accepted (+1, -0)` with no approval gate, confirming `-y` runs unattended, and `Executing Hook: fm-turn-end` in the status row after the turn.
+
+The adapter was then driven through the REAL `bin/fm-spawn.sh` and `bin/fm-control.sh` against a real Gemini pane in an isolated home:
+
+```text
+spawned gm-e2e harness=gemini kind=ship mode=no-mistakes yolo=off window=... worktree=...
+hooks installed by spawn (state/<id>.gemini-settings.json): ['BeforeAgent', 'AfterAgent', 'SessionEnd']
+t=4s   state: working · source: pane · harness busy (gemini-hook)
+t=8s   state: working · source: pane · harness busy (gemini-hook)
+after turn: v1 gen=... state=idle source=gemini-hook event=after-agent
+e2e-output.txt: SEAWORTHY
+interrupt-delivered gm-e2e harness=gemini backend=tmux verified=agent-alive cancel=unconfirmed
+after interrupt: v1 gen=... state=idle source=gemini-hook event=after-agent
+stopped gm-e2e harness=gemini backend=tmux endpoint=... worktree=...
+```
+
+The interrupt line is the one worth keeping: `AfterAgent` closed the record on a CANCELLED turn, which is why a gemini interrupt needs no `fm-interrupt` fallback event.
+A single Escape on a long turn printed `ℹ Request cancelled.`, dropped the busy token, and left the agent running; `/quit` then exited with status 0 and printed `To resume this session: gemini --resume <session-id>`, and resuming by that id restored the full transcript.
+
+### Identity markers
+
+Env var NAMES were read from a real Gemini tool process launched under a Claude primary; no value of `GEMINI_API_KEY` was read.
+
+```text
+GEMINI_CLI=[1]
+AI_AGENT=[claude-code_2-1-260_agent]
+TRUSTWS=[true]
+CLAUDECODE=[1]
+```
+
+`GEMINI_CLI` is unset in the launching environment, so it is Gemini's own; `CLAUDECODE` is inherited, which is why `bin/fm-harness.sh` tests `GEMINI_CLI` first.
+`AI_AGENT` carried the CLAUDE primary's value and is therefore an inherited launcher marker, never a Gemini identity.
+
+Ancestry cannot substitute for the marker on this platform:
+
+```sh
+node -e 'const{execSync}=require("child_process");console.log(execSync("ps -o comm= -p "+process.pid).toString().trim())'
+```
+
+```text
+MainThread
+```
+
+The shipped CLI is a node bundle, so its live process never presents as `node` and neither ancestry arm matches it.
+
+The same shape breaks pane liveness, which the end-to-end run surfaced as a hard refusal rather than a silent wrong answer:
+
+```text
+error: task gm-e2e's endpoint reads 'ambiguous' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint
+```
+
+A live gemini pane's foreground group read `comm=MainThread` and `argv0=/home/<user>/.local/node/bin/node`, so `bin/fm-gemini-lib.sh` now identifies it from argv[1] instead.
+After that change the same endpoint classified `alive` while the worker ran and `dead` once it exited, so the rule is not simply always positive.
+`tests/fm-gemini-harness.test.sh` pins that boundary so it is not later documented away, and `tests/fm-busy-adapter-wiring.test.sh` drives the generated hooks through the real writer and classifier.
+
+```sh
+bin/fm-test-run.sh tests/fm-gemini-harness.test.sh tests/fm-busy-adapter-wiring.test.sh
+```
+
+### Credential wedge and its blast radius
+
+With no resolvable credential the pane wedges on `Enter Gemini API Key` rather than failing.
+That dialog is a credential FIELD, so lifecycle text sent to a wedged pane is submitted into it and stored.
+Observed after an ordinary exit was delivered to such a pane: a `~/.gemini/gemini-credentials.json` (mode 0600) appeared that had not existed before, and a later credential-less run stopped refusing cleanly and instead reached the API:
+
+```text
+before: rc=41  When using Gemini API, you must specify the GEMINI_API_KEY environment variable.
+after : rc=1   API key not valid. Please pass a valid API key.  (API_KEY_INVALID)
+```
+
+Clearing that stored credential restored both behaviours:
+
+```text
+GEMINI_API_KEY=<from the operator's own store> gemini --skip-trust -p 'Reply with exactly the word NOVEMBER.'  ->  NOVEMBER  rc=0
+env -u GEMINI_API_KEY gemini --skip-trust -p hi                                                              ->  rc=41
+```
+
+The adapter reference records the operational rule this produces: never drive lifecycle text into a gemini pane showing that dialog; treat it as a credential blocker and retire the endpoint instead.
+The credential must also be present before the session-provider daemon starts, since a long-lived tmux or Herdr server hands panes the environment it was started with.
+
+### Settings placement
+
+Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
+Two measurements support that choice.
+Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:
+
+```text
+=== events (UNTRUSTED workspace, --skip-trust) ===
+BeforeAgent
+AfterAgent
+```
+
+And hook arrays MERGE across layers rather than overriding, so a project's own hooks keep running alongside firstmate's:
+
+```text
+=== which AfterAgent hooks ran (trusted workspace, both layers define AfterAgent) ===
+PROJECT
+SYSTEM
+```
+
+A second end-to-end spawn against a project that already committed its own `.gemini/settings.json` confirmed the file was untouched, that `git status` reported only the worker's own new output file, and that teardown removed firstmate's settings file:
+
+```text
+t=4s   state: working · source: pane · harness busy (gemini-hook)
+t=8s   state: working · source: pane · harness busy (gemini-hook)
+after turn: state=idle source=gemini-hook event=after-agent
+e2e2-output.txt: ANCHOR
+project .gemini/settings.json: {"context":{"fileName":"GEMINI.md"}}   (unchanged)
+interrupt-delivered gm2 harness=gemini backend=tmux verified=agent-alive cancel=unconfirmed
+stopped gm2 harness=gemini backend=tmux
+teardown gm2 complete; state/gm2.gemini-settings.json removed
+```
+
+### Not verified
+
+Gemini as a PRIMARY or SECONDMATE runtime is unverified and is refused by `bin/fm-spawn.sh`: no wake protocol exists under `docs/supervision-protocols/` and no turn-end guard adapter was built or exercised.
+No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so the record-and-omit contract applies.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

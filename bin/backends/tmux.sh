@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -231,6 +233,22 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+# The foreground group's full command lines. Needed because a node-bundle
+# harness carries its identity in argv[1] rather than in its command name or
+# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
+fm_backend_tmux_foreground_args() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        [ -n "$args" ] && printf '%s\n' "$args"
+      done
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
@@ -315,6 +333,20 @@ EOF
     fi
   done <<EOF
 $argv0s
+EOF
+
+  # A node-bundle harness is invisible to both name sources above: its comm is
+  # MainThread and its argv[0] is the interpreter, so gemini is identified from
+  # the script argument instead. Positive evidence only - a bare interpreter
+  # still falls through to the negative verdicts below.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if fm_gemini_args_are_gemini "$name"; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_tmux_foreground_args "$target")
 EOF
 
   comm=$(fm_backend_tmux_current_command "$target") || {

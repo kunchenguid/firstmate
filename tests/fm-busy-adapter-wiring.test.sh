@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -297,6 +297,94 @@ test_codex_unverified_until_a_semantic_source_exists() {
   pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
 }
 
+# Gemini's hooks are PROJECT hooks in the worktree's own .gemini/settings.json,
+# and gemini's hook contract requires each command to print a JSON object on
+# stdout and nothing else, so these drive the real command and check both the
+# classification and that stdout stays parseable JSON.
+run_gemini_hook() {  # <settings.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_gemini_hooks_semantic_lifecycle() {
+  local rec id=busy-gm-1 out state settings
+  rec=$(make_spawn_case gemini-lifecycle gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.gemini-settings.json"
+  assert_present "$settings" "gemini spawn did not write hook settings"
+  jq -e . "$settings" >/dev/null || fail "gemini hook settings are not valid JSON"
+  for ev in BeforeAgent AfterAgent SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "gemini hook settings lack $ev"
+  done
+  # The worktree's own .gemini/settings.json is the PROJECT's committed file;
+  # firstmate must never write it, or a project's configuration is clobbered.
+  assert_absent "$WT_DIR/.gemini/settings.json" \
+    "gemini spawn must not write the project's own .gemini/settings.json"
+
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(run_gemini_hook "$settings" AfterAgent) || fail "AfterAgent hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "AfterAgent must print only a JSON object on stdout, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "AfterAgent no longer touches the notification marker"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "AfterAgent must classify 'idle gemini-hook', got '$out'"
+
+  out=$(run_gemini_hook "$settings" BeforeAgent) || fail "BeforeAgent hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "BeforeAgent must print only a JSON object on stdout, got '$out'"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy gemini-hook" ] || fail "BeforeAgent must classify 'busy gemini-hook', got '$out'"
+
+  # SessionEnd fires TWICE for one /quit on gemini-cli 0.58.0, so the second
+  # delivery must be a harmless no-op rather than a state change or a failure.
+  run_gemini_hook "$settings" SessionEnd >/dev/null || fail "SessionEnd hook command failed"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "SessionEnd must classify idle, got '$out'"
+  run_gemini_hook "$settings" SessionEnd >/dev/null || fail "a repeated SessionEnd must still exit 0"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "a repeated SessionEnd must stay idle, got '$out'"
+  pass "gemini hooks open on BeforeAgent and close on AfterAgent and a repeated SessionEnd"
+}
+
+test_gemini_hooks_stale_incarnation_harmless() {
+  local rec id=busy-gm-2 out state settings
+  rec=$(make_spawn_case gemini-stale gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.gemini-settings.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_gemini_hook "$settings" BeforeAgent >/dev/null \
+    || fail "a stale-gen hook must still exit 0 so gemini's lifecycle is never broken"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "gemini hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+test_gemini_is_refused_as_a_secondmate() {
+  local rec id=busy-gm-3 out
+  rec=$(make_spawn_case gemini-secondmate gemini "$id")
+  read_case_record "$rec"
+  # A secondmate spawn carries no delivery contract, so this one deliberately
+  # bypasses run_spawn's ship-only --mode/--yolo arguments.
+  out=$(GROK_HOME="$HOME_DIR/grok-home" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" --secondmate "$id" gemini) && {
+    fail "a gemini secondmate must be refused, it has no primary supervision protocol: $out"
+  }
+  assert_contains "$out" 'crewmate/scout adapter only' \
+    "refusing a gemini secondmate must name the crewmate/scout boundary: $out"
+  pass "gemini is refused as a secondmate because it has no primary supervision protocol"
+}
+
 test_kimi_and_grok_install_no_unverified_wiring() {
   local state out
   state="$TMP_ROOT/gates/state"
@@ -319,6 +407,9 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_gemini_hooks_semantic_lifecycle
+test_gemini_hooks_stale_incarnation_harmless
+test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"
