@@ -47,6 +47,10 @@ detect_own() {
     if ancestry=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
       break
     fi
+    if fm_gemini_path_is_gemini "$comm" 2>/dev/null; then
+      ancestry=gemini
+      break
+    fi
     if fm_gemini_pid_is_gemini "$pid" 2>/dev/null; then
       ancestry=gemini
       break
