@@ -136,6 +136,12 @@ log_last_line() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
 }
+# Every non-empty status line, newest last - what status_terminal_then_paused
+# needs to look past a trailing declared pause for the done/failed line under it.
+log_all_lines() {
+  [ -f "$LOG" ] || return 1
+  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null
+}
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
@@ -158,6 +164,24 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# A worker finishing into an external wait appends `paused: <why>` after its
+# `done:` line (bin/fm-brief.sh's status protocol), so LOG_LINE/LOG_VERB above
+# read paused even when the log genuinely reports a completed, ci-ready done.
+# Recover the underlying done/failed line here, once, so log_reports_ci_ready
+# below treats that shape as done instead of silently downgrading a finished
+# run to a working/wedge-suspect verdict for exactly the scenario (a halted
+# CI/checks service) this shape exists to cover. LOG_VERB itself is left
+# untouched - map_log_state's own paused reporting further down still needs
+# the raw last line.
+LOG_EFFECTIVE_LINE=$LOG_LINE
+LOG_EFFECTIVE_VERB=$LOG_VERB
+if status_is_paused "$LOG_LINE"; then
+  found=$(status_terminal_then_paused "$(log_all_lines || true)" "$LOG_LINE" 2>/dev/null) && {
+    LOG_EFFECTIVE_LINE=$found
+    LOG_EFFECTIVE_VERB=$(status_line_verb "$found")
+  }
+fi
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -302,8 +326,8 @@ nm_gate_findings_count() {
   printf '%s' "$rest"
 }
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
+  [ "$LOG_EFFECTIVE_VERB" = "done" ] || return 1
+  case "$(status_line_note "$LOG_EFFECTIVE_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
   esac
@@ -524,7 +548,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_EFFECTIVE_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -535,7 +559,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_EFFECTIVE_LINE")${SEP}run still monitoring PR"
     fi
   fi
 

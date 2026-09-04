@@ -457,6 +457,30 @@ test_ci_ready_done_log_beats_monitoring_run() {
   pass "ci-ready status log beats monitoring run"
 }
 
+# Regression for the 2026-09-03 incidents: a worker finishing into an external
+# wait (halted CI/checks) appends `paused: <why>` after its `done: ... checks
+# green` line per bin/fm-brief.sh's status protocol. Without log_reports_ci_ready
+# recovering the underlying done: line, the ci-ready verdict silently regresses
+# to a working/wedge-suspect read for exactly the scenario the paused-after-done
+# shape exists to cover.
+test_ci_ready_survives_trailing_declared_pause() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-paused)
+  make_repo_on_branch "$d/wt" fm/feat-ci-paused
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-paused.meta" "window=fm:fm-feat-ci-paused" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\npaused: awaiting merge authority\n' \
+    > "$d/state/feat-ci-paused.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-paused)"
+  local out; out=$(run_crew_state "$d" feat-ci-paused)
+  assert_contains "$out" "state: done" "trailing declared pause still reads ci-ready as done"
+  assert_contains "$out" "source: status-log" "ci-ready state still comes from the status log"
+  assert_contains "$out" "checks green" "ci-ready detail preserves the underlying done: report, not the pause reason"
+  assert_not_contains "$out" "awaiting merge authority" "the pause reason must not replace the done: detail"
+  assert_not_contains "$out" "state: working" "ci-ready is not hidden by a trailing declared pause"
+  pass "ci-ready survives a trailing declared pause after done"
+}
+
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -1731,6 +1755,7 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_survives_trailing_declared_pause
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
