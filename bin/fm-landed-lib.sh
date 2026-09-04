@@ -20,13 +20,20 @@
 # merged PRs, completed scouts, and finished local-only merges. A closed row
 # that carries one of those normalized completion artifacts is a delivery
 # whoever approved it, while a referenced artifact is not completion evidence.
+# A pre-provenance row cannot distinguish an approved merge from a rejected
+# task carrying the same bullet artifact, so legacy_landed_fallback preserves
+# those existing rows; the boundary record removes that ambiguity going forward.
 
 FM_LANDED_JQ_DEFS='
   def landed_delivery:
     ((.pr_url // null) != null)
     or ((.report_path // null) != null)
     or ((.local_note // null) != null);
+  def legacy_landed_fallback:
+    .delivery_provenance != true and landed_delivery;
   def landed_record:
     .state == "done" and .structured
-    and (.hold_kind != "captain" or (.kind != "captain" and landed_delivery));
+    and (.hold_kind != "captain"
+         or (.delivery_provenance == true and landed_delivery)
+         or legacy_landed_fallback);
 '
