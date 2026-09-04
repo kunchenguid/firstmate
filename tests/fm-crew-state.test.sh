@@ -577,11 +577,9 @@ EOF
 
 # The same green-checks override as above, on a run rendering BOTH the steps
 # table and the active_steps table a live run carries (see
-# run_ci_monitoring_with_active_steps). The ci status must come from the steps
-# row `ci,running,0,0`, never from the active_steps row `ci,running,1m40s,...`
-# whose third column is a duration: the step-row reader reads only rows inside
-# the steps table, so this pins that the narrowing left the ACTIVE-run path
-# intact.
+# run_ci_monitoring_with_active_steps). The ci status here comes from the steps
+# row `ci,running,0,0`, so this pins that narrowing the step-row reader to the
+# steps table left the ACTIVE-run path intact.
 # Stop reading that steps row and this run's ci step reads as nothing at all, the
 # override never fires, and a green PR reads as validating forever - the PR #252
 # incident class.

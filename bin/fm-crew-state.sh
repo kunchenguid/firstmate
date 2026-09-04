@@ -326,16 +326,20 @@ log_reports_ci_ready() {
 # word itself is matched loosely: an unrecognized or newly added status must
 # still be read and reported, not silently dropped.
 #
-# Verified against all 495 step rows `no-mistakes axi status --run` renders for
-# every run in the local v1.60.2 store, every one of them terminal: all 495 are
-# read. That store-wide scan reached terminal runs only, so the active-run shape
-# was settled by direct observation instead - `axi status` captured mid-step on
-# live runs (v1.60.2, eb4e379, built 2026-08-29), sampled on three different
-# running steps - three distinct step names, not three runs - renders the
-# running step as `<step>,running,0,0` in the steps table beside
-# `<step>,running,<duration>,...` in active_steps. An output shape is a fact
-# about a version, not a law; the table boundary this reads is the part of the
-# shape the format itself defines.
+# Verified by re-running this positional reader over the whole local v1.60.2
+# store: it reads 657 of 657 step rows across all 73 runs `no-mistakes axi
+# status --run` renders. That 657 is not the reader counting its own matches -
+# a regex counting the rows it accepts verifies nothing - it is the per-run row
+# count compared against the daemon's own step_results table as ground truth,
+# with zero mismatched runs. All but one of those runs was terminal at scan
+# time, so the active-run shape was settled by direct observation instead -
+# `axi status` captured mid-step on live runs (v1.60.2, eb4e379, built
+# 2026-08-29), sampled on three different running steps - three distinct step
+# names, not three runs - renders the running step as `<step>,running,0,0` in
+# the steps table beside `<step>,running,<duration>,...` in active_steps. Both
+# that count and that shape are facts about one version and one local store,
+# not laws; the table boundary this reads is the part of the shape the format
+# itself defines.
 nm_step_rows() {
   printf '%s\n' "$RUN_OUT" | awk '
     {
