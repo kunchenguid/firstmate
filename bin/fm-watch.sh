@@ -32,7 +32,11 @@
 #                          (terminal_episode_scope owns what counts as a new
 #                          episode), so a crew parked on a blocked: line cannot
 #                          re-alarm every time its idle pane's footer ticks, and
-#                          still cannot go unreported past that window.
+#                          still cannot go unreported past that window. That
+#                          end-of-window recheck names itself in the reason
+#                          ("<verb> Ns, already reported, rechecked on a long
+#                          cadence not a wedge") so it is not mistaken for the
+#                          episode's first sight, which keeps the plain identity.
 #                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -1031,14 +1035,37 @@ terminal_episode_scope() {  # <window> <task>
 # The first sight still wakes promptly, terminal_episode_scope breaks the absorb
 # the moment anything real changes, and the window's end re-surfaces the episode
 # once, so a blocked crew can never become invisible either.
+#
+# The first sight of an episode carries the plain `stale: <window>` identity; the
+# end-of-window recheck of an episode already reported carries its own reason,
+# `stale: <window> (<verb> Ns, already reported, rechecked on a long cadence not a
+# wedge)`, so the supervisor can tell an hourly revisit of a blocker it has already
+# handled from a genuinely new one and spend its handling turn accordingly. The two
+# are told apart from the existing marker alone - absent or carrying another scope
+# is a first sight, matching this scope is a revisit - and the age is read from the
+# status file's mtime the way handle_paused_stale reads its own, so a churny idle
+# pane cannot reset the number.
 # Bookkeeping is identical on both branches, so the stale state machine does not
 # depend on whether this particular sight was delivered.
 surface_terminal_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key scope statusf stale_record stale_rest stale_end stale_ident throttled=1
+  local win=$1 task=$2 h=$3 key scope statusf stale_record stale_rest stale_end stale_ident
+  local marker verb mtime age reason revisit=1 throttled=1
   key=$(window_key "$win")
+  statusf="$STATE/$task.status"
   scope=$(terminal_episode_scope "$win" "$task")
-  episode_throttled "$STATE/.terminal-resurfaced-$key" "$scope" && throttled=0
-  [ "$throttled" -eq 0 ] || fm_wake_append stale "$win" "stale: $win" || exit 1
+  marker="$STATE/.terminal-resurfaced-$key"
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$scope" ] && revisit=0
+  episode_throttled "$marker" "$scope" && throttled=0
+  reason="stale: $win"
+  if [ "$revisit" -eq 0 ]; then
+    verb=$(status_line_verb "$(last_status_line "$statusf")")
+    [ -n "$verb" ] || verb='terminal status'
+    mtime=$(stat_mtime "$statusf")
+    case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+    age=$(( $(date +%s) - mtime ))
+    reason="stale: $win ($verb ${age}s, already reported, rechecked on a long cadence not a wedge)"
+  fi
+  [ "$throttled" -eq 0 ] || fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
@@ -1046,15 +1073,14 @@ surface_terminal_stale() {  # <window> <task> <hash>
     triage_log "absorbed terminal stale (already reported this episode): $win"
     return 0
   fi
-  printf '%s' "$scope" > "$STATE/.terminal-resurfaced-$key"
-  statusf="$STATE/$task.status"
+  printf '%s' "$scope" > "$marker"
   stale_record=$(status_span_first_actionable_record "$statusf" 0)
   case $? in
     0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
     *) stale_end=''; stale_ident='' ;;
   esac
   mark_surfaced "$statusf" "$stale_end" "$stale_ident"
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it

@@ -1718,9 +1718,20 @@ test_terminal_stale_surfaced() {
 # pane churns, a genuine change (a new status line, an agent that exited) breaks
 # the absorb at once, and the window's end still re-surfaces - from a churning and
 # from a perfectly static pane alike - so a blocked crew can never go invisible.
+#
+# Count queued stale wakes for <window> that carry the end-of-window RECHECK
+# reason rather than the episode's plain first-sight identity. The age is read
+# from the status file's own mtime, so the seconds are matched as a pattern.
+count_recheck_wakes() {  # <state> <window>
+  awk -F '\t' -v w="$2" '
+    $3 == "stale" && $4 == w &&
+    $5 ~ ("^stale: " w " \\(blocked [0-9]+s, already reported, rechecked on a long cadence not a wedge\\)$") { n++ }
+    END { print n + 0 }' "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
 test_terminal_stale_episode_absorbs_pane_churn() {
   local dir state fakebin out capture_file statusf window key sig throttle
-  local round wakes bare text stopped
+  local round wakes bare recheck text stopped
   dir=$(make_case blocked-episode-churn); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/blocked.status"
   window="test:fm-blocked"
@@ -1740,7 +1751,11 @@ test_terminal_stale_episode_absorbs_pane_churn() {
     || fail "first sight of a blocked crew did not surface"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$state/.wake-queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 1 ] || fail "first sight of a blocked crew produced $wakes wakes instead of one"
+  [ "$bare" -eq 1 ] \
+    || fail "first sight of a blocked crew did not carry the plain identity: $(cat "$state/.wake-queue")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the blocker's first surface"
   [ -e "$throttle" ] || fail "the first surface recorded no episode marker"
 
@@ -1787,10 +1802,10 @@ test_terminal_stale_episode_absorbs_pane_churn() {
     || fail "a static blocked pane never resurfaced once its window elapsed"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$state/.wake-queue" 2>/dev/null || echo 0)
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
-    "$state/.wake-queue" 2>/dev/null || echo 0)
+  recheck=$(count_recheck_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one"
-  [ "$bare" -eq 1 ] || fail "the elapsed window changed the wake identity: $(cat "$state/.wake-queue")"
+  [ "$recheck" -eq 1 ] \
+    || fail "the elapsed window did not name itself a recheck: $(cat "$state/.wake-queue")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-window resurface"
 
   # 6. Same again from a CHURNING pane, which reaches the resurface through the
@@ -1801,7 +1816,10 @@ test_terminal_stale_episode_absorbs_pane_churn() {
     || fail "a churning blocked pane never resurfaced once its window elapsed"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$state/.wake-queue" 2>/dev/null || echo 0)
+  recheck=$(count_recheck_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one from a churning pane"
+  [ "$recheck" -eq 1 ] \
+    || fail "the churning resurface did not name itself a recheck: $(cat "$state/.wake-queue")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the churning resurface"
 
   # 7. The agent exits under the unchanged blocker. Its pane necessarily changes
