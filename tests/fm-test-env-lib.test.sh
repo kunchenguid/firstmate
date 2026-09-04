@@ -14,9 +14,8 @@
 #   REFUSAL    a pointer that survives is reported and refused, not ignored.
 #   INVARIANT  every tests/*.test.sh reaches the owner, so a NEW suite cannot
 #              skip isolation silently - the whole point of the invariant.
-#   NOT-VACUOUS the invariant's matcher rejects a suite whose only mention of a
-#              "lib.sh" is an unrelated bin/fm-*-lib.sh, which is the exact
-#              substring-without-direction error this area has made before.
+#   NOT-VACUOUS the executable probe rejects suites whose only owner references
+#              are unrelated libraries or source text that never executes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -24,24 +23,43 @@ set -u
 
 OWNER="$ROOT/bin/fm-test-env-lib.sh"
 
-# Helper files that reach the owner themselves; a suite sourcing one of these is
-# isolated through it. Each is proven to reach the owner below, so this list
-# cannot rot into an unchecked allowance.
-OWNER_HELPERS=(wake-helpers.sh fixtures.sh secondmate-helpers.sh)
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
-# --- the matcher the invariant uses -----------------------------------------
-#
-# Matches a source directive at the start of a line, by PATH, never by loose
-# substring. `.*/lib\.sh` requires a slash immediately before `lib.sh`, so
-# `bin/fm-wake-lib.sh` and friends do not match - proven by the not-vacuous case.
-reaches_owner() {
-  local suite=$1 helper
-  grep -Eq '^[[:space:]]*(\.|source)[[:space:]]+[^#]*/bin/fm-test-env-lib\.sh' "$suite" && return 0
-  grep -Eq '^[[:space:]]*(\.|source)[[:space:]]+[^#]*/lib\.sh"?[[:space:]]*$' "$suite" && return 0
-  for helper in "${OWNER_HELPERS[@]}"; do
-    grep -Eq "^[[:space:]]*(\.|source)[[:space:]]+[^#]*/$helper" "$suite" && return 0
+make_probe_root() {
+  local probe_root=$1
+  mkdir -p "$probe_root"
+  cp -R "$ROOT/bin" "$probe_root/bin"
+  cp -R "$ROOT/tests" "$probe_root/tests"
+  cat > "$probe_root/bin/fm-test-env-lib.sh" <<'SH'
+#!/usr/bin/env bash
+fm_test_env_isolate() {
+  printf '%s\n' "$FM_TEST_ENV_PROBE_SUITE" > "$FM_TEST_ENV_PROBE_MARKER"
+  exit 0
+}
+SH
+}
+
+probe_suite_reaches_owner() {
+  local probe_root=$1 suite=$2 suite_name marker private_tmp output sentinel pointer rc=0
+  local polluted=()
+  suite_name=$(basename "$suite")
+  marker="$probe_root/$suite_name.reached-owner"
+  private_tmp="$probe_root/tmp/$suite_name"
+  output="$probe_root/$suite_name.output"
+  sentinel="$probe_root/live-home-sentinel"
+  mkdir -p "$private_tmp" "$sentinel"
+  for pointer in $FM_TEST_ENV_FLEET_POINTERS; do
+    polluted+=("$pointer=$sentinel")
   done
-  return 1
+  fm_run_timed 2 env "${polluted[@]}" \
+    TMPDIR="$private_tmp" \
+    FM_TEST_ENV_PROBE_MARKER="$marker" \
+    FM_TEST_ENV_PROBE_SUITE="$suite_name" \
+    bash "$suite" > "$output" 2>&1 || rc=$?
+  [ "$rc" -ne 124 ] || return 1
+  [ -f "$marker" ] || return 1
+  [ "$(cat "$marker")" = "$suite_name" ]
 }
 
 # --- OWNER ------------------------------------------------------------------
@@ -101,10 +119,13 @@ test_unclearable_pointer_is_refused() {
 # --- INVARIANT --------------------------------------------------------------
 
 test_every_suite_reaches_the_owner() {
-  local suite missing=0 total=0 names=
-  for suite in "$ROOT"/tests/*.test.sh; do
+  local dir probe_root suite missing=0 total=0 names=
+  dir=$(fm_test_tmproot fm-test-env-lib-invariant)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  for suite in "$probe_root"/tests/*.test.sh; do
     total=$((total + 1))
-    if ! reaches_owner "$suite"; then
+    if ! probe_suite_reaches_owner "$probe_root" "$suite"; then
       missing=$((missing + 1))
       names="$names"$'\n'"    $(basename "$suite")"
     fi
@@ -116,21 +137,12 @@ test_every_suite_reaches_the_owner() {
   pass "all $total behavior suites reach the fleet-environment isolation owner"
 }
 
-test_helpers_named_as_routes_really_reach_the_owner() {
-  local helper path
-  for helper in "${OWNER_HELPERS[@]}"; do
-    path="$ROOT/tests/$helper"
-    assert_present "$path" "helper allowed as an isolation route is missing: $helper"
-    reaches_owner "$path" \
-      || fail "$helper is allowed as an isolation route but does not reach the owner"
-  done
-  pass "every helper allowed as an isolation route reaches the owner itself"
-}
-
-test_matcher_rejects_an_unrelated_lib_substring() {
-  local dir probe
+test_probe_rejects_an_unrelated_lib_substring() {
+  local dir probe_root probe
   dir=$(fm_test_tmproot fm-test-env-lib)
-  probe="$dir/decoy.test.sh"
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  probe="$probe_root/tests/decoy.test.sh"
   # The recorded trap: counting by the substring "lib.sh" matched unrelated
   # bin/fm-*-lib.sh sources and a comment saying a suite does NOT source it.
   cat > "$probe" <<'SH'
@@ -141,31 +153,55 @@ set -u
 . "$ROOT/bin/fm-tmux-lib.sh"
 . "$ROOT/bin/fm-classify-lib.sh"
 SH
-  reaches_owner "$probe" \
-    && fail "the matcher accepted a suite whose only lib.sh mentions are unrelated bin/ libraries"
-  pass "the matcher rejects unrelated bin/fm-*-lib.sh mentions and a disclaiming comment"
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    && fail "the probe accepted a suite whose only lib.sh mentions are unrelated bin/ libraries"
+  pass "the probe rejects unrelated bin/fm-*-lib.sh mentions and a disclaiming comment"
 }
 
-test_matcher_accepts_each_real_route() {
-  local dir probe
+test_probe_rejects_an_unexecuted_owner_reference() {
+  local dir probe_root probe
   dir=$(fm_test_tmproot fm-test-env-lib)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  probe="$probe_root/tests/heredoc-decoy.test.sh"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > "${TMPDIR}/unused-source.sh" <<'DECOY'
+. "$ROOT/bin/fm-test-env-lib.sh"
+DECOY
+SH
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    && fail "the probe accepted an owner reference that was only written by an unexecuted heredoc"
+  pass "the probe rejects an owner reference that never executes"
+}
 
-  probe="$dir/direct.test.sh"
+test_probe_accepts_each_real_route() {
+  local dir probe_root probe
+  dir=$(fm_test_tmproot fm-test-env-lib)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+
+  probe="$probe_root/tests/direct.test.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
-    '. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"' > "$probe"
-  reaches_owner "$probe" || fail "the matcher rejected the direct route to the owner"
+    '. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"' \
+    'fm_test_env_isolate || exit 2' > "$probe"
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    || fail "the probe rejected the direct route to the owner"
 
-  probe="$dir/vialib.test.sh"
+  probe="$probe_root/tests/vialib.test.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
     '. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"' > "$probe"
-  reaches_owner "$probe" || fail "the matcher rejected the tests/lib.sh route"
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    || fail "the probe rejected the tests/lib.sh route"
 
-  probe="$dir/viahelper.test.sh"
+  probe="$probe_root/tests/viahelper.test.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
     '. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"' > "$probe"
-  reaches_owner "$probe" || fail "the matcher rejected the helper route"
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    || fail "the probe rejected the helper route"
 
-  pass "the matcher accepts the direct, shared-library and helper routes"
+  pass "the probe accepts the direct, shared-library and helper routes"
 }
 
 # --- direct invocation ------------------------------------------------------
@@ -199,9 +235,9 @@ test_owner_clears_every_pointer_it_publishes
 test_owner_is_not_vacuous
 test_unclearable_pointer_is_refused
 test_every_suite_reaches_the_owner
-test_helpers_named_as_routes_really_reach_the_owner
-test_matcher_rejects_an_unrelated_lib_substring
-test_matcher_accepts_each_real_route
+test_probe_rejects_an_unrelated_lib_substring
+test_probe_rejects_an_unexecuted_owner_reference
+test_probe_accepts_each_real_route
 test_direct_invocation_is_isolated
 
 printf '# fm-test-env-lib.test.sh: all assertions passed\n'
