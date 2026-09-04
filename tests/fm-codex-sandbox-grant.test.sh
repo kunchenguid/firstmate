@@ -318,6 +318,72 @@ test_precreated_state_files_are_not_read_as_new_activity() {
   pass "both pre-created state files are marked as already reported, and real later activity on each still reports"
 }
 
+test_precreation_refuses_unsafe_signal_markers() {
+  local rec out status label marker outside
+  for label in status turn-ended; do
+    rec=$(make_case "unsafe-$label-marker"); read_case "$rec"
+    marker="$HOME_DIR/state/.seen-${CASE_ID}_${label}"
+    outside="$HOME_DIR/config/${label}-marker-target"
+    printf 'preserve %s\n' "$label" > "$outside"
+    ln -s "$outside" "$marker"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    expect_code 1 "$status" "a $label marker symlink must refuse the spawn"
+    [ "$(cat "$outside")" = "preserve $label" ] \
+      || fail "publishing a $label marker overwrote its symlink target"
+    [ -L "$marker" ] || fail "a refused $label marker must remain available for repair"
+    [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+      || fail "an unsafe $label marker must refuse before any launch is composed"
+    printf '%s\n' "$out" | grep -q 'could not be published safely' \
+      || fail "the $label marker refusal must explain why launch stopped: $out"
+  done
+  pass "precreation refuses unsafe status and turn-ended markers without following either link"
+}
+
+test_precreation_refuses_unwritable_existing_roots() {
+  local rec out status label path
+  if ! dac_confines; then
+    pass "precreation refuses unwritable existing roots: permission regression skipped as root"
+    return
+  fi
+  for label in status turn-ended; do
+    rec=$(make_case "unwritable-$label"); read_case "$rec"
+    path="$HOME_DIR/state/$CASE_ID.$label"
+    : > "$path"
+    chmod u-w "$path"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    chmod u+w "$path"
+    expect_code 1 "$status" "an unwritable existing $label file must refuse the spawn"
+    [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+      || fail "an unwritable existing $label file must refuse before any launch is composed"
+    printf '%s\n' "$out" | grep -q 'cannot be opened for writing' \
+      || fail "the unwritable $label refusal must name the unusable record: $out"
+  done
+  for label in inbox handled; do
+    rec=$(make_case "unwritable-$label"); read_case "$rec"
+    mkdir -p "$HOME_DIR/state/$CASE_ID.inbox/handled"
+    if [ "$label" = inbox ]; then
+      path="$HOME_DIR/state/$CASE_ID.inbox"
+    else
+      path="$HOME_DIR/state/$CASE_ID.inbox/handled"
+    fi
+    chmod u-w "$path"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    chmod u+w "$path"
+    expect_code 1 "$status" "an unwritable existing $label directory must refuse the spawn"
+    [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
+      || fail "an unwritable existing $label directory must refuse before any launch is composed"
+    printf '%s\n' "$out" | grep -q 'cannot be written' \
+      || fail "the unwritable $label refusal must name the unusable directory: $out"
+  done
+  pass "precreation refuses unwritable existing record files, inboxes, and handled directories"
+}
+
 # A state record or inbox that has become a SYMLINK is corruption, and NOTHING
 # this grant does may follow it: not the pre-creation, not the directory creation,
 # and not the root emission. `[ -e ]` is FALSE for a dangling link, and resolving
@@ -494,8 +560,8 @@ test_grant_refuses_a_wrong_typed_or_uncreatable_record() {
   [ -z "$(granted_roots "$LAUNCH_LOG")" ] \
     || fail "an unusable inbox must refuse before any launch is composed"
   expect_code 1 "$status" "a file at the inbox path must refuse the spawn"
-  printf '%s\n' "$out" | grep -q 'could not be created under the steering inbox' \
-    || fail "the refusal must name the creation failure and the path: $out"
+  printf '%s\n' "$out" | grep -q 'exists but is not a directory' \
+    || fail "the refusal must name the unusable inbox path: $out"
   pass "pre-creation refuses loudly: a wrong-typed or uncreatable record fails the spawn instead of stranding the worker"
 }
 
@@ -844,6 +910,8 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
 test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline
 test_precreated_state_files_are_not_read_as_new_activity
+test_precreation_refuses_unsafe_signal_markers
+test_precreation_refuses_unwritable_existing_roots
 test_grant_never_follows_a_symlinked_state_record
 test_grant_refuses_a_hardlinked_state_record
 test_grant_refuses_a_redirect_worktree_git_file

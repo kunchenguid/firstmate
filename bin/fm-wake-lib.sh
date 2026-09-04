@@ -1732,9 +1732,21 @@ fm_wake_signal_mark_current() {  # <state> <file>
       sig=$(fm_wake_signal_sig "$2") || return 1
       [ -n "$sig" ] || return 1
       marker=$(fm_wake_signal_seen_path "$1" "$2")
-      printf '%s' "$sig" > "$marker" 2>/dev/null
+      fm_wake_signal_marker_write "$marker" "$sig"
       ;;
   esac
+}
+
+fm_wake_signal_marker_write() {  # <marker> <signature>
+  local marker=$1 sig=$2 tmp
+  [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || [ -f "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "${marker}.tmp.XXXXXX") || return 1
+  if ! printf '%s' "$sig" > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ]
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>

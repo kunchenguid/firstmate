@@ -1549,16 +1549,25 @@ codex_precreate_root_file() {  # <container> <file>
       echo "error: $file exists but is not a regular file; the codex writable-root grant needs the per-task record file itself - repair or remove that entry before spawning" >&2
       return 1
     fi
+    if ! perl -MFcntl=:DEFAULT -e '
+      sysopen(my $fh, $ARGV[0], O_WRONLY | O_APPEND | O_NOFOLLOW) or exit 1;
+      close $fh or exit 1;
+    ' "$file" 2>/dev/null; then
+      echo "error: $file cannot be opened for writing; refusing to grant a codex writable root the worker cannot actually write - inspect the record's permissions" >&2
+      return 1
+    fi
     return 0
-  fi
-  # A creation failure is never reported as success: the root would resolve to a
-  # path that does not exist, and whether codex tolerates or drops a nonexistent
-  # --add-dir root, the worker would be without the path its brief requires.
-  if ! : >> "$file" 2>/dev/null; then
+  elif ! perl -MFcntl=:DEFAULT -e '
+    sysopen(my $fh, $ARGV[0], O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW, 0666) or exit 1;
+    close $fh or exit 1;
+  ' "$file" 2>/dev/null; then
     echo "error: $file could not be created; refusing to grant a codex writable root the worker cannot actually write - inspect the state directory's permissions" >&2
     return 1
   fi
-  fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null || true
+  if ! fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null; then
+    echo "error: the signal marker for $file could not be published safely; refusing to grant a codex writable root with an untracked record" >&2
+    return 1
+  fi
 }
 
 # Create a directory the grant depends on, under a root the owner above has
@@ -1568,12 +1577,36 @@ codex_precreate_root_file() {  # <container> <file>
 # helper's: a granted inbox whose handled/ subdirectory could not be created is a
 # root the worker's acknowledgement move cannot complete in.
 codex_precreate_root_dir() {  # <container> <dir> <create>
-  local container=$1 dir=$2 create=$3
+  local container=$1 dir=$2 create=$3 tmp
   codex_root_real "$container" "$dir" >/dev/null || return 1
-  if ! mkdir -p "$create" 2>/dev/null; then
+  if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+    echo "error: $dir exists but is not a directory; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  if [ ! -e "$dir" ] && ! mkdir "$dir" 2>/dev/null; then
+    echo "error: $dir could not be created under $container; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  codex_root_real "$container" "$dir" >/dev/null || return 1
+  if [ -L "$create" ] || { [ -e "$create" ] && [ ! -d "$create" ]; }; then
+    echo "error: $create exists but is not a safe directory; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  if [ ! -e "$create" ] && ! mkdir "$create" 2>/dev/null; then
     echo "error: $create could not be created under the steering inbox $dir; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
     return 1
   fi
+  codex_root_real "$dir" "$create" >/dev/null || return 1
+  tmp=$(umask 077; mktemp "$dir/.fm-codex-root.XXXXXX") || {
+    echo "error: $dir cannot be written; refusing to grant a codex writable root the worker cannot acknowledge in - inspect the inbox permissions" >&2
+    return 1
+  }
+  rm -f -- "$tmp" || return 1
+  tmp=$(umask 077; mktemp "$create/.fm-codex-root.XXXXXX") || {
+    echo "error: $create cannot be written; refusing to grant a codex writable root the worker cannot acknowledge in - inspect the handled directory's permissions" >&2
+    return 1
+  }
+  rm -f -- "$tmp" || return 1
 }
 
 codex_writable_roots() {  # <kind> <worktree> <project> <id>; prints one absolute root per line
