@@ -42,17 +42,18 @@ SH
 }
 
 probe_suite_reaches_owner() {
-  local probe_root=$1 suite=$2 suite_name marker suite_pid_file suite_pid private_tmp output sentinel pointer rc=0
+  local probe_root=$1 suite=$2 suite_name marker suite_pid_file suite_pid private_tmp output sentinel sentinel_entry pointer rc=0
   local polluted=()
   suite_name=$(basename "$suite")
   marker="$probe_root/$suite_name.reached-owner"
   suite_pid_file="$probe_root/$suite_name.suite-pid"
   private_tmp="$probe_root/tmp/$suite_name"
   output="$probe_root/$suite_name.output"
-  sentinel="$probe_root/live-home-sentinel"
+  sentinel="$probe_root/live-home-sentinel/$suite_name"
   mkdir -p "$private_tmp" "$sentinel"
+  [ -z "$(find "$sentinel" -mindepth 1 -print -quit)" ] || return 1
   for pointer in $FM_TEST_ENV_FLEET_POINTERS; do
-    polluted+=("$pointer=$sentinel")
+    polluted+=("$pointer=$sentinel/$pointer")
   done
   fm_run_timed 2 env "${polluted[@]}" \
     TMPDIR="$private_tmp" \
@@ -61,6 +62,8 @@ probe_suite_reaches_owner() {
     FM_TEST_ENV_PROBE_EXIT_STATUS="$PROBE_EXIT_STATUS" \
     bash -c 'printf "%s\n" "$$" > "$1"; exec bash "$2"' \
       _ "$suite_pid_file" "$suite" > "$output" 2>&1 || rc=$?
+  sentinel_entry=$(find "$sentinel" -mindepth 1 -print -quit)
+  [ -z "$sentinel_entry" ] || return 1
   [ "$rc" -eq "$PROBE_EXIT_STATUS" ] || return 1
   [ -f "$marker" ] || return 1
   [ -f "$suite_pid_file" ] || return 1
@@ -202,7 +205,7 @@ SH
   probe_suite_reaches_owner "$probe_root" "$probe" \
     && fail "the probe accepted isolation that executed only inside a subshell"
   assert_present "$marker" "the subshell decoy never reached the owner"
-  assert_contains "$(cat "$output")" "PARENT_FM_HOME=$probe_root/live-home-sentinel" \
+  assert_contains "$(cat "$output")" "PARENT_FM_HOME=$probe_root/live-home-sentinel/subshell-decoy.test.sh/FM_HOME" \
     "the subshell decoy did not prove that its parent retained the fleet pointer"
   pass "the probe rejects isolation that leaves the top-level shell exposed"
 }
@@ -232,6 +235,27 @@ SH
   assert_contains "$(cat "$output")" "FORWARDED_STATUS=$PROBE_EXIT_STATUS" \
     "the child decoy did not forward the isolation status"
   pass "the probe rejects child isolation with a forwarded exit status"
+}
+
+test_probe_rejects_a_pre_isolation_write() {
+  local dir probe_root probe written
+  dir=$(fm_test_tmproot fm-test-env-lib)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  probe="$probe_root/tests/pre-isolation-write.test.sh"
+  written="$probe_root/live-home-sentinel/pre-isolation-write.test.sh/FM_HOME/touched"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+mkdir -p "$FM_HOME"
+printf 'touched\n' > "$FM_HOME/touched"
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+fm_test_env_isolate
+SH
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    && fail "the probe accepted a fleet-home write before isolation"
+  assert_present "$written" "the decoy did not write through its inherited FM_HOME pointer"
+  pass "the probe rejects a fleet-home write before isolation"
 }
 
 test_probe_accepts_each_real_route() {
@@ -297,6 +321,7 @@ test_probe_rejects_an_unrelated_lib_substring
 test_probe_rejects_an_unexecuted_owner_reference
 test_probe_rejects_isolation_inside_a_subshell
 test_probe_rejects_isolation_inside_a_child
+test_probe_rejects_a_pre_isolation_write
 test_probe_accepts_each_real_route
 test_direct_invocation_is_isolated
 
