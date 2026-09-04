@@ -74,7 +74,19 @@ case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
   "pane send-keys") : ;;
+  # FM_FAKE_HERDR_AGENT drives the pane's registered agent: "absent" is the
+  # agent_not_found real herdr returns once the agent has exited to a shell,
+  # any other non-empty value is that live agent_status, and leaving it unset
+  # keeps the historical silent response every pre-existing case relies on.
+  "agent get")
+    case "${FM_FAKE_HERDR_AGENT:-}" in
+      "") : ;;
+      absent) printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}" ;;
+      *) printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT" ;;
+    esac ;;
+  "pane read") printf '%s' "${FM_FAKE_HERDR_COMPOSER:-}" ;;
 esac
+exit 0
 SH
   chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
@@ -231,8 +243,85 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+# --- the typed plane must not hand a steer to a dead endpoint's shell --------
+#
+# A task's endpoint outlives the agent inside it: when the agent exits, the pane
+# falls back to the login shell that launched it and stays perfectly alive. The
+# typed plane used to type straight into that shell, which ran the first token
+# and discarded the rest - observed live on herdr as
+# `zsh: no matches found: (3 findings: ...)` - so the instruction was gone while
+# the send reported nothing a supervisor could act on. The message below carries
+# the same shell-metacharacter shape on purpose.
+#
+# The refusal is deliberately narrow. It fires only on fm_backend_agent_state's
+# positive `dead`, so the cases underneath it pin the other direction just as
+# hard: an idle agent, a busy agent, a natively `blocked` one (Cursor reads
+# blocked in every state), and an endpoint whose agent cannot be classified at
+# all must every one of them still be typed into exactly as before. A false
+# refusal here is as harmful as the swallow it prevents, because every
+# supervision decision that assumes a steer landed is built on this exit status.
+DEAD_SHELL_MESSAGE='please decide the pipeline gate (3 findings: review-1 auto-fix, review-2 and review-3 ask-user).'
+# A bare claude composer glyph: an empty agent composer, so a send that is
+# allowed through reaches its confirmed-delivery verdict.
+IDLE_COMPOSER=$(printf 'transcript\n\n  \xe2\x9d\xaf ')
+
+test_dead_endpoint_refuses_and_types_nothing() {
+  local dir fb home err herdr_log rc
+  dir="$TMP_ROOT/dead-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home deadagent); err="$dir/send.err"
+  herdr_log="$dir/herdr.log"; : > "$herdr_log"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$herdr_log" \
+    FM_TMUX_LOG="$dir/tmux.log" FM_SEND_SETTLE=0 FM_FAKE_HERDR_AGENT=absent \
+    "$SEND" default:w1:p2 "$DEAD_SHELL_MESSAGE" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a steer typed into a dead endpoint's shell reported success"
+  assert_contains "$(cat "$err")" "the agent there is gone" \
+    "the refusal should say the agent is gone, not that delivery was merely unconfirmed"
+  assert_contains "$(cat "$err")" "nothing was typed" "the refusal should state that nothing was sent"
+  assert_not_contains "$(cat "$herdr_log")" "pane send-text" \
+    "the dead endpoint was still typed into"$'\n'"$(cat "$herdr_log")"
+  assert_not_contains "$(cat "$herdr_log")" "pane send-keys" \
+    "the dead endpoint still received a submit key"$'\n'"$(cat "$herdr_log")"
+  # Non-vacuousness: the same stub, same target, same message DOES type when the
+  # pane still holds an agent, so the assertions above cannot pass by accident.
+  : > "$herdr_log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$herdr_log" \
+    FM_TMUX_LOG="$dir/tmux.log" FM_SEND_SETTLE=0 FM_FAKE_HERDR_AGENT=idle \
+    FM_FAKE_HERDR_COMPOSER="$IDLE_COMPOSER" \
+    "$SEND" default:w1:p2 "$DEAD_SHELL_MESSAGE" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the identical send to a live agent must still succeed"
+  assert_contains "$(cat "$herdr_log")" "pane send-text" \
+    "the live-agent control case never typed, so the dead-endpoint case proves nothing"
+  pass "fm-send typed plane: a dead endpoint is refused with nothing typed, while the same send to a live agent still lands"
+}
+
+test_live_agent_states_are_never_refused() {
+  local dir fb home err herdr_log rc state
+  dir="$TMP_ROOT/live-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home liveagent); err="$dir/send.err"
+  herdr_log="$dir/herdr.log"
+  # idle: an ordinary waiting composer. working: a busy agent mid-turn. blocked:
+  # a natively always-blocked pane (Cursor). unset: an endpoint whose agent the
+  # backend cannot classify at all, which must fail open, never closed.
+  for state in idle working blocked ''; do
+    : > "$herdr_log"
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_LOG="$herdr_log" \
+      FM_TMUX_LOG="$dir/tmux.log" FM_SEND_SETTLE=0 FM_FAKE_HERDR_AGENT="$state" \
+      FM_FAKE_HERDR_COMPOSER="$IDLE_COMPOSER" \
+      "$SEND" default:w1:p2 "$DEAD_SHELL_MESSAGE" >/dev/null 2>"$err"; rc=$?
+    expect_code 0 "$rc" "agent_status '${state:-<unclassifiable>}' must still be steered"
+    assert_contains "$(cat "$herdr_log")" "pane send-text" \
+      "agent_status '${state:-<unclassifiable>}' was not typed into"
+    assert_not_contains "$(cat "$err")" "the agent there is gone" \
+      "agent_status '${state:-<unclassifiable>}' was wrongly refused as a dead endpoint"
+  done
+  pass "fm-send typed plane: idle, busy, natively blocked, and unclassifiable endpoints are all still steered"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
+test_dead_endpoint_refuses_and_types_nothing
+test_live_agent_states_are_never_refused
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails

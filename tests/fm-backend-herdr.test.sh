@@ -4513,6 +4513,73 @@ test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk
+
+# --- agent_state: the endpoint-liveness verdict fm-send steers on -----------
+#
+# bin/fm-send.sh refuses to type into an endpoint fm_backend_agent_state calls
+# `dead`, because a pane whose agent has exited falls back to the login shell
+# that launched it and would run the steer as a command instead of receiving it.
+# That makes these four verdicts a delivery contract, not just a recovery one:
+# `dead` must be reachable for a really-exited agent, and must be unreachable
+# for every registered agent_status a live pane can report - including the
+# `blocked` a Cursor pane reports in EVERY state, which a stricter rule would
+# misread as gone and refuse forever. The shapes below are the real responses
+# captured from herdr 0.7.4: an exited agent leaves the pane present and
+# answers `agent get` with agent_not_found.
+test_agent_state_classifies_an_exited_agent_dead() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-dead"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: pane get - the pane itself is still very much alive
+  # 2: agent get - but nothing is registered in it any more
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state default:w1:p2' "$ROOT" )
+  [ "$out" = dead ] || fail "a present pane whose agent has exited must classify dead, got '$out'"
+  pass "fm_backend_herdr_agent_state: a live pane whose agent has exited classifies dead"
+}
+
+test_agent_state_never_calls_a_registered_agent_dead() {
+  local dir log resp fb out status
+  for status in idle working blocked 'done'; do
+    dir="$TMP_ROOT/agent-state-$status"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state default:w1:p2' "$ROOT" )
+    [ "$out" = alive ] || fail "a registered agent reporting '$status' must classify alive, got '$out'"
+  done
+  pass "fm_backend_herdr_agent_state: every registered agent_status (idle, working, blocked, done) classifies alive"
+}
+
+test_agent_state_unreadable_reads_never_claim_dead() {
+  local dir log resp fb out
+  # An unparseable agent get is ambiguity, not proof the agent left. Claiming
+  # `dead` here would make fm-send refuse a healthy worker on a bad read.
+  dir="$TMP_ROOT/agent-state-garbage"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf 'not json at all\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state default:w1:p2' "$ROOT" )
+  [ "$out" = unreadable ] || fail "an unparseable agent read must stay unreadable, got '$out'"
+
+  # A pane that is genuinely gone is `missing`, which is a different fault from
+  # an agent-less pane and must not be folded into the dead-endpoint refusal.
+  dir="$TMP_ROOT/agent-state-gone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state default:w1:p2' "$ROOT" )
+  [ "$out" = missing ] || fail "a pane that no longer exists must classify missing, got '$out'"
+  pass "fm_backend_herdr_agent_state: unreadable and missing endpoints never masquerade as dead"
+}
+
+test_agent_state_classifies_an_exited_agent_dead
+test_agent_state_never_calls_a_registered_agent_dead
+test_agent_state_unreadable_reads_never_claim_dead
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous

@@ -60,7 +60,13 @@
 # type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
-# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
+# an inconclusive send. Before ANY of that the endpoint must not be a proven
+# dead one: a task's endpoint outlives the agent inside it, and typing into the
+# login shell an exited agent falls back to would hand the steer to that shell
+# instead of losing it visibly. fm_backend_agent_state (bin/fm-backend.sh) owns
+# that verdict fleet-wide and only its positive `dead` refuses, so an idle,
+# ghost-text, or busy composer is never blocked. Typed-plane exit contract:
+# 0 = submit confirmed;
 # 3 = the text was typed into the live endpoint and
 # Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
 # before any resend, and never re-type blindly; a marked request's
@@ -1010,6 +1016,27 @@ else
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     esac
     exit 0
+  fi
+  # Refuse a dead endpoint BEFORE typing anything into it.
+  # The typed plane hands its text to whatever owns the terminal, and a task's
+  # endpoint outlives the agent inside it: once the agent exits, the pane falls
+  # back to the login shell that launched it. Typing there hands the steer to
+  # that SHELL, which runs the first token and discards the rest, so the
+  # instruction is gone while the endpoint still looks perfectly alive.
+  # The question "does this endpoint still hold an agent" already has one
+  # fleet-wide owner - fm_backend_agent_state (bin/fm-backend.sh) - so this
+  # consults it instead of adding a second classifier. Only its positive `dead`
+  # verdict refuses: `dead` means the endpoint exists and its foreground process
+  # group is confidently nothing but shells, which no live agent can produce
+  # (an agent running a child process reads `ambiguous`, never `dead`).
+  # `missing`, `ambiguous`, `unreadable`, and `unverified` all proceed exactly as
+  # before, because a false refusal here is as harmful as a false success: every
+  # supervision decision that assumes a steer landed is built on this exit.
+  if [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T")" = dead ]; then
+    fm_send_known_undelivered_cleanup || \
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T: the agent there is gone and the endpoint is now a bare shell, so nothing was typed (tried $RESOLUTION_TRIED). Relaunch the agent before re-sending; typing into the shell would run the message as a command and lose it." >&2
+    exit 1
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before

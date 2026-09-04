@@ -936,6 +936,22 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+### Steering a dead endpoint
+
+`bin/fm-send.sh`'s typed plane refuses an endpoint `fm_backend_agent_state` classifies `dead`, so that verdict is a delivery guarantee and not only a recovery one.
+Measured 2026-08-26 on Herdr 0.7.4 with Claude Code 2.1.246, in an isolated `fm-lab-` session, by launching claude in a pane, exiting it with `/exit`, and steering the pane in each state.
+
+| Pane state | `herdr agent get <pane>` | `fm_backend_agent_state` | `fm-send.sh <target> "<text>"` |
+| --- | --- | --- | --- |
+| Shell, no agent ever launched | `{"error":{"code":"agent_not_found",...}}` | `dead` | refused, exit 1, nothing typed |
+| Live idle claude | `{"agent":"claude","agent_status":"idle"}` | `alive` | delivered, exit 0 |
+| Claude mid-turn running a child process | `{"agent":"claude","agent_status":"working"}` | `alive` | delivered, exit 0 |
+| Shell after the agent exits | `{"error":{"code":"agent_not_found",...}}` | `dead` | refused, exit 1, nothing typed |
+
+Before the refusal existed, the fourth row typed the message into the login shell, which ran its first token and discarded the rest, leaving `zsh: no matches found: (3 findings: review-1 auto-fix, review-2 and review-3 ask-user).` in the pane and no instruction anywhere.
+`herdr pane process-info` shows why the agent-registry read is trustworthy here rather than a rendered one: an exited pane's foreground process is the pane's own `shell_pid`, while a mid-turn agent's foreground child carries a different pid, so a busy agent can never present as an agent-less pane.
+The portable regressions are `tests/fm-backend-herdr.test.sh` (the four `agent get` shapes) and `tests/fm-send-strict.test.sh` (the refusal, that nothing is typed, and that idle, busy, natively blocked, and unclassifiable endpoints are all still steered).
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
