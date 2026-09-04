@@ -674,6 +674,22 @@ The source waits outside the conversational turn, and its completed result arriv
 Classify the captured result through its immutable package identity with `bin/fm-procevent.sh classify <result-file>`, acknowledge it with the existing `handled` command only after it is handled, and use the printed `retire --if-owner` command when explicit retirement is needed.
 Never run the registered blocking source command directly in a conversational turn.
 
+## Tracked background work (state/background-work)
+
+`bin/fm-background-work.sh` makes detached, non-agent work visible without keeping an agent endpoint alive.
+Each private record names the activity and owning task, binds its PID to the process identity observed at registration, records start and optional expected-finish times, and stores a directly executed progress argv whose one-line output can be sampled cheaply.
+The supported `list --json` interface emits `fm-background-work-list.v1` for dashboards and other mechanical consumers, which must not read `state/background-work/` directly.
+
+Liveness and progress are separate observations.
+A missing process, zombie, or PID whose identity changed remains listed as `dead`; an identity that cannot be inspected is `unknown`.
+A changed progress value is `progressing`, an unchanged value becomes `stalled` after the registered threshold, and the first sample or any failed, timed-out, malformed, or contended probe is `unknown` rather than healthy-looking.
+The command header and `--help` own the registration flags, record mechanics, observation reasons, bounds, and retirement behavior.
+
+Tracking provides visibility only.
+It never starts, signals, supervises, restarts, recovers, or wakes for the process, and the watcher does not depend on these records.
+Process-event sources remain the separate primitive for long-polling delivery concerns: they capture completed results into durable wakes and keep their listener ownership live, but their source list does not and should not infer application progress.
+Load the agent-only [`background-work`](../.agents/skills/background-work/SKILL.md) skill before launching, adopting, or retiring this kind of work.
+
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.

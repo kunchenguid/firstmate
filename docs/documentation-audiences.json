@@ -121,6 +121,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/background-work/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bearings/SKILL.md",
       "audience": "agent-runtime"
     },
