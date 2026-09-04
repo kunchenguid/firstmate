@@ -165,6 +165,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 - Allow returns exit 0 with both streams empty.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-dispatch] ..."}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
+- `--antigravity` writes Antigravity's native `{"decision":"deny","reason":"[subagent-dispatch] ..."}` object to stdout and exits 0, because Antigravity consumes the returned object rather than an exit-2 transport.
 - `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.
   This is the same verified quirk recorded in [`arm-pretool-check.md`](arm-pretool-check.md), and the tracked Claude hook therefore passes `--claude`.
 - Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with exit 0 and no output.
@@ -185,6 +186,15 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+| Antigravity | `invoke_subagent` and `send_message` | Scoped match-all `PreToolUse` guard wired and live-verified with Gemini on Antigravity CLI 1.1.26. |
+
+### Antigravity, wired and live-verified
+
+Antigravity's native hook payload names tools at `.toolCall.name`, and its native deny output is `{"decision":"deny","reason":"..."}`.
+A Gemini-only live probe on 2026-09-04 required `invoke_subagent` in a primary-shaped scratch project.
+The tracked match-all hook reached the shared classifier, Antigravity surfaced `[subagent-dispatch]` with `blocked tool: invoke_subagent`, and no subagent ran.
+A separate allowed worker-shaped probe identified the exact built-in delegation pair as `invoke_subagent` and `send_message`; both match the existing `subagent` or `sendmessage` stems without an Antigravity-only name list.
+The guard stays inert in linked task worktrees, where a worker's own delegation is legitimate.
 
 ### Codex, verified not applicable
 

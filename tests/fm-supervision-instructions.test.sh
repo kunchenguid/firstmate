@@ -120,6 +120,23 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
+test_antigravity_uses_foreground_terminal_supervision() {
+  local out ordinary
+  out=$("$RENDER" --harness antigravity)
+  assert_contains "$out" "primary harness: antigravity" "Antigravity heading missing"
+  assert_contains "$out" "Mode: Antigravity foreground tool supervision." "Antigravity snippet missing"
+  assert_contains "$out" "invoke \`bin/fm-watch.sh\` as one foreground terminal tool call" \
+    "Antigravity protocol lost its foreground wait"
+  assert_contains "$out" "bin/fm-watch-arm.sh\` is not a valid substitute" \
+    "Antigravity protocol must explicitly reject the background arm"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "foreground bin/fm-watch.sh" "Antigravity ordinary continuation lost its foreground wait"
+  out=$("$RENDER" --harness antigravity --repair-line)
+  assert_contains "$out" "bin/fm-watch.sh as one foreground Antigravity terminal tool call" \
+    "Antigravity repair line lost its verified wait shape"
+  pass "Antigravity supervision uses one foreground terminal-tool wait"
+}
+
 test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
   local out ordinary
   out=$("$RENDER" --harness pi-signed)
@@ -183,6 +200,7 @@ test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
+test_antigravity_uses_foreground_terminal_supervision
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
