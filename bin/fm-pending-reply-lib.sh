@@ -15,7 +15,9 @@
 # and escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement.
+# acknowledgement. A same-basename restatement-copy of the mate home's
+# state/<task_id>.status onto the parent channel is a repair of the
+# FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
@@ -53,7 +55,8 @@
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
-#   wrong_home_sightings=   comma-separated identities of counted sightings
+#   wrong_home_first_sighting= encoded path:line identity of the first sighting
+#   wrong_home_sightings=   comma-separated encoded path:line identities
 #   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
 #
@@ -181,6 +184,33 @@ fm_pending_reply_get() {  # <record-path> <key>
   grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_pending_reply_sighting_encode() {  # <path> <line-number>
+  local path=$1 line_no=$2 encoded
+  case "$line_no" in ''|*[!0-9]*) return 1 ;; esac
+  encoded=$(printf '%s' "$path" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  [ -n "$encoded" ] || return 1
+  printf 'hex:%s:%s' "$encoded" "$line_no"
+}
+
+fm_pending_reply_sighting_display() {  # <encoded-sighting>
+  local sighting=$1 body encoded line_no path='' pair byte escaped
+  case "$sighting" in hex:*:*) ;; *) return 1 ;; esac
+  body=${sighting#hex:}
+  line_no=${body##*:}
+  encoded=${body%:*}
+  case "$line_no" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$encoded" ] && [ $(( ${#encoded} % 2 )) -eq 0 ] || return 1
+  while [ -n "$encoded" ]; do
+    pair=${encoded:0:2}
+    case "$pair" in *[!0-9a-fA-F]*) return 1 ;; esac
+    printf -v byte '%b' "\\x$pair"
+    path=$path$byte
+    encoded=${encoded:2}
+  done
+  printf -v escaped '%q' "$path"
+  printf '%s:%s' "$escaped" "$line_no"
+}
+
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
@@ -295,6 +325,7 @@ escalated_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
+wrong_home_first_sighting=
 wrong_home_sightings=
 wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
@@ -1054,6 +1085,7 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
       case "$line" in
         "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
+        "blocked [key=$own_key]: $payload "*|"blocked: $payload "*) found=$line; break ;;
       esac
     done
   done < "$status_file"
@@ -1152,7 +1184,8 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now payload parent_status line kind
+  local rec phase completed now payload parent_status line kind first display
+  local delivered task_id meta sm_home remote_host
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1173,6 +1206,17 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     delivery_unknown|recovery_failed|recovery_unknown) ;;
     *) return 1 ;;
   esac
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  meta="$state/${task_id}.meta"
+  if [ -n "$delivered" ] && [ -f "$meta" ]; then
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    sm_home=$(fm_meta_get "$meta" home)
+    if [ -z "$remote_host" ] && [ -n "$sm_home" ]; then
+      fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+      fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
+    fi
+  fi
   # Resolve wins if a late report arrived between completion and this call.
   if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0
@@ -1184,6 +1228,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     *) kind=missed ;;
   esac
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
+  if [ "$kind" = missed ]; then
+    first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
+    if display=$(fm_pending_reply_sighting_display "$first"); then
+      payload="$payload token seen in $display; parent channel has no corr="
+    fi
+  fi
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
@@ -1197,10 +1247,12 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
 }
 
 # Detect a correlated report written under the secondmate home (wrong home)
-# without treating it as acknowledgement.
+# without treating it as acknowledgement. A remote route's
+# parent-replies.status is its parent channel, not a stranded self-home file.
 fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec delivered hits sightings snapshot previous status_file line line_no sighting_id phase changed=0
+  local rec delivered hits first sightings snapshot previous status_file line line_no sighting_base sighting_id phase changed=0
+  local remote_parent_channel=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 0
@@ -1210,19 +1262,33 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   [ -n "$delivered" ] || return 0
   snapshot=$(fm_pending_reply_status_set_signature "$sm_home/state")
   previous=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
-  [ "$snapshot" != "$previous" ] || return 0
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
   case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
+  first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
+  if [ "$snapshot" = "$previous" ] && { [ "$hits" = 0 ] || [ -n "$first" ]; }; then
+    return 0
+  fi
   sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
+  # shellcheck source=bin/fm-parent-channel-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+  if fm_parent_channel_destination "$sm_home" "$sm_home/state" >/dev/null 2>&1 \
+    && [ "$FM_PARENT_CHANNEL_ROUTE" = remote ]; then
+    remote_parent_channel=1
+  fi
   for status_file in "$sm_home"/state/*.status; do
     [ -e "$status_file" ] || continue
+    if [ "$remote_parent_channel" = 1 ] \
+      && [ "$(basename "$status_file")" = parent-replies.status ]; then
+      continue
+    fi
+    sighting_base=$(fm_pending_reply_sighting_encode "$status_file" 0) || continue
+    sighting_base=${sighting_base%:0}
     line_no=0
     while IFS= read -r line || [ -n "$line" ]; do
       line_no=$((line_no + 1))
       fm_pending_reply_line_resolves "$line" "$corr" || continue
-      sighting_id=$(printf '%s:%s:%s:%s' "${#status_file}" "$status_file" "$line_no" "$line" \
-        | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}')
-      [ -n "$sighting_id" ] || continue
+      sighting_id="$sighting_base:$line_no"
+      [ -n "$first" ] || first=$sighting_id
       case ",$sightings," in
         *",$sighting_id,"*) continue ;;
       esac
@@ -1235,12 +1301,37 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
       changed=1
     done < "$status_file"
   done
+  if [ -n "$first" ] && [ -z "$(fm_pending_reply_get "$rec" wrong_home_first_sighting)" ]; then
+    fm_pending_reply_set "$rec" wrong_home_first_sighting "$first" || return 1
+  fi
   if [ "$changed" = 1 ]; then
     fm_pending_reply_set "$rec" wrong_home_sightings "$sightings" || return 1
     fm_pending_reply_set "$rec" wrong_home_hits "$hits" || return 1
   fi
   fm_pending_reply_set "$rec" wrong_home_scan_signature "$snapshot" || return 1
   return 0
+}
+
+# Restatement-copy a same-basename self-home corr= line onto the parent channel.
+# Only $sm_home/state/<task_id>.status is copied; arbitrary child status files
+# stay evidence, not acknowledgement.
+fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <secondmate-home>
+  local state=$1 corr=$2 sm_home=$3
+  local rec task_id parent_status stranded line
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 1
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$task_id" ] && [ -n "$parent_status" ] || return 1
+  stranded="$sm_home/state/${task_id}.status"
+  [ -f "$stranded" ] && [ ! -L "$stranded" ] || return 1
+  [ "$stranded" != "$parent_status" ] || return 1
+  line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
+  [ -n "$line" ] || return 1
+  # shellcheck source=bin/fm-parent-channel-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+  fm_parent_channel_append_once "$parent_status" "$line"
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
@@ -1280,6 +1371,11 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
       # Unresolved durable record retained; never auto-delete.
       if [ -n "$sm_home" ]; then
         fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+        if fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home"; then
+          if fm_pending_reply_try_resolve "$state" "$corr"; then
+            return 0
+          fi
+        fi
       fi
       return 0
       ;;
@@ -1291,6 +1387,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   esac
   if [ -n "$sm_home" ]; then
     fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+    fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
   fi
   fm_pending_reply_observe_busy "$state" "$corr" "$busy_state" || true
   # Re-check resolve after observation in case a concurrent status write landed.
@@ -1362,6 +1459,11 @@ fm_pending_reply_tick() {  # <state-dir>
         sm_home=$(fm_meta_get "$meta" home)
         if [ -n "$sm_home" ]; then
           fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
+          if fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home"; then
+            if fm_pending_reply_try_resolve "$state" "$corr"; then
+              continue
+            fi
+          fi
         fi
       fi
       continue
