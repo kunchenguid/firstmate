@@ -95,6 +95,8 @@
 #     they retain independently trustworthy structured surfaces. An inventory
 #     mismatch also keeps the home's own current classification, which only an
 #     unavailable child state or an untrustworthy backlog collapses to unknown.
+#     Which closed rows a home contributes is bin/fm-landed-lib.sh's rule, shared
+#     with the bearings projection so one Recently Landed section has one owner.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # Compatibility: JSON is the primary machine-readable surface.
@@ -207,6 +209,9 @@ esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 
 usage() {
   cat <<'EOF'
@@ -920,7 +925,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" '
+    --slurpfile tasks "$2" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
     | def trunc($n):
@@ -942,7 +947,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
-    | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
+    | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
