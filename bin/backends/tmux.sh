@@ -70,9 +70,7 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # server's initial environment. `new-session` is that first call here, so
 # env -u scrubs CLAUDE_CODE_CHILD_SESSION and CLAUDECODE on this exact command,
 # the same markers a server started from inside a Claude session would
-# otherwise hand down to every worker pane later launched under it (first
-# observed 2026-08-03, Claude Code 2.1.220; reproduced on tmux and this fix
-# verified 2026-09-04, Claude Code 2.1.260 -
+# otherwise hand down to every worker pane later launched under it (see
 # docs/verification/runtime-backends.md "Claude Code"). The reused-session
 # branch starts no server and needs no scrub.
 fm_backend_tmux_container_ensure() {

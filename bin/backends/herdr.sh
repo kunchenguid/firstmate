@@ -1451,10 +1451,8 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # inherited from whichever agent happened to start it - including
 # CLAUDE_CODE_CHILD_SESSION and CLAUDECODE, the markers a server started from
 # inside a Claude Code session inherits and hands down to every later pane
-# (first observed 2026-08-03, Claude Code 2.1.220; reproduced and this fix
-# verified 2026-09-04, Claude Code 2.1.260 -
-# docs/verification/runtime-backends.md "Claude Code"): a pane inheriting
-# either one treats itself as a nested child session and runs with
+# (see docs/verification/runtime-backends.md "Claude Code"): a pane
+# inheriting either one treats itself as a nested child session and runs with
 # transcripts off. Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i

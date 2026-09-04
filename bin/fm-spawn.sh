@@ -1279,17 +1279,15 @@ launch_template() {
     # and never touch the captain's global ~/.claude/settings.json.
     # env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE clears the markers Claude Code
     # stamps on its own process and that a multiplexer server started from inside a
-    # Claude session then hands down to every later pane (first observed 2026-08-03,
-    # Claude Code 2.1.220; reproduced and this fix verified 2026-09-04, Claude Code
-    # 2.1.260 - docs/verification/runtime-backends.md "Claude Code"): a worker
-    # inheriting either one treats itself as a nested child session and runs
-    # with transcripts off, so it writes no ~/.claude/projects/<slug>/*.jsonl,
-    # the context tracker reads 0, and the session cannot be resumed. Scrubbing
-    # here makes every Claude worker launch clean regardless of what its server
-    # happened to inherit; fm_backend_herdr_server_ensure (bin/backends/herdr.sh)
-    # and fm_backend_tmux_container_ensure (bin/backends/tmux.sh) additionally
-    # scrub both markers at the point each backend starts its own server, so a
-    # freshly started server is clean at the source too.
+    # Claude session then hands down to every later pane: a worker inheriting either
+    # one treats itself as a nested child session and runs with transcripts off.
+    # docs/verification/runtime-backends.md "Claude Code" owns the versioned
+    # evidence. Scrubbing here makes every Claude worker launch clean regardless of
+    # what its server happened to inherit; fm_backend_herdr_server_ensure
+    # (bin/backends/herdr.sh) and fm_backend_tmux_container_ensure
+    # (bin/backends/tmux.sh) additionally scrub both markers at the point each
+    # backend starts its own server, so a freshly started server is clean at the
+    # source too.
     claude) printf '%s' 'env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
