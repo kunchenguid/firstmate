@@ -343,6 +343,56 @@ SH
   pass "terminal lines arriving during state reads remain ledger-owned"
 }
 
+# The same race as the test above, in the shape this branch's status protocol
+# actually produces: the child appends `done:` AND `paused:` back-to-back while
+# the authoritative state read is in flight. The post-read guard must read the
+# same terminal-sequence shape as the pre-read guard, or it sees only the
+# trailing pause, publishes an inactive fallback, and the next poll's ledger
+# delivery publishes the same completion a second time.
+test_done_then_paused_during_state_read_yields_to_ledger_delivery() {
+  make_world state-ledger-race-paused; bind_secondmate local
+  write_child "$MATE" child 'working: finishing now'
+  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'done: PR https://example.test/owner/repo/pull/1 completed during state read\n'
+  printf 'paused: awaiting merge authority\n'
+} >> "$FM_STATE_OVERRIDE/$1.status"
+printf 'state: done · source: fake\n'
+SH
+  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
+  run_reconcile "$MATE" --startup
+  [ ! -e "$MAIN/state/mate.status" ] \
+    || ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "the inactive path claimed an outcome whose done-then-paused ledger arrived during state read: $(cat "$MAIN/state/mate.status")"
+  run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the next ledger pass did not deliver the raced done-then-paused line exactly once: $(cat "$MAIN/state/mate.status")"
+  ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "one raced done-then-paused completion was reported by both reconciliation paths: $(cat "$MAIN/state/mate.status")"
+  pass "a done-then-paused sequence arriving during a state read remains ledger-owned"
+}
+
+# FM_TERMINAL_PAUSE_SCAN_MAX is an operator override, so a non-numeric or
+# non-positive value must fall back to the default rather than making `[`
+# error to stderr and silently dropping an already-landed PR from
+# parent-channel delivery.
+test_invalid_pause_scan_budget_still_delivers_the_terminal_line() {
+  local bad err key expected
+  for bad in twenty 0; do
+    make_world "scan-budget-$bad"; bind_secondmate local
+    write_child "$MATE" child $'done: PR https://example.test/owner/repo/pull/1 checks green\npaused: awaiting merge authority'
+    err=$({ FM_TERMINAL_PAUSE_SCAN_MAX="$bad" FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE" >/dev/null; } 2>&1)
+    [ -z "$err" ] || fail "FM_TERMINAL_PAUSE_SCAN_MAX=$bad made the ledger reader write to stderr: $err"
+    key=$(reported_outcome_key "$MATE" child 'done') \
+      || fail "FM_TERMINAL_PAUSE_SCAN_MAX=$bad lost the terminal receipt key"
+    expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+    grep -Fxq "$expected" "$MAIN/state/mate.status" \
+      || fail "FM_TERMINAL_PAUSE_SCAN_MAX=$bad dropped the terminal PR result from parent delivery: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  done
+  pass "a non-numeric or zero pause-scan budget falls back to the default instead of hiding the terminal line"
+}
+
 # A terminal append can land after the inactive path's final ledger read but
 # before its already-selected outcome is observed on the next poll. The receipt
 # store reconciles that ledger event with the fallback delivery, while a later
@@ -858,6 +908,8 @@ test_done_then_paused_still_dedupes_against_inactive_fallback
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery
+test_done_then_paused_during_state_read_yields_to_ledger_delivery
+test_invalid_pause_scan_budget_still_delivers_the_terminal_line
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event
 test_long_terminal_lines_have_distinct_receipts

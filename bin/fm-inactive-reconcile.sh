@@ -379,6 +379,7 @@ child_terminal_ledger_line() { # <status>
   n=$(printf '%s\n' "$lines" | grep -c .)
   [ "$n" -ge 1 ] || return 1
   budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
+  case "$budget" in ''|*[!0-9]*|0) budget=20 ;; esac
   [ "$n" -lt "$budget" ] && budget=$n
   i=1
   while [ "$i" -le "$budget" ]; do
@@ -524,8 +525,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
-  if [ -n "$self" ]; then
-    case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
+  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
+    return 0
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;

@@ -951,6 +951,7 @@ terminal_then_paused() {  # <lines> <last>
   n=$(printf '%s\n' "$lines" | grep -c .)
   [ "$n" -ge 2 ] || return 1
   budget=${FM_TERMINAL_PAUSE_SCAN_MAX:-20}
+  case "$budget" in ''|*[!0-9]*|0) budget=20 ;; esac
   [ "$n" -lt "$budget" ] && budget=$n
   i=2
   while [ "$i" -le "$budget" ]; do

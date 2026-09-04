@@ -2576,6 +2576,47 @@ test_multiple_trailing_pauses_outrank_authoritative_working() {
   pass "two consecutive trailing declared pauses still outrank authoritative working state"
 }
 
+# FM_TERMINAL_PAUSE_SCAN_MAX is an operator override on the lookback budget,
+# so a non-numeric or non-positive value must fall back to the default rather
+# than making `[` error and silently disabling the declared-wait recognition
+# that keeps a finished-into-a-wait pane off the wedge path.
+test_invalid_pause_scan_budget_still_outranks_authoritative_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case bad-scan-budget-outranks-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-bad-budget"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/bad-budget.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: awaiting checks - CI halted account-wide\n'
+  } > "$state/bad-budget.status"
+  sig=$(seen_sig "$state/bad-budget.status"); printf '%s' "$sig" > "$state/.seen-bad-budget_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_TERMINAL_PAUSE_SCAN_MAX=twenty \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a bad pause-scan budget exited instead of staying absorbed: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a non-numeric pause-scan budget disabled declared-wait recognition"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a non-numeric pause-scan budget restarted the wedge timer on a declared wait"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a non-numeric pause-scan budget falls back to the default and still outranks authoritative working state"
+}
+
 # The 2026-09-04 exit-path fix: once a log ends done-then-paused, run/agent
 # state alone could never restore wedge detection - a worker steered new work
 # through its inbox (bin/fm-brief.sh forbids a plain `working:`
@@ -4196,6 +4237,7 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_terminal_then_paused_outranks_authoritative_working
 test_multiple_trailing_pauses_outrank_authoritative_working
+test_invalid_pause_scan_budget_still_outranks_authoritative_working
 test_inbox_activity_after_declared_wait_restores_wedge_detection
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
