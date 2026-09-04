@@ -144,32 +144,57 @@ _fm_telegram_chat_id_valid() {  # <id>
 
 # Resolve this home's Telegram configuration into FM_TELEGRAM_CHAT_ID and
 # FM_TELEGRAM_TOKEN_FILE. Returns 0 only when the home is fully configured and
-# the token file is present and usable; every other case returns 1 in silence,
-# which keeps every automatic caller unchanged in an unconfigured home.
+# the token file is present and usable. A home without a chat-id configuration
+# returns 1 in silence; an opted-in home with unusable token configuration
+# returns 2 with an actionable error for operator-facing callers.
 fm_telegram_config_load() {  # <home>
-  local home=$1 chat token device
+  local home=$1 chat token device dir token_setting
   FM_TELEGRAM_CHAT_ID=
   FM_TELEGRAM_TOKEN_FILE=
   FM_TELEGRAM_CONFIG_ERROR=
   chat=$(_fm_telegram_config_read "$home" telegram-chat-id) || return 1
   _fm_telegram_chat_id_valid "$chat" || return 1
-  token=$(_fm_telegram_config_read "$home" telegram-token-path) \
-    || token="$HOME/.mist-telegram-token"
+  dir=$(_fm_telegram_config_dir "$home")
+  token_setting="$dir/telegram-token-path"
+  if [ -e "$token_setting" ] || [ -L "$token_setting" ]; then
+    if [ ! -f "$token_setting" ] || [ -L "$token_setting" ] || [ ! -r "$token_setting" ]; then
+      FM_TELEGRAM_CONFIG_ERROR="token path setting $token_setting must be a readable regular file containing the bot token file path"
+      return 2
+    fi
+    token=$(_fm_telegram_config_read "$home" telegram-token-path) || {
+      FM_TELEGRAM_CONFIG_ERROR="token path setting $token_setting must contain the bot token file path"
+      return 2
+    }
+  else
+    token="$HOME/.mist-telegram-token"
+  fi
   # A leading "~/" in the recorded path is expanded here, because the path is
   # config data rather than shell input and never passes through an expansion.
   [ "${token#\~/}" = "$token" ] || token="$HOME/${token#\~/}"
-  [ -e "$token" ] || [ -L "$token" ] || return 1
-  if [ ! -f "$token" ] || [ -L "$token" ] || [ ! -r "$token" ]; then
-    FM_TELEGRAM_CONFIG_ERROR="token file $token must be owned by the current user with mode 0600"
+  if [ ! -e "$token" ] && [ ! -L "$token" ]; then
+    FM_TELEGRAM_CONFIG_ERROR="token file $token is missing"
     return 2
   fi
-  [ -s "$token" ] || return 1
-  device=$(fm_pr_file_device "$token") || return 1
+  if [ ! -f "$token" ] || [ -L "$token" ] || [ ! -r "$token" ]; then
+    FM_TELEGRAM_CONFIG_ERROR="token file $token must be a readable regular file owned by the current user with mode 0600"
+    return 2
+  fi
+  if [ ! -s "$token" ]; then
+    FM_TELEGRAM_CONFIG_ERROR="token file $token is empty"
+    return 2
+  fi
+  device=$(fm_pr_file_device "$token") || {
+    FM_TELEGRAM_CONFIG_ERROR="token file $token could not be checked"
+    return 2
+  }
   if ! fm_pr_private_file_valid "$token" 600 "$device"; then
     FM_TELEGRAM_CONFIG_ERROR="token file $token must be owned by the current user with mode 0600"
     return 2
   fi
-  fm_telegram_token_usable "$token" || return 1
+  fm_telegram_token_usable "$token" || {
+    FM_TELEGRAM_CONFIG_ERROR="token file $token must contain exactly one usable token line"
+    return 2
+  }
   # shellcheck disable=SC2034 # Read by sourcing callers.
   FM_TELEGRAM_CHAT_ID=$chat
   # shellcheck disable=SC2034 # Read by sourcing callers.

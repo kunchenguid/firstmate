@@ -32,7 +32,8 @@
 # notifications"):
 #   network down or Telegram unreachable   cards stay queued, next cycle retries
 #   token rejected or chat refused         one rate-limited wake, not one per cycle
-#   token or configuration absent          automatic paths exit 0 silently
+#   chat configuration absent              automatic paths exit 0 silently
+#   configured token unavailable           one rate-limited actionable wake
 #   this check not armed                   cards queue and drain when it is
 # A held decision, a registered PR, a failure, and a merge are all already
 # durable in the backlog and in state before any card exists, so a card that

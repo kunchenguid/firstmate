@@ -279,17 +279,70 @@ test_unsafe_token_permissions_are_a_visible_configuration_error() {
   pass "unsafe token permissions are visible and prevent queueing and sending"
 }
 
-test_absent_token_is_inert() {
-  local dir out rc=0
-  dir=$(make_home no-token)
+test_configured_token_disappearance_is_visible_and_recovers() {
+  local dir base out
+  dir=$(make_home missing-token)
+  report "$dir" "done [key=pr-t1]: child t1 PR ready: https://example.test/o/r/pull/1" \
+    pr-ready pr-t1 "project=alpha" "url=https://example.test/o/r/pull/1" >/dev/null 2>&1 || true
+  [ "$(card_count "$dir")" = 1 ] || fail "the configured home did not queue its card"
+  base=$(start_api "$dir")
   rm -f "$dir/token"
-  out=$(report "$dir" "done [key=pr-t1]: child t1 PR ready: https://example.test/o/r/pull/1" \
-    pr-ready pr-t1 "project=alpha" "url=https://example.test/o/r/pull/1" 2>&1) || rc=$?
-  [ "$rc" -eq 1 ] || fail "a home whose token file is gone changed its publish result (rc=$rc)"
-  [ -z "$out" ] || fail "a home whose token file is gone produced output: $out"
-  [ ! -e "$dir/home/state/telegram-outbox" ] \
-    || fail "a home whose token file is gone queued a card"
-  pass "an absent token file is the absent feature, silently"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the missing-token drain failed"
+  case "$out" in
+    *"$dir/token"*"missing"*) ;;
+    *) fail "the drain did not name the missing configured token: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "a missing configured token discarded its card"
+  [ ! -s "$dir/api.log" ] || fail "a missing configured token still reached the API"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the repeated missing-token drain failed"
+  [ -z "$out" ] || fail "a persistent missing token was reported more than once: $out"
+  printf '%s\n' "$BOT_TOKEN" > "$dir/token"
+  chmod 0600 "$dir/token"
+  out=$(run_send "$dir" "$base" check 2>&1) || fail "the restored-token drain failed"
+  [ -z "$out" ] || fail "the restored-token drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the restored token did not deliver its queued card"
+  stop_api
+  pass "a disappeared configured token reports once, preserves cards, and recovers"
+}
+
+test_invalid_explicit_token_path_never_uses_default() {
+  local dir base out default_home setting
+  dir=$(make_home explicit-token)
+  report "$dir" "failed [key=k-explicit]: child t1 failed: x" failed k-explicit \
+    "project=alpha" "note=the build broke" >/dev/null 2>&1 || true
+  [ "$(card_count "$dir")" = 1 ] || fail "the configured home did not queue its card"
+  base=$(start_api "$dir")
+  default_home="$dir/default-home"
+  mkdir -p "$default_home"
+  printf '%s\n' "$BOT_TOKEN" > "$default_home/.mist-telegram-token"
+  chmod 0600 "$default_home/.mist-telegram-token"
+  setting="$dir/home/config/telegram-token-path"
+  : > "$setting"
+  out=$(HOME="$default_home" run_send "$dir" "$base" check 2>&1) \
+    || fail "the empty-token-path drain failed"
+  case "$out" in
+    *"$setting"*"must contain"*) ;;
+    *) fail "the drain did not name the empty token-path setting: $out" ;;
+  esac
+  [ "$(card_count "$dir")" = 1 ] || fail "an invalid token-path setting discarded its card"
+  [ ! -s "$dir/api.log" ] || fail "an invalid explicit token path fell back to the default token"
+  printf '%s\n' "$dir/token" > "$setting"
+  : > "$dir/token"
+  out=$(HOME="$default_home" run_send "$dir" "$base" check 2>&1) \
+    || fail "the empty-token-file drain failed"
+  case "$out" in
+    *"$dir/token"*"empty"*) ;;
+    *) fail "the drain did not name the empty selected token file: $out" ;;
+  esac
+  [ ! -s "$dir/api.log" ] || fail "an empty selected token fell back to the default token"
+  printf '%s\n' "$BOT_TOKEN" > "$dir/token"
+  chmod 0600 "$dir/token"
+  out=$(HOME="$default_home" run_send "$dir" "$base" check 2>&1) \
+    || fail "the repaired explicit-token drain failed"
+  [ -z "$out" ] || fail "the repaired explicit-token drain spoke: $out"
+  [ "$(card_count "$dir")" = 0 ] || fail "the repaired explicit token did not deliver its card"
+  stop_api
+  pass "an invalid explicit token path is visible and never falls back"
 }
 
 test_card_is_built_from_typed_fields() {
@@ -849,7 +902,8 @@ test_arm_and_disarm() {
 }
 
 test_unconfigured_home_is_inert
-test_absent_token_is_inert
+test_configured_token_disappearance_is_visible_and_recovers
+test_invalid_explicit_token_path_never_uses_default
 test_an_unusable_token_file_is_inert
 test_unsafe_token_permissions_are_a_visible_configuration_error
 test_card_is_built_from_typed_fields
