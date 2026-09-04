@@ -130,14 +130,15 @@ Widening the grant to a third-party tool home, its control socket, and the homes
 
 Only codex is launched inside a filesystem sandbox.
 `claude`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi` are launched with approval flags and no sandbox flag at all, and `muse`'s `--yolo` explicitly disables its default-on sandbox.
-`cursor` is the one other adapter launched with a sandbox flag (`--sandbox enabled`), and it is measurably not affected: on `cursor-agent 2026.08.25-3e8eec8`, writes to two directories outside the workspace both succeeded.
+`cursor` is the one other adapter launched with a sandbox flag (`--sandbox enabled`).
+The following run measured the documented `--force` alias defeating that sandbox, not Firstmate's current `--auto-review --sandbox enabled` posture: on `cursor-agent 2026.08.25-3e8eec8`, writes to two directories outside the workspace both succeeded.
 
 ```
 $ cursor-agent -p --force --sandbox enabled "Run exactly two shell commands ... (1) ... state/cursor-probe.status (2) ... config/cursor-probe.txt"
 both probes succeeded - neither was denied
 ```
 
-Cursor's sandbox therefore does not confine writes to the workspace the way codex's does, and firstmate's cursor launch is left untouched.
+Firstmate refuses `--force` and leaves the current Cursor launch posture untouched.
 
 ## Coverage and what is not proven
 
