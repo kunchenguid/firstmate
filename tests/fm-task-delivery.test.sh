@@ -407,6 +407,7 @@ test_project_mode_maps_the_conditional_policy() {
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- --raw [local-only] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
@@ -417,11 +418,14 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" yoloproj 2>/dev/null)
   [ "$out" = "no-mistakes on" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
 
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw prodproj 2>/dev/null)
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw -- prodproj 2>/dev/null)
   [ "$out" = "no-mistakes-prod-only off" ] || fail "--raw did not expose the registered annotation (got '$out')"
 
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw -- flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" -- --raw 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "the option boundary did not preserve an option-shaped project name (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"

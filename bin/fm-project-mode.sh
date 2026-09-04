@@ -8,8 +8,9 @@
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (exclude local-only clones from
-# remote-gone branch pruning), bin/fm-home-seed.sh (refuse local-only seeding and
-# run no-mistakes init), and bin/fm-spawn.sh's advisory registry-deviation notice.
+# remote-gone branch pruning), bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh
+# (refuse local-only seeding and run no-mistakes init), and bin/fm-spawn.sh's
+# advisory registry-deviation notice.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -34,7 +35,7 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# Usage: fm-project-mode.sh [--raw] [--] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +48,10 @@ if [ "${1:-}" = "--raw" ]; then
   RAW=1
   shift
 fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+NAME=${1:?usage: fm-project-mode.sh [--raw] [--] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2

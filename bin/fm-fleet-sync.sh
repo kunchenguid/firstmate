@@ -352,7 +352,7 @@ sync_project() {
 
   mode=no-mistakes
   if registry_key=$(project_registry_key); then
-    mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_key" 2>/dev/null || echo "no-mistakes off")
+    mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" -- "$registry_key" 2>/dev/null || echo "no-mistakes off")
     mode=${mode_line%% *}
   fi
   if [ "$mode" != "local-only" ]; then
