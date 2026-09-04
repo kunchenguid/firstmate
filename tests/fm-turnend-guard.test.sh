@@ -353,6 +353,48 @@ test_hook_blocks_with_live_lock_and_stale_beacon() {
   pass "fm-turnend-guard: blocks on a live watcher lock with an ancient beacon"
 }
 
+# The blocking banner names the actual fault. A live, identity-matched holder of
+# this home's watcher lock whose beacon has gone stale (what a suspended host
+# leaves behind) is not a missing watcher process, and sending the operator
+# looking for one hides the pid they must inspect or stop.
+# The verdict is unchanged: both legs still block with exit 2, so the alarm is
+# proven not to have been softened to make the wording true.
+test_hook_block_banner_names_a_live_unbeaten_holder() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-banner-live-unbeaten")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify the live unbeaten watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live unbeaten holder must still block the turn"
+  assert_contains "$out" "watcher pid $pid holds this home lock but has not beaten" \
+    "the block banner must name the live holder pid that has not beaten"
+  assert_not_contains "$out" "no live watcher holds this home lock" \
+    "a live holder must not be reported as a missing watcher process"
+
+  # Negative control on the same fixture shape: no holder at all keeps the
+  # absent-watcher wording, and still blocks.
+  dir=$(make_primary_dir "$TMP_ROOT/hook-banner-no-holder")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an absent watcher must still block the turn"
+  assert_contains "$out" "no live watcher holds this home lock" \
+    "an unheld lock must keep the absent-watcher wording"
+  assert_not_contains "$out" "holds this home lock but has not beaten" \
+    "an unheld lock must not be reported as a live holder that has not beaten"
+  pass "fm-turnend-guard: the block banner separates a live unbeaten holder from an absent one"
+}
+
 test_hook_blocks_when_unhealthy_in_primary() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-block")
@@ -1915,6 +1957,7 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
+test_hook_block_banner_names_a_live_unbeaten_holder
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence

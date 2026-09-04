@@ -431,6 +431,69 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
   pass "fm-guard stale banner: a no-watcher episode survives a beacon mtime change"
 }
 
+# The third banner cause, and the one a suspended host leaves behind: a live,
+# identity-matched holder of THIS home's watcher lock whose beacon has gone stale
+# (docs/watcher-continuity.md).
+# The verdict deliberately still alarms and the guard still exits 0 because it
+# warns and never blocks; only the wording separates this from nothing running at
+# all.
+# The two negative controls run the same fixture with the holder dead and with
+# the lock genuinely unheld, so all three causes are proven distinct rather than
+# merely present.
+test_persistent_stale_beacon_banner_separates_all_three_causes() {
+  local dir home out status pid
+  dir=$(make_guard_case persistent-stale-live-holder)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record the live watcher for the stale-beacon holder"
+  touch -t 200001010000 "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$status" -eq 0 ] \
+    || fail "the watcher-down banner must warn without blocking, got exit status $status: $out"
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a live holder with a stale beacon must still alarm exactly once: $out"
+  assert_contains "$out" "watcher pid $pid holds this home lock but has not beaten" \
+    "the stale-beacon banner must name the live holder pid that has not beaten"
+  assert_not_contains "$out" "no watcher has a fresh beacon" \
+    "a live holder must not be reported as nothing having a fresh beacon"
+  assert_not_contains "$out" "no live watcher process holds this home lock" \
+    "a live holder must not be reported as a missing watcher process"
+
+  # Same fixture, holder dead: the pre-existing stale-beacon wording, unchanged.
+  dir=$(make_guard_case persistent-stale-dead-holder)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record the watcher lock for the dead holder"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  touch -t 200001010000 "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a stale beacon with no live holder must still alarm exactly once: $out"
+  assert_contains "$out" "no watcher has a fresh beacon" \
+    "a stale beacon with no live holder must keep the stale-beacon wording"
+  assert_not_contains "$out" "holds this home lock but has not beaten" \
+    "a dead holder must not be reported as a live holder that has not beaten"
+
+  # Genuinely unheld lock with a fresh beacon: the no-watcher wording, unchanged.
+  dir=$(make_guard_case persistent-stale-unheld-lock)
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a genuinely unheld lock must still alarm exactly once: $out"
+  assert_contains "$out" "no live watcher process holds this home lock" \
+    "a genuinely unheld lock must keep the no-watcher wording"
+  assert_not_contains "$out" "holds this home lock but has not beaten" \
+    "an unheld lock must not be reported as a live holder that has not beaten"
+  pass "fm-guard stale banner: the banner separates a live unbeaten holder from both other causes"
+}
+
 # The send-time false alarm this suite exists to pin: on a Pi primary the watcher
 # process is torn down and respawned by the extension on every actionable wake, so
 # a guarded command that lands in a hand-off sees a fresh beacon and an unheld lock
@@ -743,6 +806,7 @@ test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
+test_persistent_stale_beacon_banner_separates_all_three_causes
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_healthy_recovery_rearms_next_stale_episode

@@ -505,6 +505,93 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### Cycle-end evidence and holder-naming banners, 2026-08-29
+
+```text
+macOS 27.0 (26A5421a) arm64
+GNU bash 5.3.9(1)-release
+ShellCheck 0.11.0 (pinned)
+base: origin/main f66be0f
+```
+
+Each regression case below was checked against the code with its own fix removed, because a case that cannot fail proves nothing.
+One behaviour in this change has no such case; it is named in full under "The uncovered leg" below rather than left for a reader to find by opening the test files.
+
+The cycle-end evidence, mutant = the evidence clause reverted to the bare upstream sentence:
+
+```text
+control -> ok - an attached arm reports the exit status its owning arm recorded
+mutant  -> not ok - attached arm did not report the owner-recorded exit:
+               watcher: attached pid=96760 (beacon 0s)
+               watcher: FAILED - cycle ended without an actionable reason
+```
+
+That mutant output is the reported symptom itself: a fresh beacon, a failed cycle, and nothing to act on.
+
+The ledger probe at a long identity, mutant = the singly-truncated probe restored:
+
+```text
+control -> ok - the owner-recorded exit is still found when the identity is long
+mutant  -> not ok - a long identity lost the owner-recorded exit:
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=15635 exited and released this home lock without recording a delivered wake
+```
+
+The mutant does not lose the verdict, only the exit code - it falls back to the generic disposition text in exactly the case where the recorded exit is the only evidence left.
+The fixture asserts its own identity length before relying on it, so it cannot pass vacuously on a short path.
+
+The ledger reason filter, mutant = the allow-list removed so any row under the watcher's PID is eligible:
+
+```text
+control -> ok - an arm-interrupted row is not reported as the watcher's own exit
+mutant  -> not ok - attached arm reported its own arm's signal as the watcher's exit:
+               watcher: attached pid=25977 (beacon 1s)
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=25977 was killed by HUP without delivering a wake
+```
+
+The watcher in that fixture was never sent SIGHUP; its own arm was, and the arm terminated it.
+The mutant names a signal source that does not exist, which is the same unactionable evidence in a more confident voice.
+
+The three-answer liveness probe, mutant = an unreadable identity collapsed back into "not live":
+
+```text
+control -> ok - an unreadable identity reads as unknown, and a real death still reads as a death
+mutant  -> not ok - an unreadable identity was reported as a death:
+               watcher: attached pid=27845 (beacon 1s)
+               watcher: FAILED - cycle ended without an actionable reason:
+               watcher pid=27845 died leaving its own lock behind
+```
+
+The fixture asserts the watcher is still alive at that moment, so the mutant's sentence is provably false rather than merely unproven.
+Its second leg kills that same watcher and requires the death wording to still fire, so the fix cannot pass by simply never saying it.
+
+#### The uncovered leg: an empty recorded identity
+
+That liveness probe has a second leg, and no test in this repository fails without it.
+This is the one behaviour in this change that ships unproven, and it is stated here so the coverage of the rest is not read as covering it too.
+
+When the identity recorded for the cycle is empty rather than merely unreadable, `cycle_watcher_still_live` answers unknown instead of falling back to bare pid liveness.
+Reverting that leg alone - `[ -n "$identity" ] || return 2` back to `return 0` - leaves the entire `tests/fm-watcher-lock.test.sh` suite green at 35 ok, 0 not ok, exit 0.
+The mutant was confirmed to be valid bash first, so that green is a real pass rather than a broken script.
+
+It could not be staged because the fixed and unfixed code only diverge on a pid the kernel has already recycled.
+An empty recorded identity is captured in exactly one place: when an owning arm forks its watcher and `fm_pid_identity` cannot read the new child, at `cycle_begin "$child" started ...` in `bin/fm-watch-arm.sh`.
+Shadowing `ps` so that read fails does reproduce the empty identity - driven through the real scripts, that arm prints `watcher pid=N exited and released this home lock without recording a delivered wake` - but an owning arm reaches the evidence path only after `wait` has reaped that child, so `fm_pid_alive` is already false and both versions take the same branch above the leg.
+The attached-arm paths cannot reach it at all, because `fm_watcher_lock_matches_pid` rejects an empty recorded identity before a cycle can begin from one.
+Forcing the divergence therefore needs that freed pid to be reused by a live process inside that window, which is not deterministically stageable without test-only machinery that would make the fixture unlike a real run.
+
+The leg is kept exactly as written rather than deleted.
+Deleting it would restore the bare-liveness fallback this change's own rationale rules out, which trades an unproven behaviour for a known defect.
+
+### Beacon freshness under host suspend - attempted and deferred
+
+The second half of the reported problem, that `state/.last-watcher-beat` can read fresh while supervision is already dead and stale while a watcher is merely suspended, was attempted on this branch and deliberately deferred rather than shipped.
+The approach - separating a suspended watcher from a wedged one by watching the beacon for a bounded window instead of inferring from its age - is sound and reproduces the fault, but bounding those windows introduced five regressions of its own, each fix bounding one window and opening another.
+Two of them broke guarantees the change itself had stated: callers that declared no budget stopped keeping their previous timing, and a receipt could claim a full observation that was never spent, which let a caller skip the one observation the design promised.
+The pattern is the finding, and it is recorded here rather than lost: adding timed windows to a supervision path that had none, measured on a clock that can move underneath them in both directions, is the same class of fault the work set out to fix.
+No part of that machinery is present in this change; the evidence above covers only what ships.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

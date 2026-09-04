@@ -92,6 +92,19 @@ An attached arm follows verified identity-matched successors and resolves the sa
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
 A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
+That line now carries an evidence clause naming what actually ended the cycle, because the bare sentence is unactionable: a watcher that exited cleanly, one that died leaving its lock behind, one another watcher replaced, and one that is still live but no longer beating all reach it and all need different responses.
+The typed prefix is unchanged, so anything already matching on it keeps matching, and neither the verdict nor the exit status moves - only the operator's evidence improves.
+An arm that merely ATTACHED holds no handle on its watcher's exit status, so where the evidence is a real exit code it is read back from the lifecycle ledger the OWNING arm already wrote.
+That lookup is bound to the same watcher PID, the same recorded process identity, and a close no earlier than this arm attached, so neither a recycled PID nor an older cycle of the same watcher can be read as this one.
+It stays diagnostic: a missing or unreadable row degrades to the disposition text and never changes the verdict.
+Only rows classifying the WATCHER's own termination are eligible, on an explicit allow-list, because a row is written under the watcher's PID whenever a cycle closes - including the closes the ARM caused, where an interrupted arm terminates its child and then records its OWN signal there.
+Reading such a row back as the watcher's fate would name a signal the watcher never received, so every other reason falls through to the disposition text instead.
+Liveness inside that evidence is identity-qualified rather than bare, because a recycled PID is a live PID and would otherwise name an unrelated process to the operator while suppressing the recorded exit code that is the only remaining evidence in exactly that case.
+That probe answers three ways rather than two: the recorded identity is re-proven on a live PID, the watcher is provably gone, or nothing is established either way because no identity was recorded for the cycle or the live PID's identity cannot be read right now.
+The third answer is reported as an unknown rather than resolved into either neighbour, since naming a live watcher that cannot be identified and asserting an exit that was never observed are the same invented certainty.
+The ledger probe is rebuilt through the same transforms the ledger applied on the way in, since a single truncation of a composite is not the same as truncating each half, and a singly-truncated probe silently stops matching its own row once an identity is long enough - which a deep worktree path reaches.
+
+`bin/fm-guard.sh`'s pull warning and `bin/fm-turnend-guard.sh`'s turn-end block now draw the same live-holder distinction in their banners with no verdict, exit status, or alarm moving; [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns that wording and the wait-free holder read it uses.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
@@ -108,6 +121,10 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also covers the cycle-end evidence on two paired fixtures: an attached arm whose watcher exits nonzero must report the exit its owning arm recorded rather than the bare unactionable sentence, and the same two-arm fixture run from a deliberately deep path must still find that row once the identity is long enough for the ledger's two truncations to disagree.
+Its paired leg signals the OWNING arm instead of the watcher, so the ledger carries an arm-interrupted row under the watcher's PID, and asserts the attached arm does not report that signal as the watcher's own exit.
+A further paired fixture makes one attached arm's identity read fail while its watcher keeps running and requires the evidence to name that unknown, while the other leg of the same fixture, which can read identities, must still call a watcher that really died with its lock left behind a death.
+`tests/fm-guard-stale-banner.test.sh` and `tests/fm-turnend-guard.test.sh` each pair a live unbeaten holder against nothing running at all, with both legs still warning and still blocking respectively, so the wording can change without the verdict moving.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
@@ -120,5 +137,7 @@ The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+The beacon in `state/.last-watcher-beat` remains an age reading rather than a liveness proof, so it can read fresh while supervision is already dead and stale while a watcher is merely suspended.
+[`verification/supervision.md`](verification/supervision.md#beacon-freshness-under-host-suspend---attempted-and-deferred) records why that half is deferred rather than fixed here.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

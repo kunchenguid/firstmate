@@ -209,6 +209,13 @@ if [ "$watcher_healthy" = false ]; then
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
       if [ "$watcher_down_reason" = no-watcher ]; then
         watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
+      elif live_holder=$(fm_watcher_live_holder_pid "$STATE" "$WATCH" "$FM_HOME"); then
+        # A live identity-matched holder with a stale beacon is a different fault
+        # from nothing running at all, and it is what a suspended host leaves
+        # behind. Naming it keeps the operator from reading a resume as a dead
+        # watcher; the verdict itself stays unchanged and still alarms.
+        watcher_cause=$(printf 'watcher pid %s holds this home lock but has not beaten (last beat: %s, grace %ss)' \
+          "$live_holder" "$beacon_desc" "$GRACE")
       else
         watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
       fi

@@ -836,6 +836,288 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
+
+# An attached arm holds no handle on its watcher's exit status, so a watcher that
+# ends nonzero - killed, or bailing out of its own startup - used to reach the
+# operator as a bare "cycle ended without an actionable reason" with a perfectly
+# fresh beacon and nothing to act on. The owning arm classified that exit in the
+# lifecycle ledger, and the attached arm must report it.
+test_attached_arm_reports_the_owner_recorded_exit() {
+  local dir state fakebin ownerout attachout ownerpid attachpid wpid status i
+  dir=$(make_case attached-owner-exit)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner-arm.out"
+  attachout="$dir/attached-arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" &
+  ownerpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" || fail "owning arm did not start a watcher"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$attachout" &
+  attachpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$attachout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$attachout" || fail "second arm did not attach to the running watcher"
+
+  # A watcher that ends without delivering, while its beacon is still well inside
+  # grace: the shape the suspend fix deliberately does not cover.
+  kill -TERM "$wpid" 2>/dev/null || fail "could not terminate the watcher"
+  wait_for_exit "$ownerpid" 200 >/dev/null 2>&1 || true
+  wait_for_exit "$attachpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after a nonzero watcher exit (status $status)"
+  grep -qF "cycle ended without an actionable reason: watcher pid=$wpid exited 1 without delivering a wake" "$attachout" \
+    || fail "attached arm did not report the owner-recorded exit: $(cat "$attachout")"
+  pass "an attached arm reports the exit status its owning arm recorded"
+}
+
+# The same ledger lookup at a LONG identity. The ledger writes its lock snapshot
+# through cycle_clean_field TWICE - once per part in lock_snapshot, then once
+# over the whole "pid:<x>|identity:<y>" composite in cycle_log_append - and
+# cut(1) applied to a pair is not cut(1) applied to each half. A probe truncated
+# only once therefore stops matching its own row past roughly a 497-character
+# identity, and the operator silently drops from the recorded exit code back to
+# the generic disposition text in exactly the case where the exit code is the
+# only evidence left.
+#
+# A deep watcher path is how that length is reached in practice: this home runs
+# out of pooled worktrees whose paths are already long, and the identity carries
+# the full command. This case runs the SAME two-arm fixture as the one above from
+# a deliberately deep copy, so it differs from it by path length alone.
+test_owner_recorded_exit_survives_a_long_identity() {
+  local dir state fakebin deep bin ownerout attachout ownerpid attachpid wpid status i identity
+  dir=$(make_case long-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+
+  # ~470 characters of path, so lstart plus the command clears the 497-character
+  # point where the two truncations start to disagree.
+  deep="$dir"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    deep="$deep/nested-worktree-path-segment-$i-padding"
+  done
+  bin="$deep/bin"
+  mkdir -p "$bin" || fail "could not build the deep fixture path"
+  cp "$ROOT"/bin/*.sh "$bin/" 2>/dev/null || fail "could not stage the deep bin"
+  [ -x "$bin/fm-watch-arm.sh" ] || fail "deep bin is missing the arm"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$bin/fm-watch-arm.sh" > "$dir/owner.out" 2>&1 &
+  ownerpid=$!
+  ownerout="$dir/owner.out"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" || fail "deep-path owning arm did not start a watcher: $(cat "$ownerout")"
+
+  # The fixture is only meaningful if it actually produced a long identity.
+  identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  [ "${#identity}" -gt 497 ] \
+    || fail "fixture did not reach a long identity (${#identity} chars); the truncation case would pass vacuously"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$bin/fm-watch-arm.sh" > "$dir/attached.out" 2>&1 &
+  attachpid=$!
+  attachout="$dir/attached.out"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$attachout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$attachout" || fail "deep-path second arm did not attach: $(cat "$attachout")"
+
+  kill -TERM "$wpid" 2>/dev/null || fail "could not terminate the deep-path watcher"
+  wait_for_exit "$ownerpid" 200 >/dev/null 2>&1 || true
+  wait_for_exit "$attachpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "deep-path attached arm did not fail after a nonzero exit (status $status)"
+  grep -qF "watcher pid=$wpid exited 1 without delivering a wake" "$attachout" \
+    || fail "a long identity lost the owner-recorded exit: $(cat "$attachout")"
+  pass "the owner-recorded exit is still found when the identity is long"
+}
+
+# The paired leg of the case above, differing by a single fact: which process is
+# signalled. The ledger writes a row under the WATCHER's pid whenever a cycle
+# closes, including the closes the ARM caused - an interrupted arm TERMs its child
+# and then records its OWN signal in that row. Read back unfiltered, that row told
+# the operator "watcher pid=W was killed by HUP" about a watcher that was TERMed
+# by its own arm, sending them after a SIGHUP source that never existed.
+test_attached_arm_does_not_blame_the_watcher_for_its_arms_signal() {
+  local dir state fakebin ledger ownerout attachout ownerpid attachpid wpid status i
+  dir=$(make_case attached-owner-interrupted)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ledger="$state/.watch-cycle-exits.log"
+  ownerout="$dir/owner-arm.out"
+  attachout="$dir/attached-arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" 2>&1 &
+  ownerpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" \
+    || { kill -TERM "$ownerpid" 2>/dev/null; fail "owning arm did not start a watcher"; }
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=5 "$WATCH_ARM" > "$attachout" 2>&1 &
+  attachpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$attachout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$attachout" \
+    || { kill -TERM "$ownerpid" "$attachpid" "$wpid" 2>/dev/null; fail "second arm did not attach to the running watcher"; }
+
+  # Interrupt the OWNING ARM, not the watcher. Its handler TERMs the watcher and
+  # then records 129/HUP - the ARM's fate - against the watcher's pid.
+  kill -HUP "$ownerpid" 2>/dev/null \
+    || { kill -TERM "$ownerpid" "$attachpid" "$wpid" 2>/dev/null; fail "could not interrupt the owning arm"; }
+  wait_for_exit "$ownerpid" 200 >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q "watcher_pid=$wpid	origin=started.*reason=arm-interrupted" "$ledger" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q "watcher_pid=$wpid	origin=started.*reason=arm-interrupted" "$ledger" 2>/dev/null \
+    || { kill -TERM "$attachpid" "$wpid" 2>/dev/null; fail "fixture wrote no arm-interrupted row under the watcher pid: $(cat "$ledger" 2>/dev/null)"; }
+
+  wait_for_exit "$attachpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  kill -TERM "$wpid" 2>/dev/null || true
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "attached arm did not fail after its watcher ended (status $status)"
+  grep -qF 'cycle ended without an actionable reason:' "$attachout" \
+    || fail "attached arm printed no evidence clause: $(cat "$attachout")"
+  if grep -qF 'killed by HUP' "$attachout"; then
+    fail "attached arm reported its own arm's signal as the watcher's exit: $(cat "$attachout")"
+  fi
+  pass "an arm-interrupted row is not reported as the watcher's own exit"
+}
+
+# A liveness probe has three answers, not two. When a live pid cannot be matched
+# to the identity this cycle recorded - because the identity read itself fails -
+# nothing is established either way. Collapsing that into "not live" made the arm
+# tell the operator the watcher "died leaving its own lock behind" about a watcher
+# that was running the whole time, which is the same invented certainty this
+# change exists to remove. Both legs share one fixture and one watcher and differ
+# by a single fact: whether the failing arm could read that identity.
+test_unprovable_liveness_is_not_reported_as_a_death() {
+  local dir state fakebin noproc real_ps sentinel ownerout blindout deadout
+  local ownerpid blindpid deadpid wpid status i
+  dir=$(make_case unprovable-liveness)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  noproc="$dir/no-proc"
+  sentinel="$dir/identity-unreadable"
+  ownerout="$dir/owner-arm.out"
+  blindout="$dir/blind-arm.out"
+  deadout="$dir/dead-arm.out"
+  mkdir -p "$noproc"
+
+  # Route every identity read through ps on both Linux and macOS, then make that
+  # read fail for one arm only, on demand. Nothing else in the fixture carries
+  # FM_TEST_BLIND_IDENTITY, so the watcher and its owning arm keep seeing a real ps.
+  real_ps=$(command -v ps) || fail "no ps on PATH to wrap"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+if [ -n "\${FM_TEST_BLIND_IDENTITY:-}" ] && [ -e "\${FM_TEST_BLIND_IDENTITY}" ]; then
+  exit 1
+fi
+exec "$real_ps" "\$@"
+SH
+  chmod +x "$fakebin/ps"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$noproc" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" 2>&1 &
+  ownerpid=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$ownerout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wpid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$wpid" "$ownerout" \
+    || { kill -TERM "$ownerpid" 2>/dev/null; fail "owning arm did not start a watcher: $(cat "$ownerout")"; }
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$noproc" \
+    FM_TEST_BLIND_IDENTITY="$sentinel" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$WATCH_ARM" > "$blindout" 2>&1 &
+  blindpid=$!
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PROC_ROOT_OVERRIDE="$noproc" \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$deadout" 2>&1 &
+  deadpid=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$blindout" 2>/dev/null \
+      && grep -qF "watcher: attached pid=$wpid" "$deadout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! grep -qF "watcher: attached pid=$wpid" "$blindout" 2>/dev/null \
+    || ! grep -qF "watcher: attached pid=$wpid" "$deadout" 2>/dev/null; then
+    kill -TERM "$ownerpid" "$blindpid" "$deadpid" "$wpid" 2>/dev/null
+    fail "both arms did not attach to the running watcher"
+  fi
+
+  # Leg one: the identity read fails while the watcher is untouched and running.
+  : > "$sentinel"
+  wait_for_exit "$blindpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  kill -0 "$wpid" 2>/dev/null \
+    || { rm -f "$sentinel"; kill -TERM "$ownerpid" "$deadpid" "$wpid" 2>/dev/null; fail "the watcher was supposed to outlive the blinded arm"; }
+  rm -f "$sentinel"
+  if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+    kill -TERM "$ownerpid" "$deadpid" "$wpid" 2>/dev/null
+    fail "blinded arm did not fail loudly (status $status)"
+  fi
+  if grep -qF "died leaving its own lock behind" "$blindout"; then
+    kill -TERM "$ownerpid" "$deadpid" "$wpid" 2>/dev/null
+    fail "an unreadable identity was reported as a death: $(cat "$blindout")"
+  fi
+  grep -qF "watcher pid=$wpid could not be identified" "$blindout" \
+    || { kill -TERM "$ownerpid" "$deadpid" "$wpid" 2>/dev/null; fail "blinded arm did not name the unknown: $(cat "$blindout")"; }
+
+  # Leg two: the same fixture, the same sentence at stake, one fact different -
+  # this arm can read identities, and the watcher really is gone with its lock
+  # still on disk. The wording that must not be invented above must still fire here.
+  kill -KILL "$ownerpid" 2>/dev/null || true
+  wait_for_exit "$ownerpid" 100 >/dev/null 2>&1 || true
+  kill -KILL "$wpid" 2>/dev/null || true
+  wait_for_exit "$deadpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "arm did not fail loudly after its watcher was killed (status $status)"
+  grep -qF "watcher pid=$wpid died leaving its own lock behind" "$deadout" \
+    || fail "a real death was not named as one: $(cat "$deadout")"
+  pass "an unreadable identity reads as unknown, and a real death still reads as a death"
+}
+
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
   dir=$(make_case cycle-ledger)
@@ -1130,4 +1412,8 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_attached_arm_reports_the_owner_recorded_exit
+test_attached_arm_does_not_blame_the_watcher_for_its_arms_signal
+test_owner_recorded_exit_survives_a_long_identity
+test_unprovable_liveness_is_not_reported_as_a_death
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
