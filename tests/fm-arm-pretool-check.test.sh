@@ -163,7 +163,7 @@ run_matrix_entry() {
       ;;
     copilot)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"bash",toolArgs:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | "$CHECK" --copilot >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     grok)
@@ -187,10 +187,18 @@ run_matrix_entry() {
     return
   fi
 
+  if [ "$entry" = copilot ]; then
+    [ "$rc" -eq 0 ] || fail "$id via $entry must deny through Copilot's native stdout object, got exit $rc"
+    [ ! -s "$err_file" ] || fail "$id via $entry deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via copilot deny must carry Copilot's native decision object on stdout: $(cat "$out_file")"
+    return
+  fi
+
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ] || [ "$entry" = copilot ]; then
+  if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
   elif [ "$entry" = grok ]; then
     jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
@@ -407,6 +415,20 @@ test_failopen_missing_node() {
 
 # --- --claude output shaping ---------------------------------------------------
 
+test_copilot_mode_stdout_has_native_json_on_deny() {
+  local out err rc stderr_file
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-copilot-stderr.XXXXXX")
+  out=$("$CHECK" --copilot --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
+  rc=$?
+  err=$(cat "$stderr_file" 2>/dev/null)
+  rm -f "$stderr_file"
+  [ "$rc" -eq 0 ] || fail "--copilot deny must exit 0, got $rc"
+  [ -z "$err" ] || fail "--copilot deny must leave stderr empty, got: $err"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' >/dev/null 2>&1 \
+    || fail "--copilot deny must put Copilot's native permissionDecision object on stdout: $out"
+  pass "--copilot: stdout carries Copilot deny JSON and exit 0"
+}
+
 test_claude_mode_stdout_empty_on_deny() {
   local out err rc stderr_file
   # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
@@ -473,6 +495,7 @@ test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
 test_failopen_missing_node
+test_copilot_mode_stdout_has_native_json_on_deny
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes

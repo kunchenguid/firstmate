@@ -239,9 +239,11 @@ test_stdin_transports_and_output_shapes() {
   : > "$OUT"; : > "$ERR"
   printf '%s' '{"toolName":"task","toolArgs":{"description":"go"}}' \
     | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
-      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
-  [ "$rc" -eq 2 ] || fail "Copilot-shaped stdin must deny, got exit $rc"
-  [ ! -s "$OUT" ] || fail "Copilot deny wrote stdout: $(cat "$OUT")"
+      "$CHECK" --copilot > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "Copilot-shaped stdin must deny through Copilot's native stdout object, got exit $rc"
+  [ ! -s "$ERR" ] || fail "Copilot deny wrote stderr: $(cat "$ERR")"
+  jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
+    || fail "Copilot deny must write Copilot's native decision object on stdout: $(cat "$OUT")"
 
   rc=0
   : > "$OUT"; : > "$ERR"

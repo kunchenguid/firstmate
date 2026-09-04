@@ -25,7 +25,8 @@
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#          deny object on stdout unless --claude or --copilot was supplied.
+#   DENY, --copilot - exit 0 and Copilot's own decision object on stdout.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status.
 #   INERT - not the real primary checkout (a crewmate/scout task worktree or a
@@ -36,6 +37,7 @@
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Copilot consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
 set -u
@@ -56,7 +58,8 @@ Fires only in the real primary firstmate checkout; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+unless --claude or --copilot is supplied.
+With --copilot, a deny is Copilot's own decision object on stdout and exit 0.
 With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
 Malformed transport and an unavailable classifier runtime fail open.
@@ -191,8 +194,12 @@ if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
   exit 0
 fi
+if [ "$COPILOT_MODE" -eq 1 ]; then
+  printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ]; then
+if [ "$CLAUDE_MODE" -eq 0 ]; then
   printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
 fi
 exit 2
