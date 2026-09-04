@@ -22,6 +22,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 OWNER="$ROOT/bin/fm-test-env-lib.sh"
+PROBE_EXIT_STATUS=91
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
@@ -35,7 +36,7 @@ make_probe_root() {
 #!/usr/bin/env bash
 fm_test_env_isolate() {
   printf '%s\n' "$FM_TEST_ENV_PROBE_SUITE" > "$FM_TEST_ENV_PROBE_MARKER"
-  exit 0
+  exit "$FM_TEST_ENV_PROBE_EXIT_STATUS"
 }
 SH
 }
@@ -56,8 +57,9 @@ probe_suite_reaches_owner() {
     TMPDIR="$private_tmp" \
     FM_TEST_ENV_PROBE_MARKER="$marker" \
     FM_TEST_ENV_PROBE_SUITE="$suite_name" \
+    FM_TEST_ENV_PROBE_EXIT_STATUS="$PROBE_EXIT_STATUS" \
     bash "$suite" > "$output" 2>&1 || rc=$?
-  [ "$rc" -ne 124 ] || return 1
+  [ "$rc" -eq "$PROBE_EXIT_STATUS" ] || return 1
   [ -f "$marker" ] || return 1
   [ "$(cat "$marker")" = "$suite_name" ]
 }
@@ -133,7 +135,7 @@ test_every_suite_reaches_the_owner() {
   # A selection that found nothing would pass silently; refuse that.
   [ "$total" -gt 0 ] || fail "found no test suites to check, so this invariant is vacuous"
   [ "$missing" -eq 0 ] \
-    || fail "these suites never reach bin/fm-test-env-lib.sh, so they can be handed the live fleet home:$names"
+    || fail "these suites never isolate their top-level shell through bin/fm-test-env-lib.sh, so they can be handed the live fleet home:$names"
   pass "all $total behavior suites reach the fleet-environment isolation owner"
 }
 
@@ -174,6 +176,31 @@ SH
   probe_suite_reaches_owner "$probe_root" "$probe" \
     && fail "the probe accepted an owner reference that was only written by an unexecuted heredoc"
   pass "the probe rejects an owner reference that never executes"
+}
+
+test_probe_rejects_isolation_inside_a_subshell() {
+  local dir probe_root probe output marker
+  dir=$(fm_test_tmproot fm-test-env-lib)
+  probe_root="$dir/repo"
+  make_probe_root "$probe_root"
+  probe="$probe_root/tests/subshell-decoy.test.sh"
+  output="$probe_root/subshell-decoy.test.sh.output"
+  marker="$probe_root/subshell-decoy.test.sh.reached-owner"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+(
+  . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+  fm_test_env_isolate
+)
+printf 'PARENT_FM_HOME=%s\n' "$FM_HOME"
+SH
+  probe_suite_reaches_owner "$probe_root" "$probe" \
+    && fail "the probe accepted isolation that executed only inside a subshell"
+  assert_present "$marker" "the subshell decoy never reached the owner"
+  assert_contains "$(cat "$output")" "PARENT_FM_HOME=$probe_root/live-home-sentinel" \
+    "the subshell decoy did not prove that its parent retained the fleet pointer"
+  pass "the probe rejects isolation that leaves the top-level shell exposed"
 }
 
 test_probe_accepts_each_real_route() {
@@ -237,6 +264,7 @@ test_unclearable_pointer_is_refused
 test_every_suite_reaches_the_owner
 test_probe_rejects_an_unrelated_lib_substring
 test_probe_rejects_an_unexecuted_owner_reference
+test_probe_rejects_isolation_inside_a_subshell
 test_probe_accepts_each_real_route
 test_direct_invocation_is_isolated
 
