@@ -131,13 +131,10 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
-log_last_line() {
-  [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
-}
-# Every non-empty status line, newest last - what status_terminal_then_paused
-# needs to look past a trailing declared pause for the done/failed line under it.
+# Every non-empty status line, newest last; fm-classify-lib.sh owns
+# leading-verb normalization. Read once and reused for both LOG_LINE (its
+# tail) and the terminal-then-paused scan below, so the two can never
+# describe different snapshots of a file that could change between reads.
 log_all_lines() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null
@@ -162,7 +159,13 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(log_last_line || true)
+# Read the log once and derive LOG_LINE from that same snapshot rather than a
+# second independent file read, so LOG_LINE and the full-line scan below can
+# never describe different snapshots (the sibling watcher code added in this
+# same change - bin/fm-watch.sh's pause_state_class - documents avoiding
+# exactly this for the same reason).
+LOG_LINES=$(log_all_lines || true)
+LOG_LINE=$(printf '%s\n' "$LOG_LINES" | tail -1)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # A worker finishing into an external wait appends `paused: <why>` after its
@@ -177,7 +180,7 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 LOG_EFFECTIVE_LINE=$LOG_LINE
 LOG_EFFECTIVE_VERB=$LOG_VERB
 if status_is_paused "$LOG_LINE"; then
-  found=$(status_terminal_then_paused "$(log_all_lines || true)" "$LOG_LINE" 2>/dev/null) && {
+  found=$(status_terminal_then_paused "$LOG_LINES" "$LOG_LINE" 2>/dev/null) && {
     LOG_EFFECTIVE_LINE=$found
     LOG_EFFECTIVE_VERB=$(status_line_verb "$found")
   }
