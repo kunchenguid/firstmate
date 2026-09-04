@@ -86,6 +86,35 @@ Cancelling the model picker cancels the whole command and changes neither choice
 Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
 Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
+## Pi scout web search (config/pi-scout-websearch / ollama-cloud.env)
+
+Pi ships with no web tool and no MCP, so a Pi scout has no way to establish an external fact - a current release version, an upstream incident, a documented third-party behavior - and has to escalate it instead.
+This gives Pi scouts a `web_search` tool backed by Ollama Cloud web search, without giving any worker the credential.
+`bin/fm-ollama-websearch.sh` holds the key and answers queries; `bin/fm-pi-websearch-ext.ts` is the Pi extension that exposes the tool and does nothing but call that script.
+The script's header owns the mechanics and the exact non-disclosure guarantee.
+
+It is default-off and takes two things to turn on: the captain's explicit opt-in and a key.
+The opt-in is the local, gitignored presence flag `config/pi-scout-websearch` under the effective Firstmate home; create it to enable the tool and delete it to turn the tool off again without touching the key.
+The flag is required on top of the key because the key file predates this feature - it already serves Ollama usage reporting - so its presence proves a credential exists, not that the captain agreed to spend search quota through scouts; a metered capability ships as an option to enable, never as behavior inferred from a credential.
+The key is read from the same file Ollama usage reporting already uses, `~/Library/Application Support/firstmate/ollama-cloud.env` on macOS or `${XDG_CONFIG_HOME:-~/.config}/firstmate/ollama-cloud.env`, as a line reading `OLLAMA_API_KEY=<key>`.
+With the flag present but that file missing or empty, the scout still launches exactly as before, and the spawn prints a one-line note saying why the tool is absent.
+Without the flag, spawns stay silent about the feature entirely.
+The key file lives in the OS user's home rather than in a firstmate home, so every firstmate home on that machine - the primary and any local secondmate - resolves the same key with nothing to copy or inherit.
+A secondmate on another machine has its own user home and needs its own key file there.
+The opt-in flag, by contrast, is per home and is not part of secondmate inherited configuration: each home spends only where its own captain enabled it, so consent never quietly widens.
+
+Only Pi SCOUTS get the tool.
+An implementation worker's answers are in the repository it was given, and Claude workers already have their own web search, so wiring it to either would spend quota for nothing.
+Searches are metered: each one counts against the same Ollama Cloud quota this home already reports, itemized there under the model name `web search` (measured; see [`verification/ollama-websearch.md`](verification/ollama-websearch.md)).
+The extension additionally caps a scout at three searches per turn and twenty per session.
+The session cap is the one that matters: Pi starts a new turn after every tool call, so a per-turn cap alone would not stop a scout that searches once per turn indefinitely.
+Both bound an unproductive loop rather than a determined worker, and both fail soft - the tool refuses and tells the scout to report what it has, so a genuine need escalates instead of spending silently.
+
+This is not a privilege boundary, and it is worth being precise about why.
+The proxy runs as the same user as the worker that calls it, so a worker that can read the key file directly gains nothing by going through the proxy and loses nothing if the proxy refuses.
+What the proxy guarantees is narrower and is what actually changed: the key is never disclosed *through it* - not in output, not in a child's arguments or environment, and never sent anywhere but Ollama.
+The exposure that remains is the key file's own permissions and location, which is a property of that file, unchanged by this feature.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

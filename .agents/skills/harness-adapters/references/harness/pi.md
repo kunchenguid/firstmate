@@ -39,6 +39,14 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 
+## Scout web search
+
+Pi has no built-in web tool and no MCP, so a Pi worker has no web access by default.
+A Pi SCOUT is the exception: `../../../bin/fm-spawn.sh` gives it a `web_search` tool when this home has opted in via `config/pi-scout-websearch` and has an Ollama key configured, so falling back to Pi for an investigation no longer costs the scout its ability to establish an external fact.
+Nothing else gets it - a Pi implementation worker keeps no web access, and Claude workers already have their own.
+Treat it as a dispatch fact, not something to arrange: a home missing the opt-in flag or the key simply launches the scout without the tool.
+`../../../docs/configuration.md` owns the operator-facing setup and cost.
+
 ## Primary integration
 
 The primary turn-end behavior was verified on 2026-07-09 with Pi 0.80.5.

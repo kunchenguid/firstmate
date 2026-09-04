@@ -173,6 +173,17 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIWEBSEARCH__ `-e <bin/fm-pi-websearch-ext.ts> ` for a pi SCOUT on a home
+#                  whose captain opted in via config/pi-scout-websearch and that
+#                  has an Ollama key configured; empty for every other spawn.
+#                  Scouts are the only workers that need the web (an implementation
+#                  worker's answers are in the repository), and each search spends
+#                  metered quota, so the tool is not wired fleet-wide. The opt-in
+#                  flag is required on top of the key because the key file predates
+#                  this feature (the usage probe reads it): its presence proves a
+#                  credential exists, not that the captain consented to scouts
+#                  spending on it. bin/fm-ollama-websearch.sh owns the key and is
+#                  asked `status` only once the flag is present.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1291,7 +1302,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __PIWEBSEARCH__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -3154,6 +3165,30 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+# Pi scouts get their own web search; nothing else does, and it takes two
+# things: the captain's opt-in flag (config/pi-scout-websearch) and a usable
+# key. The flag is checked first because the key file predates this feature
+# (the usage probe reads it), so its presence proves a credential exists, not
+# that the captain consented to scouts spending metered quota on it - and
+# capability ships as an option to enable, never as inferred consent
+# (VISION.md). Neither absence is a spawn failure - the scout simply launches
+# without the tool, the state every Pi worker was in before this existed.
+PIWEBSEARCH=
+case "$HARNESS" in
+  pi|pi-signed)
+    if [ "$KIND" = scout ] && [ -f "$CONFIG/pi-scout-websearch" ]; then
+      # Same root as the extension path below: the extension resolves the proxy
+      # as its own sibling, so probing a different tree than the worker will
+      # load could report a key the worker's proxy never sees.
+      if "$FM_ROOT/bin/fm-ollama-websearch.sh" status >/dev/null 2>&1; then
+        PIWEBSEARCH="-e $(shell_quote "$FM_ROOT/bin/fm-pi-websearch-ext.ts") "
+      else
+        echo "note: pi-scout-websearch is enabled but no Ollama key is configured, so this scout launches without web search" >&2
+      fi
+    fi
+    ;;
+esac
+LAUNCH=${LAUNCH//__PIWEBSEARCH__/$PIWEBSEARCH}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
