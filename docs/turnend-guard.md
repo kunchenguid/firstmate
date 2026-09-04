@@ -162,6 +162,9 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
+- Antigravity (`agy`) exposes a global plugin hook engine under `$HOME/.gemini/config/plugins/<name>/`, with a `PreInvocation` and `Stop` command hook pair; it has no primary integration and remains outside the guard above, the same as Kimi.
+- Captain-approved `agy` crew wake support uses `bin/fm-agy-turnend-hook.sh` to manage Firstmate's own plugin at `$HOME/.gemini/config/plugins/firstmate/`, gated the same way as Kimi's by a per-task token pointer resolved through Firstmate's private registry.
+- Installation refuses before writing unless `python3` and `jq` are available; if `jq` is later removed, the installed hook remains silent and exits 0, the same fail-open fallback to idle detection as Kimi.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
@@ -173,6 +176,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
+`tests/fm-agy-harness.test.sh` covers the separate Antigravity crew plugin hook's detection, control contract, busy sources, composer delivery, installer idempotency, spawn and teardown lifecycle, missing-binary refusal, fallback binary resolution, and session-lock holder recognition.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
