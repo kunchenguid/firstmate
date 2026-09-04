@@ -3199,6 +3199,118 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# --- Deliberately detached daemons survive the reap -----------------------
+# A process that is BOTH reparented to init (PPID 1) AND the leader of its own
+# process group is a daemon someone meant to outlive the lane (the observed
+# case: `limactl hostagent`, which inherits the launching shell's cwd and never
+# chdirs, so a `colima restart` run from a worktree bound the captain's VM to
+# the lane's lifetime). Teardown spares that signature and reports it; every
+# ordinary lane process is still reaped.
+
+# Start a process under <dir> whose parent exits immediately, so it is
+# reparented to init. With <own-group>=1 it also leads its own process group,
+# which completes the detached-daemon signature; with 0 it inherits this
+# shell's group and must stay reapable. Echoes nothing; writes the pid to
+# <pidfile>.
+spawn_orphan() {  # <dir> <pidfile> <own-group>
+  perl -e '
+    my ($dir, $pidfile, $own_group) = @ARGV;
+    my $pid = fork();
+    die "fork failed" unless defined $pid;
+    exit 0 if $pid;
+    setpgrp(0, 0) if $own_group;
+    chdir $dir or die "chdir failed";
+    open my $fh, ">", $pidfile or die "open failed";
+    print $fh "$$\n";
+    close $fh;
+    exec "sleep", "300" or die "exec failed";
+  ' "$1" "$2" "$3"
+  local waited=0
+  while [ ! -s "$2" ]; do
+    waited=$((waited + 1))
+    [ "$waited" -le 100 ] || fail "spawn_orphan: process under $1 never reported its pid"
+    sleep 0.05
+  done
+  sleep 0.2
+}
+
+test_detached_daemon_survives_teardown_and_is_reported() {
+  local case_dir rc daemon_pid daemon_ppid daemon_pgid lane_pid
+  case_dir=$(make_case detached-daemon-spared)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  spawn_orphan "$case_dir/wt" "$case_dir/daemon.pid" 1
+  daemon_pid=$(cat "$case_dir/daemon.pid")
+  daemon_ppid=$(ps -p "$daemon_pid" -o ppid= | tr -d '[:space:]')
+  daemon_pgid=$(ps -p "$daemon_pid" -o pgid= | tr -d '[:space:]')
+  [ "$daemon_ppid" = 1 ] \
+    || fail "detached-daemon-spared: fixture daemon is not reparented to init (ppid $daemon_ppid)"
+  [ "$daemon_pgid" = "$daemon_pid" ] \
+    || fail "detached-daemon-spared: fixture daemon does not lead its own group (pgid $daemon_pgid)"
+
+  # An ordinary lane process in the same worktree: still a child of this shell,
+  # so it fails the signature and must still be reaped.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  lane_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$lane_pid" 2>/dev/null || fail "detached-daemon-spared: setup lane sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "detached-daemon-spared: teardown should still succeed"
+  if ! kill -0 "$daemon_pid" 2>/dev/null; then
+    kill -KILL "$lane_pid" 2>/dev/null || true
+    fail "detached-daemon-spared: teardown killed a deliberately detached daemon"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  if kill -0 "$lane_pid" 2>/dev/null; then
+    kill -KILL "$lane_pid" 2>/dev/null || true
+    fail "detached-daemon-spared: an ordinary lane process survived teardown"
+  fi
+  assert_grep "sparing detached daemon for task-x1: pid $daemon_pid (" "$case_dir/stderr" \
+    "detached-daemon-spared: teardown spared the daemon silently instead of reporting its pid"
+  assert_grep "sleep" "$case_dir/stderr" \
+    "detached-daemon-spared: the sparing line did not name the spared command"
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "detached-daemon-spared: teardown did not report reaping the ordinary lane process"
+  pass "a detached daemon survives teardown and is reported, while an ordinary lane process is still reaped"
+}
+
+test_reparented_non_group_leader_is_still_reaped() {
+  local case_dir rc pid ppid pgid
+  case_dir=$(make_case reparented-non-leader-reaped)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # Reparented to init but NOT its own group leader: only half the signature,
+  # so this is an ordinary lane leak and must still be reaped.
+  spawn_orphan "$case_dir/wt" "$case_dir/orphan.pid" 0
+  pid=$(cat "$case_dir/orphan.pid")
+  ppid=$(ps -p "$pid" -o ppid= | tr -d '[:space:]')
+  pgid=$(ps -p "$pid" -o pgid= | tr -d '[:space:]')
+  [ "$ppid" = 1 ] \
+    || fail "reparented-non-leader-reaped: fixture process is not reparented to init (ppid $ppid)"
+  [ "$pgid" != "$pid" ] \
+    || fail "reparented-non-leader-reaped: fixture process unexpectedly leads its own group"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "reparented-non-leader-reaped: teardown should still succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "reparented-non-leader-reaped: a reparented non-group-leader survived teardown"
+  fi
+  assert_no_grep "sparing detached daemon" "$case_dir/stderr" \
+    "reparented-non-leader-reaped: teardown spared a process that only met half the signature"
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "reparented-non-leader-reaped: teardown did not report reaping the leaked process"
+  pass "a reparented process that does not lead its own group is still reaped"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3272,3 +3384,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_detached_daemon_survives_teardown_and_is_reported
+test_reparented_non_group_leader_is_still_reaped

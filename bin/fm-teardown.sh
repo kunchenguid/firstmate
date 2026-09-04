@@ -162,6 +162,17 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     One exception is spared: a process that is BOTH already reparented to
+#     init (PPID 1) AND the leader of its own process group (PID == PGID) is a
+#     deliberately detached daemon, not a lane leak, so it survives teardown.
+#     That signature covers a long-lived service a task happened to start from
+#     its worktree - the `limactl hostagent` behind a `colima restart` inherits
+#     the launching shell's cwd and never chdirs, so an unguarded reap took the
+#     captain's Colima VM down with the lane (observed twice on 2026-08-10).
+#     An ordinary lane process, still a child of the task's shell or harness,
+#     fails at least one half of the signature and is reaped as before. Every
+#     spared process is reported once by pid and command, so a rare genuine
+#     leak wearing that signature stays diagnosable rather than silent.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1697,10 +1708,44 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+# A deliberately detached daemon carries a two-part signature: it is already
+# reparented to init (PPID 1) AND leads its own process group (PID == PGID).
+# A process the task's own shell or harness left behind fails at least one of
+# those, so sparing this signature never spares an ordinary lane leak.
+# Unreadable ppid/pgid is not the signature: the process stays reapable.
+task_pid_is_detached_daemon() {  # <pid>
+  local pid=$1 fields ppid pgid
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fields=$(LC_ALL=C ps -p "$pid" -o ppid=,pgid= 2>/dev/null) || return 1
+  # shellcheck disable=SC2086 # deliberate word splitting of the two ps fields
+  set -- $fields
+  [ "$#" -eq 2 ] || return 1
+  ppid=$1
+  pgid=$2
+  case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$pgid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$ppid" -eq 1 ] || return 1
+  [ "$pgid" -eq "$pid" ]
+}
+
+# Report every spared daemon exactly once per teardown, so a rare genuine leak
+# that happens to wear the signature stays diagnosable instead of vanishing
+# silently from the reap.
+TASK_SPARED_DAEMON_PIDS=""
+announce_spared_detached_daemon() {  # <pid>
+  local pid=$1 cmd
+  task_pid_list_contains "$TASK_SPARED_DAEMON_PIDS" "$pid" && return 0
+  TASK_SPARED_DAEMON_PIDS="$TASK_SPARED_DAEMON_PIDS
+$pid"
+  cmd=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || cmd=""
+  cmd=$(printf '%s' "$cmd" | tr '\n' ' ')
+  echo "teardown: sparing detached daemon for $ID: pid $pid (${cmd:-<unknown command>})" >&2
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
+  local dir dir_pids pids="" pid kept=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -1710,7 +1755,19 @@ task_pids_under_roots() {  # <dir>...
     pids="$pids
 $dir_pids"
   done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if task_pid_is_detached_daemon "$pid"; then
+      announce_spared_detached_daemon "$pid"
+      continue
+    fi
+    kept="$kept
+$pid"
+  done <<EOF
+$pids
+EOF
+  TASK_PIDS=$(printf '%s\n' "$kept" | grep -E '^[0-9]+$' || true)
 }
 
 reap_task_backend_process_group() {  # <label>
