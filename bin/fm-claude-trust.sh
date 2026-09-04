@@ -34,6 +34,7 @@
 # whatever a mutable env var names, and add exactly the policy surface this
 # registration must not grow. The structural test is verified for treehouse
 # worktrees, which are linked git worktrees. Orca's worktree shape is UNVERIFIED:
+# Per-home Treehouse root selection is owned by docs/configuration.md and bin/fm-treehouse-lib.sh.
 # docs/orca-backend.md calls it an "independent worktree", which does not
 # establish a shared git common dir, and orca is macOS-only and was not installed
 # where this was written. If Orca clones instead of linking, its git dir equals
