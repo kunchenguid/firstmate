@@ -1722,10 +1722,10 @@ test_terminal_stale_surfaced() {
 # Count queued stale wakes for <window> that carry the end-of-window RECHECK
 # reason rather than the episode's plain first-sight identity. The age is read
 # from the status file's own mtime, so the seconds are matched as a pattern.
-count_recheck_wakes() {  # <state> <window>
-  awk -F '\t' -v w="$2" '
+count_recheck_wakes() {  # <state> <window> <expected-verb>
+  awk -F '\t' -v w="$2" -v v="$3" '
     $3 == "stale" && $4 == w &&
-    $5 ~ ("^stale: " w " \\(blocked [0-9]+s, already reported, rechecked on a long cadence not a wedge\\)$") { n++ }
+    $5 ~ ("^stale: " w " \\(" v " [0-9]+s, already reported, rechecked on a long cadence not a wedge\\)$") { n++ }
     END { print n + 0 }' "$1/.wake-queue" 2>/dev/null || echo 0
 }
 
@@ -1802,7 +1802,7 @@ test_terminal_stale_episode_absorbs_pane_churn() {
     || fail "a static blocked pane never resurfaced once its window elapsed"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$state/.wake-queue" 2>/dev/null || echo 0)
-  recheck=$(count_recheck_wakes "$state" "$window")
+  recheck=$(count_recheck_wakes "$state" "$window" blocked)
   [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one"
   [ "$recheck" -eq 1 ] \
     || fail "the elapsed window did not name itself a recheck: $(cat "$state/.wake-queue")"
@@ -1816,7 +1816,7 @@ test_terminal_stale_episode_absorbs_pane_churn() {
     || fail "a churning blocked pane never resurfaced once its window elapsed"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$state/.wake-queue" 2>/dev/null || echo 0)
-  recheck=$(count_recheck_wakes "$state" "$window")
+  recheck=$(count_recheck_wakes "$state" "$window" blocked)
   [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one from a churning pane"
   [ "$recheck" -eq 1 ] \
     || fail "the churning resurface did not name itself a recheck: $(cat "$state/.wake-queue")"
@@ -1833,6 +1833,57 @@ test_terminal_stale_episode_absorbs_pane_churn() {
   [ "$wakes" -eq 1 ] || fail "an exited agent produced $wakes wakes instead of one"
   ack_stopped_cycle "$state" || fail "could not acknowledge the exited agent's surface"
   pass "a blocked crew surfaces once, absorbs pane churn for its whole window, and resurfaces on a real change or the window's end"
+}
+
+# --- the recheck's verb slot on a status line that declares no verb ------------
+# The captain-relevant set admits the legacy colonless prose forms (`PR ready`,
+# `checks green`, `ready in branch`, `merged`) as well as the declared terminal
+# verbs, so the terminal-episode recheck must word itself correctly for both. The
+# leading words of a prose line are not a declaration, and a payload of its own -
+# a PR URL - carries a colon that truncates any naive parse mid-scheme, which is
+# how `PR ready https://example.test/x/pull/2` once rechecked as
+# `(PR ready https 4001s, ...)`. Such a line must take the neutral wording rather
+# than present a truncated pseudo-verb as the crew's declaration.
+test_terminal_recheck_verb_on_a_prose_status_line() {
+  local dir state fakebin out capture_file statusf window key sig throttle
+  local wakes recheck neutral text stopped
+  dir=$(make_case prose-episode-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/prose.status"
+  window="test:fm-prose"
+  stopped='state: stopped · source: pane · idle at a prompt'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/prose.meta"
+  printf 'PR ready https://example.test/x/pull/2\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-prose_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.terminal-resurfaced-$key"
+
+  text='pr ready, elapsed 1s'
+  printf '%s' "$text" > "$capture_file"
+  printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "first sight of a prose captain-relevant status did not surface"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "first sight of a prose status produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prose status's first surface"
+  [ -e "$throttle" ] || fail "the prose status's first surface recorded no episode marker"
+
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "a prose captain-relevant status never resurfaced once its window elapsed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  neutral=$(count_recheck_wakes "$state" "$window" "terminal status")
+  recheck=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /https / { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "the prose status's elapsed window produced $wakes wakes instead of one"
+  [ "$recheck" -eq 0 ] \
+    || fail "the recheck presented a URL-truncated pseudo-verb: $(cat "$state/.wake-queue")"
+  [ "$neutral" -eq 1 ] \
+    || fail "the recheck of a prose status did not take the neutral wording: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prose status's resurface"
+  pass "a captain-relevant status line that declares no verb rechecks with the neutral wording"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -4174,6 +4225,7 @@ test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_terminal_stale_episode_absorbs_pane_churn
+test_terminal_recheck_verb_on_a_prose_status_line
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

@@ -37,6 +37,9 @@
 #                          ("<verb> Ns, already reported, rechecked on a long
 #                          cadence not a wedge") so it is not mistaken for the
 #                          episode's first sight, which keeps the plain identity.
+#                          A line that declares no verb, such as the colonless
+#                          "PR ready" prose forms, reads as "terminal status"
+#                          there rather than as a truncated pseudo-verb.
 #                          A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -817,6 +820,18 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# How old the crew's own declaration is, in seconds since its status file was last
+# written. The one definition every long-cadence recheck reason ages itself from,
+# so the numbers the captain reads on the declared-wait and terminal-episode paths
+# cannot drift apart. An unreadable or nonsense mtime reads as brand new rather
+# than as a wild age.
+status_age_secs() {  # <status-file>
+  local mtime
+  mtime=$(stat_mtime "$1")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  echo $(( $(date +%s) - mtime ))
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -834,16 +849,14 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
+  local win=$1 task=$2 h=$3 key statusf age detail reason declaration
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
-  age=$(( $(date +%s) - mtime ))
+  age=$(status_age_secs "$statusf")
   if status_is_captain_held "$(last_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
@@ -1042,14 +1055,19 @@ terminal_episode_scope() {  # <window> <task>
 # wedge)`, so the supervisor can tell an hourly revisit of a blocker it has already
 # handled from a genuinely new one and spend its handling turn accordingly. The two
 # are told apart from the existing marker alone - absent or carrying another scope
-# is a first sight, matching this scope is a revisit - and the age is read from the
-# status file's mtime the way handle_paused_stale reads its own, so a churny idle
-# pane cannot reset the number.
+# is a first sight, matching this scope is a revisit - and the age comes from the
+# shared status_age_secs the declared-wait recheck ages itself from, so a churny
+# idle pane cannot reset the number and the two cadences cannot drift.
+# The verb slot names the crew's own DECLARED verb, so it takes only a
+# colon-terminated leading token with no embedded whitespace; the captain-relevant
+# set also admits colonless prose lines (`PR ready https://...`, `checks green`,
+# `merged`), whose leading words are not a declaration and would read as a
+# truncated pseudo-verb, so those fall back to the neutral `terminal status`.
 # Bookkeeping is identical on both branches, so the stale state machine does not
 # depend on whether this particular sight was delivered.
 surface_terminal_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key scope statusf stale_record stale_rest stale_end stale_ident
-  local marker verb mtime age reason revisit=1 throttled=1
+  local marker last verb reason revisit=1 throttled=1
   key=$(window_key "$win")
   statusf="$STATE/$task.status"
   scope=$(terminal_episode_scope "$win" "$task")
@@ -1057,15 +1075,16 @@ surface_terminal_stale() {  # <window> <task> <hash>
   [ "$(cat "$marker" 2>/dev/null || true)" = "$scope" ] && revisit=0
   episode_throttled "$marker" "$scope" && throttled=0
   reason="stale: $win"
-  if [ "$revisit" -eq 0 ]; then
-    verb=$(status_line_verb "$(last_status_line "$statusf")")
-    [ -n "$verb" ] || verb='terminal status'
-    mtime=$(stat_mtime "$statusf")
-    case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
-    age=$(( $(date +%s) - mtime ))
-    reason="stale: $win ($verb ${age}s, already reported, rechecked on a long cadence not a wedge)"
+  if [ "$throttled" -ne 0 ]; then
+    if [ "$revisit" -eq 0 ]; then
+      last=$(last_status_line "$statusf")
+      verb=''
+      case "$last" in *:*) verb=$(status_line_verb "$last") ;; esac
+      case "$verb" in ''|*[[:space:]]*) verb='terminal status' ;; esac
+      reason="stale: $win ($verb $(status_age_secs "$statusf")s, already reported, rechecked on a long cadence not a wedge)"
+    fi
+    fm_wake_append stale "$win" "$reason" || exit 1
   fi
-  [ "$throttled" -eq 0 ] || fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
