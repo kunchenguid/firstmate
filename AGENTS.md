@@ -321,6 +321,8 @@ When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--reso
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
+When the captain explicitly requests visual review after every module or step, downstream modules remain blocked until the designated reviewer inspects the current module's artifacts, returns PASS or concrete steering, and any requested correction is rerun and accepted; risk-proportionate validation never relaxes this gate or mandatory correctness and safety tests.
+Validation remains risk-proportionate: prioritize progress on the requested primary task, use the smallest test that proves the immediate blocker or next real pipeline stage is ready, avoid disproportionate time on redundant or nonessential smoke tests, and do not repeat an established check unless relevant state changed or new evidence contradicts it.
 Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
