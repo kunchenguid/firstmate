@@ -1400,7 +1400,7 @@ EOF
 # in every home. A rejected captain-held work item never becomes a delivery merely
 # because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json snap backlog repo wt pr
+  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1460,6 +1460,36 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
     "$TEARDOWN" approved-local >/dev/null \
     || fail "could not backfill the local delivery completion"
+  forced_pr="https://github.com/kunchenguid/firstmate/pull/404"
+  "$TASKS_AXI_BIN" add forced-rejected "Discard an unlanded candidate" --kind ship \
+    --repo firstmate --start --file "$backlog" >/dev/null \
+    || fail "could not create the forced rejection fixture"
+  fm_write_meta "$home/state/forced-rejected.meta" \
+    "window=firstmate:fm-forced-rejected" "endpoint_task_id=forced-rejected" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$forced_pr" "spawn_gen=forced-rejected-fixture"
+  record_claude_state "$home/state" forced-rejected idle
+  printf 'done: discard approved\n' > "$home/state/forced-rejected.status"
+  "$TASKS_AXI_BIN" hold forced-rejected --reason "captain discard choice pending" \
+    --kind captain --file "$backlog" >/dev/null \
+    || fail "could not hold the forced rejection fixture"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" forced-rejected --force >/dev/null \
+    || fail "could not discard the forced rejection fixture"
+  forced_show=$("$TASKS_AXI_BIN" show forced-rejected --full --file "$backlog") \
+    || fail "could not read the retained forced rejection fixture"
+  assert_contains "$forced_show" "Deliverable of the finished work: none" \
+    "forced cleanup did not record the discarded work as a non-delivery"
+  assert_not_contains "$forced_show" "Deliverable of the finished work: PR $forced_pr" \
+    "forced cleanup recorded discarded work as a delivered PR"
+  printf 'Do not merge the discarded candidate.\n' > "$home/forced-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer forced-rejected --decision-file "$home/forced-answer.txt" >/dev/null \
+    || fail "could not record the forced rejection answer"
   "$TASKS_AXI_BIN" add rejected-merge \
     "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
     --kind ship --repo firstmate --file "$backlog" >/dev/null \
@@ -1499,10 +1529,13 @@ test_captain_approved_delivery_stays_in_landed() {
   printf '%s' "$snap" | jq -e '
     ([.backlog.records[] | select(.id == "approved-merge")][0]) as $approved
     | ([.backlog.records[] | select(.id == "approved-local")][0]) as $local
+    | ([.backlog.records[] | select(.id == "forced-rejected")][0]) as $forced
     | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
     | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
     | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
       and $local.delivery_provenance == true and $local.local_note == "local main"
+      and $forced.delivery_provenance == true and $forced.pr_url == null
+      and $forced.report_path == null and $forced.local_note == null
       and $rejected.delivery_provenance == true and $rejected.pr_url == null
       and $rejected.report_path == null and $rejected.local_note == null
       and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
@@ -1513,6 +1546,7 @@ test_captain_approved_delivery_stays_in_landed() {
       and (.landed | any(.[]; .id == "approved-local"))
       and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
+      and (.landed | any(.[]; .id == "forced-rejected") | not)
       and (.landed | any(.[]; .id == "rejected-merge") | not)
   ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"
   [ ! -s "$home/net.log" ] || fail "landed must make no gh/gh-axi call, got: $(cat "$home/net.log")"
