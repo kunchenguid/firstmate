@@ -2148,3 +2148,56 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+
+# state/<id>.check.sh is a single slot. A claude-local task keeps its
+# local-model eviction watcher there, so arming a merge poll on such a task
+# would silently replace the watcher and leave the worker's stall detection
+# gone. The poll is refused instead, before the record is touched, and the
+# refusal names the retirement command that hands the slot over deliberately.
+test_claude_local_eviction_watcher_is_not_overwritten() {
+  local dir state before after rc
+  dir=$(make_case claude-local-slot)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "harness=claude-local" \
+    "kind=scout"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" task-a >/dev/null 2>&1 \
+    || fail "the eviction watcher fixture could not be registered"
+  fm_custom_check_registered "$state" task-a || fail "the fixture watcher was not registered"
+  before=$(state_snapshot "$state")
+
+  rc=0
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 1 ] || fail "arming a poll over a claude-local eviction watcher should be refused, got exit $rc"
+  grep -q 'eviction watcher' "$dir/stderr" \
+    || fail "the refusal did not say what occupies the slot: $(cat "$dir/stderr")"
+  grep -q 'fm-check-unregister.sh task-a' "$dir/stderr" \
+    || fail "the refusal did not name the retirement command: $(cat "$dir/stderr")"
+  after=$(state_snapshot "$state")
+  [ "$before" = "$after" ] \
+    || fail "a refused poll changed task state:"$'\n'"$before"$'\n---\n'"$after"
+  fm_custom_check_registered "$state" task-a \
+    || fail "the eviction watcher was not left registered after the refusal"
+  ! grep -q '^pr=' "$state/task-a.meta" \
+    || fail "a refused poll recorded a pr= line for a poll that was never armed"
+
+  # Deliberate hand-over: once the watcher is retired the same command arms.
+  FM_HOME="$dir/home" "$ROOT/bin/fm-check-unregister.sh" task-a >/dev/null 2>&1 \
+    || fail "the fixture watcher could not be retired"
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "the poll did not arm once the slot was free: $(cat "$dir/stderr")"
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "the armed poll was not the static template"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the poll armed after hand-over was not valid"
+
+  pass "fm-pr-check refuses to overwrite a claude-local eviction watcher and arms once it is retired"
+}
+
+test_claude_local_eviction_watcher_is_not_overwritten

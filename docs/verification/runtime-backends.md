@@ -1398,3 +1398,111 @@ The live probe loads the tracked watcher extension through Pi's real resource lo
 It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
 The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
 A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+## claude-local
+
+Verified 2026-09-01 against LM Studio serving `qwen3-coder-next-mlx` (MLX 4-bit, `lmstudio-community`) at `http://127.0.0.1:1234` on an Apple M1 Max, 64 GB, with Claude Code 2.1.x.
+`claude-local` is the `claude` CLI pinned to that endpoint, so this record covers only what the LOCAL endpoint changes; every other claude fact stays in the claude evidence above.
+
+### Endpoint catalog and the model-identity finding
+
+The catalog reports per-model load state and the loaded window:
+
+```
+$ curl -s http://127.0.0.1:1234/api/v0/models
+{"data":[{"id":"qwen3-coder-next-mlx","type":"llm","arch":"qwen3_next","compatibility_type":"mlx",
+  "quantization":"4bit","state":"loaded","max_context_length":262144,"loaded_context_length":65536,
+  "capabilities":["tool_use"]},
+ {"id":"text-embedding-nomic-embed-text-v1.5","type":"embeddings","state":"not-loaded","max_context_length":2048}]}
+```
+
+The request path does NOT honor the model id it is given, which is why the catalog is the only identity source:
+
+```
+$ curl -s -w 'HTTP %{http_code}\n' http://127.0.0.1:1234/v1/messages \
+    -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' -H 'x-api-key: lmstudio' \
+    -d '{"model":"definitely-not-loaded-xyz","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+HTTP 200
+{"id":"msg_al35oo54q6i1us46zilr5q","type":"message","role":"assistant",
+ "content":[{"type":"text","text":"Hello! How can I help you"}],
+ "model":"qwen3-coder-next-mlx","stop_reason":"max_tokens",
+ "usage":{"input_tokens":9,"output_tokens":7,"cache_read_input_tokens":0}}
+```
+
+A model that is not loaded is answered by the one that is, and the response names the loaded model rather than the requested one.
+No request can therefore report an eviction.
+
+Token counting is absent, so no exact count is available without spending a full prefill:
+
+```
+$ curl -s -w 'HTTP %{http_code}\n' http://127.0.0.1:1234/v1/messages/count_tokens ...
+HTTP 200
+{"error":"Unexpected endpoint or method. (POST /v1/messages/count_tokens)"}
+```
+
+An unreachable endpoint is distinct and fast: `curl` exit 7, `HTTP 000`.
+
+### The context boundary
+
+The dominant consumer of this window is the harness, not the task.
+Captured from LM Studio's own request log, one `claude -p` turn carrying a one-sentence prompt sent Claude Code's system prompt and full tool schema:
+
+```
+$ wc -c < lmstudio-request-log
+253572          # ~63k tokens at bytes/4, before any task content
+```
+
+Against the 65,536-token window the model had loaded, that baseline is ~96% of the window.
+The enforced boundary is therefore the HEADROOM above it, which `bin/fm-local-model.sh` computes and refuses against:
+
+```
+$ bin/fm-local-model.sh probe
+ok: http://127.0.0.1:1234 is answering
+$ bin/fm-local-model.sh model-state qwen3-coder-next-mlx
+loaded
+$ bin/fm-local-model.sh context-budget qwen3-coder-next-mlx
+65536
+$ bin/fm-local-model.sh headroom qwen3-coder-next-mlx
+5536
+```
+
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the control Claude Code itself names for an unrecognized model's real window; without it Claude Code assumes 200k and auto-compacts against a window the server does not have.
+Setting it also silenced that warning.
+
+### Latency, and the reliability limit
+
+| Exchange | Wall clock |
+|---|---|
+| Raw Anthropic endpoint, 14 input tokens, warm | 0.35s |
+| Raw OpenAI endpoint, same prompt, cold | 17.7s |
+| `claude -p`, trivial single turn | 153s |
+| `claude -p`, two turns with one tool call | 309s |
+| `claude -p`, trivial single turn, later attempt | did not complete in 20 minutes |
+
+Per-turn latency is minutes and is NOT stable.
+Two concurrent clients against one local model starve each other.
+
+### What a supervised run established, and what it did not
+
+One supervised scout task exercised the `claude` CLI through an `fm-spawn.sh` launch on the tmux backend against this endpoint.
+
+Established:
+
+- Tool use survives the Anthropic-compatible endpoint end to end: a forced `Read` returned the correct sentinel from a file the model had never seen.
+- The semantic busy source works unchanged. claude's own hooks fired on the local runtime, producing a real record rather than a guess:
+  `v1 gen=g1788235566.4619.24610 seq=2 state=busy source=claude-hook event=user-prompt-submit ts=1788235647`
+- A trust dialog appears on each fresh worktree, and its default selection is `No, exit`; bare Enter exits the agent, so acceptance needs Down then Enter.
+- Interrupt is delivered through the control plane, reporting `cancel=unconfirmed`, matching claude's documented no-hook interrupt. It did not clear a pending request-retry timer.
+- A stalled worker is silent: Claude Code sat in a multi-minute retry backoff ("will retry in 4m 34s") with no request reaching the server, which is why the endpoint check exists.
+
+UNESTABLISHED, recorded as such rather than assumed:
+
+- Turn-end signal. No supervised turn ever completed, so neither the `Stop` hook nor the turn-ended marker was observed firing here.
+- Exit. `bin/fm-control.sh exit` did not return within two minutes.
+- Resume and skill invocation. Not exercised.
+- Whether LM Studio JIT-loads an evicted model on request.
+
+**Conclusion: `claude-local` is not trustworthy for unattended work.**
+No supervised turn was observed completing, and the harness baseline leaves 5,536 usable tokens on the reference configuration.
+It ships opt-in, short-context, crewmate/scout only, and refused for no-mistakes shipping.
+Refresh this record by re-running `tests/fm-local-model.test.sh` and `tests/fm-claude-local-harness.test.sh` for the logic, and the probes above against a live endpoint for the version-scoped facts.

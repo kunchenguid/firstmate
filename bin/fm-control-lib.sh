@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse) return 0 ;;
+    claude|claude-local|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse) return 0 ;;
   esac
   return 1
 }
@@ -102,7 +102,11 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini) [ "$kind" != secondmate ] || return 1 ;;
+    # These adapters are not verified for a secondmate: they lack a primary
+    # supervision protocol, and claude-local also has a short crewmate context.
+    # bin/fm-spawn.sh refuses the same launch; this is what refuses the RELAUNCH
+    # before the current agent is stopped.
+    muse|gemini|claude-local) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }

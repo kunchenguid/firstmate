@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -614,6 +616,19 @@ relaunch_rollback() {
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
+  # $HARNESS is the control FAMILY, which is what the interrupt/exit tables and
+  # wiring retirement are keyed by. For the relaunch PROFILE we want the exact
+  # adapter instead, whenever the recorded value is itself a verified adapter:
+  # such a value can be reconstructed exactly, so the alias guard below must not
+  # fire for it and the model/effort carry-over must compare like with like.
+  # Only a raw-command basename - which resolves to a family but is not itself
+  # an adapter - is genuinely unreconstructable. claude-local is what makes this
+  # visible: its family is claude, but it is a real adapter with its own launch
+  # template and its own model axis, so canonicalizing it to claude would both
+  # refuse an ordinary relaunch and reset the recorded model to default.
+  if fm_control_harness_supported "$PRIOR_RECORDED_HARNESS"; then
+    PRIOR_HARNESS=$PRIOR_RECORDED_HARNESS
+  fi
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
@@ -756,6 +771,20 @@ safe_checkpoint() {
 # actually reads. A secondmate's charter is a durable standing document and is
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
+progress_note_block() {  # <stamp>
+  echo
+  echo "## Progress note ($1)"
+  echo
+  echo "This task was relaunched. Continue from here; the local copy and every"
+  echo "uncommitted change are exactly as the previous worker left them."
+  echo
+  echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
+  echo "each message in numeric order, then mv each handled file into"
+  echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+  echo
+  printf '%s\n' "$NOTE"
+}
+
 record_note() {
   local stamp
   [ -n "$NOTE" ] || return 0
@@ -765,30 +794,42 @@ record_note() {
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
-      {
-        echo
-        echo "## Progress note ($stamp)"
-        echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
-        echo "uncommitted change are exactly as the previous worker left them."
-        echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
-        echo
-        printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
+      progress_note_block "$stamp" >> "$RELAUNCH_BRIEF" \
         || die "could not append the progress note to task $ID's instructions"
       ;;
   esac
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line local_model_endpoint brief_preview brief_fits_status task_mode
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+
+  if { [ "$PRIOR_HARNESS" = claude-local ] || [ "$TARGET_HARNESS" = claude-local ]; } \
+     && fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    die "task $ID has an active PR poll in state/$ID.check.sh, the single custom-check slot a claude-local eviction watcher also needs; finish or retire that poll before relaunching so neither watcher is silently replaced (the running worker was left in place)"
+  fi
+  if [ "$TARGET_HARNESS" = claude-local ] \
+     && { [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ]; } \
+     && ! { [ "$PRIOR_HARNESS" = claude-local ] \
+            && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+            && fm_custom_check_registered "$STATE" "$ID"; }; then
+    die "task $ID has an occupied custom-check slot in state/$ID.check.sh that cannot be proved to be its incumbent claude-local eviction watcher; retire or repair that check before relaunching so the running worker is not stopped for a replacement that fm-spawn will refuse (the running worker was left in place)"
+  fi
+  if [ "$TARGET_HARNESS" = claude-local ]; then
+    [ "$TARGET_MODEL" != default ] \
+      || die "claude-local requires an explicit model id and task $ID records none; pass --model <exact-model-id> (list them with: bin/fm-local-model.sh list) rather than stopping the running worker for a launch that must be refused"
+    task_mode=$(fm_meta_get "$META" mode)
+    [ "$task_mode" != no-mistakes ] \
+      || die "task $ID records mode=no-mistakes and claude-local is not verified for no-mistakes shipping work, so relaunching it there would stop the running worker for a launch that must be refused; ship this task on a hosted runtime, or re-spawn it under --mode direct-PR/local-only if the captain has approved the lower rigor (the running worker was left in place)"
+    local_model_endpoint=${FM_LOCAL_MODEL_ENDPOINT:-}
+    [ -n "$local_model_endpoint" ] || local_model_endpoint=$(fm_meta_get "$META" local_model_endpoint)
+    [ -n "$local_model_endpoint" ] || local_model_endpoint=http://127.0.0.1:1234
+    FM_LOCAL_MODEL_ENDPOINT="$local_model_endpoint" "$SCRIPT_DIR/fm-local-model.sh" preflight "$TARGET_MODEL" >/dev/null \
+      || die "the local-model preflight for claude-local failed (see above), so relaunching $ID would stop the running worker for a launch that must be refused; the worker was left in place"
+  fi
 
   case "$KIND" in
     ship|scout)
@@ -807,6 +848,21 @@ do_relaunch() {
       die "task $ID records kind '$KIND', which has no defined relaunch shape"
       ;;
   esac
+  if [ "$TARGET_HARNESS" = claude-local ] && [ -n "$RELAUNCH_BRIEF" ]; then
+    brief_preview=$(mktemp "${TMPDIR:-/tmp}/fm-control-brief.XXXXXX") \
+      || die "could not stage task $ID's instructions for the claude-local brief check"
+    if ! { cat "$RELAUNCH_BRIEF" \
+        && { [ -z "$NOTE" ] || progress_note_block "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }; } > "$brief_preview"; then
+      rm -f -- "$brief_preview"
+      die "could not stage task $ID's instructions for the claude-local brief check"
+    fi
+    brief_fits_status=0
+    FM_LOCAL_MODEL_ENDPOINT="$local_model_endpoint" "$SCRIPT_DIR/fm-local-model.sh" brief-fits "$TARGET_MODEL" "$brief_preview" >/dev/null \
+      || brief_fits_status=$?
+    rm -f -- "$brief_preview"
+    [ "$brief_fits_status" -eq 0 ] \
+      || die "task $ID's instructions plus this progress note exceed the local model's usable headroom (see above), so relaunching would stop the running worker for a launch that must be refused; the worker was left in place"
+  fi
 
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"

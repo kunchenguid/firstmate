@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
+  Contains verified facts for claude, claude-local, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -25,6 +25,7 @@ Operational paths keep the context named by their owner: `config/` and active-ho
 ## Non-negotiable safety
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+`claude-local` is verified for short, ATTENDED crewmate and scout work only, and its own reference owns that boundary; never offer it for unattended or no-mistakes work.
 If `config/crew-harness` or `config/secondmate-harness` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
 Do not pause current work for that choice.
 
@@ -82,6 +83,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
   },
   "harnesses": {
     "claude": "references/harness/claude.md",
+    "claude-local": "references/harness/claude-local.md",
     "codex": "references/harness/codex.md",
     "opencode": "references/harness/opencode.md",
     "pi": "references/harness/pi.md",
