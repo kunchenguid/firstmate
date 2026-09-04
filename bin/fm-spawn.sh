@@ -2805,40 +2805,6 @@ EOF
 EOF
       exclude_path "$local_copilot_hook_rel"
       ;;
-    gemini)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-      # Semantic busy-state hooks (bin/fm-busy-lib.sh): BeforeAgent opens a
-      # turn and AfterAgent closes it, with SessionEnd closing on process
-      # shutdown so an abnormal end can never leave a stale busy record.
-      # Verified live on gemini-cli 0.58.0 as a clean open/close pair:
-      # mid-turn only BeforeAgent had fired, and AfterAgent followed at turn
-      # end. AfterAgent ALSO fires on a manual Escape interrupt (carrying
-      # prompt_response "[no response text]"), so unlike Claude a cancelled
-      # gemini turn closes its own record instead of leaving it busy.
-      # SessionEnd was observed firing TWICE for one /quit; the busy writer is
-      # idempotent for a repeated idle event, so the duplicate is harmless and
-      # deliberately not de-duplicated here.
-      # These are written into a FIRSTMATE-OWNED settings file under state/,
-      # reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH on the launch command,
-      # never into the worktree's own .gemini/settings.json - that path is the
-      # PROJECT's committed settings file, so writing it would clobber a
-      # project's configuration and retiring it would delete a tracked file.
-      # Hook arrays MERGE across gemini's settings layers rather than
-      # overriding, so a project's own hooks still run alongside these.
-      # AfterAgent keeps the turn-ended NOTIFICATION touch for the watcher.
-      # Every hook command tolerates a refused event (|| true) so a stale-gen
-      # writer can never break gemini's own lifecycle, and each prints the
-      # empty JSON object gemini's hook contract requires on stdout.
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
-      g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
-      cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
-{"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
-EOF
-      fi
-      ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
       cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
