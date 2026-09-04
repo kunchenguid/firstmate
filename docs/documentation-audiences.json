@@ -55,6 +55,10 @@
       "target": "docs/documentation-audiences.json"
     },
     {
+      "source": "AGENTS.md",
+      "target": "docs/known-tool-defects.md"
+    },
+    {
       "source": "docs/calm.md",
       "target": "docs/calm-mode-feasibility.md"
     },
@@ -351,6 +355,10 @@
     {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/known-tool-defects.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/orca-backend.md",

@@ -1,0 +1,8 @@
+{
+  "name": "fm-verify-page-deps",
+  "private": true,
+  "description": "Vendored runtime dependency for bin/fm-verify-page.sh. Not published, not part of the firstmate CLI surface.",
+  "dependencies": {
+    "playwright-core": "1.59.1"
+  }
+}

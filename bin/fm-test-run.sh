@@ -1363,6 +1363,14 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
+    bin/fm-verify-page/*)
+      # The vendored playwright-core dependency manifest/lockfile and the Node
+      # implementation live under bin/fm-verify-page/ and are not individually
+      # named in tests/fm-verify-page.test.sh, unlike a bin/*.sh script's own
+      # basename, so they need an explicit mapping instead of the generic
+      # bin/* basename-reference scan below.
+      printf '%s\n' unclassified
+      ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule
       # the fixture case above applies. Refusing on its absent mapping would
