@@ -12,6 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export FM_ROOT
 LIA_SCRIPT="$FM_ROOT/projects/lia/scripts/boot.py"
+if [ ! -f "$LIA_SCRIPT" ] && [ -f "${HOME:-}/.lia/boot.py" ]; then
+  LIA_SCRIPT="${HOME:-}/.lia/boot.py"
+fi
 
 if [ ! -f "$LIA_SCRIPT" ]; then
   printf '{"status":"FAILED","mode":"ERROR","phase":"PREFLIGHT","error":"projects/lia/scripts/boot.py not found"}\n'
@@ -23,12 +26,24 @@ fi
 
 TIMEOUT_LIMIT=15
 
-fm_run_timed "$TIMEOUT_LIMIT" python3 "$LIA_SCRIPT" --launch "$@"
+BOOT_OUTPUT=$(fm_run_timed "$TIMEOUT_LIMIT" python3 "$LIA_SCRIPT" --launch "$@")
 RC=$?
 
 if [ "$RC" -eq 124 ]; then
   printf '{"status":"FAILED","mode":"ERROR","phase":"TIMEOUT","error":"Lia boot exceeded 15s budget"}\n'
   exit 1
+fi
+
+if [ -n "$BOOT_OUTPUT" ]; then
+  printf '%s\n' "$BOOT_OUTPUT"
+fi
+
+if [ "$RC" -eq 0 ]; then
+  if printf '%s\n' "$BOOT_OUTPUT" | grep -q 'COLD_BOOT'; then
+    if [ -x "$SCRIPT_DIR/fm-send.sh" ]; then
+      "$SCRIPT_DIR/fm-send.sh" lia "Lia, đài chỉ huy vào ca trực. Giữ vững vị trí, sẵn sàng nhận lệnh của Captain." || true
+    fi
+  fi
 fi
 
 exit "$RC"
