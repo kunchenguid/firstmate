@@ -949,6 +949,23 @@ terminal_then_paused() {  # <lines> <last>
   status_terminal_then_paused "$1" "$2" >/dev/null
 }
 
+# Nanosecond mtime for no_inbox_activity_since_status alone - do NOT widen the
+# shared stat_mtime above for this: stat_mtime has other callers (crew-state
+# reconciliation, wake signatures) that reasonably want whole-second epoch
+# values, and changing its resolution would silently alter their behavior too.
+# Darwin's `stat -f %Fm` and GNU's `stat -c %.9Y` both already report a
+# dot-separated nine-digit fractional second (bin/fm-wake-lib.sh's fm_wake_signal_sig
+# uses the same %Fm on Darwin for its own signature), so stripping the dot
+# gives a plain integer of nanoseconds since epoch that ordinary `-ge`
+# handles unchanged. Empty or non-numeric output (an unreadable file, or a
+# stat variant that omits the fraction) is left for the caller's existing
+# numeric guard to reject, exactly like stat_mtime's contract.
+if [ "$(uname)" = Darwin ]; then
+  stat_mtime_ns() { stat -f %Fm "$1" 2>/dev/null | tr -d '.'; }
+else
+  stat_mtime_ns() { stat -c %.9Y "$1" 2>/dev/null | tr -d '.'; }
+fi
+
 # 0 if no record under <task>'s steering inbox (delivered or already
 # handled/) carries an mtime at or after <status>'s: i.e. nothing has steered
 # this worker new work since its last status append. A steer landing after a
@@ -957,22 +974,31 @@ terminal_then_paused() {  # <lines> <last>
 # acknowledgement of a steer, so the status log alone can never show this, but
 # the inbox delivery timestamp can. Used to keep terminal_then_paused's trust
 # in a declared wait from becoming permanent once new work has actually
-# arrived (a stale `paused:` must not outrank live evidence forever). Uses
-# >= rather than > on purpose: mtimes here are coarse integer seconds, so an
-# inbox record landing in the same second as the status append is
-# indistinguishable from one that landed just after it, and treating that tie
-# as "old" would let a same-second steer hide behind a stale paused
-# classification instead of surfacing it.
+# arrived (a stale `paused:` must not outrank live evidence forever).
+#
+# Compares at nanosecond resolution (stat_mtime_ns above) so a same-second
+# status append and inbox delivery are almost always still orderable - the
+# case that made a plain integer-second comparison ambiguous either way: too
+# strict (`>`) misses a genuinely new same-second steer and hides it behind a
+# stale pause forever, too loose (`>=`) misreads a same-second record that
+# actually predates the pause as newer and spuriously cancels a legitimate
+# wait. Nanosecond resolution removes the tie for the vast majority of real
+# same-second pairs. `>=` remains as the fallback for the residual case - a
+# filesystem or stat implementation that truly cannot report sub-second
+# precision and returns a whole-second value - and there the same bias this
+# codebase uses elsewhere applies: a silent miss that hides real work forever
+# is worse than an occasional false wake that costs one supervision turn, so
+# an unresolvable tie counts as activity rather than being trusted as old.
 no_inbox_activity_since_status() {  # <status-file> <task>
-  local status=$1 task=$2 status_mtime dir f fmtime
-  status_mtime=$(stat_mtime "$status")
-  case "$status_mtime" in ''|*[!0-9]*) return 0 ;; esac
+  local status=$1 task=$2 status_ns dir f fns
+  status_ns=$(stat_mtime_ns "$status")
+  case "$status_ns" in ''|*[!0-9]*) return 0 ;; esac
   dir=$(fm_task_inbox_dir "$STATE" "$task")
   for f in "$dir"/*.msg "$dir/handled"/*.msg; do
     [ -f "$f" ] || continue
-    fmtime=$(stat_mtime "$f")
-    case "$fmtime" in ''|*[!0-9]*) continue ;; esac
-    [ "$fmtime" -ge "$status_mtime" ] && return 1
+    fns=$(stat_mtime_ns "$f")
+    case "$fns" in ''|*[!0-9]*) continue ;; esac
+    [ "$fns" -ge "$status_ns" ] && return 1
   done
   return 0
 }

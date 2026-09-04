@@ -137,6 +137,22 @@ set_mtime() {  # <epoch> <file>
   fi
 }
 
+# Set <file>'s mtime to exactly <epoch> seconds plus a <frac9>-nanosecond
+# fraction (nine digits, e.g. "250000000"), for pinning two files to the same
+# whole second but distinguishable sub-second stamps - the case
+# bin/fm-watch.sh's stat_mtime_ns exists to resolve. `touch -d` accepts a
+# fractional ISO-8601 stamp on both BSD (macOS) and GNU touch; only the epoch
+# formatting differs.
+set_mtime_frac() {  # <epoch> <frac9> <file>
+  local epoch=$1 frac=$2 f=$3 stamp
+  if stamp=$(date -r "$epoch" +%Y-%m-%dT%H:%M:%S 2>/dev/null); then
+    touch -d "${stamp}.${frac}" "$f"
+  else
+    stamp=$(date -d "@$epoch" +%Y-%m-%dT%H:%M:%S)
+    touch -d "${stamp}.${frac}" "$f"
+  fi
+}
+
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
@@ -2702,6 +2718,65 @@ test_same_second_inbox_activity_restores_wedge_detection() {
   pass "an inbox record with the same mtime as the last status line still restores wedge detection"
 }
 
+# Greptile's second-round finding on PR #3679: with only whole-second mtimes,
+# no_inbox_activity_since_status's `>=` fallback cannot tell a same-second
+# inbox record that genuinely PREDATES the status append from one that lands
+# after it, so it always (wrongly, in this direction) reads it as new and
+# spuriously cancels a legitimate declared wait. bin/fm-watch.sh's
+# stat_mtime_ns removes that ambiguity for filesystems that report sub-second
+# resolution (this one does - both platforms verified). Pin that a record
+# whose sub-second stamp genuinely comes first, inside the very same
+# wall-clock second as the status append, is still recognized as old and the
+# declared wait stays trusted.
+test_subsecond_inbox_activity_orders_within_same_second() {
+  local dir state fakebin out capture_file window key pane_hash sig pid inbox_dir now
+  dir=$(make_case inbox-restore-subsecond-order); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-inbox-subsecond-order"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/inbox-order.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: awaiting merge authority\n'
+  } > "$state/inbox-order.status"
+  now=$(date +%s)
+  # Status append lands at .800 of the second; the inbox record predates it
+  # at .100 of the SAME whole second - a plain integer-second compare cannot
+  # tell these apart, and the old `>=` fallback misread this exact shape as
+  # newer activity.
+  set_mtime_frac "$now" 800000000 "$state/inbox-order.status"
+  sig=$(seen_sig "$state/inbox-order.status"); printf '%s' "$sig" > "$state/.seen-inbox-order_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  inbox_dir="$state/inbox-order.inbox"
+  mkdir -p "$inbox_dir/handled"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-04T00:00:00Z\n--\nolder steer, already handled\n' > "$inbox_dir/handled/001.msg"
+  set_mtime_frac "$now" 100000000 "$inbox_dir/handled/001.msg"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "an older same-second inbox record exited the watcher instead of staying absorbed on the declared wait: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "an older same-second inbox record disabled declared-wait recognition"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "an older same-second inbox record spuriously restored wedge tracking past a trusted declared wait"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an inbox record that genuinely predates the status append within the same whole second is still recognized as old"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -4282,6 +4357,7 @@ test_multiple_trailing_pauses_outrank_authoritative_working
 test_invalid_pause_scan_budget_still_outranks_authoritative_working
 test_inbox_activity_after_declared_wait_restores_wedge_detection
 test_same_second_inbox_activity_restores_wedge_detection
+test_subsecond_inbox_activity_orders_within_same_second
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
