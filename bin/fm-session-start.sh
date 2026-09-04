@@ -245,12 +245,16 @@ while [ "$#" -gt 0 ]; do
       SESSION_SOURCE=${1#--source=}
       shift
       ;;
-    1|--part1|--fleet)
+    1|--part1|--fleet|stage1)
       PART=1
       shift
       ;;
-    2|--part2|--context)
+    2|--part2|--context|stage2)
       PART=2
+      shift
+      ;;
+    3|--part3|--supervision|stage3)
+      PART=3
       shift
       ;;
     all|--all)
@@ -263,7 +267,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [1|2|all|--part1|--part2|--fleet|--context]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [1|2|3|all|--part1|--part2|--part3]\n' >&2
       exit 2
       ;;
   esac
@@ -274,8 +278,9 @@ done
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
 case "$PART" in
-  1) SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state' ;;
-  2) SESSION_START_STAGES='network-checks context copilot-boot next-step' ;;
+  1) SESSION_START_STAGES='lock bootstrap' ;;
+  2) SESSION_START_STAGES='wake-queue read-once fleet-state network-checks' ;;
+  3) SESSION_START_STAGES='supervision-instructions context copilot-boot next-step' ;;
   *) SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context copilot-boot next-step' ;;
 esac
 
@@ -307,6 +312,7 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   case "$PART" in
     1) CHILD_ARGS+=(1) ;;
     2) CHILD_ARGS+=(2) ;;
+    3) CHILD_ARGS+=(3) ;;
   esac
   if [ ${#CHILD_ARGS[@]} -gt 0 ]; then
     fm_run_timed "$SESSION_START_BUDGET" \
@@ -1007,38 +1013,47 @@ main() {
   case "$PART" in
     1)
       if [ "$REEMIT" -eq 1 ]; then
-        section "SESSION START (CONTEXT RE-EMIT) - PART 1 - $FM_HOME"
-        printf 'This session already took the helm at its own startup and has only lost its\n'
-        printf 'context. Lock ownership is re-verified and the durable records below are\n'
-        printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-        printf 'secondmate convergence and liveness, pending remote handoff\n'
-        printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
-        printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 1/3 - $FM_HOME"
       else
-        section "SESSION START - PART 1 - $FM_HOME"
+        section "SESSION START - STAGE 1/3 - $FM_HOME"
       fi
       stage_lock
       stage_bootstrap
-      stage_wake_queue
-      stage_supervision_instructions
-      stage_read_once
-      stage_fleet_digest
+      printf '\nSTAGE 1 COMPLETE -> NEXT: bin/fm-session-start.sh 2\n'
       ;;
     2)
       if [ "$REEMIT" -eq 1 ]; then
-        section "SESSION START (CONTEXT RE-EMIT) - PART 2 - $FM_HOME"
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 2/3 - $FM_HOME"
       else
-        section "SESSION START - PART 2 - $FM_HOME"
+        section "SESSION START - STAGE 2/3 - $FM_HOME"
       fi
       if "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
         READ_ONLY=0
       else
         READ_ONLY=1
       fi
+      stage_wake_queue
+      stage_read_once
+      stage_fleet_digest
       stage_network_checks
+      printf '\nSTAGE 2 COMPLETE -> NEXT: bin/fm-session-start.sh 3\n'
+      ;;
+    3)
+      if [ "$REEMIT" -eq 1 ]; then
+        section "SESSION START (CONTEXT RE-EMIT) - STAGE 3/3 - $FM_HOME"
+      else
+        section "SESSION START - STAGE 3/3 - $FM_HOME"
+      fi
+      if "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+        READ_ONLY=0
+      else
+        READ_ONLY=1
+      fi
+      stage_supervision_instructions
       stage_context_digest
       stage_copilot_boot
       stage_closing_reminder
+      printf '\nSTAGE 3 COMPLETE - SESSION START COMPLETE\n'
       ;;
     all|*)
       if [ "$REEMIT" -eq 1 ]; then
