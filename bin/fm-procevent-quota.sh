@@ -283,6 +283,7 @@ case "${1-}" in
   poll)      shift; cmd_poll "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  retirement-cleanup) shift; [ "$#" -eq 3 ] || usage ;;
   source-id) shift; cmd_source_id "${1-}" ;;
   retire)    shift; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;

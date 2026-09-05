@@ -5,6 +5,7 @@
 #   fm-procevent-lavish.sh arm <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
+#   fm-procevent-lavish.sh retirement-cleanup <source-id> <registration-generation> <reason>
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh read <result-file>
@@ -48,6 +49,10 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
+# retirement-cleanup
+#            Record and remove acknowledgements that cannot be delivered before
+#            the generic runner removes their exact registration generation.
+#            The runner invokes this idempotently under the source lock.
 # silent     Exit 0 when the captured result is a routine no-op the runner should
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
@@ -345,6 +350,19 @@ discard_stale_reply_records_locked() {  # <source-id> <live-generation>
     [ "$REPLY_RECORD_GENERATION" = "$live_generation" ] || \
       fallback_reply_record_locked "$path" "source generation changed before delivery"
   done
+}
+
+cmd_retirement_cleanup() {  # <source-id> <registration-generation> <reason>
+  local id=${1-} generation=${2-} reason=${3-} state
+  [ "$#" -eq 3 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ -n "$generation" ] && [ -n "$reason" ] || die "retirement cleanup identity is incomplete"
+  case "$generation$reason" in *$'\n'*) die "retirement cleanup fields cannot contain newlines" ;; esac
+  if [ -e "$STATE" ] && state=$(fm_procevent_state_root_resolve "$STATE"); then
+    STATE=$state
+    discard_stale_reply_records_locked "$id" "$generation"
+    remove_reply_generation_locked "$id" "$generation" "$reason"
+  fi
 }
 
 cmd_reply() {
@@ -1099,6 +1117,7 @@ case "${1-}" in
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  retirement-cleanup) shift; cmd_retirement_cleanup "$@" ;;
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   read)      shift; cmd_read "$@" ;;

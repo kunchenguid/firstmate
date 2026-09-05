@@ -99,6 +99,11 @@
 # it. Exit 0 is the only terminal verdict. A missing command, an error, or any
 # other exit keeps the registration armed, so an adapter that has no notion of
 # ending needs no change.
+# Before a built-in registration is removed by terminal retirement, explicit
+# retirement, or sweep-home, this runner invokes the adapter's optional
+# `retirement-cleanup <source-id> <registration-generation> <reason>` command
+# under the same source lock. Exit 0 completes cleanup, exit 2 means the adapter
+# owns no cleanup, and any other exit retains the registration for safe retry.
 #
 # Routine no-op knowledge is adapter-owned through the same kind of seam. Some
 # sources produce a result that carries no news at all - a review surface that
@@ -299,6 +304,26 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
   script=$(adapter_script "$1")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   "$script" terminal "$2" >/dev/null 2>&1
+}
+
+adapter_retirement_cleanup_locked() {  # <adapter> <source-id> <generation> <reason>
+  local adapter=$1 id=$2 generation=$3 reason=$4 script owner_state status
+  fm_procevent_extension_registration_load_locked "$STATE" "$id"
+  owner_state=$?
+  case "$owner_state" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$script" retirement-cleanup "$id" "$generation" "$reason" >/dev/null 2>&1
+  status=$?
+  case "$status" in
+    0|2) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Ask the source's own adapter whether a captured result is a routine no-op that
@@ -937,7 +962,7 @@ EOF
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
   fi
   if adapter_result_is_terminal "$adapter" "$durable"; then
-    if retire_owned_terminal_source "$id"; then
+    if retire_owned_terminal_source "$adapter" "$id"; then
       printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
     else
       printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
@@ -957,8 +982,8 @@ EOF
 # replacement) or an owned claim with no registration (and signal this runner
 # mid-exit), and a generation this runner no longer owns is never unregistered.
 # The EXIT trap's own release then no-ops, because the generation is already gone.
-retire_owned_terminal_source() {  # <source-id>
-  local id=$1 status=0 registration current_identity
+retire_owned_terminal_source() {  # <adapter> <source-id>
+  local adapter=$1 id=$2 status=0 registration current_identity
   registration=$(source_file "$id")
   fm_procevent_source_lock_acquire "$id" || return 1
   if fm_procevent_claim_load_locked "$id" 2>/dev/null \
@@ -969,7 +994,9 @@ retire_owned_terminal_source() {  # <source-id>
     && current_identity=$(fm_procevent_registration_identity "$registration" 2>/dev/null) \
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
-    if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+    if adapter_retirement_cleanup_locked "$adapter" "$id" "$CLAIM_REG_IDENTITY" \
+        "source ended before delivery" \
+      && rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
       fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
     else
       status=1
@@ -988,7 +1015,7 @@ detach_runner() {  # <source-id> [registration-generation]
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  local rec id adapter published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -1056,7 +1083,11 @@ cmd_reconcile() {
           owner=$FM_PROCEVENT_CLAIM_HOME
           pid=$FM_PROCEVENT_CLAIM_PID
           token=$FM_PROCEVENT_CLAIM_TOKEN
-          if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+          adapter=$(read_adapter "$id" 2>/dev/null || true)
+          if fm_procevent_adapter_valid "$adapter" \
+            && fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+            && adapter_retirement_cleanup_locked "$adapter" "$id" \
+              "$FM_PROCEVENT_CLAIM_REG_IDENTITY" "source ended before delivery" \
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
@@ -1360,7 +1391,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest=''
+  local extension_binding_digest='' retirement_adapter='' retirement_generation=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
@@ -1383,20 +1414,28 @@ cmd_retire() {
   esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
-    if [ -z "$condition" ]; then
-      fm_procevent_extension_registration_load_locked "$STATE" "$id"
-      owner_state=$?
-      case "$owner_state" in
-        0)
+    fm_procevent_extension_registration_load_locked "$STATE" "$id"
+    owner_state=$?
+    case "$owner_state" in
+      0)
+        if [ -z "$condition" ]; then
           fm_procevent_source_lock_release "$id"
           die "extension registration requires its exact --if-owner token: $id"
-          ;;
-        2)
-          fm_procevent_source_lock_release "$id"
-          die "cannot safely read extension registration ownership: $id"
-          ;;
-      esac
-    fi
+        fi
+        ;;
+      1)
+        retirement_adapter=$(read_adapter "$id" 2>/dev/null) \
+          || { fm_procevent_source_lock_release "$id"; die "cannot read source adapter: $id"; }
+        fm_procevent_adapter_valid "$retirement_adapter" \
+          || { fm_procevent_source_lock_release "$id"; die "cannot safely read source adapter: $id"; }
+        retirement_generation=$(fm_procevent_registration_identity "$(source_file "$id")" 2>/dev/null) \
+          || { fm_procevent_source_lock_release "$id"; die "cannot read source registration generation: $id"; }
+        ;;
+      2)
+        fm_procevent_source_lock_release "$id"
+        die "cannot safely read extension registration ownership: $id"
+        ;;
+    esac
     case "$condition" in
       --if-absent)
         fm_procevent_source_lock_release "$id"
@@ -1455,6 +1494,12 @@ cmd_retire() {
     && ! cleanup_extension_binding_invocations "$extension_binding_digest"; then
     fm_procevent_source_lock_release "$id"
     die "cannot prove external adapter cleanup; source remains registered: $id"
+  fi
+  if [ -n "$retirement_adapter" ] \
+    && ! adapter_retirement_cleanup_locked "$retirement_adapter" "$id" \
+      "$retirement_generation" "source retired before delivery"; then
+    fm_procevent_source_lock_release "$id"
+    die "adapter retirement cleanup failed; source remains registered: $id"
   fi
   rm -f -- "$(source_file "$id")"
   rm -f -- "$(runner_file "$id")" "$(child_file "$id")"

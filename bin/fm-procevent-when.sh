@@ -497,6 +497,7 @@ case "${1-}" in
   run)       shift; [ "$#" -eq 1 ] || usage; cmd_run "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  retirement-cleanup) shift; [ "$#" -eq 3 ] || usage ;;
   source-id) shift; cmd_source_id "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;

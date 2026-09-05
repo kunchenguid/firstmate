@@ -601,6 +601,10 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
+HLT_STATUS="$HLT/state/review-host.status"
+PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" FM_LAVISH_HOST_STATUS_FILE="$HLT_STATUS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" reply "$REVIEW_ART" \
+  "Working on the final requested change." >/dev/null
 for _ in $(seq 1 6); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
   sleep 0.3
@@ -614,6 +618,11 @@ done
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
 assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
+assert_contains "$(cat "$HLT_STATUS")" \
+  "acknowledgement: Working on the final requested change.; reason: source ended before delivery" \
+  "terminal retirement did not preserve its claimed acknowledgement in host status"
+assert_absent "$HLT/state/procevent/$lavish_id.pending-reply" \
+  "terminal retirement left its recorded pending acknowledgement"
 LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
 assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
@@ -1660,6 +1669,19 @@ assert_contains "$(cat "$reply_status")" \
   "explicit retirement did not preserve an in-flight acknowledgement in host status"
 assert_absent "$pending_reply" "explicit retirement left its recorded pending acknowledgement"
 assert_absent "$inflight_reply" "explicit retirement left its recorded in-flight acknowledgement"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Acknowledgement awaiting home sweep." >/dev/null
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null
+assert_contains "$(cat "$reply_status")" \
+  "acknowledgement: Acknowledgement awaiting home sweep.; reason: source retired before delivery" \
+  "home sweep did not preserve its pending acknowledgement in host status"
+assert_absent "$pending_reply" "home sweep left its recorded pending acknowledgement"
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
