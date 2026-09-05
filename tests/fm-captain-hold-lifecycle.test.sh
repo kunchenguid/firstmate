@@ -4,6 +4,7 @@
 # answers, the record-divergence guard over its two records, and the legacy
 # compatibility for pre-collapse decision identities.
 set -u
+umask 077
 
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091

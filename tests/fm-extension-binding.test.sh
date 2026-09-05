@@ -5,6 +5,7 @@
 # The suite drives only public commands, package executables, and the durable
 # records those commands publish. It never asserts implementation-source bytes.
 set -u
+umask 077
 
 # The aggregate runner reaps stale fixtures before launching its isolated
 # section children.  Repeating that global scan in each child can consume the
