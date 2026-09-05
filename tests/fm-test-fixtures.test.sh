@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for tests/fixtures.sh fake-toolchain and spawn-world builders.
+# Behavior tests for shared Git fixtures, fake-toolchain and spawn-world builders.
 #
 # These cases drive the builders as a test would: they write stubs into a
 # fakebin and exec those stubs. Assertions are on the binaries' observable
@@ -12,6 +12,55 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-test-fixtures)
+
+test_git_config_isolation() (
+  local dir="$TMP_ROOT/git-config" scope helper
+  mkdir -p "$dir"
+  export GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system"
+  export GIT_CONFIG_NOSYSTEM=0
+  unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+  # A failing signer exposes inherited config without requiring GPG or keys.
+  for scope in global system; do
+    : > "$dir/global"
+    : > "$dir/system"
+    git config --file "$dir/$scope" commit.gpgsign true
+    git config --file "$dir/$scope" gpg.format openpgp
+    git config --file "$dir/$scope" gpg.program /usr/bin/false
+    cp "$dir/$scope" "$dir/expected"
+    for helper in lib fixtures secondmate-helpers wake-helpers; do
+      bash -eus -- "$ROOT/tests/$helper.sh" "$dir/$scope-$helper" "$dir/$scope" <<'SH' || exit 1
+. "$1"
+fm_git_init_commit "$2"
+[ "$(git -C "$2" log -1 --format=%s)" = initial ] || fail "fixture has no initial commit"
+fm_git_identity
+# Child Git processes and direct commits inherit the same isolation.
+bash -eu -c 'git -C "$1" commit -q --allow-empty -m child' _ "$2"
+# Repository-local config and explicit command inputs remain authoritative.
+git -C "$2" config commit.gpgsign true
+git -C "$2" config gpg.program /usr/bin/false
+if git -C "$2" commit -q --allow-empty -m signed > "$2/signing.log" 2>&1; then
+  fail "repository-local signing config was ignored"
+fi
+assert_grep 'gpg failed to sign' "$2/signing.log" "local signing was not attempted"
+git -C "$2" -c commit.gpgsign=false commit -q --allow-empty -m explicit
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  git -C "$2" commit -q --allow-empty -m environment
+# A config test can deliberately supply its own global file after sourcing.
+[ "$(GIT_CONFIG_GLOBAL="$3" git config --get commit.gpgsign)" = true ] || fail "explicit global config was ignored"
+SH
+    done
+    # Sourcing in test subprocesses cannot change the caller or its config files.
+    [ "$(git config --get commit.gpgsign)" = true ] || fail "caller lost signing preference"
+    cmp -s "$dir/$scope" "$dir/expected" || fail "host config file was changed"
+    git init -q "$dir/$scope-outside"
+    if git -C "$dir/$scope-outside" -c user.name=test -c user.email=test@example.invalid \
+      commit -q --allow-empty -m outside > "$dir/outside.log" 2>&1; then
+      fail "commit outside fixtures bypassed signing"
+    fi
+    assert_grep 'gpg failed to sign' "$dir/outside.log" "outside commit did not attempt signing"
+  done
+  pass "shared helpers isolate host Git config and preserve explicit config and outside commits"
+)
 
 test_no_mistakes_version_constant() {
   local fakebin out
@@ -124,6 +173,7 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+test_git_config_isolation || fail "Git fixture config isolation"
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
