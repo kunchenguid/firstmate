@@ -198,6 +198,15 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## No-mistakes review pane (config/nm-review-pane)
+
+On the Herdr backend, every no-mistakes ship task gets one live review pane split to the right of its worker pane, in the task worktree, showing `no-mistakes attach --run <id>` for the branch's current run.
+The pane is created once after the spawn, shows a waiting line until the first run exists, and is re-pointed at each new run of that branch instead of opening another pane; supervision keeps it current on a bounded cadence and task cleanup closes it.
+The optional local, gitignored `config/nm-review-pane` file turns this off for a home when it contains `off`; an absent file, an empty file, and `on` all keep the default, and any other value warns and keeps the default because a visual convenience must never fail a spawn or a poll.
+The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+`FM_NM_REVIEW_PANE_INTERVAL` (seconds, default `20`) sets the watcher's sweep cadence, and `FM_NM_REVIEW_PANE_NM_TIMEOUT` (seconds, default `20`) bounds each status read.
+`bin/fm-nm-review-pane.sh`'s header owns the eligibility rule, the private `state/<id>.nm-review-pane` record, the re-point mechanics, the empirical `no-mistakes attach` exit behavior the design rests on, and the cleanup contract; [`herdr-backend.md`](herdr-backend.md#no-mistakes-review-pane) owns the operator-facing behavior and safety limits.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true`, pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI, and pins `commands.test` to `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` so the gate's test baseline runs through the repository's own runner instead of a hand-chained walk of `bash tests/*.test.sh`.
@@ -416,7 +425,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `nm-review-pane`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
@@ -841,6 +850,8 @@ FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail insid
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
+FM_NM_REVIEW_PANE_INTERVAL=20   # herdr-only: seconds between watcher sweeps that re-point no-mistakes review panes; see "No-mistakes review pane"
+FM_NM_REVIEW_PANE_NM_TIMEOUT=20   # herdr-only: seconds allowed per no-mistakes status read inside bin/fm-nm-review-pane.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage

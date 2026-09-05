@@ -2549,6 +2549,13 @@ cleanup_firstmate_home_children() {
           echo "error: herdr session presentation lock is not held for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+        if [ -e "$sub_state/$child_id.nm-review-pane" ] || [ -L "$sub_state/$child_id.nm-review-pane" ]; then
+          if ! declare -F fm_nm_review_pane_close_locked >/dev/null 2>&1; then
+            # shellcheck source=bin/fm-nm-review-pane.sh
+            . "$SCRIPT_DIR/fm-nm-review-pane.sh"
+          fi
+          fm_nm_review_pane_close_locked "$sub_state" "$child_id" || true
+        fi
         fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
         if ! fm_backend_herdr_endpoint_confirmed_gone "$child_t"; then
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
@@ -2865,6 +2872,21 @@ if [ "$BACKEND" = herdr ] \
        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
+# The task's no-mistakes review pane (bin/fm-nm-review-pane.sh) closes before
+# the task pane, under the same held session lock and the same focus-safe
+# close the task pane uses; an unconfirmed close retains its record with the
+# rerun command rather than fighting for it, and never blocks this teardown.
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$STATE/$ID.nm-review-pane" ] || [ -L "$STATE/$ID.nm-review-pane" ]; }; then
+  # shellcheck source=bin/fm-nm-review-pane.sh
+  . "$SCRIPT_DIR/fm-nm-review-pane.sh"
+  if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
+    fm_nm_review_pane_close_locked "$STATE" "$ID" || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; retaining the no-mistakes review pane record for $ID rather than closing unlocked" >&2
   fi
 fi
 

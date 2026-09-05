@@ -294,7 +294,8 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
-    fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
+    fm-herdr-session-cleanup.test.sh|fm-nm-review-pane.test.sh|\
+    fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
@@ -1185,6 +1186,13 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
+      ;;
+    bin/fm-nm-review-pane.sh)
+      # The pane script is called from spawn, the watcher, and teardown.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pr-forge
+      printf '%s\n' real-herdr-gated
       ;;
     bin/backends/zellij*|tests/zellij-test-safety.sh)
       printf '%s\n' zellij

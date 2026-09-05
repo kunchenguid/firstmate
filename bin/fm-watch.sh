@@ -166,6 +166,12 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+NM_REVIEW_PANE_INTERVAL=${FM_NM_REVIEW_PANE_INTERVAL:-20}  # seconds between herdr
+                                      # no-mistakes review-pane sweeps
+                                      # (bin/fm-nm-review-pane.sh)
+case "$NM_REVIEW_PANE_INTERVAL" in
+  ''|*[!0-9]*|0) NM_REVIEW_PANE_INTERVAL=20 ;;
+esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -1446,6 +1452,34 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+# One detached sweep at a time; a sweep still running when the next tick is due
+# simply wins that tick. Its stderr lands in state/.nm-review-pane.log,
+# truncated per sweep, so the newest warnings stay inspectable.
+NM_REVIEW_PANE_PID=
+nm_review_pane_tick() {
+  local meta id
+  [ "$(age_of "$STATE/.last-nm-review-pane")" -ge "$NM_REVIEW_PANE_INTERVAL" ] || return 0
+  if [ -n "$NM_REVIEW_PANE_PID" ]; then
+    if kill -0 "$NM_REVIEW_PANE_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$NM_REVIEW_PANE_PID" 2>/dev/null || true
+    NM_REVIEW_PANE_PID=
+  fi
+  touch "$STATE/.last-nm-review-pane"
+  (
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || continue
+      grep -q '^backend=herdr$' "$meta" 2>/dev/null || continue
+      grep -q '^mode=no-mistakes$' "$meta" 2>/dev/null || continue
+      id=$(basename "$meta" .meta)
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-nm-review-pane.sh" "$id" || true
+    done
+  ) </dev/null >/dev/null 2>"$STATE/.nm-review-pane.log" &
+  NM_REVIEW_PANE_PID=$!
+}
+
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
   local request
@@ -1613,6 +1647,13 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+
+  # Herdr no-mistakes review panes: keep each live herdr no-mistakes ship task's
+  # review pane pointed at that branch's current run. bin/fm-nm-review-pane.sh
+  # owns the pane, its record, and the opt-out; this loop only decides when to
+  # ask, on a bounded cadence and detached, so a slow `axi status` never blocks
+  # a poll. Presentation only: it never wakes firstmate.
+  nm_review_pane_tick
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
