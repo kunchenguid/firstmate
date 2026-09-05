@@ -545,6 +545,7 @@ SH
   while [ ! -f "$signal" ]; do sleep 0.01; done
 
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_acquire_wait "$home/state/.control-mate.lock"
     fm_lock_acquire_wait "$home/state/.meta-mate.lock"
@@ -669,6 +670,7 @@ SH
     sleep 0.01
   done
 
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$home/state/.control-remote-send-race-mate.lock"
   fm_lock_acquire_wait "$home/state/.meta-remote-send-race-mate.lock"
