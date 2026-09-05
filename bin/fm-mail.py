@@ -222,18 +222,17 @@ def retry_scan_window(order, pos, window):
 
 
 def save_retry_pos(pos_path, order_len, window, pos):
-    """Persist the next retry-scan start position after this poll's window."""
+    """Persist the next retry-scan start position after this poll's window.
+    A failed write propagates so the poll fails closed rather than silently
+    restarting the retry scan at the same head every poll."""
     if not pos_path:
         return
     if order_len <= 0:
         next_pos = 0
     else:
         next_pos = (pos + window) % order_len
-    try:
-        with open(pos_path, 'w', encoding='utf-8') as f:
-            f.write(str(next_pos) + '\n')
-    except OSError:
-        pass
+    with open(pos_path, 'w', encoding='utf-8') as f:
+        f.write(str(next_pos) + '\n')
 
 
 def load_turn(path):
@@ -248,14 +247,12 @@ def load_turn(path):
 
 
 def save_turn(path, turn):
-    """Persist the alternating-turn flag."""
+    """Persist the alternating-turn flag. A failed write propagates so the
+    poll fails closed rather than silently selecting the same class forever."""
     if not path:
         return
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(str(turn % 2) + '\n')
-    except OSError:
-        pass
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(str(turn % 2) + '\n')
 
 
 def cmd_poll_list():
@@ -368,11 +365,13 @@ def cmd_poll_list():
                 new_emitted += 1
         # Emit the mailbox generation guard first, then each message row
         # (uid, date, from, subject, status) so the bash layer diffs against
-        # the cursor and the retry set.
+        # the cursor and the retry set. The retry cursor is advanced before
+        # emission so a failed write can never leave rows emitted by a poll
+        # that then fails.
+        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
-        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         m.logout()
         return 0
     except Exception as e:

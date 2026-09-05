@@ -645,6 +645,29 @@ PYEOF
   pass "fm-mail: a cap of one never suppresses new mail while retries exist"
 }
 
+test_poll_fails_closed_when_retry_clear_fails() {
+  local fakebin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  mkdir -p "$HOME_DIR/bin"
+  [ -e "$HOME_DIR/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '77\t\tfrom@x\tRe: hi\tretry\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n77\n' > "$HOME_DIR/state/.mail-seen"
+  printf '77\n' > "$HOME_DIR/state/.mail-retry"
+  chmod 0000 "$HOME_DIR/state/.mail-retry"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when the retry record cannot be cleared"
+  assert_not_contains "$out" "woke for 77" "no recovery wake is emitted before the retry is cleared"
+  pass "fm-mail: a failed retry clear fails the poll instead of duplicating the recovery wake"
+}
+
 test_poll_fails_closed_when_retry_unwritable() {
   local fakebin homedir_bin out rc=0
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -1376,6 +1399,7 @@ test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
+test_poll_fails_closed_when_retry_clear_fails
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
