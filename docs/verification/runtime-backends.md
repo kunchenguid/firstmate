@@ -1000,7 +1000,7 @@ bin/fm-lint.sh
 
 ```text
 ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
-ok - active claim identity stops a job after it changes directory outside the root
+ok - active claim identity stops a job descendant after it changes directory outside the root
 ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```
 
@@ -1022,7 +1022,8 @@ The native Pi cases ran; checks requiring the separately importable Pi SDK repor
 Repeated ensure calls also reproduced a live-owner rejection when the worker started under EST5 and a caller used JST-9.
 Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
 Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
-The subreaper regression records legacy ownership in the live worker's available `C.UTF-8` or `C.utf8` locale and EST5 timezone, checks it from a C locale and JST-9 caller, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
+The subreaper regression records legacy ownership in the live worker's available `C.UTF-8` or `C.utf8` locale and EST5 timezone, checks timezone reconstruction from a C locale and JST-9 caller, then checks locale reconstruction from a C locale while holding EST5 constant.
+It pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
 The previous implementation fails that check; the corrected implementation reports:
 
 ```text

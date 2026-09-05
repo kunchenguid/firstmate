@@ -1106,15 +1106,42 @@ fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
 }
 
 fm_remote_job_signal_claim_snapshot() { # <snapshot> <state> <signal>
-  local snapshot=$1 state=$2 signal=$3 pid recorded_start group id job identity
+  local snapshot=$1 state=$2 signal=$3 pid recorded_start group id job identity own_group
+  own_group=$(fm_remote_job_process_pgid "$$") || return 1
   while IFS=$'\t' read -r pid recorded_start group id; do
     [ -n "$pid" ] || continue
     fm_remote_job_safe_id "$id" || continue
     job="$state/jobs/$id"
     identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
     [ "$identity" = "$pid"$'\t'"$recorded_start"$'\t'"$group" ] || continue
-    kill -"$signal" "$pid" 2>/dev/null || true
+    [ "$group" != "$own_group" ] || continue
+    kill -"$signal" -- "-$group" 2>/dev/null || true
   done <<< "$snapshot"
+}
+
+fm_remote_job_claim_snapshot_has_live_identity() { # <snapshot>
+  local snapshot=$1 process_snapshot pid group status actual_start
+  local claim_pid recorded_start recorded_group _ recorded_boot recorded_ticks actual_boot actual_ticks
+  process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 0
+  while IFS=$'\t' read -r claim_pid recorded_start recorded_group _; do
+    [ -n "$claim_pid" ] && [ "$recorded_group" = "$claim_pid" ] || continue
+    case "$recorded_start" in linux:*:*) ;; *) return 0 ;; esac
+    recorded_boot=${recorded_start#linux:}
+    recorded_ticks=${recorded_boot##*:}
+    recorded_boot=${recorded_boot%:*}
+    case "$recorded_ticks" in ''|*[!0-9]*) return 0 ;; esac
+    while read -r pid group status; do
+      [ "$group" = "$recorded_group" ] && [[ "$status" != Z* ]] || continue
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      case "$actual_start" in linux:*:*) ;; *) return 0 ;; esac
+      actual_boot=${actual_start#linux:}
+      actual_ticks=${actual_boot##*:}
+      actual_boot=${actual_boot%:*}
+      case "$actual_ticks" in ''|*[!0-9]*) return 0 ;; esac
+      [ "$actual_boot" != "$recorded_boot" ] || [ "$actual_ticks" -lt "$recorded_ticks" ] || return 0
+    done <<< "$process_snapshot"
+  done <<< "$snapshot"
+  return 1
 }
 
 fm_remote_job_snapshot_merge() { # <existing> <additional>
@@ -1222,7 +1249,7 @@ fm_remote_job_stop_worker_tree() { # <pid>
         claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
         claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
         if ! fm_remote_job_snapshot_has_live_identity "$known" &&
-          ! fm_remote_job_snapshot_has_live_identity "$claim_known"; then
+          ! fm_remote_job_claim_snapshot_has_live_identity "$claim_known"; then
           return 0
         fi
         i=$((i + 1))

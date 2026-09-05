@@ -140,6 +140,21 @@ def process_alive(pid):
         return False
 
 
+def queue_process_identity(pid, queue):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    assert b"FM_REMOTE_JOB_STATE_ROOT=" + os.fsencode(queue) in entries
+    assert os.fsencode(worker) in args
+    return fields[19]
+
+
+def assert_queue_unchanged(queue, expected):
+    for pid, start in expected.items():
+        assert queue_process_identity(pid, queue) == start, "another queue replaced an owned process"
+    assert not queue_processes(queue) - expected.keys(), "another queue gained an unexpected process"
+
+
 def utf8_locale():
     for candidate in ("C.UTF-8", "C.utf8"):
         result = subprocess.run(["locale", "charmap"], env=dict(os.environ, LC_ALL=candidate),
@@ -248,9 +263,12 @@ done
         shutil.copy2(repo / "bin" / name, root / "bin" / name)
     chdir_worker = root / "bin/fm-chdir-block.sh"
     chdir_worker.write_text('''#!/bin/bash
-cd "$HOME" || exit 1
-printf '%s\n' "$$" > "$HOME/chdir-job.pid"
-exec sleep 300
+(
+  cd "$HOME" || exit 1
+  printf '%s\n' "$BASHPID" > "$HOME/chdir-job.pid"
+  exec sleep 300
+) &
+wait "$!"
 ''')
     chdir_worker.chmod(0o755)
     git_env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
@@ -297,6 +315,15 @@ exec sleep 300
         call(ensure, queue, "JST-9")
         assert launch_log.read_text() == launches, "legacy identity launched another worker"
         (lock / "start").write_text(kernel_identity)
+    for lock in (queue / "worker.lock", queue / "supervisor.lock"):
+        pid = (lock / "pid").read_text().strip()
+        kernel_identity = (lock / "start").read_text()
+        locale_legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
+                                                env=dict(os.environ, TZ="EST5", LC_ALL=locale_name), text=True)
+        (lock / "start").write_text(locale_legacy)
+        call(ensure, queue, "EST5", "C")
+        assert launch_log.read_text() == launches, "locale-only legacy identity launched another worker"
+        (lock / "start").write_text(kernel_identity)
     print("ok - repeated ensure across timezones and delayed readiness preserves owners without new workers")
     job_queue = fixture / "job-queue"
     call(start, job_queue)
@@ -311,6 +338,8 @@ exec sleep 300
         chdir_pid = int((account / "chdir-job.pid").read_text())
         extra_pids.add(chdir_pid)
         assert Path(f"/proc/{chdir_pid}/cwd").resolve() == account
+        claim_group = int(next((job_queue / "jobs").glob("job-*/.claim/group")).read_text())
+        assert chdir_pid != claim_group and os.getpgid(chdir_pid) == claim_group
         job_serving = int((job_queue / "worker.pid").read_text())
         call(f"fm_remote_job_stop_worker_tree {job_serving}", job_queue)
         wait_for(lambda: not process_alive(chdir_pid))
@@ -331,7 +360,7 @@ exec sleep 300
             unrelated_process.terminate()
             unrelated_process.wait()
         extra_pids.discard(unrelated_process.pid)
-    print("ok - active claim identity stops a job after it changes directory outside the root")
+    print("ok - active claim identity stops a job descendant after it changes directory outside the root")
     (queue / "worker.lock/command").write_text("stale serving ownership\n")
     for _ in range(3):
         call(start, queue)
@@ -339,7 +368,7 @@ exec sleep 300
     real_other = fixture / "real-other-queue"
     call(start, real_other)
     wait_for(lambda: len(queue_processes(real_other)) == 2)
-    unrelated = set(queue_processes(real_other))
+    unrelated = {pid: queue_process_identity(pid, real_other) for pid in queue_processes(real_other)}
     serving = int((queue / "worker.pid").read_text())
     supervisor = int((queue / "supervisor.lock/pid").read_text())
     os.kill(supervisor, signal.SIGSTOP)
@@ -360,7 +389,7 @@ exec sleep 300
     wait_for(lambda: not queue_processes(queue))
     for _ in range(30):
         assert not queue_processes(queue), "real supervisor respawned after zombie-child stop"
-        assert queue_processes(real_other) == unrelated, "zombie-child stop reached another queue"
+        assert_queue_unchanged(real_other, unrelated)
         time.sleep(0.1)
     call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', real_other)
     wait_for(lambda: not processes())
