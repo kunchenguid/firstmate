@@ -299,7 +299,8 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 The primary Firstmate home keeps Treehouse's normal root precedence and pool location unchanged.
 Task workers launched from a non-primary Firstmate home pass Treehouse's explicit `--root` option on both acquisition and return commands, so the typed command is independent of the active tmux, Herdr, Zellij, or cmux backend.
 For a local secondmate, the structural home check is a linked git worktree of the Firstmate code root with a different physical top level and shared git common directory; a marked standalone home is supported for remote secondmates.
-The per-home option uses `FM_HOME/config` as Treehouse's root, which makes the effective pool location `FM_HOME/config/treehouse/` and keeps it inside the home-local gitignored configuration area.
+The per-home option uses `FM_HOME/config` as Treehouse's root, which makes the effective pool location `FM_HOME/config/.treehouse/` and keeps it inside the home-local gitignored configuration area.
+The `--root` option exists from Treehouse v2.2.0, and an older build ignores the `TREEHOUSE_ROOT` environment variable too, so a home that resolves a root of its own refuses to spawn or to return a task worktree rather than pooling into another home's clone; the session-start bootstrap reports that same home as needing a treehouse upgrade.
 This choice changes no project clone, project-level `treehouse.toml`, user-level Treehouse configuration, or primary-home pool.
 Relaunches reuse the recorded worktree, while teardown passes the same home-specific root when returning a task worktree and retains the primary root when releasing a leased secondmate home.
 

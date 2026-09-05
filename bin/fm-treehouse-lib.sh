@@ -14,6 +14,16 @@
 # the code root's common dir and whose physical top level is the active home.
 # A marked standalone Firstmate home is also accepted for remote secondmates.
 # Plain directories and unrelated clones retain the primary default behavior.
+#
+# fm_treehouse_supports_root
+#   Succeeds when the installed Treehouse accepts the global --root option, the
+#   only mechanism a typed pool command can carry into a worker pane on every
+#   session-provider backend.
+#   Treehouse added it in v2.2.0; an older build silently ignores TREEHOUSE_ROOT
+#   too, so a home that needs its own root must refuse rather than pool into
+#   another home's clone.
+#   Probed from help output like bin/fm-bootstrap.sh's --lease gate, so no
+#   version string has to be parsed.
 
 _FM_TREEHOUSE_LIB_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -21,6 +31,10 @@ _FM_TREEHOUSE_LIB_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 fm_treehouse_real_dir() {
   CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P
+}
+
+fm_treehouse_supports_root() {
+  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--root([^[:alnum:]_-]|$)'
 }
 
 fm_treehouse_root_for_home() {

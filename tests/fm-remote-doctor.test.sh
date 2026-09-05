@@ -198,6 +198,12 @@ esac
 SH
   cat > "$CASE_BIN/treehouse" <<'SH'
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 exit 0
 SH
   cat > "$CASE_BIN/claude" <<'SH'

@@ -84,11 +84,10 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
-exit 0
-SH
+  # `treehouse return [--root <root>] --force <wt>`: succeed silently. The stub
+  # advertises the global --root option the pinned build carries, so a case whose
+  # home owns its own pool is not refused for an apparently older Treehouse.
+  fm_fake_treehouse "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 # tmux kill-window etc.: succeed silently.
@@ -420,6 +419,12 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -454,6 +459,12 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -499,6 +510,12 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -1860,6 +1877,37 @@ test_secondmate_pr_registration_publishes_ready_line() {
 # Tearing a child down inside a secondmate home delivers the child's final
 # ledger line to the parent before the record goes, and refuses (retaining
 # every record) while the parent channel cannot be written; a rerun after the
+# A home that owns its own Treehouse pool cannot release a worktree through a
+# build that predates the --root option: addressing the default pool would return
+# somebody else's worktree, and raw removal would strand this pool's lease and
+# delete the work it still owns. The only safe outcome is to refuse and change
+# nothing.
+test_secondmate_home_teardown_refuses_treehouse_without_root_option() {
+  local case_dir rc wt_head
+
+  case_dir=$(make_case mate-teardown-old-treehouse)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state"
+  fm_fake_treehouse "$case_dir/fakebin" --no-root
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "mate-teardown-old-treehouse: teardown should refuse without a scoped pool root"
+  grep -F 'no --root option' "$case_dir/stderr" >/dev/null \
+    || fail "mate-teardown-old-treehouse: the refusal did not name the missing Treehouse option: $(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] \
+    || fail "mate-teardown-old-treehouse: a refused teardown must leave the local copy in place"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "mate-teardown-old-treehouse: a refused teardown must keep the task record"
+  pass "a home owning its own pool refuses teardown when treehouse cannot scope the return"
+}
+
 # repair delivers and completes.
 test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   local case_dir rc channel wt_head err seq generation
@@ -2060,6 +2108,12 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2156,6 +2210,12 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2270,6 +2330,12 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
   : > "$log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2322,9 +2388,14 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
 printf '%s\n' "\$*" >> "$case_dir/kill.log"
 exit 0
 SH
+  # Logs every call and, like the pinned build, advertises the global --root a
+  # home that owns its own pool needs on the return.
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
@@ -3194,6 +3265,12 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -3364,6 +3441,12 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
@@ -3590,6 +3673,12 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
@@ -3626,6 +3715,12 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
@@ -3658,6 +3753,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
+test_secondmate_home_teardown_refuses_treehouse_without_root_option
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

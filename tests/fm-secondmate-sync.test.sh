@@ -364,6 +364,7 @@ SH
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease]'
 fi
+  printf '%s\n' '      --root string   Worktree root directory'
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -1241,7 +1242,8 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
     'herdr_workspace_id=w1' 'herdr_tab_id=t1' 'herdr_pane_id=p1'
 
   fakebin=$(make_remote_leg_ssh_stub "$w")
-  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  fm_fake_exit0 "$fakebin" gh tmux node
+  fm_fake_treehouse "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
     FM_BOOTSTRAP_NETWORK=only \
@@ -1279,7 +1281,8 @@ test_bootstrap_reports_outdated_host_actionably() {
   printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
 
   fakebin=$(make_remote_leg_ssh_stub "$w")
-  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  fm_fake_exit0 "$fakebin" gh tmux node
+  fm_fake_treehouse "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
     FM_BOOTSTRAP_NETWORK=only \
@@ -1320,7 +1323,8 @@ test_remote_launch_does_not_retarget_host_copy() {
   install_remote_herdr_fixture "$herdrbin" "$w/herdr.state" "$w/herdr.log" \
     "$w/herdr.sendfail" "$w/herdr.sock"
   cp "$herdrbin/bin/herdr" "$fakebin/herdr"
-  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  fm_fake_exit0 "$fakebin" gh tmux node
+  fm_fake_treehouse "$fakebin"
 
   # The real launch leg, exactly as the parent invokes it after its own sync.
   launch_out=$(PATH="$fakebin:$BASE_PATH" \
