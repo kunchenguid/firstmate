@@ -1066,6 +1066,56 @@ fm_remote_job_scope_snapshot() { # <root> <state>
   done
 }
 
+fm_remote_job_active_claim_identity() { # <job> <state>
+  local job=$1 state=$2 jobs claim pid recorded_start actual_start group physical
+  jobs="$state/jobs"
+  [ -d "$jobs" ] && [ ! -L "$jobs" ] || return 1
+  case "$job" in "$jobs"/job-*) ;; *) return 1 ;; esac
+  [ -d "$job" ] && [ ! -L "$job" ] || return 1
+  physical=$(CDPATH='' cd -- "$job" 2>/dev/null && pwd -P) || return 1
+  [ "$physical" = "$job" ] || return 1
+  [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ] || return 1
+  claim="$job/.claim"
+  [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
+  fm_remote_job_regular_bounded "$claim/armed" 1 || return 1
+  pid=$(fm_remote_job_read_single_line "$claim/group" 64) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  recorded_start=$(fm_remote_job_read_single_line "$claim/group_start" 256) || return 1
+  actual_start=$(fm_remote_job_process_start "$pid") || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
+  group=$(fm_remote_job_process_pgid "$pid") || return 1
+  [ "$group" = "$pid" ] || return 1
+  printf '%s\t%s\t%s\n' "$pid" "$actual_start" "$group"
+}
+
+fm_remote_job_active_claim_snapshot() { # <state>
+  local state=$1 job identity id
+  for job in "$state"/jobs/job-*; do
+    identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
+    [ -n "$identity" ] || continue
+    id=${job##*/}
+    fm_remote_job_safe_id "$id" || continue
+    printf '%s\t%s\n' "$identity" "$id"
+  done
+}
+
+fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" |
+    awk -F '\t' 'NF == 4 && !seen[$1 FS $2]++'
+}
+
+fm_remote_job_signal_claim_snapshot() { # <snapshot> <state> <signal>
+  local snapshot=$1 state=$2 signal=$3 pid recorded_start group id job identity
+  while IFS=$'\t' read -r pid recorded_start group id; do
+    [ -n "$pid" ] && fm_remote_job_safe_id "$id" || continue
+    job="$state/jobs/$id"
+    identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
+    [ "$identity" = "$pid"$'\t'"$recorded_start"$'\t'"$group" ] || continue
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done <<< "$snapshot"
+}
+
 fm_remote_job_snapshot_merge() { # <existing> <additional>
   printf '%s\n%s\n' "$1" "$2" |
     awk -F '\t' 'NF == 3 && !seen[$1 FS $2]++'
@@ -1151,7 +1201,7 @@ fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT
 }
 
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 root state signal current known='' i actual_start recorded_start
+  local pid=$1 root state signal current known='' claim_current claim_known='' i actual_start recorded_start
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
@@ -1160,12 +1210,20 @@ fm_remote_job_stop_worker_tree() { # <pid>
     for signal in TERM KILL; do
       current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
       known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
+      claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
+      claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
       [ -z "$current" ] || fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal"
+      [ -z "$claim_current" ] || fm_remote_job_signal_claim_snapshot "$claim_current" "$state" "$signal"
       i=0
       while [ "$i" -lt 50 ]; do
         current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
         known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
-        fm_remote_job_snapshot_has_live_identity "$known" || return 0
+        claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
+        claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+        if ! fm_remote_job_snapshot_has_live_identity "$known" &&
+          ! fm_remote_job_snapshot_has_live_identity "$claim_known"; then
+          return 0
+        fi
         i=$((i + 1))
         sleep 0.1
       done

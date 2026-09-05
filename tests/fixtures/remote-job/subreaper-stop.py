@@ -42,6 +42,7 @@ account.mkdir()
 (root / "AGENTS.md").write_text("fixture\n")
 worker = root / "bin/fm-remote-job-worker.sh"
 known = set()
+extra_pids = set()
 launch_bin = fixture / "launch-bin"
 launch_bin.mkdir()
 launch_log = fixture / "launches"
@@ -130,6 +131,22 @@ def queue_processes(queue):
 def process_state(pid):
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
     return fields[0]
+
+
+def process_alive(pid):
+    try:
+        return process_state(pid) != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+def utf8_locale():
+    for candidate in ("C.UTF-8", "C.utf8"):
+        result = subprocess.run(["locale", "charmap"], env=dict(os.environ, LC_ALL=candidate),
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if result.returncode == 0 and result.stdout.strip().upper() == "UTF-8":
+            return candidate
+    raise AssertionError("a built-in C UTF-8 locale is required")
 
 
 try:
@@ -229,7 +246,20 @@ done
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
         shutil.copy2(repo / "bin" / name, root / "bin" / name)
-    locale_name = "POSIX"
+    chdir_worker = root / "bin/fm-chdir-block.sh"
+    chdir_worker.write_text('''#!/bin/bash
+cd "$HOME" || exit 1
+printf '%s\n' "$$" > "$HOME/chdir-job.pid"
+exec sleep 300
+''')
+    chdir_worker.chmod(0o755)
+    git_env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+    subprocess.run(["git", "-C", str(root), "init", "-q", "-b", "main"], env=git_env, check=True)
+    subprocess.run(["git", "-C", str(root), "add", "AGENTS.md", "bin"], env=git_env, check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+                    "commit", "-qm", "fixture"], env=git_env, check=True)
+    locale_name = utf8_locale()
     call(start, queue, "EST5", locale_name)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     quarantine = queue / "worker.lock/quarantine"
@@ -268,6 +298,40 @@ done
         assert launch_log.read_text() == launches, "legacy identity launched another worker"
         (lock / "start").write_text(kernel_identity)
     print("ok - repeated ensure across timezones and delayed readiness preserves owners without new workers")
+    job_queue = fixture / "job-queue"
+    call(start, job_queue)
+    wait_for(lambda: len(queue_processes(job_queue)) == 2)
+    unrelated_process = subprocess.Popen(["sleep", "300"], cwd=fixture)
+    extra_pids.add(unrelated_process.pid)
+    try:
+        (account / "chdir-job.pid").unlink(missing_ok=True)
+        call('printf "" | fm_remote_job_stage "$HOME" "$FM_ROOT_OVERRIDE" "$HOME" fm-chdir-block.sh >/dev/null',
+             job_queue)
+        wait_for(lambda: (account / "chdir-job.pid").is_file())
+        chdir_pid = int((account / "chdir-job.pid").read_text())
+        extra_pids.add(chdir_pid)
+        assert Path(f"/proc/{chdir_pid}/cwd").resolve() == account
+        job_serving = int((job_queue / "worker.pid").read_text())
+        call(f"fm_remote_job_stop_worker_tree {job_serving}", job_queue)
+        wait_for(lambda: not process_alive(chdir_pid))
+        try:
+            os.waitpid(chdir_pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        extra_pids.discard(chdir_pid)
+        wait_for(lambda: not queue_processes(job_queue))
+        assert unrelated_process.poll() is None, "claim-backed stop reached an unrelated process"
+        assert set(processes()) == original, "claim-backed stop reached another queue"
+        for _ in range(30):
+            assert not queue_processes(job_queue), "claim-backed worker respawned after stop"
+            assert not process_alive(chdir_pid), "chdir job survived worker stop"
+            time.sleep(0.1)
+    finally:
+        if unrelated_process.poll() is None:
+            unrelated_process.terminate()
+            unrelated_process.wait()
+        extra_pids.discard(unrelated_process.pid)
+    print("ok - active claim identity stops a job after it changes directory outside the root")
     (queue / "worker.lock/command").write_text("stale serving ownership\n")
     for _ in range(3):
         call(start, queue)
@@ -303,6 +367,11 @@ done
     print("ok - zombie serving ownership recovers its scoped supervisor without respawn")
 finally:
     # Bounded fixture-only fallback, even when a pre-fix assertion fails.
+    for pid in extra_pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     for pid in processes():
         try:
             os.kill(pid, signal.SIGKILL)

@@ -989,7 +989,8 @@ It also dissolves a previously scoped process group, recreates the same numeric 
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
-The legacy identity regression uses the guaranteed POSIX locale and an explicit timezone shift, so it exercises environment reconstruction without locale compiler or host locale-source dependencies.
+The legacy identity regression starts ownership under the first working `C.UTF-8` or `C.utf8` spelling and EST5, then checks it from a C locale and JST-9 without compiling locale data or reading host locale sources.
+The worker-stop regression runs a tracked job that changes its working directory to the account home, then proves its active claim PID and kernel start identity stop it without reaching another queue or an unrelated process.
 The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
 
 ```sh
@@ -999,8 +1000,8 @@ bin/fm-lint.sh
 
 ```text
 ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
-ok - stale serving metadata cannot accumulate restart supervisors
-FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=25934
+ok - active claim identity stops a job after it changes directory outside the root
+ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```
 
 The signal-injection fixture also passes when its runner is a background Bash job with inherited ignored SIGINT.
@@ -1021,7 +1022,7 @@ The native Pi cases ran; checks requiring the separately importable Pi SDK repor
 Repeated ensure calls also reproduced a live-owner rejection when the worker started under EST5 and a caller used JST-9.
 Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
 Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
-The subreaper regression records legacy ownership in the live worker's French locale and EST5 timezone, checks it from a C locale and JST-9 caller, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
+The subreaper regression records legacy ownership in the live worker's available `C.UTF-8` or `C.utf8` locale and EST5 timezone, checks it from a C locale and JST-9 caller, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
 The previous implementation fails that check; the corrected implementation reports:
 
 ```text
