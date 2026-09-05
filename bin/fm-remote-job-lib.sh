@@ -1108,7 +1108,8 @@ fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
 fm_remote_job_signal_claim_snapshot() { # <snapshot> <state> <signal>
   local snapshot=$1 state=$2 signal=$3 pid recorded_start group id job identity
   while IFS=$'\t' read -r pid recorded_start group id; do
-    [ -n "$pid" ] && fm_remote_job_safe_id "$id" || continue
+    [ -n "$pid" ] || continue
+    fm_remote_job_safe_id "$id" || continue
     job="$state/jobs/$id"
     identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
     [ "$identity" = "$pid"$'\t'"$recorded_start"$'\t'"$group" ] || continue
