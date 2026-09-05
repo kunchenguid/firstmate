@@ -100,20 +100,79 @@ test_stale_watch_lock_reclaimed() {
 }
 
 test_live_stale_watch_lock_is_actionable() {
-  local dir state fakebin out err status
+  local dir state fakebin out err status typed_status identity live
   dir=$(make_case live-stale-lock)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   err="$dir/watch.err"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  sleep 300 &
+  live=$!
+  # A live holder that this home can positively identify as ITS OWN watcher,
+  # whose beacon has aged. Recording the full identity is the whole point: it is
+  # what separates "my watcher is inside a long phase" from "something else holds
+  # this lock", and only the first of those may leave through the typed outcome.
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not record the holder identity"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch -t 200001010000 "$state/.last-watcher-beat"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
+  # This case used to leave through a bare exit 1 with "heartbeat is stale" on
+  # stderr, which reached the arm layer as "FAILED - exited 1 without an
+  # actionable reason" and reported a working fleet's supervision as broken
+  # (2026-09-04 supervision investigation). It now leaves through its own typed
+  # status carrying the holder and the beacon age, so the arm can wait for that
+  # holder instead. Still actionable, still not a failure.
+  typed_status=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; printf %s "$FM_WATCHER_BUSY_HOLDER_STATUS"' _ "$LIB")
+  [ "$status" = "$typed_status" ] \
+    || fail "an identified live holder with a stale beacon exited $status, not the typed busy-holder status $typed_status"
+  grep -F 'busy holder' "$out" >/dev/null \
+    || fail "watcher did not name the busy holder: $(cat "$out" "$err" 2>/dev/null)"
+  grep -F "pid=$live" "$out" >/dev/null \
+    || fail "the typed busy-holder outcome did not name the holding pid"
+  is_live_non_zombie "$live" || fail "the identified holder was not left alone"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "an identified live holder with a stale beacon leaves through the typed busy-holder outcome"
+}
+
+# The other half of that distinction, and the reason the typed outcome is gated
+# on identity at all: a live process holding the lock that this home CANNOT
+# identify as its own watcher is not a busy watcher. Nothing can ever be
+# confirmed behind that lock, so it must stay a loud failure rather than being
+# waited on and then quietly excused.
+test_unidentified_live_lock_holder_still_fails_loudly() {
+  local dir state fakebin out err status typed_status live
+  dir=$(make_case unidentified-live-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  sleep 300 &
+  live=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  typed_status=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; printf %s "$FM_WATCHER_BUSY_HOLDER_STATUS"' _ "$LIB")
+  [ "$status" -ne 0 ] || fail "an unidentifiable live lock holder was treated as healthy"
+  [ "$status" != "$typed_status" ] \
+    || fail "an unidentifiable live holder used the typed busy-holder outcome; only an identity-matched watcher may"
+  grep -F 'heartbeat is stale' "$err" >/dev/null \
+    || fail "an unidentifiable live holder did not explain itself loudly: $(cat "$out" "$err" 2>/dev/null)"
+  is_live_non_zombie "$live" || fail "the unrelated live lock holder was signalled"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "an unidentifiable live lock holder stays a loud failure, never a busy holder"
 }
 
 test_guard_warnings() {
@@ -924,6 +983,241 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# Stop a fixture process and actually get rid of it. TERM first, then a hard stop
+# after a bounded wait: a SIGSTOPped fixture never handles TERM, and leaving one
+# behind strands the runner, because an orphan keeps its stdout open long after
+# the script that started it has finished.
+reap() {  # <pid>
+  local pid=$1 i=0
+  [ -n "$pid" ] || return 0
+  kill -CONT "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$i" -lt 30 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# --- a live monitor process is never terminated on age ----------------------
+#
+# 2026-09-04 supervision investigation: a live, identity-matched watcher whose
+# beacon had aged was reported as "auto-arm FAILED - exited 1 without an
+# actionable reason", and the auto-arm re-ran the identical predicate one second
+# later (both refusals landed at epochs 1788501895 and 1788501896). The watcher
+# was working the whole time.
+#
+# The arm now waits for such a holder and attaches when it beats again. It does
+# NOT stop it, replace it, or start a second watcher beside it: an aged beacon is
+# a suspected stall, and identity proves only WHICH process holds the lock, never
+# that the process is stuck. The captain ruled on 2026-09-05 that a running
+# monitor process is never terminated on age, a missing heartbeat, or an expired
+# wait. The SIGSTOP fixture is the strongest stalled holder available, and is
+# used here precisely because even that one must survive.
+
+test_stale_beacon_holder_is_not_reported_as_a_failure() {
+  local dir state fakebin armout armpid watcher_pid i out second secondpid held blocked=0
+  dir=$(make_case busy-holder-typed)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  second="$dir/second.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -z "$watcher_pid" ]; then
+    reap "$armpid"
+    fail "no watcher started for the busy-holder fixture"
+  fi
+  # Stall it and age its beacon: the exact 2026-09-04 reading. Then retire the
+  # arm that started it, so what follows observes ONE arm meeting one stalled
+  # holder. The first arm is a fixture, not a participant; left alive it reacts
+  # to its own stopped child and muddies the observation.
+  kill -STOP "$watcher_pid" 2>/dev/null || true
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  kill -KILL "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+
+  # A second arm now meets a live holder with an aged beacon. Run it in the
+  # BACKGROUND behind a bounded wait: blocking on the stalled holder is itself a
+  # failure, and a foreground call would hang the whole suite.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=2 FM_WATCHER_STALE_GRACE=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
+  secondpid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    kill -0 "$secondpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$secondpid" 2>/dev/null && blocked=1
+  out=$(cat "$second" 2>/dev/null || true)
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  # Observations are complete: tear every fixture down BEFORE asserting, so no
+  # assertion can leave a stopped watcher holding the runner's stdout open.
+  reap "$secondpid"
+  reap "$watcher_pid"
+
+  [ "$blocked" -eq 0 ] \
+    || fail "the arm blocked indefinitely on a stalled holder instead of returning"
+  [ "$held" = "$watcher_pid" ] \
+    || fail "the live holder lost the lock (lock names '$held', holder was $watcher_pid)"
+  # The arm announces every watcher it starts, so its own output is the
+  # authoritative observable for "a successor was launched".
+  case "$out" in
+    *"watcher: started pid="*)
+      fail "a successor watcher was started alongside the live holder: $out" ;;
+  esac
+  case "$out" in
+    *"auto-arm FAILED"*|*"FAILED - watcher cycle exited"*)
+      fail "a live holder was reported as a failure: $out" ;;
+  esac
+  case "$out" in
+    *"busy holder"*) ;;
+    *) fail "a live holder with an aged beacon produced no typed outcome: $out" ;;
+  esac
+  pass "a live holder with an aged beacon is left alone: not stopped, not replaced, not reported failed"
+}
+
+test_recovering_holder_is_attached_to_not_replaced() {
+  local dir state fakebin armout armpid watcher_pid i out second secondpid
+  dir=$(make_case busy-holder-attach)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  second="$dir/second.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -z "$watcher_pid" ]; then
+    reap "$armpid"
+    fail "no watcher started for the attach fixture"
+  fi
+  # Age the beacon so the next arm sees a busy holder, then let the holder beat
+  # again mid-wait: the ordinary case of a slow phase completing. The holder is
+  # never stopped here, so nothing can block on it.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  kill -KILL "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  ( sleep 2; touch "$state/.last-watcher-beat" ) >/dev/null 2>&1 &
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=8 FM_WATCHER_STALE_GRACE=8 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
+  secondpid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF "watcher: attached pid=$watcher_pid" "$second" 2>/dev/null && break
+    kill -0 "$secondpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$second" 2>/dev/null || true)
+  reap "$secondpid"
+  reap "$watcher_pid"
+
+  case "$out" in
+    *"watcher: attached pid=$watcher_pid"*) ;;
+    *) fail "the arm did not attach to the holder that beat again: $out" ;;
+  esac
+  case "$out" in
+    *"watcher: started pid="*) fail "the arm replaced the recovering holder: $out" ;;
+    *FAILED*) fail "attaching to a recovered holder reported a failure: $out" ;;
+  esac
+  pass "a holder that beats again mid-wait is attached to, not replaced"
+}
+
+# --- lock ownership must survive sibling SUBSHELLS, not just sibling processes -
+#
+# test_lock_single_winner_under_concurrency spawns `bash -c` children, which are
+# separate processes with distinct $$, so it never exercised the case that was
+# actually broken. Every `worker &` inside one script is a SUBSHELL: it shares
+# its parent's $$, and on the stock macOS bash 3.2 this repo supports there is no
+# $BASHPID to tell them apart. Ownership derived from $$ therefore made two live
+# siblings look like one process, and fm_lock_try_acquire's self-held branch read
+# a sibling's live hold as its own abandoned one and reclaimed it.
+
+test_frame_identity_is_per_subshell_and_stable() {
+  local dir out a b top1 top2
+  dir=$(make_case frame-identity)
+  out="$dir/ids"
+  : > "$out"
+  # The liveness check happens INSIDE the frame that owns the identity: by the
+  # time this function reads the file, every one of those processes has exited,
+  # so checking the pid out here would only prove they are gone.
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_self_pid_set; printf "top %s\n" "$FM_SELF_PID" >> "$2"
+    fm_self_pid_set; printf "top %s\n" "$FM_SELF_PID" >> "$2"
+    kill -0 "$FM_SELF_PID" 2>/dev/null && printf "live yes\n" >> "$2"
+    ( fm_self_pid_set; printf "sibA %s\n" "$FM_SELF_PID" >> "$2" ) &
+    ( fm_self_pid_set; printf "sibB %s\n" "$FM_SELF_PID" >> "$2" ) &
+    wait
+  ' _ "$LIB" "$out"
+  top1=$(awk '$1=="top"{print $2}' "$out" | sed -n 1p)
+  top2=$(awk '$1=="top"{print $2}' "$out" | sed -n 2p)
+  a=$(awk '$1=="sibA"{print $2}' "$out")
+  b=$(awk '$1=="sibB"{print $2}' "$out")
+  [ -n "$top1" ] && [ -n "$a" ] && [ -n "$b" ] || fail "frame identity produced no value"
+  [ "$top1" = "$top2" ] || fail "frame identity changed within one frame ($top1 vs $top2)"
+  [ "$a" != "$b" ] || fail "two sibling subshells reported the same frame identity ($a)"
+  [ "$a" != "$top1" ] || fail "a subshell reported its parent frame's identity"
+  grep -qx "live yes" "$out" \
+    || fail "the frame identity did not name a live process while that frame was running"
+  pass "frame identity is per-subshell, stable within a frame, and a real pid"
+}
+
+test_sibling_subshells_get_exclusive_lock_ownership() {
+  local dir state lockdir marker winners held
+  dir=$(make_case sibling-subshell-lock)
+  state="$dir/state"
+  lockdir="$state/.sibling.lock"
+  marker="$dir/wins"
+  : > "$marker"
+  # Sibling subshells of ONE shell contending for one lock. Each winner holds it
+  # while it records itself, so a second winner means two frames held it at once.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    i=1
+    while [ "$i" -le 12 ]; do
+      (
+        if fm_lock_try_acquire "$2"; then
+          printf "held\n" >> "$3"
+          /bin/sleep 0.3
+          fm_lock_release "$2"
+        fi
+      ) &
+      i=$((i + 1))
+    done
+    wait
+  ' _ "$LIB" "$lockdir" "$marker"
+  # grep -c prints 0 AND exits nonzero when nothing matches, so `|| echo 0` would
+  # append a second line and make the comparison below a syntax error.
+  winners=$(grep -c held "$marker" 2>/dev/null) || winners=0
+  winners=${winners:-0}
+  [ "$winners" -ge 1 ] || fail "no sibling subshell acquired the lock at all"
+  [ "$winners" -eq 1 ] \
+    || fail "$winners sibling subshells held one lock at the same time"
+  held=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ -z "$held" ] || fail "the lock was left held after every sibling released"
+  pass "sibling subshells of one shell cannot hold the same lock simultaneously"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1085,12 +1379,17 @@ test_msys_pid_identity_uses_proc() {
 }
 
 test_singleton_start
+test_stale_beacon_holder_is_not_reported_as_a_failure
+test_recovering_holder_is_attached_to_not_replaced
+test_frame_identity_is_per_subshell_and_stable
+test_sibling_subshells_get_exclusive_lock_ownership
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
+test_unidentified_live_lock_holder_still_fails_loudly
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

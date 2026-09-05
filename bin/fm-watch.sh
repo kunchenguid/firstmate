@@ -1457,15 +1457,28 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
     # Nothing on this path signals, kills or replaces that holder. Age alone
     # cannot distinguish a slow phase from a stuck one, and the captain ruled on
     # 2026-09-05 that a running monitor process is never terminated on age.
+    # The typed outcome is ONLY for a holder this home can positively identify as
+    # its own watcher. A live process holding the lock without matching identity
+    # is not a busy watcher - it is an unconfirmable lock, and the honest answer
+    # for that is still a loud failure. Without this gate the arm would wait on,
+    # and then quietly excuse, a lock no watcher can ever be confirmed behind.
+    if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$WATCHER_STALE_GRACE" "$FM_HOME"; then
+      if [ -e "$BEAT" ]; then
+        echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=${FM_WATCHER_BUSY_BEACON_AGE}s (grace ${WATCHER_STALE_GRACE}s)"
+      else
+        echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=none (grace ${WATCHER_STALE_GRACE}s)"
+      fi
+      exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
+    fi
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: busy holder pid=$FM_LOCK_HELD_PID beacon=${beat_age}s (grace ${WATCHER_STALE_GRACE}s)"
-        exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+        exit 1
       fi
     elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: busy holder pid=$FM_LOCK_HELD_PID beacon=none (grace ${WATCHER_STALE_GRACE}s)"
-      exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
+      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
+      exit 1
     fi
     echo "watcher: already running pid $FM_LOCK_HELD_PID"
   else
