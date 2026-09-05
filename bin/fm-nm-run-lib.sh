@@ -214,3 +214,48 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
   done <<< "$list"
   return 0
 }
+
+# Local-time epoch for the ledger's date column ("YYYY-MM-DD HH:MM"); empty when
+# the column is absent or does not parse. The column stamps run start, not end,
+# so this epoch can prove only that a record predates the run. Dated evidence is
+# owned by docs/verification/supervision.md.
+fm_nm_ledger_epoch() {  # <YYYY-MM-DD HH:MM>
+  local stamp=$1
+  case "$stamp" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\ [0-9][0-9]:[0-9][0-9]) ;;
+    *) return 0 ;;
+  esac
+  date -j -f '%Y-%m-%d %H:%M' "$stamp" +%s 2>/dev/null \
+    || date -d "$stamp" +%s 2>/dev/null \
+    || true
+}
+
+# The branch's NEWEST ledger row as "<status>|<short-sha>|<epoch>|<pr>", or nothing when the
+# branch has no row. The ledger is newest-first and its newest row for a branch
+# IS that branch's current run, which is the same rule
+# fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
+# holding a TERMINAL run answer needs to know whether a LATER run has since
+# superseded it, which the status word alone cannot say. The ledger has no run
+# ID, so these fields can expose disagreement with a full run answer but cannot
+# establish identity; BINDING a run still needs the strict rules above.
+fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
+  local branch=$1 list=$2 row rest br st sha stamp pr
+  [ -n "$list" ] || return 0
+  while IFS= read -r row; do
+    row=$(fm_nm_trim "$row")
+    [ -n "$row" ] || continue
+    st=${row%% *}
+    rest=$(fm_nm_trim "${row#* }")
+    br=${rest%% *}
+    [ "$br" = "$branch" ] || continue
+    # Drop the branch column; retain the short SHA before parsing the date.
+    rest=$(fm_nm_trim "${rest#* }")
+    sha=${rest%% *}
+    rest=$(fm_nm_trim "${rest#* }")
+    stamp=${rest:0:16}
+    pr=$(fm_nm_trim "${rest:16}")
+    printf '%s|%s|%s|%s' "$st" "$sha" "$(fm_nm_ledger_epoch "$stamp")" "$pr"
+    return 0
+  done <<< "$list"
+  return 0
+}

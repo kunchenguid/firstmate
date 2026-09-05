@@ -49,6 +49,14 @@
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
+# A terminal outcome is a CAPTAIN-FACING claim, so two rules bound what may be
+# built from that read, owned by terminal_outcome_corroborated and
+# terminal_outcome_pr below. It is manufactured only when the crew's own last
+# self-declared word (done, failed, or the configured paused verb) does not
+# contradict it, and its PR identity comes from the same record as its state -
+# the run's own published PR for a run-step state, that line's own PR for a
+# status-log state, and never a separately recorded task PR. Together they
+# prevent one captain-facing record from combining claims from different runs.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -311,6 +319,50 @@ meta_incarnation() { # <meta>
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
 
+# Parse the canonical state line described by this script's header.
+STATE_LINE_SEP=' · '
+
+state_line_source() { # <state-line>
+  local rest=${1#*"$STATE_LINE_SEP"source: }
+  [ "$rest" != "$1" ] || return 0
+  case "$rest" in *"$STATE_LINE_SEP"*) rest=${rest%%"$STATE_LINE_SEP"*} ;; esac
+  printf '%s' "$rest"
+}
+
+# Read the optional pull request published in the canonical state line.
+state_line_pr() { # <state-line>
+  local rest=${1##*"$STATE_LINE_SEP"pr=}
+  [ "$rest" != "$1" ] || return 0
+  printf '%s' "$rest"
+}
+
+# Enforce the header's same-record pull-request contract.
+terminal_outcome_pr() { # <state-line>
+  local line=$1 value
+  if [ "$(state_line_source "$line")" = run-step ]; then
+    clean_field "$(state_line_pr "$line")"
+    return 0
+  fi
+  value=$(printf '%s\n' "$line" \
+    | grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' | head -1 || true)
+  clean_field "$value"
+}
+
+# Enforce the header's independent captain-facing corroboration contract.
+terminal_outcome_corroborated() { # <state> <last-status-line>
+  local state=$1 last=$2 declared
+  if status_is_paused "$last"; then
+    declared=paused
+  else
+    case "$(status_line_verb "$last")" in
+      done) declared='done' ;;
+      failed) declared=failed ;;
+      *) return 0 ;;
+    esac
+  fi
+  [ "$declared" = "$state" ]
+}
+
 pr_for_task() { # <meta> <status> [preferred-line]
   local meta=$1 status=$2 preferred=${3:-} value
   value=$(meta_field "$meta" pr)
@@ -496,7 +548,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  pr=$(pr_for_task "$meta" "$status")
+  terminal_outcome_corroborated "$state" "$last" || return 0
+  pr=$(terminal_outcome_pr "$state_line")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then

@@ -51,6 +51,23 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#   2b. A TERMINAL FAILED reading (failed/cancelled) is authoritative only while
+#      nothing newer contradicts it, because head identity binds whatever run
+#      last sat on this head, not necessarily this branch's current one - and a
+#      stale failure here is promoted into a captain-facing terminal outcome by
+#      bin/fm-inactive-reconcile.sh. Three records may outrank it: a later run
+#      the ledger PROVES is current (answering from that run), a later
+#      self-declared pause or done in the status log that the ledger's date
+#      proves post-dates the failed run by clearing its whole minute, and finally
+#      a later run on this branch that cannot be bound here (reported as unknown
+#      - history, but no proof of the present). Because the ledger has no run ID,
+#      an equal head does not identify a rerun; a terminal row supplies newer
+#      truth when its observable
+#      status, head, or PR differs, or when the state came from the coarse
+#      fallback. Nothing else does, and with no ordering evidence the failure
+#      stands, so a real failure is never hidden. Independently of outcome, a
+#      terminal reading publishes a PR only when the current-run evidence still
+#      attributes that reading; otherwise it publishes none.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -108,6 +125,14 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
+emit_run() {  # <state> <detail> [pr]
+  local detail=$2
+  case "$1" in
+    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+  esac
+  emit "$1" run-step "$detail"
+}
+
 # --- meta resolution --------------------------------------------------------
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
@@ -158,6 +183,31 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+snapshot_ordered_log() {
+  local before_mtime before_size before_ident line after_mtime after_size after_ident
+  ORDERED_LOG_LINE=
+  ORDERED_LOG_MTIME=
+  [ -f "$LOG" ] || return 1
+  before_mtime=$(_fm_status_file_mtime "$LOG") || return 1
+  before_size=$(_fm_status_file_size "$LOG") || return 1
+  before_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
+  line=$(log_last_line || true)
+  after_mtime=$(_fm_status_file_mtime "$LOG") || return 1
+  after_size=$(_fm_status_file_size "$LOG") || return 1
+  after_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
+  before_size=${before_size//[[:space:]]/}
+  after_size=${after_size//[[:space:]]/}
+  case "$before_mtime:$after_mtime:$before_size:$after_size" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  [ "$before_mtime" = "$after_mtime" ] \
+    && [ "$before_size" = "$after_size" ] \
+    && [ "$before_ident" = "$after_ident" ] \
+    || return 1
+  ORDERED_LOG_LINE=$line
+  ORDERED_LOG_MTIME=$before_mtime
+}
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -381,6 +431,18 @@ nm_ci_checks_state() {
 nm_runs_list() {
   nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
 }
+# The ledger is fetched at most once per read into RUNS_LIST: the coarse
+# attribution fallback and the terminal-failed supersession cross-check below
+# both need it, and neither is worth a second bounded CLI call. Assigns rather
+# than prints, so the cache survives (a command substitution would fetch into a
+# subshell every time).
+RUNS_LIST=""
+RUNS_LIST_FETCHED=0
+runs_list_once() {
+  [ "$RUNS_LIST_FETCHED" = 1 ] && return 0
+  RUNS_LIST=$(nm_runs_list)
+  RUNS_LIST_FETCHED=1
+}
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
@@ -424,7 +486,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
       # itself did not respond, so retrying it immediately with a second
       # bounded call would just double the wait for no better answer.
-      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+      runs_list_once
+      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         # A branch-matching answer the strict rule rejected is this branch's
@@ -443,6 +506,7 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  RUN_PR=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -465,7 +529,23 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    # The pull request THIS run opened, if it reached its pr step at all. A run
+    # that never opened one reports no pr field, and that absence is meaningful:
+    # it is what keeps a terminal outcome from being lent an older task's PR.
+    RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
+    case "$outcome" in
+      passed|checks-passed) ATTRIBUTED_LEDGER_STATUS=completed ;;
+      failed|cancelled) ATTRIBUTED_LEDGER_STATUS=$outcome ;;
+      *)
+        case "$status" in
+          ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
+          *) ATTRIBUTED_LEDGER_STATUS=$status ;;
+        esac
+        ;;
+    esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
@@ -539,6 +619,80 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  TERMINAL_PR=""
+  case "$RUN_STATE" in
+    done|failed)
+      runs_list_once
+      NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+      NEWEST_STATUS=${NEWEST_ROW%%|*}
+      NEWEST_REST=${NEWEST_ROW#*|}
+      NEWEST_SHA=${NEWEST_REST%%|*}
+      NEWEST_REST=${NEWEST_REST#*|}
+      NEWEST_EPOCH=${NEWEST_REST%%|*}
+      NEWEST_PR=${NEWEST_REST#*|}
+      NEWEST_ROW_AGREES=0
+      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+      if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
+        && [ "$run_branch" = "$CREW_BRANCH" ] \
+        && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
+        && [ "$NEWEST_PR" = "$RUN_PR" ]; then
+        case "$RUN_HEAD" in
+          "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_ROW_AGREES=1 ;;
+        esac
+      fi
+      if [ "$RUN_SOURCE" = coarse ]; then
+        case "$LEDGER_STATUS" in
+          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+        esac
+      elif [ "$NEWEST_ROW_AGREES" = 1 ]; then
+        TERMINAL_PR=$RUN_PR
+      fi
+      ;;
+  esac
+
+  # Apply the terminal-failure precedence contract owned by header rule 2b.
+  if [ "$RUN_STATE" = failed ]; then
+    case "$LEDGER_STATUS" in
+      running)
+        emit working run-step "run superseded by a newer run on this branch (earlier $RUN_DETAIL)"
+        ;;
+      completed)
+        SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
+        TERMINAL_PR=$NEWEST_PR
+        emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+        ;;
+      failed|cancelled)
+        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+          LEDGER_DETAIL="run $LEDGER_STATUS"
+          [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
+          TERMINAL_PR=$NEWEST_PR
+          emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+        fi
+        ;;
+    esac
+    # map_log_state owns the verb->state mapping, including the configurable
+    # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
+    # readers to keep the line and its ordering evidence consistent.
+    if [ -n "$NEWEST_EPOCH" ] && snapshot_ordered_log; then
+      if [ "$ORDERED_LOG_MTIME" -ge "$((NEWEST_EPOCH + 60))" ]; then
+        LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
+        case "$LOG_STATE" in
+          paused|done)
+            emit "$LOG_STATE" status-log \
+              "$(status_line_note "$ORDERED_LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
+            ;;
+        esac
+      fi
+    fi
+    case "$NEWEST_STATUS" in
+      '') ;;
+      *)
+        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
+          "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
+        ;;
+    esac
+  fi
+
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
@@ -554,7 +708,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------

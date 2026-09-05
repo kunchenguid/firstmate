@@ -230,6 +230,49 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## No-mistakes run ledger and terminal run fields
+
+The terminal-failed supersession rule in `bin/fm-crew-state.sh` reads the run ledger's date column and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
+
+Column layout and newest-first ordering:
+
+```sh
+no-mistakes runs --limit 5
+```
+
+Observed result, abbreviated to two rows:
+
+```
+  cancelled    fm/fm-afk-inject-never-delivers eebd9498  2026-08-31 22:48  https://github.com/kunchenguid/firstmate/pull/3050
+  completed    fm/fm-stooddown-worker-false-wedge-alarms b387086f  2026-08-30 10:03  https://github.com/kunchenguid/firstmate/pull/3281
+```
+
+The date column stamps a run's START, not its end:
+
+```sh
+ls -la ~/.no-mistakes/logs/01M186HDY76G4RJHW5Z7CFHQDB
+```
+
+Observed result: `intent.log`, the run's first step, has mtime `30 Aug 10:03`, matching that run's ledger date `2026-08-30 10:03`, while `ci.log`, its last step, has mtime `30 Aug 11:13`.
+So the column can prove a status-log record older than a run, and can never prove one newer than the run finished, which is why `fm_nm_ledger_epoch` is used in that one direction only.
+
+A terminal run that never reached its `pr` step emits no `pr` field at all:
+
+```sh
+no-mistakes axi status --run 01M14G3F9BEYBSYSZRVRQJ9XYT
+```
+
+Observed result: `status: failed`, `review,failed` with `test` through `ci` still pending, `outcome: failed`, and no `pr:` line at all.
+The completed run above reports `pr: "https://github.com/kunchenguid/firstmate/pull/3281"` in the same field.
+That absence is what lets a terminal outcome take its pull-request identity from the same record as its state instead of an older recorded one.
+
+Deterministic entry points:
+
+```sh
+tests/fm-crew-state.test.sh
+tests/fm-inactive-reconcile.test.sh
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.
