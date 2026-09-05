@@ -525,6 +525,54 @@ PYEOF
   pass "fm-mail: an unfetchable uid is surfaced degraded and cannot starve later mail"
 }
 
+test_poll_keeps_journal_when_heal_cannot_record() {
+  local fakebin homedir_bin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # No unseen mail; the poll only heals the seeded journal entry.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  printf '%s\t%s\n' '90009' '55' > "$HOME_DIR/state/.mail-woken"
+  chmod 0400 "$HOME_DIR/state/.mail-seen"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed even when the heal cannot record"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-woken" 2>/dev/null)" "55" "journal evidence survives an unrecordable heal"
+  chmod 0600 "$HOME_DIR/state/.mail-seen"
+  pass "fm-mail: the journal survives when the heal cannot commit a uid"
+}
+
+test_body_preview_falls_back_from_empty_plain() {
+  local harness out
+  harness="$TMP_ROOT/body-preview-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({'FM_MAIL_USER':'t','FM_MAIL_PASS':'p','FM_IMAP_HOST':'h','FM_IMAP_PORT':'993','FM_SMTP_HOST':'s','FM_SMTP_PORT':'465'})
+import email, importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+msg = email.message_from_string(
+    "Content-Type: multipart/alternative; boundary=b\r\n\r\n"
+    "--b\r\nContent-Type: text/plain\r\n\r\n\r\n"
+    "--b\r\nContent-Type: text/html\r\n\r\n<p>Hello</p>\r\n"
+    "--b--\r\n")
+print(mod.body_preview(msg))
+PYEOF
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py")
+  assert_contains "$out" "Hello" "empty plain-text alternative falls back to the html preview"
+  pass "fm-mail: an empty plain-text alternative falls back to the html preview"
+}
+
 test_poll_caps_wakes_per_run() {
   local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -692,3 +740,5 @@ test_poll_caps_wakes_per_run
 test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
+test_poll_keeps_journal_when_heal_cannot_record
+test_body_preview_falls_back_from_empty_plain

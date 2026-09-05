@@ -58,16 +58,22 @@ def connect_mailbox():
 
 
 def body_preview(msg):
-    """First text/plain line, else first text/html line, else empty."""
+    """First non-empty text/plain line, else first non-empty text/html line,
+    else empty. An empty plain-text alternative falls through to html so a
+    valid message never loses its promised preview."""
     for part in msg.walk():
         if part.get_content_type() == 'text/plain':
-            return part.get_payload(decode=True).decode('utf-8', 'replace').strip()
+            text = part.get_payload(decode=True).decode('utf-8', 'replace').strip()
+            if text:
+                return text
     for part in msg.walk():
         if part.get_content_type() == 'text/html':
             raw = part.get_payload(decode=True).decode('utf-8', 'replace')
             raw = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', raw)
             preview = re.sub(r'<[^>]+>', ' ', raw)
-            return ' '.join(preview.split())
+            preview = ' '.join(preview.split())
+            if preview:
+                return preview
     return ''
 
 
