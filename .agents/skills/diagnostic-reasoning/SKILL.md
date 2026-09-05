@@ -3,7 +3,7 @@ name: diagnostic-reasoning
 description: >-
   Agent-only procedure for diagnosing reported bugs.
   Use before scoping a reported bug and before acting on a diagnostic report.
-  Owns end-user-aligned reproduction, causal separation, divergent-path and history inspection, counterfactual testing, and disconfirming evidence.
+  Owns end-user-aligned reproduction, causal separation, divergent-path and history inspection, counterfactual testing, disconfirming evidence, and the cheapest-disconfirming-evidence pull required before commissioning an investigation.
 user-invocable: false
 metadata:
   internal: true
@@ -45,6 +45,7 @@ Compare the final explanation against the proven path and show why the proposed 
 
 ## Scope and act on the result
 
+**Rule I** - before commissioning any investigation, pull the cheapest disconfirming evidence yourself (the exact CI log line, the check conclusion at the exact head, the file at the sha) and name it in the brief.
 A diagnosis brief should ask for the reproduction, trigger/mask/symptom separation, divergent and proven path comparison, relevant history, smallest counterfactual, and disconfirming evidence in the report.
 A diagnostic report should distinguish observed facts from hypotheses and state any unresolved uncertainty that could change the recommended scope.
 Before acting on the report, verify that its claimed cause explains the end-user reproduction and the proven path without relying on an untested masking condition.

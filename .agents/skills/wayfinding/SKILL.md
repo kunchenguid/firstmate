@@ -3,8 +3,8 @@ name: wayfinding
 description: >-
   Agent-only judgment for designing and sequencing multi-task work: a stage, a release, a migration, or any campaign larger than one task.
   Use before scoping such work, and before dispatching a task whose backlog dependency names a stage, a release, or a final acceptance.
-  Also use when work is blocked only at its final step or the queue looks fully gated, to find the work that can still be pre-staged.
-  Owns the destination and completion boundary, the unknown-classification split, the retained tracer, vertical outcomes, integration ownership, new-request classification, pre-staging around a blocked final step, the proof ladder, and the named-dependency reconciliation that must happen before dispatch.
+  Also use when work is blocked only at its final step or the queue looks fully gated, to find the work that can still be pre-staged, and whenever the ready frontier lists only umbrellas or nothing while holds still exist.
+  Owns the destination and completion boundary, the unknown-classification split, the retained tracer, vertical outcomes, integration ownership, new-request classification, pre-staging around a blocked final step, the frontier-reset expansion of a stalled queue, the proof ladder, and the named-dependency reconciliation that must happen before dispatch.
 user-invocable: false
 metadata:
   internal: true
@@ -69,6 +69,13 @@ What this skill adds is the accounting:
 
 Classify each new request that arrives while work is under way as **replace**, **preempt**, **parallel**, or **wait**, and say which.
 An unclassified new request defaults to preempt in practice, because it is the thing most recently said.
+
+### Frontier reset
+
+When the ready frontier lists only umbrellas or nothing while holds still exist, expand the umbrella that same turn into concrete items filed from the project's own open records: ROADMAP rows, openspec `tasks.md` boxes, or decision records.
+Evaluate every hold against those same records - the project's ROADMAP, its openspec `tasks.md`, and its `data/done-archive.md` - rather than against the hold's own remembered text.
+Release a hold that record shows has cleared, or re-hold it with a concrete event or date; never carry a hold's text forward unchanged past the condition it named.
+Resolve a dependency against the project's own `done-archive.md` and its other records, never against whether an id is still visible in `data/backlog.md`, whose retention rule (section 10) prunes closed entries regardless of whether the dependency they named actually closed.
 
 ## Pre-staging: a blocker gates its step, not the task
 

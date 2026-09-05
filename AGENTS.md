@@ -302,7 +302,10 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 A task is independently landable only when it can complete its delivery path and merge without waiting for another unlanded branch.
 Work may still be prepared ahead of an unlanded dependency, but an unstable shared router, schema, generated bundle, application frame, or contract has one integration owner.
 Complete-but-not-integrated work in that stream takes priority once its dependency lands.
+Preparation is never bounded by seam; only integration onto an unstable seam is serial with one owner.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+An idle slot while a ready item exists is a defect, so dispatch it or record on the item the exact rule that blocks it.
+A captain-ordered sequence sets priority among the items it names, is not a whitelist unless the captain says so, and when its last item is blocked or an umbrella the frontier resumes.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -360,6 +363,13 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
+Review-loop rules, lettered for cross-reference:
+
+- **C** - a family surviving round two aborts is fixed locally, tests-first, and restarts once with the intent amended.
+- **D** - one tool mechanism killing two runs in a day halts new validation runs until a local mitigation exists.
+- **E** - a learned rule is broadcast to every live worker and added to the scaffold in the same turn.
+- **G** - live tasks are bounded by what can merge per day and by seams, never globally.
+
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
@@ -401,6 +411,7 @@ The promoted worker must inventory scratch state, return to a clean default-bran
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+Supervision is required whenever work is under way or ready work exists with free capacity.
 Relay may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
@@ -556,7 +567,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
-- `wayfinding` - load before scoping or sequencing work larger than one task, such as a stage, release, migration, or campaign, before dispatching a task whose backlog dependency names a stage, release, or final acceptance, and whenever work is blocked only at its final step or the queue looks fully gated.
+- `wayfinding` - load before scoping or sequencing work larger than one task, such as a stage, release, migration, or campaign, before dispatching a task whose backlog dependency names a stage, release, or final acceptance, whenever work is blocked only at its final step or the queue looks fully gated, and whenever the ready frontier lists only umbrellas or nothing while holds still exist.
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
