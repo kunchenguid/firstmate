@@ -22,7 +22,7 @@
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
-#     hold_bucket, and delivery_provenance fields.
+#     and hold_bucket fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done, and missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
@@ -364,7 +364,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" "$FM_COMPLETION_JQ_DEFS"'
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -422,16 +422,6 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
-    def delivery_links($values):
-      [$values[] | scan("https?://[^[:space:]);\"<>]+")];
-    def delivery_report($values):
-      (([ $values[]
-          | capture("(?:^|; )report (?<v>.*/report\\.md)(?:; |$)")?
-          | .v ][0]) // null);
-    def body_local_note($values):
-      if any($values[]; test("(^|;[[:space:]]*)local main([[:space:]]*;|$)"))
-      then "local main"
-      else null end;
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -500,20 +490,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
     | .records |= map(
-        if .structured then
-          (delivery_values(.body_lines)) as $delivery_values
-          | ($delivery_values | length > 0) as $has_delivery_provenance
-          | ((delivery_links($delivery_values) | map(select(test("/pull/[0-9]+"))) | .[0]) // null) as $delivery_pr_url
-          | (delivery_report($delivery_values)) as $delivery_report_path
-          | (body_local_note($delivery_values)) as $delivery_local_note
-          | .delivery_provenance = $has_delivery_provenance
-          | .pr_url = (if $has_delivery_provenance then $delivery_pr_url else .pr_url end)
-          | .report_path = (if $has_delivery_provenance then $delivery_report_path else .report_path end)
-          | .local_note = (if $has_delivery_provenance then $delivery_local_note else .local_note end)
-          | if (.body_lines | length) > 0 then
-              .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
-              | .body_excerpt = ((.body_lines | join(" "))[:240])
-            else . end
+        if (.body_lines | length) > 0 then
+          .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
