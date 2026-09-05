@@ -190,6 +190,37 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
+test_secondmate_multiline_terminal_fallback_is_delivered_once() {
+  local terminal timing
+  for terminal in 'done' failed; do
+    for timing in before during; do
+      make_world "multiline-$terminal-$timing"; bind_secondmate local
+      write_child "$MATE" child 'working: finishing validation'
+      if [ "$timing" = before ]; then
+        printf '%s: validation finished\nSee the report for details.\n\n' "$terminal" >> "$MATE/state/child.status"
+        age "$MATE/state/child.status"
+      else
+        cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s: validation finished\nSee the report for details.\n\n' "$FM_FAKE_CREW_STATE" >> "$FM_STATE_OVERRIDE/$1.status"
+printf 'state: %s · source: fake\n' "$FM_FAKE_CREW_STATE"
+SH
+      fi
+      FM_FAKE_CREW_STATE="$terminal" run_reconcile "$MATE" --startup
+      grep -Fq "$terminal [key=inactive-outcome-mate-child-$terminal]: inactive terminal child=child" "$MAIN/state/mate.status" \
+        || fail "$terminal with trailing prose arriving $timing state read was lost"
+      age "$MATE/state/child.status"
+      FM_FAKE_CREW_STATE="$terminal" run_reconcile "$MATE" --startup
+      run_report "$MATE" child
+      [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+        || fail "$terminal with trailing prose arriving $timing state read was delivered twice"
+      [ "$(outcome_count "$MATE" reported)" = 1 ] \
+        || fail "multiline $terminal fallback did not retain exactly one receipt"
+    done
+  done
+  pass "multiline terminal outcomes are reported once before or during a state read"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -344,14 +375,18 @@ test_secondmate_partial_ledger_line_waits_for_newline() {
   make_world partial; bind_secondmate local
   write_child "$MATE" child 'working: nearly there'
   printf 'done: half writ' >> "$MATE/state/child.status"
-  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
-  [ ! -e "$MAIN/state/mate.status" ] || ! grep -q 'child-outcome-' "$MAIN/state/mate.status" \
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ ! -s "$MAIN/state/mate.status" ] \
     || fail "an unterminated ledger line was delivered: $(cat "$MAIN/state/mate.status")"
   printf 'ten\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "completed ledger receipt key missing"
   grep -Fq "done [key=$key]: child child done: half written" "$MAIN/state/mate.status" \
     || fail "the completed line was not delivered once its newline landed"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "completing the partial line delivered the outcome twice"
   pass "a ledger line still being appended waits for its newline"
 }
 
@@ -788,6 +823,7 @@ test_reconciliation_never_calls_forge() {
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
+test_secondmate_multiline_terminal_fallback_is_delivered_once
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery
