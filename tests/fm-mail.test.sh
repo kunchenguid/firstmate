@@ -276,6 +276,102 @@ SH
   pass "fm-mail: flock serializes overlapping polls so mail wakes exactly once"
 }
 
+test_poll_recovers_journaled_wake_after_ack() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t70007\n'
+printf '55\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first poll must succeed"
+  assert_contains "$out" "woke for 55" "first poll wakes uid 55"
+
+  # Simulate a poll killed between wake append and cursor record, then the
+  # fleet drain acknowledging and consuming that wake: the wake is removed
+  # from the queue and the uid is absent from the cursor, but the journal
+  # survives.
+  printf 'uidvalidity=70007\n' > "$HOME_DIR/state/.mail-seen"
+  printf '%s\t%s\n' '70007' '55' > "$HOME_DIR/state/.mail-woken"
+  grep -v "check: mail 55" "$HOME_DIR/state/.wake-queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
+  mv "$TMP_ROOT/wakeq.acked" "$HOME_DIR/state/.wake-queue"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "recovery poll must succeed"
+  assert_not_contains "$out" "woke for 55" "recovery must not re-wake the acked mail"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "55" "journal heal restores the cursor record"
+  local wakeq
+  wakeq=$(grep -c "check: mail 55" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  expect_code 0 "$wakeq" "recovery must not append a second wake for uid 55"
+  pass "fm-mail: journal recovers a wake the drain already acknowledged"
+}
+
+test_poll_legacy_wake_does_not_leak_into_generation() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # Fresh mailbox generation (uidvalidity 90009) whose uid 42 is currently
+  # unseen. A legacy generation-less wake `mail:42` from an earlier era is
+  # still queued.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '42\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+
+  # Seed a legacy wake key (no generation) directly in the wake queue.
+  printf '0\t9001\tcheck\tmail:42\tcheck: mail 42 - legacy\n' >> "$HOME_DIR/state/.wake-queue"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll with a queued legacy wake must succeed"
+  assert_contains "$out" "woke for 42" "a reused uid must still wake under the current generation"
+  pass "fm-mail: a legacy generation-less wake never marks a reused uid surfaced"
+}
+
+test_poll_missing_wake_lib_does_not_suppress() {
+  local fakebin miss_home
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  miss_home="$TMP_ROOT/misslib-home"
+  mkdir -p "$miss_home"
+  # No bin/fm-wake-lib.sh in this home: wake_for must fail, not silently
+  # succeed and record the uid without a wake.
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t10010\n'
+printf '33\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$miss_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must stop when the wake library is missing"
+  assert_not_contains "$(cat "$miss_home/state/.mail-seen" 2>/dev/null)" "33" "a failed wake must never be committed to the cursor"
+  pass "fm-mail: a missing wake library fails the poll instead of suppressing mail"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -287,3 +383,6 @@ test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
 test_poll_heals_wake_without_cursor_record
 test_poll_serializes_overlapping_invocations
+test_poll_recovers_journaled_wake_after_ack
+test_poll_legacy_wake_does_not_leak_into_generation
+test_poll_missing_wake_lib_does_not_suppress
