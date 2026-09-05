@@ -146,6 +146,9 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *check-runs*) cat "$FM_TEST_GH_CHECKS" ; exit 0 ;;
+esac
+case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" headRefName "*) printf '%s\n' "${FM_TEST_GH_BRANCH:-fm/task-a}" ;;
   *" state "*)
@@ -180,6 +183,12 @@ SH
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
   : > "$dir/guard.log"
+  # fm-pr-merge.sh now requires a green check-run rollup at the verified head
+  # before it will merge (see bin/fm-pr-merge.sh's file header); this default
+  # keeps every merge-path test's fixture answering that read the same way
+  # tests/fm-pr-merge.test.sh's own make_case does. A test that wants to drive
+  # a red/pending/missing check-run case overwrites this file first.
+  printf '1\tci\tcompleted\tsuccess\n' > "$dir/github-checks"
   printf '%s\n' "$dir"
 }
 
@@ -218,6 +227,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GH_CHECKS="$dir/github-checks" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -519,8 +529,8 @@ test_valid_recording_and_merge_derivation() {
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF "pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit $expected --merge" \
+    "$dir/gh-axi.log" || fail "merge wrapper did not preserve repository derivation and method"
   # A merge this home performed leaves its own durable outcome, so the poll's
   # confirmation is no longer the first the captain hears of it. Acknowledge that
   # record before the watcher cycle below, which is what still retires the poll.
