@@ -32,6 +32,7 @@
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
+#   (k2) no-mistakes + OPEN PR (merge-queue enqueue)            -> REFUSE (not landed)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
 #   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
@@ -242,16 +243,22 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
-# Override GitHub lookups to report PR 7 as merged with the supplied head.
-add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+# Override GitHub lookups to report PR 7 in the given state with the supplied
+# head. Args: case_dir state head, where state is the lowercase forge state
+# ("merged" or "open"); an open PR is the merge-queue enqueue state, which
+# leaves the pull request open until it actually lands.
+add_gh_pr_state_for_head() {
+  local case_dir=$1 state=$2 head=$3 upper
+  upper=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
+merged_at=''
+[ '$state' != merged ] || merged_at='  merged: "2026-06-26T00:00:00Z"'
+case "\${1:-} \${2:-}" in
   "pr list")
-    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,$state" ; exit 0 ;;
   "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+    printf '%s\n' "pull_request:" "  number: 7" "  state: $state" \${merged_at:+"\$merged_at"} ; exit 0 ;;
 esac
 exit 0
 SH
@@ -261,6 +268,36 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as still open with the supplied head.
+# A merge-queue enqueue leaves the pull request OPEN until it actually lands.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'OPEN' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -741,7 +778,7 @@ test_squash_merged_branch_deleted_allows() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_for_current_head "$case_dir"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -761,7 +798,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   append_pr_meta_url "$case_dir"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -819,7 +856,7 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -831,6 +868,27 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
+test_open_pr_does_not_count_as_landed() {
+  local case_dir rc pr_head
+  case_dir=$(make_case open-pr-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  # Same unpushed branch content as the squash-merged allow case, but the PR is
+  # still OPEN: that is the merge-queue enqueue state, not a landing.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_state_for_head "$case_dir" open "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-unlanded: teardown should refuse while the PR is still open"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-unlanded: no REFUSED line in stderr"
+  pass "open PR, including a merge-queue enqueue, does not count as landed"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -839,7 +897,7 @@ test_merged_pr_with_later_local_commit_refuses() {
   append_pr_meta_for_current_head "$case_dir"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -857,7 +915,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
@@ -894,7 +952,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
@@ -958,7 +1016,7 @@ test_dirty_worktree_refuses() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_state_for_head "$case_dir" merged "$pr_head"
   printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
 
   set +e
@@ -3225,6 +3283,7 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_open_pr_does_not_count_as_landed
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags

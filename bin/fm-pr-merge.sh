@@ -7,7 +7,11 @@
 # host and path, so any instance works and no host is hardcoded.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
-# --squash, --merge, --rebase, or --method after the optional -- separator.
+# --squash, --merge, --rebase, --method, or --no-method after the optional --
+# separator. --method=queue, --method queue, and --no-method count as a method
+# so that default is skipped, then they are dropped rather than forwarded: a
+# GitHub merge-queue branch refuses any explicit strategy, and gh-axi rejects
+# --method=queue.
 # The gh-axi merge abstraction always performs the merge; the outcome read that
 # follows it never becomes a prerequisite for reaching that abstraction. After
 # gh-axi returns success, GitHub's live state is read back and accepted only
@@ -18,10 +22,16 @@
 # and naming both failed reads when gh is present and its own read failed.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
-# the exact -- --auto --<method> retry flags, unless the caller already passed
-# that method with --auto to a merge command that returned success, in which
-# case it reports instead that the accepted request has not entered the queue
-# and the queue state has to be re-checked.
+# the exact -- --auto --no-method retry flags. It names no strategy because the
+# queue sets the method itself and refuses an explicit one, so the same retry
+# holds whether that method is known, ambiguous or unrecognised, and naming a
+# strategy would send the operator back into the refusal this path exists for.
+# The exception is a caller who already passed a forge-decides method with
+# --auto, in which case that retry would only repeat what they ran, so it says
+# no different retry exists and points at the blocking cause reported above it.
+# Because the retry itself is one fixed command, that exception is read from the
+# caller's arguments alone: it holds for every rules outcome that would
+# otherwise name the retry, and whether the merge command succeeded or failed.
 # No method is selected for the caller in any case. A rules response that names
 # no queue rule, one that could not be read, rules that disagree, and a method
 # this script does not recognise are four distinct outcomes and are reported
@@ -40,6 +50,12 @@
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
+# Those same forge-decides tokens are refused up front on GitLab, where no glab
+# flag spells them.
+# Combining a forge-decides token with an explicit GitHub strategy (--squash,
+# --merge, --rebase, or --method other than queue) is refused before the forge
+# is called: dropping only the queue token would silently forward the strategy,
+# and a merge-queue branch would reject that merge.
 #
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
@@ -107,7 +123,7 @@ caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*) return 0 ;;
+      --squash|--merge|--rebase|--method|--method=*|--no-method) return 0 ;;
     esac
   done
   return 1
@@ -115,6 +131,8 @@ caller_has_merge_method() {
 
 # The merge method the caller's own extra arguments named, in the --flag,
 # --method <value> and --method=<value> forms caller_has_merge_method accepts.
+# Every spelling of "let the forge choose" normalises to queue, so one request
+# is not mistaken for another spelling of it or for naming no method at all.
 caller_merge_method() {
   local arg method='' pending=false
   for arg in "$@"; do
@@ -127,6 +145,7 @@ caller_merge_method() {
       --squash) method=squash ;;
       --merge) method=merge ;;
       --rebase) method=rebase ;;
+      --no-method) method=queue ;;
       --method) pending=true ;;
       --method=*) method=${arg#--method=} ;;
     esac
@@ -152,6 +171,93 @@ caller_requested_auto_merge() {
     esac
   done
   return "$requested"
+}
+
+# GitHub-only: drop tokens that mean "let the forge choose the method".
+# They already satisfy caller_has_merge_method so the default --squash is not
+# added. They are not GitHub merge strategies and must not reach gh-axi.
+GITHUB_MERGE_FORWARD=()
+github_drop_forge_decides_method() {
+  GITHUB_MERGE_FORWARD=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-method|--method=queue)
+        shift
+        ;;
+      --method)
+        if [ "${2-}" = queue ]; then
+          shift 2
+        else
+          GITHUB_MERGE_FORWARD+=("$1")
+          shift
+        fi
+        ;;
+      *)
+        GITHUB_MERGE_FORWARD+=("$1")
+        shift
+        ;;
+    esac
+  done
+}
+
+# Firstmate-level tokens that ask the forge to choose the merge method. No glab
+# flag spells them, and GitLab already applies the project's own merge method,
+# so the request is a no-op there: refuse it by name before anything is recorded
+# rather than forward an unknown flag to glab after the merge is armed.
+reject_forge_decides_method() {
+  local arg prev=''
+  for arg in "$@"; do
+    if [ "$arg" = --no-method ] || [ "$arg" = --method=queue ] \
+      || { [ "$prev" = --method ] && [ "$arg" = queue ]; }; then
+      echo "error: extra merge arguments must not ask GitLab to choose the merge method, which it already does" >&2
+      return 1
+    fi
+    prev=$arg
+  done
+}
+
+# GitHub-only: a forge-decides token plus an explicit strategy is two method
+# requests. Dropping only the queue token would forward the strategy and a
+# merge-queue branch would reject the merge, so name both and refuse before
+# anything is recorded.
+reject_conflicting_forge_decides_method() {
+  local arg prev='' forge_decides='' explicit=''
+  for arg in "$@"; do
+    if [ "$prev" = --method ]; then
+      if [ "$arg" = queue ]; then
+        forge_decides="${forge_decides:+$forge_decides }--method queue"
+      else
+        explicit="${explicit:+$explicit }--method $arg"
+      fi
+      prev=
+      continue
+    fi
+    case "$arg" in
+      --no-method)
+        forge_decides="${forge_decides:+$forge_decides }--no-method"
+        ;;
+      --method=queue)
+        forge_decides="${forge_decides:+$forge_decides }--method=queue"
+        ;;
+      --squash|--merge|--rebase)
+        explicit="${explicit:+$explicit }$arg"
+        ;;
+      --method=*)
+        explicit="${explicit:+$explicit }$arg"
+        ;;
+      --method)
+        prev=--method
+        ;;
+    esac
+  done
+  if [ "$prev" = --method ]; then
+    explicit="${explicit:+$explicit }--method"
+  fi
+  if [ -n "$forge_decides" ] && [ -n "$explicit" ]; then
+    printf 'error: extra merge arguments must not combine a forge-decides method (%s) with an explicit merge strategy (%s)\n' \
+      "$forge_decides" "$explicit" >&2
+    return 1
+  fi
 }
 
 reject_repo_overrides() {
@@ -187,6 +293,8 @@ reject_head_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+[ "$PROVIDER" != gitlab ] || reject_forge_decides_method "$@" || exit 1
+[ "$PROVIDER" != github ] || reject_conflicting_forge_decides_method "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -533,19 +641,34 @@ github_state_is_open() {
   esac
 }
 
-# Whether the caller's own named method is the one the queue is configured for,
-# compared without regard to the spelling either side happens to use.
-github_caller_method_is() {
-  case "$FM_PR_GITHUB_CALLER_METHOD" in
-    [mM][eE][rR][gG][eE]) [ "$1" = merge ] ;;
-    [sS][qQ][uU][aA][sS][hH]) [ "$1" = squash ] ;;
-    [rR][eE][bB][aA][sS][eE]) [ "$1" = rebase ] ;;
-    *) return 1 ;;
-  esac
+# Whether the caller already asked the forge to choose the merge method, in any
+# of the spellings caller_merge_method normalises to queue. That is the one
+# method request a queue-governed base accepts, so it is what this refusal
+# treats as flags the caller had already got right.
+github_caller_method_is_forge_decides() {
+  [ "$FM_PR_GITHUB_CALLER_METHOD" = queue ]
+}
+
+# The one retry a queue-governed base accepts. It names no strategy, because the
+# queue sets the merge method itself and refuses an explicit one, so it does not
+# vary with the queue's configured method and stays nameable even when that
+# method is ambiguous or unrecognised.
+github_queue_retry_command() {
+  printf '%s %s %s -- --auto --no-method' "$0" "$ID" "$URL"
+}
+
+# Whether the caller's own arguments already are the retry a queue-governed base
+# takes, which makes naming that retry an echo of the command just run. The
+# retry is one fixed command, so whether it would repeat the caller is settled
+# by what they typed: it is read from their arguments alone, never from what the
+# merge command then returned or from which rules outcome came back, so no path
+# can reach the point of handing the caller their own command back.
+github_caller_already_ran_queue_retry() {
+  [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] && github_caller_method_is_forge_decides
 }
 
 github_report_queue_rules() {
-  local queue_method methods_display
+  local queue_method methods_display situation
   github_read_queue_method
   case "$FM_PR_GITHUB_QUEUE_STATUS" in
     single)
@@ -554,31 +677,37 @@ github_report_queue_rules() {
         SQUASH) queue_method=squash ;;
         REBASE) queue_method=rebase ;;
       esac
-      if github_merge_command_succeeded \
-        && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] \
-        && github_caller_method_is "$queue_method"; then
-        printf 'error: this run refuses even though the request for %s was accepted with the exact flags base branch %s requires (--auto --%s): the pull request has still not entered the merge queue, so no landed or queued outcome is proven; re-check the pull request'"'"'s merge queue state before retrying\n' \
-          "$URL" "$FM_PR_GITHUB_BASE" "$queue_method" >&2
-      else
-        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
-          "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
-      fi
+      printf -v situation \
+        'base branch %s requires the merge queue, which sets the merge method (%s) itself and refuses an explicit strategy' \
+        "$FM_PR_GITHUB_BASE" "$queue_method"
       ;;
     conflicting)
-      printf 'error: base branch %s has conflicting merge queue methods (%s); exact retry flags are ambiguous\n' \
-        "$FM_PR_GITHUB_BASE" "${FM_PR_GITHUB_QUEUE_METHODS//,/, }" >&2
+      printf -v situation \
+        'base branch %s has conflicting merge queue methods (%s), so which one it would apply is ambiguous; the merge queue applies its own without being told' \
+        "$FM_PR_GITHUB_BASE" "${FM_PR_GITHUB_QUEUE_METHODS//,/, }"
       ;;
     unrecognised)
       methods_display=${FM_PR_GITHUB_QUEUE_METHODS//,/, }
       [ -n "$methods_display" ] || methods_display='<none reported>'
-      printf 'error: base branch %s requires the merge queue, but its configured merge method (%s) is not one this script recognises, so exact retry flags cannot be named\n' \
-        "$FM_PR_GITHUB_BASE" "$methods_display" >&2
+      printf -v situation \
+        'base branch %s requires the merge queue, but its configured merge method (%s) is not one this script recognises; the merge queue applies its own without being told' \
+        "$FM_PR_GITHUB_BASE" "$methods_display"
       ;;
     unreadable)
       printf 'error: the branch rules for base branch %s could not be read, so a merge queue requirement can be neither confirmed nor ruled out here\n' \
         "${FM_PR_GITHUB_BASE:-<unknown>}" >&2
+      return 0
+      ;;
+    *)
+      return 0
       ;;
   esac
+  if github_caller_already_ran_queue_retry; then
+    printf 'error: %s; --auto --no-method is the only thing that base takes and this run already used it, so no different retry exists to name: the outcome reported above for %s is the blocking cause, and re-check the pull request'"'"'s merge queue state before running the same command again\n' \
+      "$situation" "$URL" >&2
+  else
+    printf 'error: %s; retry with: %s\n' "$situation" "$(github_queue_retry_command)" >&2
+  fi
 }
 
 github_report_unmerged_outcome() {
@@ -639,8 +768,10 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
+    github_drop_forge_decides_method "$@"
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
+      "${merge_args[@]+"${merge_args[@]}"}" \
+      "${GITHUB_MERGE_FORWARD[@]+"${GITHUB_MERGE_FORWARD[@]}"}" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
       merge_status=$?

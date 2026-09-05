@@ -1138,6 +1138,7 @@ pr_is_merged() {
   resolved_url=${remainder#*$'\t'}
   [ "$head" != "$remainder" ] || return 1
   case "$state" in
+    # OPEN includes a merge-queue enqueue: landing is MERGED only.
     MERGED|merged) ;;
     *) return 1 ;;
   esac
