@@ -664,10 +664,12 @@ EOF
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
 #
-# The cursor format is `version`, `offset`, `ident`, then the folded open set.
+# The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
+# kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
-# interpretation is discarded and rebuilt from byte 0.
+# interpretation is discarded and rebuilt from byte 0; the kind suffix does the
+# same when a task kind changes, because kind changes the fold below.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
@@ -710,6 +712,9 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # and closes.
 # 5: status_line_verb now also reads through an UNBRACKETED correlation token,
 # so lines that previously folded as ordinary status become opens and closes.
+# 6: a done/failed line on a ship or scout closes every open decision, and the
+# persisted version now carries the task kind, so cursors folded without that
+# terminal rule are discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
