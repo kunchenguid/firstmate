@@ -921,6 +921,57 @@ test_completed_scout_report_is_pointer_not_pending() {
   pass "a completed scout's stale decision surfaces as a report pointer, not pending"
 }
 
+test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
+  local home fakebin kind terminal id phase single mate single_state mate_state out
+  home=$(make_home terminal-cleanup)
+  mkdir -p "$home/projects/task"
+  fakebin=$(make_fakebin "$home")
+  for kind in ship scout secondmate; do
+    for terminal in done failed; do
+      id="$kind-$terminal"
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" "worktree=$home/projects/task" \
+        "kind=$kind" "harness=claude"
+      record_claude_idle "$home/state" "$id"
+      printf 'blocked [key=access]: waiting\nneeds-decision [key=choice]: choose a route\n%s: final outcome\nnote: cleanup complete\n' \
+        "$terminal" > "$home/state/$id.status"
+    done
+  done
+  for phase in terminal reopened resolved; do
+    case "$phase" in
+      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=blocked ;;
+      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=blocked; mate_state=blocked ;;
+      resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
+    esac
+    for kind in ship scout secondmate; do
+      for terminal in done failed; do
+        id="$kind-$terminal"
+        case "$phase" in
+          reopened) printf 'blocked [key=access]: reopened access\nneeds-decision [key=new-choice]: a new choice\nnote: more cleanup\n' >> "$home/state/$id.status" ;;
+          resolved) printf 'resolved [key=access]: access granted\nresolved [key=new-choice]: answered\nnote: final cleanup\n' >> "$home/state/$id.status" ;;
+        esac
+      done
+    done
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e --argjson single "$single" --argjson mate "$mate" \
+      --arg single_state "$single_state" --arg mate_state "$mate_state" '
+      .tasks | length == 6 and all(.[];
+        (.kind == "secondmate") as $persistent
+        | (.hints.open_decisions | map(.key) | sort) == (if $persistent then $mate else $single end)
+          and .current_state.state == (if $persistent then $mate_state else $single_state end)
+          and .hints.blocked_event == (if $persistent then $mate else $single end | index("access") != null)
+          and .hints.pending_decision == (if $persistent then $mate else $single end | any(. != "access")))
+    ' >/dev/null || fail "$phase snapshot revived a completed decision or lost a current one: $out"
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+    printf '%s' "$out" | jq -e --argjson single "$single" --argjson mate "$mate" '
+      (.decisions_open | map({id,key}) | sort_by(.id,.key)) ==
+        (([ ("ship-done","ship-failed","scout-done","scout-failed") as $id | $single[] | {id:$id,key:.} ]
+          + [ ("secondmate-done","secondmate-failed") as $id | $mate[] | {id:$id,key:.} ]) | sort_by(.id,.key))
+    ' >/dev/null || fail "$phase home summary revived a completed decision or lost a current one: $out"
+  done
+  pass "snapshots and home summaries share terminal supersession, reopening, and secondmate preservation"
+}
+
 # The complementary safety property: a scout still PARKED at a decision (its last
 # event is the needs-decision, it has not finished) DOES stay pending. The terminal
 # clear must not over-fire on a live, undecided scout.
@@ -1058,6 +1109,7 @@ test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
+test_terminal_cleanup_decisions_agree_across_snapshot_modes
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
