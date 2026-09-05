@@ -291,6 +291,38 @@ outcome: failed
 EOF
 }
 
+# A human approved past a live CI check that was still red. Verified identical
+# in no-mistakes v1.64.0 and v1.65.4 (internal/cli/axi_drive.go:69-70,
+# outcomeForRun): "passed-with-override" is the exact literal both releases emit.
+run_passed_with_override() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: passed-with-override
+EOF
+}
+
+# A synthetic, never-real outcome word: proves the catch-all default rather
+# than pinning behavior to any one currently-unmapped real outcome (a future
+# release may map a real word like ci-monitor-interrupted explicitly).
+run_unrecognized_outcome() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: zzz-not-a-real-outcome
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -682,6 +714,40 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# A passed-with-override outcome is a distinct exceptional result, never
+# ordinary green completion: it must read neither as done nor as plain
+# unknown, so a human is required to look before any merge decision.
+test_terminal_passed_with_override() {
+  reset_fakes
+  local d; d=$(new_case override)
+  make_repo_on_branch "$d/wt" fm/feat-override
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-override.meta" "window=fm:fm-feat-override" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override)"
+  local out; out=$(run_crew_state "$d" feat-override)
+  assert_contains "$out" "state: needs-inspection" "passed-with-override -> needs-inspection, not done"
+  assert_not_contains "$out" "state: done" "override must never read as done"
+  assert_not_contains "$out" "state: unknown" "override must never collapse to plain unknown"
+  assert_contains "$out" "source: run-step" "override -> run-step source"
+  pass "terminal passed-with-override run reads as needs-inspection, never done"
+}
+
+# An outcome word this file's mapping does not recognize (a future no-mistakes
+# release, or a typo) still falls to the safe unknown default rather than any
+# state that could be mistaken for a green result.
+test_terminal_unrecognized_outcome() {
+  reset_fakes
+  local d; d=$(new_case unrecognized)
+  make_repo_on_branch "$d/wt" fm/feat-unrecognized
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unrecognized.meta" "window=fm:fm-feat-unrecognized" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_unrecognized_outcome fm/feat-unrecognized)"
+  local out; out=$(run_crew_state "$d" feat-unrecognized)
+  assert_contains "$out" "state: unknown" "unrecognized outcome -> unknown"
+  assert_contains "$out" "outcome: zzz-not-a-real-outcome" "unknown detail names the raw outcome"
+  pass "terminal run with an unrecognized outcome falls to unknown, not done"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1306,6 +1372,23 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+# The merge-readiness consumer: crew_absorb_class/crew_is_provably_working is
+# the one downstream reader that turns fm-crew-state's raw state token into an
+# autonomous absorb-or-surface decision. A passed-with-override run must never
+# be absorbed as working (its own case, not the "genuinely stopped" one above)
+# - it must surface every time, so a human looks before anything merges.
+test_not_provably_working_when_passed_with_override() {
+  reset_fakes
+  local d; d=$(new_case provably-working-override)
+  make_repo_on_branch "$d/wt" fm/feat-override-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-override-absorb.meta" "window=fm:fm-feat-override-absorb" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override-absorb)"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-override-absorb \
+    && fail "a passed-with-override run must never be absorbed as provably working"
+  pass "crew_is_provably_working surfaces a passed-with-override run instead of absorbing it"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1744,6 +1827,8 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_terminal_passed_with_override
+test_terminal_unrecognized_outcome
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
@@ -1772,6 +1857,7 @@ test_remote_dead_reports_remote_verdict
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
+test_not_provably_working_when_passed_with_override
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
