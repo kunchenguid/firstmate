@@ -287,9 +287,12 @@ fm_backend_thurbox_target() {  # <uuid>
 }
 
 # fm_backend_thurbox_session_row: the live session record for a session UUID,
-# or failure when the session does not exist. A soft-DELETED session is NOT
-# live: `session get` still answers for one, so the row's own deleted marker is
-# what decides.
+# or failure when the session does not exist. A deleted session is not live and
+# needs no marker check here: `session get` refuses a deleted row outright
+# (`Session not found`, exit 1), which fm_backend_thurbox_json already turns
+# into a failed read. An earlier release answered for deleted rows and this
+# function filtered them on `deleted_at`; that branch became unreachable and was
+# removed rather than left describing behaviour the CLI no longer has.
 #
 # It takes the UUID rather than the target deliberately. Callers reach it
 # through a command substitution, and parsing the target here would set
@@ -297,11 +300,9 @@ fm_backend_thurbox_target() {  # <uuid>
 # caller to address an unset session on its very next line. Every entry point
 # therefore parses the target itself, in its own scope, before reading a row.
 fm_backend_thurbox_session_row() {  # <session-uuid>
-  local uuid=$1 raw deleted
+  local uuid=$1 raw
   [ -n "$uuid" ] || return 1
   raw=$(fm_backend_thurbox_json session get "$uuid") || return 1
-  deleted=$(printf '%s' "$raw" | jq -r '.deleted_at // empty' 2>/dev/null)
-  [ -z "$deleted" ] || return 1
   printf '%s' "$raw"
 }
 
@@ -614,7 +615,7 @@ fm_backend_thurbox_composer_state() {  # <target> -> empty|pending|pending-unpro
   verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$screen" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_thurbox_composer_identity "$1") || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity='probe-absent'
     fi
     verdict=$(fm_composer_classify_screen "$(fm_backend_thurbox_composer_caps)" "$screen" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
@@ -700,8 +701,8 @@ fm_backend_thurbox_agent_state() {  # <target>
     # soft-deleted session is absent from this inventory while its agent keeps
     # running, so answering `missing` here would invite a second agent into the
     # same task. Only an authoritative disposition may license that.
-    case "$(fm_backend_thurbox_deleted_disposition "$FM_BACKEND_THURBOX_SESSION")" in
-      absent|force-deleted) printf 'missing' ;;
+    case "$(fm_backend_thurbox_endpoint_disposition "$FM_BACKEND_THURBOX_SESSION")" in
+      gone) printf 'missing' ;;
       *) printf 'unreadable' ;;
     esac
     return 0
@@ -745,39 +746,84 @@ fm_backend_thurbox_agent_alive() {  # <target>
 # treehouse worktree), never --worktree-branch, so thurbox owns no worktree for
 # them and --force removes none. treehouse remains the worktree owner exactly
 # as it is for tmux, herdr, zellij and cmux.
+# A soft-deleted row cannot be force-deleted at all - `delete` resolves live
+# rows, and a deleted one belongs to `restore`/`reap` - so a task whose session
+# was deleted from outside (the interface's own delete, or a peer) would leave
+# its agent running with teardown believing it had killed it. `session reap` is
+# the documented way to let go of that agent, it is idempotent, and it refuses a
+# live session outright, so it can never take down a running task by mistake.
 fm_backend_thurbox_kill() {  # <target>
   fm_backend_thurbox_parse_target "$1" || return 1
-  thurbox-cli session delete "$FM_BACKEND_THURBOX_SESSION" --force --json >/dev/null 2>&1
+  thurbox-cli session delete "$FM_BACKEND_THURBOX_SESSION" --force --json >/dev/null 2>&1 && return 0
+  thurbox-cli session reap "$FM_BACKEND_THURBOX_SESSION" --json >/dev/null 2>&1
 }
 
-# fm_backend_thurbox_deleted_disposition: what became of a session that is no
-# longer in the live inventory. Prints `force-deleted`, `soft-deleted`, or
-# `absent`, and returns 1 when the deleted inventory could not be read.
+# fm_backend_thurbox_pane_alive: is <pane-id> still a pane on thurbox's own tmux
+# server? Returns 0 alive, 1 gone, 2 when it cannot be told.
 #
-# This exists because ROW-absence is not ENDPOINT-absence. A soft
-# `session delete` removes the row while the pane keeps running, and thurbox
-# then refuses to force-delete a row it can no longer resolve
-# (`Session not found`), so that pane outlives the session indefinitely rather
-# than for a reap window. `session list --deleted` carries `force_deleted`,
-# which is the only cheap discriminator: true means the window was killed,
-# false means it is still there. Verified against 2.18.0 - a force-deleted
-# session left zero windows on thurbox's socket, a soft-deleted one left one.
-fm_backend_thurbox_deleted_disposition() {  # <session-uuid>
-  local uuid=$1 deleted row forced
+# This is the adapter's ONE reach past thurbox-cli, and it is here because
+# thurbox will not answer the question. A deleted row is refused by both
+# `session get` and `session capture` whether or not its pane is still up, and
+# the row itself is byte-identical before and after a reap - `force_deleted`
+# stays false and no reaped marker appears (verified on 2.18.0). The row's own
+# `backend_id` against the socket `version` reports is the only thing left that
+# distinguishes a released pane from a running one.
+fm_backend_thurbox_pane_alive() {  # <pane-id>
+  local pane=$1 socket
+  [ -n "$pane" ] || return 2
+  command -v tmux >/dev/null 2>&1 || return 2
+  socket=$(fm_backend_thurbox_socket_name) || return 2
+  [ -n "$socket" ] || return 2
+  local panes
+  panes=$(tmux -L "$socket" list-panes -a -F '#{pane_id}' 2>/dev/null) || return 2
+  printf '%s\n' "$panes" | grep -qxF "$pane"
+}
+
+# fm_backend_thurbox_endpoint_disposition: the single answer both teardown-facing
+# reads need about a session missing from the live inventory. Prints `gone` when
+# the endpoint is provably absent, `live-pane` when an agent may still be
+# running, and returns 1 when it cannot be told - which callers must treat as
+# "not proven", never as either verdict.
+#
+# A soft `session delete` is thurbox's lossless undo window, not a leak: the row
+# goes, the worktrees stay, and the pane comes down when an interface, the
+# `automation tick` heartbeat, or `session reap` lets go of it. Firstmate runs
+# headless with none of those guaranteed, so a soft-deleted row proves nothing on
+# its own and its pane has to be checked.
+fm_backend_thurbox_endpoint_disposition() {  # <session-uuid>
+  local uuid=$1 deleted row forced backend_type pane
   [ -n "$uuid" ] || return 1
   deleted=$(fm_backend_thurbox_json session list --deleted) || return 1
   row=$(printf '%s' "$deleted" | jq -c --arg id "$uuid" \
     'map(select(.id == $id)) | first // empty' 2>/dev/null) || return 1
   if [ -z "$row" ]; then
-    printf 'absent'
+    printf 'gone'
     return 0
   fi
   forced=$(printf '%s' "$row" | jq -r '.force_deleted // empty' 2>/dev/null)
   if [ "$forced" = true ]; then
-    printf 'force-deleted'
-  else
-    printf 'soft-deleted'
+    printf 'gone'
+    return 0
   fi
+  # Soft-deleted: only its pane can say. A session whose pane lives on another
+  # host cannot be proven absent from this one, so it is never claimed.
+  backend_type=$(printf '%s' "$row" | jq -r '.backend_type // empty' 2>/dev/null)
+  case "$backend_type" in
+    local-tmux) ;;
+    *) return 1 ;;
+  esac
+  pane=$(printf '%s' "$row" | jq -r '.backend_id // empty' 2>/dev/null)
+  # Captured explicitly: an `if` whose condition fails and has no else exits 0,
+  # so `$?` after it would report the `if`, not the probe, and every reaped pane
+  # would read as unprovable.
+  local pane_probe
+  fm_backend_thurbox_pane_alive "$pane"
+  pane_probe=$?
+  case "$pane_probe" in
+    0) printf 'live-pane'; return 0 ;;
+    1) printf 'gone'; return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_thurbox_endpoint_confirmed_gone: a POSITIVE proof of absence for
@@ -796,10 +842,7 @@ fm_backend_thurbox_endpoint_confirmed_gone() {  # <target>
   hit=$(printf '%s' "$inventory" | jq -r --arg id "$FM_BACKEND_THURBOX_SESSION" \
     'map(select(.id == $id)) | length' 2>/dev/null)
   [ "$hit" = 0 ] || return 1
-  case "$(fm_backend_thurbox_deleted_disposition "$FM_BACKEND_THURBOX_SESSION")" in
-    absent|force-deleted) return 0 ;;
-    *) return 1 ;;
-  esac
+  [ "$(fm_backend_thurbox_endpoint_disposition "$FM_BACKEND_THURBOX_SESSION")" = gone ]
 }
 
 # fm_backend_thurbox_list_live: one "<target>\t<name>" line per live session.
@@ -882,13 +925,17 @@ fm_backend_thurbox_event_reader_cmd() {
 
 # fm_backend_thurbox_normalize_event: THE single normalize point - both the
 # stream reader's lines and any level-reconcile read flow through here into the
-# shared normalized-transition record. thurbox's stream carries no previous
-# state and is edge-triggered, so from_status stays empty and to_status drives
-# the policy, exactly as herdr's does. The session uuid occupies the pane_id
+# shared normalized-transition record. The session uuid occupies the pane_id
 # slot because it IS this backend's endpoint identity; there is no separate
 # workspace layer, so that field stays empty.
-fm_backend_thurbox_normalize_event() {  # <session_uuid> <state> <agent>
-  fm_transition_record "${1:-}" "" "" "${2:-}" "${3:-}"
+#
+# from_status is filled from the event's own `from_state`. An earlier release
+# carried no previous state, which is why this used to leave the slot empty; it
+# does now, and a policy that can see working->blocked separately from
+# idle->blocked is strictly better informed. A baseline `present` row genuinely
+# has no previous state and correctly normalizes to empty.
+fm_backend_thurbox_normalize_event() {  # <session_uuid> <state> <agent> [<from_state>]
+  fm_transition_record "${1:-}" "" "${4:-}" "${2:-}" "${3:-}"
 }
 
 # fm_backend_thurbox_escalation_marker: the per-session dedupe marker path for
@@ -900,17 +947,48 @@ fm_backend_thurbox_escalation_marker() {  # <state_dir> <window>
   printf '%s/.thurbox-escalated-%s' "$state" "$key"
 }
 
+# fm_backend_thurbox_watch_cursor_path: where this home records the last event
+# sequence it consumed, so a later wait can resume from it.
+fm_backend_thurbox_watch_cursor_path() {  # <state_dir>
+  printf '%s/.thurbox-watch-seq' "$1"
+}
+
+# fm_backend_thurbox_watch_cursor_set: advance the cursor, ignoring anything
+# that is not a sequence number. Best-effort by design: a cursor that cannot be
+# written costs a replay, never a lost event, because the next wait simply
+# starts from now again.
+fm_backend_thurbox_watch_cursor_set() {  # <cursor-file> <seq>
+  local file=$1 seq=$2
+  [ -n "$file" ] || return 0
+  case "$seq" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s\n' "$seq" > "$file" 2>/dev/null || true
+}
+
 # fm_backend_thurbox_apply_transition: route one normalized record through the
 # shared policy table, maintaining the per-session dedupe marker. On a fresh
 # actionable (blocked) edge it prints the record and returns 0; the caller
 # commits the marker only after handling it. `absorb` (working) clears the
 # marker. Everything else returns 1 with no output.
-fm_backend_thurbox_apply_transition() {  # <state_dir> <record>
-  local state=$1 record=$2 uuid to action window marker
+# <heuristic> is the event's own `hook_blocked_is_heuristic`. thurbox sets it
+# because Claude's blocked signal rides its Notification hook, which also fires
+# for advisories an auto-mode agent clears by itself and stays set for the whole
+# of a long foreground command. Escalating on the first such edge produced
+# repeated false alarms, so a heuristic blocked edge is corroborated with one
+# `session get` before it is raised: if the session has already left blocked, it
+# was transient and is absorbed. A confident edge pays for no extra read.
+fm_backend_thurbox_apply_transition() {  # <state_dir> <record> [<heuristic>]
+  local state=$1 record=$2 heuristic=${3:-} uuid to action window marker
   uuid=$(fm_transition_pane_id "$record")
   [ -n "$uuid" ] || return 1
   to=$(fm_transition_to_status "$record")
   action=$(fm_transition_policy "$to")
+  if [ "$action" = actionable ] && [ "$heuristic" = true ]; then
+    local now
+    now=$(fm_backend_thurbox_field '.state' session get "$uuid") || now=""
+    [ "$now" = blocked ] || action=defer
+  fi
   window=$(fm_backend_thurbox_target "$uuid")
   marker=$(fm_backend_thurbox_escalation_marker "$state" "$window")
   case "$action" in
@@ -984,23 +1062,52 @@ $(fm_backend_thurbox_event_reader_cmd)
 EOF
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local line session state_field agent record
+  # Resume where the last wait stopped. The caller waits in bounded windows and
+  # the stream is not running between them, so without this every transition
+  # landing in that gap is simply never seen - a crewmate could go blocked and
+  # nothing would notice until something else tripped over it. thurbox stamps
+  # every event with a monotonic seq and `--since` replays exactly what was
+  # missed; its own help names this case, "the gap a stream otherwise has across
+  # a restart".
+  #
+  # With no cursor yet this deliberately starts from now rather than replaying
+  # the machine's whole history into a first arm.
+  local cursor_file since=""
+  cursor_file=$(fm_backend_thurbox_watch_cursor_path "$state")
+  if [ -r "$cursor_file" ]; then
+    since=$(tr -dc '0-9' < "$cursor_file" 2>/dev/null)
+  fi
+  local reader_args=(--for-secs "$timeout")
+  [ -z "$since" ] || reader_args+=(--since "$since")
+
+  local line seq session state_field agent from_field heuristic record
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    seq=$(printf '%s' "$line" | jq -r '.seq // empty' 2>/dev/null)
     session=$(printf '%s' "$line" | jq -r '.session // empty' 2>/dev/null) || continue
-    [ -n "$session" ] || continue
+    if [ -z "$session" ]; then
+      fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"
+      continue
+    fi
     case " $wanted " in
       *" $session "*) ;;
-      *) continue ;;
+      *) fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"; continue ;;
     esac
     state_field=$(printf '%s' "$line" | jq -r '.state // empty' 2>/dev/null)
     agent=$(printf '%s' "$line" | jq -r '.agent // empty' 2>/dev/null)
-    record=$(fm_backend_thurbox_normalize_event "$session" "$state_field" "$agent")
-    if record=$(fm_backend_thurbox_apply_transition "$state" "$record"); then
+    from_field=$(printf '%s' "$line" | jq -r '.from_state // empty' 2>/dev/null)
+    heuristic=$(printf '%s' "$line" | jq -r '.hook_blocked_is_heuristic // empty' 2>/dev/null)
+    record=$(fm_backend_thurbox_normalize_event "$session" "$state_field" "$agent" "$from_field")
+    if record=$(fm_backend_thurbox_apply_transition "$state" "$record" "$heuristic"); then
+      # Stop the cursor AT the handled edge, never past it: the events behind it
+      # in this window are unread, and must replay on the next wait rather than
+      # being swallowed by the early return.
+      fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"
       printf '%s' "$record"
       return 0
     fi
-  done < <("${reader[@]}" --for-secs "$timeout" 2>/dev/null)
+    fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"
+  done < <("${reader[@]}" "${reader_args[@]}" 2>/dev/null)
 
   return 1
 }

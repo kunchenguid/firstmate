@@ -50,7 +50,13 @@ command -v thurbox-cli >/dev/null 2>&1 || { echo "skip: thurbox-cli not installe
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the thurbox adapter)"; exit 0; }
 
 FM_ROOT_OVERRIDE="$ROOT"; export FM_ROOT_OVERRIDE
-FM_HOME="$ROOT"; FM_ROOT="$ROOT"; FM_BACKEND_LIB_DIR="$ROOT/bin"
+# Read by the adapter and the libraries sourced below, not by this file.
+# shellcheck disable=SC2034
+FM_HOME="$ROOT"
+# shellcheck disable=SC2034
+FM_ROOT="$ROOT"
+# shellcheck disable=SC2034
+FM_BACKEND_LIB_DIR="$ROOT/bin"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-transition-lib.sh"
@@ -127,15 +133,28 @@ state=$(fm_backend_thurbox_agent_state "$target")
   || fail "a soft-deleted session read 'missing', which licenses a relaunch beside a live agent"
 pass "real binary: a soft-deleted session does not license recovery (read '$state')"
 
-# Reclaim and tear down for real; only now is the endpoint provably gone.
-thurbox-cli session restore "$id" >/dev/null 2>&1 || fail "could not restore the soft-deleted session"
-fm_backend_thurbox_kill "$target" || fail "forced teardown failed"
+# Teardown on a soft-deleted row: a forced delete cannot resolve it, so the
+# adapter reaps instead. Only once the pane is actually released is the endpoint
+# provably gone. This is the whole point of reaping deliberately rather than
+# waiting for an interface or the automation heartbeat that a headless firstmate
+# has no guarantee of.
+fm_backend_thurbox_kill "$target" || fail "teardown could not release a soft-deleted session's pane"
 sleep 3
 
 fm_backend_thurbox_endpoint_confirmed_gone "$target" \
-  || fail "a force-deleted endpoint must be provably gone"
+  || fail "a reaped endpoint must be provably gone"
 [ "$(fm_backend_thurbox_agent_state "$target")" = missing ] \
-  || fail "a force-deleted endpoint must read missing"
-pass "real binary: a forced teardown is proven gone and licenses recovery"
+  || fail "a reaped endpoint must read missing"
+pass "real binary: teardown reaps a soft-deleted session and the endpoint becomes provably gone"
+
+# And the ordinary path: a live session torn down with --force.
+id=$(make_session forced) || fail "could not create the forced-teardown session"
+sleep 2
+target="thurbox:$id"
+fm_backend_thurbox_kill "$target" || fail "forced teardown failed"
+sleep 3
+fm_backend_thurbox_endpoint_confirmed_gone "$target" \
+  || fail "a force-deleted endpoint must be provably gone"
+pass "real binary: an ordinary forced teardown is proven gone"
 
 echo "all fm-backend-thurbox-smoke tests passed"

@@ -102,6 +102,17 @@ Nothing thurbox-specific reaches that policy.
 `--initial` is deliberately not passed: its baseline `present` rows would replay an already-handled blocked state as a fresh edge on every poll.
 `watch --for-secs` bounds the stream inside thurbox, so the wait needs no external timeout wrapper.
 
+**The stream is resumed, not restarted.**
+The watcher waits in bounded windows and the stream is not running between them, so an edge landing in that gap would simply never be seen.
+Every event carries a monotonic `seq`, and `--since` replays exactly what was missed.
+The adapter records the last sequence it consumed in `state/.thurbox-watch-seq` and resumes from it; with no cursor yet it starts from now rather than replaying the machine's whole history into a first arm.
+An early return on an actionable edge stops the cursor **at** that edge, so the events behind it in the same window replay on the next wait instead of being swallowed.
+
+**Two event fields shape decisions here.**
+`from_state` fills the transition record's previous-state slot, so the policy can tell `working -> blocked` from `idle -> blocked`.
+`hook_blocked_is_heuristic` guards the escalation: thurbox sets it because Claude's blocked signal rides its `Notification` hook, which also fires for advisories an auto-mode agent clears by itself and stays set for the whole of a long foreground command.
+A heuristic blocked edge is corroborated with one `session get` before it is raised, and absorbed when the session has already moved on; a confident edge pays for no extra read.
+
 Transitions are observed at roughly one-second granularity.
 The stream removes Firstmate's poll, but thurbox samples its own state internally rather than being driven by the agent's hook synchronously.
 
@@ -183,21 +194,36 @@ A bare `session delete` only soft-deletes the row and leaves the pane running, s
 
 Firstmate's tasks are created with `--repo-path` against an already-built Treehouse worktree, never with `--worktree-branch`, so thurbox owns no worktree for them and `--force` removes none.
 
-### Absence has to be proven, not inferred
+### The undo window, and proving absence through it
 
-Row-absence is not endpoint-absence, and the gap is not a brief reap window.
-A soft `session delete` removes the row while the pane keeps running, and thurbox then refuses to force-delete a row it can no longer resolve - `session delete <id> --force` answers `Session not found` - so that pane outlives the session indefinitely.
-Reclaiming it needs `session restore` first.
+A soft `session delete` is thurbox's **lossless undo window**, not a leak.
+The row goes, the worktrees stay, and the pane comes down when something lets go of it: a running interface, the `automation tick` heartbeat, or `session reap` on demand.
+`session restore` brings the whole session back until that happens.
+`--force` skips the window entirely, killing the pane in the same call.
 
-Firstmate's own teardown always passes `--force` and never creates that state, so the exposure is a delete from outside: the TUI's own, or a peer's.
+That design has one consequence for a driver: row-absence is not endpoint-absence.
+Firstmate runs headless, with no interface and no guaranteed heartbeat, so a soft-deleted session's agent can keep running with nothing scheduled to stop it.
 
-`session list --deleted` carries a `force_deleted` mark, which is the discriminator, verified on 2.18.0: a force-deleted session left no window on thurbox's socket, a soft-deleted one left its window running.
-`fm_backend_thurbox_deleted_disposition` reads it, and both teardown-facing reads consult it once the live inventory comes back empty:
+**Teardown reaps deliberately** rather than waiting for a reaper that may never run.
+`fm_backend_thurbox_kill` force-deletes, and when that cannot resolve the row - which is what a delete from outside leaves behind, since `delete` addresses live rows and a deleted one belongs to `restore`/`reap` - it reaps instead.
+`session reap` is idempotent and refuses a live session outright, so it can never take down a running task by mistake.
 
-- `fm_backend_thurbox_endpoint_confirmed_gone` reports proof only when the session is absent from both inventories, or present in the deleted one as force-deleted.
-- `fm_backend_thurbox_agent_state` reports `missing` only in those same cases, and `unreadable` for a soft-deleted session.
+**Absence is then proven, not inferred.**
+`fm_backend_thurbox_endpoint_disposition` is the single answer both teardown-facing reads use once the live inventory comes back empty:
 
-That second one is the sharper edge: only `dead` and `missing` license recovery, and recovery starts a replacement agent, so answering `missing` for a session whose agent is still running would invite a second agent into one task.
+| Deleted-inventory row | Verdict |
+| --- | --- |
+| absent | gone |
+| `force_deleted: true` | gone |
+| soft-deleted, pane released | gone |
+| soft-deleted, pane still up | not gone |
+| unreadable, or a `--host` session | not proven |
+
+The pane check is this adapter's one reach past `thurbox-cli`, and it is there because thurbox will not answer the question: `session get` and `session capture` both refuse a deleted row whether or not its pane is up, and the deleted row is byte-identical before and after a reap - `force_deleted` stays false and no reaped marker appears.
+The row's own `backend_id` against the socket `version` reports is what is left.
+
+`fm_backend_thurbox_agent_state` reports `missing` only on a `gone` verdict and `unreadable` otherwise.
+That is the sharper edge: only `dead` and `missing` license recovery, and recovery starts a replacement agent, so answering `missing` for a session whose agent is still running would invite a second agent into one task.
 
 ### Parked sessions
 

@@ -114,6 +114,23 @@ respond_exit() {  # <case-dir> <n> <code> [stdout]
   printf '%s' "$3" > "$1/responses/$2.exit"
 }
 
+# make_fake_tmux <dir> <live-pane-id>...: a `tmux` stub whose `list-panes -a`
+# reports exactly the given pane ids. The thurbox adapter needs it to answer
+# "is this deleted session's pane still up", which thurbox itself will not say.
+make_fake_tmux() {  # <fakebin-dir> [pane-id...]
+  local fb=$1
+  shift
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  *list-panes*)\n'
+    for pane in "$@"; do printf "    printf '%%s\\\\n' '%s'\n" "$pane"; done
+    printf '    exit 0 ;;\n'
+    printf 'esac\nexit 0\n'
+  } > "$fb/tmux"
+  chmod +x "$fb/tmux"
+}
+
 # assert_log_args <case-dir> <msg> <arg>...: the fake logs each invocation as
 # its arguments each followed by a unit separator, so an ADJACENT argument
 # sequence ("--lines" immediately followed by "500") is checked as one fixed
@@ -479,6 +496,68 @@ out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = missing ] || fail "a force-deleted session is authoritatively gone (got: $out)"
 pass "a force-deleted session reports missing, which correctly licenses recovery"
 
+# --- reaping, and proving the pane is actually down ---------------------------
+#
+# A soft delete is thurbox's lossless undo window, not a leak: the row goes, the
+# worktrees stay, and the pane comes down when an interface, the automation
+# heartbeat, or `session reap` lets go of it. Firstmate runs headless, so it
+# reaps deliberately rather than waiting for something that may never run.
+#
+# The deleted row cannot report any of this. It is byte-identical before and
+# after a reap - `force_deleted` stays false and there is no reaped marker
+# (verified on 2.18.0) - and `session get`/`session capture` refuse a deleted row
+# either way. The row's own `backend_id` against thurbox's socket is the only
+# thing that answers, which is why the proof reaches for the multiplexer here and
+# nowhere else in this adapter.
+
+new_case reap-when-force-refused; d=$CASE_DIR
+# 1 delete --force refuses a row it can no longer resolve, 2 reap takes the pane down.
+respond_exit "$d" 1 1 '{"error":"Session not found: 11111111-2222-3333-4444-555555555555"}'
+respond "$d" 2 '{"id":"11111111-2222-3333-4444-555555555555","name":"x","reaped":true}'
+out=$(adapter "$d" "fm_backend_thurbox_kill '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "teardown must still bring the pane down when force-delete cannot resolve the row"
+assert_log_args "the pane must be released with reap" session reap 11111111-2222-3333-4444-555555555555
+pass "teardown reaps the pane when a soft-deleted row refuses a forced delete"
+
+new_case reap-not-needed; d=$CASE_DIR
+respond "$d" 1 '{"deleted":true,"killed_window":true,"forced":true}'
+out=$(adapter "$d" "fm_backend_thurbox_kill '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "an ordinary forced teardown must succeed"
+assert_no_grep 'reap' "$FM_THURBOX_LOG" "a forced delete that worked must not also reap"
+pass "an ordinary forced teardown does not reach for reap"
+
+new_case gone-soft-deleted-pane-down; d=$CASE_DIR
+make_fake_tmux "$CASE_DIR/fakebin" '%99'
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false,"backend_type":"local-tmux","backend_id":"%42"}]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "a reaped session whose pane is gone IS provably gone"
+pass "a soft-deleted session whose pane has been reaped is proven gone"
+
+new_case gone-soft-deleted-pane-up; d=$CASE_DIR
+make_fake_tmux "$CASE_DIR/fakebin" '%42'
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false,"backend_type":"local-tmux","backend_id":"%42"}]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=1' "a session whose pane is still up is not gone, reaped or not"
+pass "a soft-deleted session whose pane is still up is never reported gone"
+
+new_case gone-soft-deleted-remote; d=$CASE_DIR
+make_fake_tmux "$CASE_DIR/fakebin"
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false,"backend_type":"ssh:elsewhere","backend_id":"%42"}]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=1' "a remote pane cannot be proven absent from this machine"
+pass "a remote session's pane is never claimed proven absent from the wrong host"
+
+new_case agent-soft-deleted-pane-down; d=$CASE_DIR
+make_fake_tmux "$CASE_DIR/fakebin" '%99'
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false,"backend_type":"local-tmux","backend_id":"%42"}]'
+out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
+[ "$out" = missing ] || fail "a reaped session is authoritatively gone and may license recovery (got: $out)"
+pass "a reaped session reports missing, which correctly licenses recovery"
+
 # --- home scoping ------------------------------------------------------------
 
 new_case scoped-name; d=$CASE_DIR
@@ -535,9 +614,12 @@ make_event_reader() {  # <dir> <ndjson-file>
   local dir=$1 src=$2
   cat > "$dir/reader" <<SH
 #!/usr/bin/env bash
+# Logs its own argv so a test can see exactly how the stream was resumed.
+printf '%s\\n' "\$*" >> "$dir/reader-args"
 cat "$src"
 SH
   chmod +x "$dir/reader"
+  : > "$dir/reader-args"
   printf '%s\n' "$dir/reader"
 }
 
@@ -617,6 +699,135 @@ out=$(adapter "$d" 'fm_backend_thurbox_event_reader_cmd | tr "\n" " "')
 assert_contains "$out" 'watch' "the reader must be thurbox-cli watch"
 assert_not_contains "$out" '--initial' "--initial would replay handled state as a fresh edge on every poll"
 pass "the event reader never passes --initial, so a handled blocked state is not replayed each poll"
+
+# --- resuming the stream, so a transition between windows is not lost ---------
+#
+# The watcher waits in bounded windows (FM_POLL, 15s by default) and the stream
+# is not running between them, so any edge landing in that gap was simply never
+# seen. thurbox gives every event a monotonic `seq` and `watch --since <seq>`
+# replays exactly what was missed - its help names this case outright, "the gap
+# a stream otherwise has across a restart".
+#
+# The property under test is the resume itself, asserted on the reader's own
+# argv and on the persisted cursor, because that is what a caller can observe.
+
+new_case events-first-wait-has-no-since; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":10,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"working","name":"t"}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'" >/dev/null 2>&1
+assert_not_contains "$(cat "$d/reader-args")" '--since' \
+  "the first wait has no cursor yet and must start from now, not replay history"
+pass "the first wait starts from now rather than replaying every past transition"
+
+new_case events-cursor-advances; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":41,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"working","name":"t"}
+{"seq":42,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"idle","name":"t"}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'" >/dev/null 2>&1
+cur=$(cat "$d/state/.thurbox-watch-seq" 2>/dev/null)
+[ "$cur" = 42 ] || fail "the cursor must record the last event consumed (got: '$cur')"
+pass "the cursor records the last transition actually consumed"
+
+new_case events-second-wait-resumes; d=$CASE_DIR
+mkdir -p "$d/state"
+printf '77\n' > "$d/state/.thurbox-watch-seq"
+cat > "$d/stream" <<'NDJSON'
+{"seq":78,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"working","name":"t"}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'" >/dev/null 2>&1
+assert_contains "$(cat "$d/reader-args")" '--since 77' \
+  "a later wait must resume from the recorded cursor so the gap between windows is replayed"
+pass "a later wait resumes from the cursor, so an edge landing between windows is not lost"
+
+# Returning early on an actionable edge must NOT swallow the events behind it:
+# the cursor stops at the edge that was handled, so the rest replay next time.
+new_case events-cursor-stops-at-handled-edge; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":90,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"blocked","name":"t"}
+{"seq":91,"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"working","name":"t"}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'; echo \"|rc=\$?\"")
+assert_contains "$out" '|rc=0' "the blocked edge must still be reported"
+cur=$(cat "$d/state/.thurbox-watch-seq" 2>/dev/null)
+[ "$cur" = 90 ] || fail "the cursor must stop at the handled edge so later events replay (got: '$cur')"
+pass "an early return leaves later transitions to replay instead of swallowing them"
+
+# --- what the event actually carries ------------------------------------------
+#
+# The adapter used to read three fields out of an event because 2.11's stream
+# carried little else. It now carries the previous state and thurbox's own
+# confidence in the one it reports, and both change decisions here.
+
+new_case events-carry-from-state; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":5,"event":"changed","session":"11111111-2222-3333-4444-555555555555","from_state":"working","state":"blocked","to_state":"blocked","agent":"claude","hook_blocked_is_heuristic":false}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "
+    rec=\$(fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET') || exit 1
+    echo \"from=\$(fm_transition_from_status \"\$rec\") to=\$(fm_transition_to_status \"\$rec\") agent=\$(fm_transition_agent \"\$rec\")\"
+  ")
+assert_contains "$out" 'from=working' "the record must carry the state the session came from"
+assert_contains "$out" 'to=blocked' "the record must carry the state it moved to"
+pass "a transition record carries the previous state, not just the new one"
+
+# thurbox reports hook_blocked_is_heuristic because Claude's blocked signal rides
+# its Notification hook, which also fires for advisories an auto-mode agent
+# clears by itself. Escalating on the first such edge is what produced three
+# false alarms; the corroboration belongs here, not in a supervisor's script.
+
+new_case events-heuristic-blocked-transient; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":6,"event":"changed","session":"11111111-2222-3333-4444-555555555555","from_state":"working","state":"blocked","to_state":"blocked","hook_blocked_is_heuristic":true}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+# The corroborating read finds the session already working again.
+respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"working","state_source":"hook"}'
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'; echo \"|rc=\$?\"")
+assert_contains "$out" '|rc=1' "a heuristic blocked edge the session has already left must not escalate"
+pass "a heuristic blocked edge that has already cleared is absorbed, not raised"
+
+new_case events-heuristic-blocked-real; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":7,"event":"changed","session":"11111111-2222-3333-4444-555555555555","from_state":"working","state":"blocked","to_state":"blocked","hook_blocked_is_heuristic":true}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+# The corroborating read confirms it is still blocked.
+respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"blocked","state_source":"hook"}'
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'; echo \"|rc=\$?\"")
+assert_contains "$out" '|rc=0' "a heuristic blocked edge that is still blocked must escalate"
+pass "a heuristic blocked edge that is still blocked is raised"
+
+new_case events-confident-blocked-no-recheck; d=$CASE_DIR
+cat > "$d/stream" <<'NDJSON'
+{"seq":8,"event":"changed","session":"11111111-2222-3333-4444-555555555555","from_state":"working","state":"blocked","to_state":"blocked","hook_blocked_is_heuristic":false}
+NDJSON
+reader_bin=$(make_event_reader "$d" "$d/stream")
+mkdir -p "$d/state"
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader_bin" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'; echo \"|rc=\$?\"")
+assert_contains "$out" '|rc=0' "a blocked edge thurbox is confident about must escalate"
+assert_no_grep 'session get' "$FM_THURBOX_LOG" "a confident blocked edge must not pay for a corroborating read"
+pass "a blocked edge thurbox reports confidently escalates with no extra read"
 
 # --- registry wiring ---------------------------------------------------------
 

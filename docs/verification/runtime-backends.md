@@ -1114,8 +1114,8 @@ exit 2
 
 Nothing is typed. The working form is `session send --no-enter --json <id> -- <text>`.
 
-**Absence proof.** A soft delete removes the row while the pane keeps running,
-and the row can then no longer be force-deleted at all:
+**The undo window.** A soft delete removes the row while the pane keeps running,
+and that row cannot then be force-deleted - `delete` addresses live rows:
 
 ```text
 session delete <id>            -> {"deleted":true,"killed_window":false}
@@ -1123,13 +1123,41 @@ session delete <id> --force    -> {"error":"Session not found: ..."}   exit 1
 tmux -L thurbox list-windows   -> tb-<name> still present
 ```
 
-`session restore` reclaims it. `session list --deleted` distinguishes the two
-cases, and the window count confirms the mark is trustworthy:
+This is deliberate and documented, not a leak: it is thurbox's lossless undo
+window. `session delete --help` states that the windows come down "once the undo
+window closes - by a running interface, by the `automation tick` heartbeat, or on
+demand with `session reap`", while the worktrees stay. An initial reading of this
+pass called it an orphaned pane and a thurbox defect; that was wrong, and the
+correction is recorded here rather than removed.
+
+`session reap` releases the pane on demand, which is what a headless driver
+needs:
+
+```text
+before reap:  windows on socket: 1
+session reap  -> {"reaped": true}
+after  reap:  windows on socket: 0
+row retained in --deleted (reaping is not deleting)
+```
+
+It is idempotent, and refuses a live session outright
+(`Deleted session not found`), so it cannot take down a running task.
+
+The deleted row cannot report any of this: it is byte-identical before and after
+a reap, and `session get`/`session capture` refuse it either way. `force_deleted`
+separates the two delete modes, and the row's `backend_id` against the socket
+answers the rest:
 
 ```text
 fmfix-hard   force_deleted=true    windows on socket: 0
 fmfix-soft   force_deleted=false   windows on socket: 1
 ```
+
+**Stream resume.** Every event carries a monotonic `seq` and `watch --since`
+replays what was missed - the help names the case, "the gap a stream otherwise
+has across a restart". Events also carry `from_state` and
+`hook_blocked_is_heuristic`; the latter reads `true` for a claude session, which
+is why a blocked edge is corroborated before it is raised.
 
 **`session exec` identity.** The 2.11 leak is fixed and the help says so: the
 `THURBOX_*` namespace is scrubbed of the caller's values and replaced with the
