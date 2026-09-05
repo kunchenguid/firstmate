@@ -55,6 +55,13 @@ cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 sleep "$1"
 printf 'ran\n' > "$2"
 SH
+cat > "$REMOTE_ROOT/bin/fm-held-job.sh" <<'SH'
+#!/bin/bash
+while [ ! -e "$1" ]; do
+  sleep 0.05
+done
+printf 'ran\n' > "$2"
+SH
 cat > "$REMOTE_ROOT/bin/fm-touch-job.sh" <<'SH'
 #!/bin/bash
 printf 'ran\n' > "$1"
@@ -207,9 +214,10 @@ assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
 
 ACTIVE_SIDE_EFFECT="$TMP_ROOT/active-side-effect"
-FM_REMOTE_JOB_TIMEOUT=10
+ACTIVE_RELEASE="$TMP_ROOT/active-release"
+FM_REMOTE_JOB_TIMEOUT=15
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 4 "$ACTIVE_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-held-job.sh "$ACTIVE_RELEASE" "$ACTIVE_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
 for _ in $(seq 1 100); do
@@ -225,9 +233,12 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 fm_remote_job_probe "$ACCOUNT_HOME" || fail "the active worker did not refresh its readiness heartbeat"
+[ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the heartbeat probe succeeded after the active job stopped running"
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$(cat "$STATE_ROOT/worker.pid")" = "$ACTIVE_WORKER_PID" ] \
   || fail "ensure replaced a healthy worker during an active job"
+touch "$ACTIVE_RELEASE"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the active job did not complete after the readiness probe"
 assert_present "$ACTIVE_SIDE_EFFECT" "the active job was interrupted by the concurrent readiness check"
