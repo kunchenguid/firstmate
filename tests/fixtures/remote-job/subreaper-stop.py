@@ -197,18 +197,25 @@ def worker_environment(queue, timezone="UTC0", locale_name="C"):
     return env
 
 
-def call(script, queue, timezone="UTC0", locale_name="C"):
+def run_call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None):
     env = worker_environment(queue, timezone, locale_name)
+    if environment_overrides:
+        env.update(environment_overrides)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait_for(lambda: proc.poll() is not None, 20)
         out, err = proc.communicate()
-        assert proc.returncode == 0, (out, err)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None):
+    result = run_call(script, queue, timezone, locale_name, environment_overrides)
+    assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 def queue_processes(queue):
@@ -425,6 +432,21 @@ done
 wait "$!"
 ''')
     chdir_worker.chmod(0o755)
+    leaderless_worker = root / "bin/fm-leaderless-block.sh"
+    leaderless_worker.write_text('''#!/bin/bash
+(
+  cd "$HOME" || exit 1
+  printf '%s\n' "$BASHPID" > "$HOME/leaderless-job.pid"
+  exec sleep 300
+) &
+exit 0
+''')
+    leaderless_worker.chmod(0o755)
+    side_effect_worker = root / "bin/fm-claim-side-effect.sh"
+    side_effect_worker.write_text('''#!/bin/bash
+printf 'executed\n' > "$HOME/claim-side-effect"
+''')
+    side_effect_worker.chmod(0o755)
     git_env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
     subprocess.run(["git", "-C", str(root), "init", "-q", "-b", "main"], env=git_env, check=True)
     subprocess.run(["git", "-C", str(root), "add", "AGENTS.md", "bin"], env=git_env, check=True)
@@ -528,6 +550,55 @@ wait "$!"
             unrelated_process.wait()
         extra_pids.discard(unrelated_process.pid)
     print("ok - active claim identity stops a job descendant after it changes directory outside the root")
+    leaderless_queue = fixture / "leaderless-queue"
+    call(start, leaderless_queue)
+    wait_for(lambda: len(queue_processes(leaderless_queue)) == 2)
+    (account / "leaderless-job.pid").unlink(missing_ok=True)
+    call('printf "" | fm_remote_job_stage "$HOME" "$FM_ROOT_OVERRIDE" "$HOME" '
+         'fm-leaderless-block.sh >/dev/null', leaderless_queue)
+    wait_for(lambda: (account / "leaderless-job.pid").is_file())
+    leaderless_pid = int((account / "leaderless-job.pid").read_text())
+    extra_pids.add(leaderless_pid)
+    leaderless_claim = next((leaderless_queue / "jobs").glob("job-*/.claim/group"))
+    leaderless_group = int(leaderless_claim.read_text())
+    wait_for(lambda: not Path(f"/proc/{leaderless_group}").exists())
+    assert os.getpgid(leaderless_pid) == leaderless_group
+    leaderless_start = process_start(leaderless_pid)
+    leaderless_serving = int((leaderless_queue / "worker.pid").read_text())
+    leaderless_result = run_call(f"fm_remote_job_stop_worker_tree {leaderless_serving}",
+                                 leaderless_queue)
+    assert leaderless_result.returncode != 0, (leaderless_result.stdout, leaderless_result.stderr)
+    assert "NEEDING MANUAL CLEANUP" in leaderless_result.stderr
+    assert f"surviving pid {leaderless_pid}" in leaderless_result.stderr
+    assert leaderless_start in leaderless_result.stderr
+    assert f"cwd {account}" in leaderless_result.stderr
+    assert process_alive(leaderless_pid), "leaderless claim child was killed by a group signal"
+    assert set(processes()) == original, "leaderless claim stop reached another queue"
+    os.kill(leaderless_pid, signal.SIGKILL)
+    wait_for(lambda: not process_alive(leaderless_pid))
+    try:
+        os.waitpid(leaderless_pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    extra_pids.discard(leaderless_pid)
+    print("ok - leaderless active claim fails closed with surviving process metadata")
+
+    identity_queue = fixture / "identity-queue"
+    claim_identity_override = {"FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY": "1"}
+    call(start, identity_queue, environment_overrides=claim_identity_override)
+    wait_for(lambda: len(queue_processes(identity_queue)) == 2)
+    (account / "claim-side-effect").unlink(missing_ok=True)
+    call('printf "" | fm_remote_job_stage "$HOME" "$FM_ROOT_OVERRIDE" "$HOME" '
+         'fm-claim-side-effect.sh >/dev/null', identity_queue)
+    identity_job = next((identity_queue / "jobs").glob("job-*"))
+    wait_for(lambda: (identity_job / "state").read_text().strip() == "done")
+    assert (identity_job / "exit").read_text().strip() == "125"
+    assert not (account / "claim-side-effect").exists()
+    identity_serving = int((identity_queue / "worker.pid").read_text())
+    call(f"fm_remote_job_stop_worker_tree {identity_serving}", identity_queue)
+    wait_for(lambda: not queue_processes(identity_queue))
+    assert set(processes()) == original, "claim identity failure reached another queue"
+    print("ok - missing kernel claim identity prevents command side effects")
     (queue / "worker.lock/command").write_text("stale serving ownership\n")
     for _ in range(3):
         call(start, queue)

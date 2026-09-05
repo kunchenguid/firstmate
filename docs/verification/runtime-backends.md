@@ -989,6 +989,8 @@ It directly proves signalling skips a fully scoped snapshot whose recorded proce
 The exact kernel PID/PGID reuse race runs only when a private fixture user/PID namespace exposes writable `ns_last_pid`; it ran on this host and left the unrelated recycled identity alive.
 The same private-namespace race replaces a pre-change active-claim leader while preserving its legacy second-resolution start rendering, then proves cleanup sends no group signal, preserves the replacement, reports its PID and recorded identity as needing manual cleanup, and returns failure.
 Only kernel start identities authorize active-claim group signals; legacy identity reconstruction remains supported for worker locks while draining pre-change records.
+When a recorded active-claim leader is gone but its execution group survives, cleanup individually signals only fully scoped processes, reports every remaining group member with PID, kernel start identity, and working directory, and fails for manual cleanup.
+New Linux claims require a kernel start identity before the waiting child is armed, so an identity inventory failure returns 125 without executing the staged command.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
@@ -1006,6 +1008,8 @@ bin/fm-lint.sh
 ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
 ok - legacy active claim reports manual cleanup without signalling a recycled group
 ok - active claim identity stops a job descendant after it changes directory outside the root
+ok - leaderless active claim fails closed with surviving process metadata
+ok - missing kernel claim identity prevents command side effects
 ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```
 

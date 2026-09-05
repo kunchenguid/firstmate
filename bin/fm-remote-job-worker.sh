@@ -270,18 +270,13 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
   return 1
 }
 
-# A leaderless live group still belongs to the recorded execution: its PGID
-# cannot be reused while any old member survives, so it remains safe to signal.
-# A live leader whose start identity mismatches proves PID reuse and makes the
-# recorded group stale; an unreadable live leader stays indeterminate so the
-# stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
   local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
     kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
+    worker_process_or_group_alive group "$pid" && return 4
     return 1
   }
   fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" && return 0
@@ -304,7 +299,7 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
     case "$identity_status" in
       0|3) ;;
       1) return 1 ;;
-      2) worker_process_or_group_alive group "$pid"; return ;;
+      2|4) worker_process_or_group_alive group "$pid"; return ;;
     esac
   fi
   worker_process_or_group_alive "$kind" "$pid"
@@ -552,7 +547,12 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   ) &
   group_pid=$!
   set +m
-  group_start=$(fm_remote_job_process_start "$group_pid") || {
+  if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" = 1 ]; then
+    group_start=
+  else
+    group_start=$(fm_remote_job_process_kernel_start "$group_pid" 2>/dev/null || true)
+  fi
+  [ -n "$group_start" ] || {
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
