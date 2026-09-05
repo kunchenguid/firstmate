@@ -219,7 +219,7 @@ unit_failed_start_rolls_back_state() {
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    FM_SUPERVISOR_BACKEND=unsupported FM_WEDGE_ALARM_CHANNEL=off "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
   elif [ ! -e "$st/state/.afk" ] \
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
@@ -240,9 +240,11 @@ unit_concurrent_start_serialized() {
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & first=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" FM_WEDGE_ALARM_CHANNEL=off \
+    "$LAUNCH" start >/dev/null 2>&1 & first=$!
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & second=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" FM_WEDGE_ALARM_CHANNEL=off \
+    "$LAUNCH" start >/dev/null 2>&1 & second=$!
   wait "$first"; wait "$second"
   rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
   count=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v expected="$rec" '$0 == expected {n++} END{print n+0}')
@@ -488,7 +490,7 @@ unit_native_lifecycle() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL=off "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -759,7 +761,7 @@ unit_clear_failure_aborts_entry() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL=off bash -c '
     . "$1"
     fm_afk_launch_reconcile() { return 0; }
     fm_afk_clear_stale_artifacts() { return 1; }
@@ -812,7 +814,7 @@ unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL=off bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
     ! fm_afk_launch_start_native
@@ -821,6 +823,109 @@ unit_flag_write_failure_aborts() {
     pass "flag failure: lifecycle aborts without active state"
   else
     fail "flag failure: lifecycle reported active state"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT: fm_afk_launch_wedge_alarm_preflight (fresh-entry refusal when no
+# reliable wedge-alarm channel is configured; fm-wedge-alarm-lib.sh).
+# ---------------------------------------------------------------------------
+make_wedge_preflight_case() {  # <name> -> echoes dir; creates state/ and a fake non-Darwin uname on PATH
+  local name=$1 dir fakebin
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-wedge-preflight-$name.XXXXXX")
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/state" "$fakebin"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+SH
+  chmod +x "$fakebin/uname"
+  printf '%s\n' "$dir"
+}
+
+unit_wedge_alarm_preflight_refuses_without_channel() {
+  local st out rc
+  st=$(make_wedge_preflight_case no-channel)
+  # shellcheck disable=SC2016 # $1 expands inside the bash -c subshell, not here.
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    env -u FM_WEDGE_ALARM_CHANNEL bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "no active wedge-alarm channel is configured"; then
+    pass "wedge-alarm preflight: refuses a fresh entry with no configured channel and no platform default"
+  else
+    fail "wedge-alarm preflight: did not refuse with no channel configured (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_wedge_alarm_preflight_accepts_explicit_off() {
+  local st out rc
+  st=$(make_wedge_preflight_case explicit-off)
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL=off \
+    bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+    pass "wedge-alarm preflight: an explicit 'off' acknowledgment passes entry"
+  else
+    fail "wedge-alarm preflight: explicit 'off' unexpectedly refused entry (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_wedge_alarm_preflight_refuses_malformed_directive() {
+  local st out rc
+  st=$(make_wedge_preflight_case malformed)
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL=oascript \
+    bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "no active wedge-alarm channel is configured"; then
+    pass "wedge-alarm preflight: refuses entry on an unrecognized/malformed channel directive"
+  else
+    fail "wedge-alarm preflight: a malformed directive ('oascript') was accepted as reliable (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_wedge_alarm_preflight_refuses_empty_command_directive() {
+  local st out rc
+  st=$(make_wedge_preflight_case empty-command)
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL='command:' \
+    bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "no active wedge-alarm channel is configured"; then
+    pass "wedge-alarm preflight: refuses entry on a bare 'command:' directive with no payload"
+  else
+    fail "wedge-alarm preflight: a bare 'command:' directive was accepted as reliable (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_wedge_alarm_preflight_refuses_whitespace_command_directive() {
+  local st out rc
+  st=$(make_wedge_preflight_case whitespace-command)
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_WEDGE_ALARM_CHANNEL='command:   ' \
+    bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "no active wedge-alarm channel is configured"; then
+    pass "wedge-alarm preflight: refuses entry on a 'command:' directive with a whitespace-only payload"
+  else
+    fail "wedge-alarm preflight: a whitespace-only 'command:' directive was accepted as reliable (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_wedge_alarm_preflight_accepts_command_with_payload() {
+  local st out rc
+  st=$(make_wedge_preflight_case command-payload)
+  out=$(PATH="$st/fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_WEDGE_ALARM_CHANNEL='command:/usr/bin/notify-send' \
+    bash -c '. "$1"; fm_afk_launch_wedge_alarm_preflight' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+    pass "wedge-alarm preflight: a 'command:<cmd>' directive with a real payload passes entry"
+  else
+    fail "wedge-alarm preflight: 'command:<cmd>' with a payload unexpectedly refused entry (rc=$rc): $out"
   fi
   rm -rf "$st"
 }
@@ -863,6 +968,7 @@ e2e_herdr() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    FM_WEDGE_ALARM_CHANNEL=off \
     "$LAUNCH" start >/dev/null 2>&1
 
   during=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
@@ -903,6 +1009,7 @@ e2e_tmux() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    FM_WEDGE_ALARM_CHANNEL=off \
     "$LAUNCH" start >/dev/null 2>&1
 
   during=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
@@ -955,6 +1062,12 @@ unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
+unit_wedge_alarm_preflight_refuses_without_channel
+unit_wedge_alarm_preflight_accepts_explicit_off
+unit_wedge_alarm_preflight_refuses_malformed_directive
+unit_wedge_alarm_preflight_refuses_empty_command_directive
+unit_wedge_alarm_preflight_refuses_whitespace_command_directive
+unit_wedge_alarm_preflight_accepts_command_with_payload
 e2e_herdr
 e2e_tmux
 

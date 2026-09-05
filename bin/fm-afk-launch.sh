@@ -39,6 +39,13 @@
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
 #
+# Both start and start-native refuse a FRESH entry (not a refresh of an
+# already-running daemon) when no active wedge-alarm channel is configured and
+# this platform has no built-in default (fm-wedge-alarm-lib.sh's
+# wedge_alarm_reliable_channel_configured; docs/wedge-alarm.md). Configure
+# config/wedge-alarm with a command: directive, or set it to `off` to
+# explicitly accept the durable marker as the only signal.
+#
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
@@ -79,6 +86,8 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
+# shellcheck source=bin/fm-wedge-alarm-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-wedge-alarm-lib.sh"
 # fm-afk-start.sh provides the daemon-lock liveness helpers and
 # fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
 # main does not run on source. It sets `set -eu`, so turn errexit back off for
@@ -88,6 +97,27 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+# fm_afk_launch_wedge_alarm_preflight: refuse a FRESH away-mode entry when no
+# active wedge-alarm channel is configured AND this platform has no built-in
+# default (fm-wedge-alarm-lib.sh's wedge_alarm_reliable_channel_configured).
+# Without this, a captain on a platform with no built-in channel (verified
+# live, 2026-09-01: Linux, no osascript, no org.freedesktop.Notifications
+# D-Bus service, and herdr's own "notification show" reporting
+# {"reason":"disabled"} rather than posting anything) walks away believing the
+# documented promise - a guard false-positive or a genuine stall becomes a
+# VISIBLE alert - while every future max-defer wedge fires into a channel that
+# was never going to reach anyone. Refusing here, before the captain leaves, is
+# more honest than a silent marker discovered hours later. An explicit `off` in
+# config/wedge-alarm is a deliberate acknowledgment and passes this check, the
+# same as any other explicit channel directive; only the unconfigured/auto
+# default that resolves to nothing is refused.
+fm_afk_launch_wedge_alarm_preflight() {
+  wedge_alarm_reliable_channel_configured && return 0
+  fm_afk_launch_log "refusing away-mode entry: no active wedge-alarm channel is configured, and this platform ($(uname)) has no built-in default; a stuck injection would raise the alarm but reach nobody but the durable state/.subsuper-inject-wedged marker (docs/wedge-alarm.md)"
+  fm_afk_launch_log "configure config/wedge-alarm with a command: directive that can reach you (a phone push, a pager, etc.), or set it to 'off' to explicitly accept the durable marker as the only signal, then retry"
+  return 1
+}
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -482,6 +512,8 @@ fm_afk_launch_start() {
     return 0
   fi
 
+  fm_afk_launch_wedge_alarm_preflight || return 1
+
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1
@@ -540,6 +572,7 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
     return 0
   fi
+  fm_afk_launch_wedge_alarm_preflight || return 1
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
   if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     had_afk=1

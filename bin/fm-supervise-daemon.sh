@@ -639,6 +639,25 @@ pane_is_busy() {  # <target> [backend]
   case "$native" in
     busy) return 0 ;;
   esac
+  # An affirmatively EMPTY composer is positive, structural proof the turn has
+  # ended: the harness renders either a live generating view or an idle prompt,
+  # never both, and inject_msg's own composer guard already requires exactly
+  # this verdict before it will ever type into the pane. Checking it here too
+  # stops the rendered-tail scan below from re-litigating a question this
+  # positive signal has already answered.
+  # Verified incident (2026-09-01, claude-on-herdr): the rendered scan has no
+  # positional anchor - it greps the last 12 non-blank lines for Claude's
+  # busy-shape signature ("…" + a parenthesized elapsed duration), which a
+  # live spinner satisfies but so can ordinary SETTLED reply text several
+  # lines back (e.g. "...holding steady… (2h into the soak test)"). With no
+  # new output to scroll that line out of view - exactly the state of an
+  # away-mode pane whose escalations keep failing to land - the false match
+  # persists for the rest of the session. A live busy pane never shows an
+  # affirmatively empty composer, so this short-circuit never masks a real
+  # busy turn.
+  if [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = empty ]; then
+    return 1
+  fi
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
@@ -719,52 +738,13 @@ escalate_flush() {  # <state>
 # skipped, never crashing the daemon loop - and the durable marker plus the tmux
 # flash stay exactly as before.
 #
-# Config: config/wedge-alarm (local, gitignored), one channel directive per
-# non-empty, non-comment line. FM_WEDGE_ALARM_CHANNEL overrides the file with a
-# single directive. Directives:
-#   off              disable the active alert entirely, regardless of position
-#                    (marker + flash remain)
-#   auto | default   platform default: macOS -> osascript; otherwise none
-#   osascript        macOS Notification Center banner (backend-independent)
-#   herdr            herdr UI notification (herdr notification show)
-#   command:<cmd>    run <cmd> via `sh -c`, summary on $1 and on stdin
-# An absent config means auto, i.e. default-ON on macOS: the alarm's whole
-# purpose is to never be silent, so the reachable OS channel fires unless the
-# captain explicitly disables it.
-
-# Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
-# wins (a single directive); else each non-empty, non-comment line of
-# config/wedge-alarm; else "auto".
-wedge_alarm_configured_channels() {
-  local cfg line found=
-  if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then
-    printf '%s\n' "$FM_WEDGE_ALARM_CHANNEL"
-    return 0
-  fi
-  cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-alarm"
-  if [ -f "$cfg" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [ -n "$line" ] || continue
-      case "$line" in '#'*) continue ;; esac
-      printf '%s\n' "$line"
-      found=1
-    done < "$cfg"
-  fi
-  [ -n "$found" ] || printf 'auto\n'
-}
-
-# Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
-# nothing and wedge_alarm_notify logs that the marker is the only signal.
-wedge_alarm_platform_default() {
-  case "$(uname)" in
-    Darwin) command -v osascript >/dev/null 2>&1 && printf 'osascript' ;;
-    *) : ;;
-  esac
-}
+# Channel config, resolution, and the away-mode-entry reliability check are
+# owned by fm-wedge-alarm-lib.sh (wedge_alarm_configured_channels,
+# wedge_alarm_platform_default, wedge_alarm_reliable_channel_configured) so the
+# runtime alert here and bin/fm-afk-launch.sh's entry-time refusal can never
+# drift apart.
+# shellcheck source=bin/fm-wedge-alarm-lib.sh
+. "$FM_DAEMON_DIR/fm-wedge-alarm-lib.sh"
 
 wedge_alarm_run_bounded() {
   local channel=$1 timeout monitor_was_on=0 pid start elapsed rc

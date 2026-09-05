@@ -2467,6 +2467,7 @@ test_pane_is_busy_herdr_native_busy_state() {
 test_primary_busy_guard_is_harness_scoped() {
   (
     fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_composer_state() { printf 'pending'; }
     fm_backend_capture() { printf 'esc interrupt\n'; }
     if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
       fail "OpenCode's rendered signature must not classify a Claude primary busy"
@@ -2475,6 +2476,35 @@ test_primary_busy_guard_is_harness_scoped() {
       || fail "OpenCode's rendered signature should classify an OpenCode primary busy"
   ) || fail "harness-scoped primary busy guard subshell failed"
   pass "primary busy guard isolates rendered signatures by detected harness"
+}
+
+# Verified live, 2026-09-01 (claude-on-herdr): pane_is_busy's rendered-tail scan
+# has no positional anchor, so Claude's busy-shape signature ("…" + a
+# parenthesized elapsed duration) can match ordinary SETTLED reply text sitting
+# several lines back in scrollback, not just a live spinner footer. With no new
+# output to scroll that line out of view - exactly an away-mode pane whose
+# escalations keep failing to land - the false match persisted for the rest of
+# the session across three separate daemon restarts. An affirmatively empty
+# composer is positive, structural proof the turn has ended (the harness shows
+# either a live generating view or an idle prompt, never both), so it must
+# short-circuit the scan before the scan ever runs.
+test_pane_is_busy_empty_composer_overrides_settled_scrollback_match() {
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'empty'; }
+    fm_backend_capture() { fail "the rendered-tail scan must not run once the composer is proven empty"; }
+    if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "an affirmatively empty composer must not be overridden by a settled-scrollback regex match"
+    fi
+  ) || fail "empty-composer override subshell failed"
+  (
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_composer_state() { printf 'pending'; }
+    fm_backend_capture() { printf 'Captain, the fix is deployed and holding steady… (2h into the soak test)\n'; }
+    FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
+      || fail "a genuinely unproven composer should still fall through to the rendered-tail scan"
+  ) || fail "non-empty-composer fallback subshell failed"
+  pass "pane_is_busy: an affirmatively empty composer overrides a settled-scrollback signature match"
 }
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
@@ -2730,6 +2760,7 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
+test_pane_is_busy_empty_composer_overrides_settled_scrollback_match
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

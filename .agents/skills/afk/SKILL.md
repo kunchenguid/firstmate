@@ -94,6 +94,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
 - **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
+  The rendered scan has no positional anchor - it can match settled SCROLLBACK text, not only a live spinner footer - so an affirmatively empty composer (proof the turn has ended) short-circuits it first; a genuinely busy pane never reads empty (verified live, 2026-09-01: claude-on-herdr).
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
   Each adapter contributes only capture and capability facts to the fleet-wide screen classifier in `bin/fm-composer-lib.sh`, which owns every shape and verdict.
@@ -113,6 +114,7 @@ an ERROR in the daemon log, a durable
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+`bin/fm-afk-launch.sh start`/`start-native` refuse a fresh entry when no channel can plausibly reach the captain (`docs/wedge-alarm.md` "Away-mode entry check"), so that promise is checked before the captain walks away, not just at failure time.
 
 ## Submit model
 

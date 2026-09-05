@@ -505,6 +505,43 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Away-mode supervisor busy guard
+
+Investigated 2026-09-01 (claude-on-herdr, Herdr 0.8.2, Claude Code 2.1.257) after two real away-mode sessions delivered zero escalations for over two hours each, every 15s cycle logging `inject deferred: supervisor pane busy (agent mid-turn)` while the supervisor pane was actually idle.
+
+The primary hypothesis under investigation - that hosting the daemon as a harness-native tracked background job makes `pane_is_busy` read its own hosting pane as permanently busy - was DISPROVEN by live measurement in an isolated Herdr lab session (`tests/`'s pattern; a real `claude` process, not a stub). None of the following tripped `fm_backend_busy_state`/`fm_busy_lines_match` while the pane was genuinely idle:
+
+- A single or long-lived (900s) tracked background shell in the hosting pane.
+- The real `bin/fm-supervise-daemon.sh`, launched exactly as production does (`bin/fm-afk-start.sh` via Claude's native background-bash tool) against a throwaway `FM_HOME`, targeting its own hosting pane via `HERDR_ENV`/`HERDR_PANE_ID` auto-discovery - confirmed by a real seeded escalation being delivered end to end with the background daemon and an extra background shell both alive.
+- A live background Task-tool subagent running concurrently.
+
+The actual cause: `pane_is_busy`'s rendered-tail fallback (`fm_busy_lines_match`, used when Herdr's native agent-state is not `busy`) scans the last 12 non-blank lines of the pane with no positional anchor.
+Claude's busy-shape signature (an ellipsis followed by a parenthesized elapsed duration, `…[[:space:]]+\([0-9]+[smh]`) is satisfied by a live spinner footer, but nothing in the match requires that - it is equally satisfied by ordinary SETTLED reply text sitting several lines back in scrollback, for example a firstmate reply mentioning "...holding steady… (2h into the soak test)".
+
+Reproduced live:
+
+```sh
+# idle pane, no matching text on screen
+fm_backend_busy_state herdr "$TARGET"   # -> idle
+# same idle pane, after the pane's own PRIOR reply contains "...(2h into the soak test)"
+fm_backend_busy_state herdr "$TARGET"   # native busy_state is unaffected (still idle);
+                                         # pane_is_busy's rendered fallback now matches -> busy
+```
+
+With no new output ever landing while escalations keep failing to deliver, nothing scrolls the offending line out of the scanned window, so the false match persists for the rest of the session - matching the observed multi-hour, cross-restart persistence exactly.
+The fix (`bin/fm-supervise-daemon.sh`'s `pane_is_busy`) checks `fm_backend_composer_state` for an affirmatively `empty` composer before running the rendered scan: a genuinely busy pane never reads an empty composer (the harness renders either a live generating view or an idle prompt, never both), so this short-circuit cannot mask a real busy turn.
+Regression coverage: `tests/fm-daemon.test.sh`'s `test_pane_is_busy_empty_composer_overrides_settled_scrollback_match`.
+
+The terminal-backed launch path (`bin/fm-afk-launch.sh start`) and the native-hosted path (`start-native`) share the identical `pane_is_busy` call against the same captain-pane target, so this was never specific to native hosting; both paths are fixed by the same change, and no afk-skill harness-routing change was needed.
+
+Deterministic entry points:
+
+```sh
+tests/fm-daemon.test.sh
+tests/fm-afk-inject-e2e.test.sh
+tests/fm-afk-inject-herdr-e2e.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
@@ -537,3 +574,21 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+### No reliable Linux default, 2026-09-01
+
+Bounded manually on Linux 6.6.87.2-microsoft-standard-WSL2, Herdr 0.8.2, in an isolated Herdr lab session (no client attached to that headless server):
+
+```sh
+$ herdr notification show 'wedge-test' --body probe --sound none --session "$LAB_SESSION"
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+$ dbus-send --session --dest=org.freedesktop.Notifications --type=method_call --print-reply \
+    /org/freedesktop/Notifications org.freedesktop.Notifications.GetServerInformation
+Error org.freedesktop.DBus.Error.ServiceUnknown: The name org.freedesktop.Notifications was not provided by any .service files
+$ command -v notify-send; command -v osascript   # both absent
+```
+
+No `org.freedesktop.Notifications` D-Bus service is registered on this machine at all, so neither the `herdr` channel nor a hypothetical `notify-send`-style channel has anywhere to deliver to; `auto`/`default` (the config-absent case) resolves to nothing here, matching `wedge_alarm_platform_default`'s documented non-macOS behavior.
+This is why the entry-time refusal (`bin/fm-wedge-alarm-lib.sh`'s `wedge_alarm_reliable_channel_configured`, wired into `bin/fm-afk-launch.sh`) was chosen over asserting a working default Linux channel: none was clearly available to assert.
+
+Deterministic entry point: `tests/fm-afk-launch.test.sh`.
