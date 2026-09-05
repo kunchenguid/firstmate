@@ -44,7 +44,9 @@
 #            A second reply staged before consumption is appended after one
 #            blank line, so concurrent host progress is not overwritten.
 #            Reply delivery is bound to the registration generation active when
-#            the acknowledgement was staged.
+#            the acknowledgement was staged. A matching legacy registration is
+#            upgraded atomically before staging. In-flight state is committed
+#            only after the poll returns a nonempty successful response.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -404,7 +406,7 @@ cmd_reply() {
   host_status=${FM_LAVISH_HOST_STATUS_FILE-}
   host_status_path_validate "$host_status" \
     || die "FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
-  generation_line=$("$SCRIPT_DIR/fm-procevent.sh" generation "$id" --if-matches lavish -- \
+  generation_line=$("$SCRIPT_DIR/fm-procevent.sh" generation "$id" --upgrade-legacy --if-matches lavish -- \
     "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" 2>/dev/null) || generation_line=
   case "$generation_line" in
     'generation: '*) generation=${generation_line#generation: } ;;
@@ -609,7 +611,6 @@ take_pending_reply() {  # <artifact>
 POLL_RETRY_LIMIT=12
 POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MAX=60
-POLL_REPLY_GRACE_TICKS=100
 
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
 # response must be those two lines with those exact bytes: whitespace variants,
@@ -681,7 +682,7 @@ poll_retry_delay() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response poll_pipe cleanup_command rc filter_rc
-  local poll_pid='' filter_pid='' restart_signal='' grace_tick reply_claimed
+  local poll_pid='' filter_pid='' restart_signal='' reply_claimed
   local -a poll_argv
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
@@ -735,20 +736,6 @@ cmd_poll() {
     poll_pid=$!
     poll_response_filter "$response" < "$poll_pipe" &
     filter_pid=$!
-    if [ "$reply_claimed" -eq 1 ]; then
-      grace_tick=0
-      while [ "$grace_tick" -lt "$POLL_REPLY_GRACE_TICKS" ] \
-        && [ -z "$restart_signal" ] && kill -0 "$poll_pid" 2>/dev/null; do
-        sleep 0.05
-        grace_tick=$((grace_tick + 1))
-      done
-      if [ "$grace_tick" -eq "$POLL_REPLY_GRACE_TICKS" ] \
-        && [ -z "$restart_signal" ] && kill -0 "$poll_pid" 2>/dev/null; then
-        commit_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
-      else
-        restore_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
-      fi
-    fi
     wait "$poll_pid"
     rc=$?
     if [ -n "$restart_signal" ]; then
@@ -758,6 +745,15 @@ cmd_poll() {
     wait "$filter_pid"
     filter_rc=$?
     filter_pid=
+    if [ "$reply_claimed" -eq 1 ]; then
+      if [ -z "$restart_signal" ] && [ "$rc" -eq 0 ] \
+        && { [ "$filter_rc" -eq 0 ] || [ "$filter_rc" -eq 10 ]; } \
+        && [ -s "$response" ]; then
+        commit_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
+      else
+        restore_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
+      fi
+    fi
     if [ -n "$restart_signal" ]; then
       case "$restart_signal" in
         HUP) return 129 ;;

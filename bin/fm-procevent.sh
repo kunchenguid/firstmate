@@ -7,7 +7,7 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
-#   fm-procevent.sh generation <source-id> --if-matches <adapter> -- <argv>...
+#   fm-procevent.sh generation <source-id> [--upgrade-legacy] --if-matches <adapter> -- <argv>...
 #   fm-procevent.sh restart <source-id> [--if-generation <registration-token>] --if-matches <adapter> -- <argv>...
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
@@ -45,7 +45,8 @@
 #            captured result ends the source and retires the registration when it
 #            says so, so a source that has ended stops being restarted.
 # generation Print the current built-in registration generation after exact
-#            adapter and argv matching.
+#            adapter and argv matching. --upgrade-legacy atomically republishes
+#            an exact legacy built-in record with a fresh runner-owned token.
 # restart    Signal this home's runner-owned registered-command child, wait for
 #            the runner to drain and release it, then immediately launch the
 #            registered built-in command again.
@@ -1206,9 +1207,17 @@ runner_child_load_locked() {  # <source-id> <runner-pid> <claim-token>
 }
 
 cmd_generation() {
-  local id=${1-} condition=${2-} adapter=${3-} sep=${4-} generation
-  shift 4 2>/dev/null || usage
+  local id=${1-} upgrade_legacy=0 condition adapter sep generation
+  shift 1 2>/dev/null || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  if [ "${1-}" = --upgrade-legacy ]; then
+    upgrade_legacy=1
+    shift
+  fi
+  condition=${1-}
+  adapter=${2-}
+  sep=${3-}
+  shift 3 2>/dev/null || usage
   [ "$condition" = --if-matches ] || usage
   fm_procevent_adapter_valid "$adapter" \
     || die "adapter name must be lowercase alphanumeric or dash: $adapter"
@@ -1218,10 +1227,15 @@ cmd_generation() {
     fm_procevent_source_lock_release "$id"
     die "source registration does not match the expected owner: $id"
   fi
-  generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
-    fm_procevent_source_lock_release "$id"
-    die "cannot read source registration generation: $id"
-  }
+  if ! generation=$(fm_procevent_registration_generation_locked "$STATE" "$id"); then
+    if [ "$upgrade_legacy" -eq 1 ] \
+      && fm_procevent_registration_publish_locked "$STATE" "$adapter" "$id" "$@"; then
+      generation=$FM_PROCEVENT_REGISTRATION_TOKEN
+    else
+      fm_procevent_source_lock_release "$id"
+      die "cannot read source registration generation: $id"
+    fi
+  fi
   fm_procevent_source_lock_release "$id"
   printf 'generation: %s\n' "$generation"
 }

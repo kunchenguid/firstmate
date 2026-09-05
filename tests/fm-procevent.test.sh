@@ -618,11 +618,12 @@ done
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
 assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
-assert_contains "$(cat "$HLT_STATUS")" \
-  "acknowledgement: Working on the final requested change.; reason: source ended before delivery" \
-  "terminal retirement did not preserve its claimed acknowledgement in host status"
 assert_absent "$HLT/state/procevent/$lavish_id.pending-reply" \
-  "terminal retirement left its recorded pending acknowledgement"
+  "a successful terminal response left its committed acknowledgement pending"
+assert_absent "$HLT/state/procevent/$lavish_id.inflight-reply" \
+  "a successful terminal response left its committed acknowledgement in flight"
+assert_absent "$HLT_STATUS" \
+  "a successful terminal response incorrectly fell back to host status"
 LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
 assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
@@ -1428,6 +1429,7 @@ RESTART_LOG="$TMP_ROOT/reply-restart.log"
 mkdir -p "$REPLY_RUNTIME/bin" "$REPLY_BIN"
 new_home "$REPLY_HOME"
 chmod 700 "$REPLY_HOME/state"
+export GENERATION_RUNNER="$ROOT/bin/fm-procevent.sh"
 cp "$ROOT/bin/fm-procevent-lavish.sh" "$ROOT/bin/fm-procevent-lib.sh" \
   "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$REPLY_RUNTIME/bin/"
 cat > "$REPLY_RUNTIME/bin/fm-procevent.sh" <<'SH'
@@ -1441,11 +1443,7 @@ file_identity() {
 }
 case "${1-}" in
   generation)
-    source="$FM_HOME/state/procevent/$2.source"
-    [ -f "$source" ] && [ ! -L "$source" ] || exit 1
-    token=$(sed -n 's/^registration_token=//p' "$source")
-    [ -n "$token" ] || exit 1
-    printf 'generation: %s\n' "$token"
+    exec "$GENERATION_RUNNER" "$@"
     ;;
   restart)
     printf '%s\n' "$*" >> "$RESTART_LOG"
@@ -1495,6 +1493,7 @@ cat > "$REPLY_BIN/lavish-axi" <<'SH'
 case "${REPLY_BEHAVIOR:-success}" in
   block) while :; do sleep 1; done ;;
   commit) sleep 6; printf 'session:\n  file: fixture\n  status: waiting\n' ;;
+  empty) : ;;
   fail) exit 23 ;;
   success) printf 'session:\n  file: fixture\n  status: waiting\n' ;;
 esac
@@ -1508,6 +1507,12 @@ reply_id=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+reply_source="$REPLY_HOME/state/procevent/$reply_id.source"
+{
+  printf 'adapter=lavish\nargc=3\nargv:\n'
+  printf '%s\n' "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART"
+} > "$reply_source"
+chmod 0600 "$reply_source"
 
 newline_reply_status=0
 newline_reply_out=$(printf '\n\n' | FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
@@ -1523,6 +1528,16 @@ assert_absent "$RESTART_LOG" "newline-only reply input restarted the listener"
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
   FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" "First change applied." >/dev/null
+upgraded_generation_out=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" generation "$reply_id" --if-matches lavish -- \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART")
+upgraded_generation=${upgraded_generation_out#generation: }
+case "$upgraded_generation" in
+  sha256:*) ;;
+  *) fail "reply did not atomically upgrade its matching legacy registration" ;;
+esac
+[ "${#upgraded_generation}" -eq 71 ] \
+  || fail "reply registration token has the wrong length"
 printf '\nSecond change applied.\nWith detail.\n' | \
   FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
     FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
@@ -1622,8 +1637,8 @@ done
 assert_present "$inflight_reply" "blocking poll did not claim the pending reply"
 kill -TERM "$reply_poll_pid"
 wait "$reply_poll_pid" 2>/dev/null || true
-assert_present "$pending_reply" "termination inside the grace window lost the reply"
-assert_absent "$inflight_reply" "termination inside the grace window left an in-flight reply"
+assert_present "$pending_reply" "termination before a response lost the reply"
+assert_absent "$inflight_reply" "termination before a response left an in-flight reply"
 
 REPLY_BEHAVIOR=block PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
   FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
@@ -1633,15 +1648,27 @@ for _ in $(seq 1 100); do
   [ -e "$inflight_reply" ] && break
   sleep 0.02
 done
-assert_present "$inflight_reply" "delivery-grace poll did not claim the pending reply"
-for _ in $(seq 1 150); do
-  [ ! -e "$inflight_reply" ] && break
+assert_present "$inflight_reply" "stalled poll did not claim the pending reply"
+for _ in $(seq 1 110); do
+  [ -e "$inflight_reply" ] || fail "process liveness committed a reply before poll progress"
   sleep 0.05
 done
-assert_absent "$inflight_reply" "reply remained in flight after the delivery grace window"
-assert_absent "$pending_reply" "committed reply returned to pending after the grace window"
+assert_present "$inflight_reply" "stalled poll lost its in-flight reply"
+assert_absent "$pending_reply" "stalled poll returned its reply before termination"
 kill -TERM "$reply_poll_pid"
 wait "$reply_poll_pid" 2>/dev/null || true
+assert_present "$pending_reply" "termination after prolonged liveness lost the reply"
+assert_absent "$inflight_reply" "termination after prolonged liveness left an in-flight reply"
+REPLY_BEHAVIOR=empty PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+assert_present "$pending_reply" "an empty successful exit committed an unproven reply"
+assert_absent "$inflight_reply" "an empty successful exit left an unproven reply in flight"
+REPLY_BEHAVIOR=success PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
+  FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+assert_absent "$pending_reply" "successful poll response restored a committed reply"
+assert_absent "$inflight_reply" "successful poll response left a committed reply in flight"
 
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
   FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
@@ -1771,8 +1798,21 @@ restart_generation_out=$(pe "$RESTART_HOME" generation restart-src --if-matches 
 restart_generation=${restart_generation_out#generation: }
 assert_contains "$restart_register_out" "registration-token: $restart_generation" \
   "generation did not return the token printed when the source was registered"
+initial_restart_generation=$restart_generation
+restart_source="$RESTART_HOME/state/procevent/restart-src.source"
+{
+  printf 'adapter=lavish\nargc=2\nargv:\n'
+  printf '%s\n' "$RESTART_BLOCKER" "$RESTART_STARTED"
+} > "$restart_source"
+chmod 0600 "$restart_source"
 pe "$RESTART_HOME" reconcile >/dev/null
 wait_for_lines "$RESTART_STARTED" 1 || fail "restart fixture did not start its first generation"
+restart_generation_out=$(pe "$RESTART_HOME" generation restart-src --upgrade-legacy \
+  --if-matches lavish -- "$RESTART_BLOCKER" "$RESTART_STARTED") \
+  || fail "generation did not upgrade the live matching legacy registration"
+restart_generation=${restart_generation_out#generation: }
+[ "$restart_generation" != "$initial_restart_generation" ] \
+  || fail "legacy registration upgrade reused its prior token"
 pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
   --if-matches lavish -- \
   "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
