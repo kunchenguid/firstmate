@@ -795,6 +795,107 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# Execute the actual emitted command in a synthetic pane environment: the
+# fake backend records delivery, while real shells exercise the env boundary.
+# No developer environment or credential values are inspected by these probes.
+test_launch_environment_allowlist() {
+  local setting rec id out status probe result expected launch value pane_shell
+  # shellcheck disable=SC2016
+  value='synthetic value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
+  for setting in absent enabled empty; do
+    id="env-$setting"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    case "$setting" in
+      enabled) printf '# Synthetic credential name\nFM_TEST_ALLOWED\nFM_TEST_EMPTY\nFM_TEST_UNSET\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
+      empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
+    esac
+    probe="$CASE_DIR/probe.sh"
+    cat > "$probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
+  "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
+SH
+    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+    status=$?
+    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+      [ -x "$pane_shell" ] || continue
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+      FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
+      "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
+      case "$setting" in
+        absent) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
+        enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
+        empty) expected=$(printf '%s\n' unset unset unset unset) ;;
+      esac
+      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n/usr/bin:/bin\nxterm\nsynthetic-pane\n/synthetic/gotmp'
+      [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
+    done
+    pass "allowlist=$setting preserves the operational floor and filters only when opted in"
+  done
+}
+
+test_launch_environment_invalid_config_refuses() {
+  local rec id bad out status
+  id=env-invalid
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  for bad in 'FM_TEST_ALLOWED=value' 'NAME;false' '1INVALID' '*'; do
+    printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "invalid allowlist must refuse spawn"
+    assert_contains "$out" 'launch-env-allowlist' "refusal must identify the config file"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid allowlist delivered a launch command"
+    [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "invalid allowlist published a task"
+  done
+  pass "invalid allowlist names refuse before launch or task publication"
+}
+
+test_launch_environment_inherited_by_secondmate() {
+  local rec id sm out status result
+  id=env-secondmate
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
+  cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
+    || fail "secondmate did not inherit the launch environment contract"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
+    /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
+  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
+    || fail "secondmate's environment lost filtering or explicit home assignments: $result"
+  # Exercise the same inheritance owner used by local and remote transfers;
+  # removal must restore absence downstream as well as copying an opt-in.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-config-inherit-lib.sh"
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    propagate_secondmate_inheritance "$HOME_DIR" "$sm" >/dev/null
+  ) || fail "allowlist removal failed to converge"
+  [ ! -e "$sm/config/launch-env-allowlist" ] || fail "secondmate retained a removed allowlist"
+  pass "secondmate launch inherits the allowlist for subsequent worker launches"
+}
+
+test_launch_environment_allowlist
+test_launch_environment_invalid_config_refuses
+test_launch_environment_inherited_by_secondmate
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
