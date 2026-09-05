@@ -313,6 +313,7 @@ fm_composer_strip_ghost() {
 # outside its composer and the composer verdict is therefore always `unknown`.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_DELIVERY_CLAUDE_CURRENT_FOOTER_REGEX='^[[:space:]]*(esc to interrupt|thinking\.\.\.[[:space:]]+esc to interrupt|[^[:space:]]+[[:space:]]+[^[:space:]]+…[[:space:]]+\([0-9]+[smh]([[:space:]]+[·•][^)]*)?\))[[:space:]]*$'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -350,6 +351,38 @@ fm_busy_lines_match() {  # [harness]
     esac
   fi
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+}
+
+# fm_claude_current_footer_busy returns 0 for busy, 1 for idle, and 2 for
+# unreadable or structurally ambiguous state.
+fm_claude_current_footer_busy() {
+  local lines plain footer footer_row composer caps verdict
+  IFS= read -r -d '' lines || true
+  [ -n "$lines" ] || return 2
+  plain=$(printf '%s' "$lines" | fm_composer_strip_ansi) || return 2
+  footer=$(printf '%s\n' "$plain" | awk 'NF { row=$0 } END { if (row != "") print row }')
+  footer_row=$(printf '%s\n' "$plain" | awk 'NF { row=NR - 1 } END { if (row != "") print row }')
+  fm_composer_normalize_trim_var footer
+  [ -n "$footer" ] && [ -n "$footer_row" ] || return 2
+  composer=$(printf '%s\n' "$plain" | awk '
+    { rows[NR]=$0 }
+    NF { last=NR }
+    END { for (row=1; row < last; row++) print rows[row] }
+  ')
+  caps=$(printf '%s\n' 'styled=0' 'cursor=0' 'identity=0' 'rows=12')
+  verdict=$(fm_composer_classify_screen "$caps" "$composer")
+  [ "$verdict" = empty ] || return 2
+  _fm_composer_scan_screen "$composer" ''
+  _fm_composer_select_cursorless "$composer" || return 2
+  [ "$footer_row" -eq $((FM_COMPOSER_SELECTED_BOUNDARY + 1)) ] || return 2
+  if [ -n "${FM_BUSY_REGEX:-}" ]; then
+    if printf '%s\n' "$footer" | fm_busy_lines_match claude; then
+      return 0
+    fi
+  elif printf '%s\n' "$footer" | grep -qE "$FM_DELIVERY_CLAUDE_CURRENT_FOOTER_REGEX"; then
+    return 0
+  fi
+  return 1
 }
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
@@ -1024,11 +1057,12 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed
+  local plain=$1 generic=-1 next boundary=-1 raw trimmed
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
   FM_COMPOSER_SELECTED_AMBIG=0
+  FM_COMPOSER_SELECTED_BOUNDARY=-1
   if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
     FM_COMPOSER_SELECTED_KIND=box
@@ -1104,6 +1138,19 @@ _fm_composer_select_cursorless() {
       return 1
     fi
   fi
+  case "$FM_COMPOSER_SELECTED_KIND" in
+    box|leftbar) ;;
+    bare)
+      boundary=$FM_COMPOSER_SELECTED_LAST
+      next=$((boundary + 1))
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      if [ -n "$trimmed" ] && fm_composer_row_has_edge "$trimmed"; then boundary=$next; fi
+      ;;
+    pi) boundary=$FM_COMPOSER_SCAN_PI_CLOSE ;;
+  esac
+  FM_COMPOSER_SELECTED_BOUNDARY=$boundary
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 

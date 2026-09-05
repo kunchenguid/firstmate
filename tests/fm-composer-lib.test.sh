@@ -271,17 +271,17 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # footer, whose real content turns an idle pane into a false `pending`.
   # Captured live from a herdr cursor pane.
   local screen plain out
-  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  plain=$'transcript\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
   # The closing rule must bound the region, so the footer below is not input.
-  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+  fm_composer_row_has_edge " $(printf '▀▀▀')" \
     || fail "a half-block rule row must count as a structural edge"
-  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+  fm_composer_row_has_edge " $(printf '▄▄▄')" \
     || fail "the upper half-block rule must count as a structural edge"
   # Non-vacuousness: the footer rows really are non-blank content that would be
   # swallowed if the rule did not bound the region.
   case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
   ESC_LOCAL=$(printf '\033')
-  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"  ${ESC_LOCAL}[2m→ ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
@@ -664,3 +664,22 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+test_claude_current_footer_requires_selected_composer_adjacency() {
+  local foreign genuine rc
+  foreign=$'────────────────────────\n❯\n────────────────────────\nClaude 4.1\n✲ Working… (4s)\n'
+  if printf '%s' "$foreign" | fm_claude_current_footer_busy; then
+    fail "a foreign Working row below an idle Claude composer must not read busy"
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] \
+    || fail "a foreign Working row outside the selected composer boundary must read unknown, got rc=$rc"
+
+  genuine=$'────────────────────────\n❯\n────────────────────────\n✲ Pollinating… (16s · ↓ 1.1k tokens)\n'
+  printf '%s' "$genuine" | fm_claude_current_footer_busy \
+    || fail "a genuine Claude mid-turn footer immediately below its composer must read busy"
+  pass "fm_claude_current_footer_busy: the footer belongs to the selected composer boundary"
+}
+
+test_claude_current_footer_requires_selected_composer_adjacency

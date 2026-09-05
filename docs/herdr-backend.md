@@ -228,6 +228,8 @@ Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn comp
 That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
 It is the same semantic signal the native path uses and the same one the tmux submit core reads.
 A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
+For a known Claude target, the rendered-busy predicate accepts an active-turn signature only when the final nonblank footer row is immediately below the selected composer boundary, including a structural closing edge the shared classifier proves for that screen shape.
+A footer-like row outside that boundary is structurally ambiguous and returns `unknown`, including a foreign `Working` row below an idle Claude composer.
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
 

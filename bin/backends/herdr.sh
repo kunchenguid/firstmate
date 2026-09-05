@@ -2684,6 +2684,17 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
   cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
   visible=$(printf '%s' "$cap" | grep -v '^[[:space:]]*$' | tail -12)
   [ -n "$visible" ] || { printf 'unknown'; return 0; }
+  if [ "$harness" = claude ]; then
+    if printf '%s' "$visible" | fm_claude_current_footer_busy; then
+      printf 'busy'
+    else
+      case "$?" in
+        1) printf 'idle' ;;
+        *) printf 'unknown' ;;
+      esac
+    fi
+    return 0
+  fi
   if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else
