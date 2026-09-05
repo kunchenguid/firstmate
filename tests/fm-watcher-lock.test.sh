@@ -374,6 +374,42 @@ test_lock_walks_a_fully_abandoned_steal_chain() {
   pass "a fully abandoned steal chain is walked and cleaned up"
 }
 
+# A crash between a reclaim's fm_lock_remove_path "$lockdir" and its paired
+# fm_lock_try_create/fm_lock_release leaves the lock path absent while its
+# steal companion still exists, abandoned. That is still something to
+# displace one level down, so it must recover like the fully abandoned chain
+# above rather than being refused like the truly uncreatable case below.
+test_lock_recovers_when_only_the_steal_companion_remains() {
+  local dir state lockdir rc newpid
+  dir=$(make_case lock-steal-only)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_try_acquire "$2.steal" || exit 7
+    fm_lock_remove_path "$2" || exit 7
+    kill -9 "${BASHPID:-$$}"
+  ' _ "$LIB" "$lockdir" >/dev/null 2>&1
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fail "lockdir unexpectedly present before acquire"
+  fi
+  if [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ]; then
+    fail "abandoned steal companion was not built"
+  fi
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer refused a lock rooted only in an abandoned steal companion (rc=$rc)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  if [ -e "$lockdir.steal" ] || [ -L "$lockdir.steal" ]; then
+    fail "abandoned steal companion was reclaimed but not cleaned up"
+  fi
+  pass "a lock rooted only in an abandoned steal companion is walked and cleaned up"
+}
+
 # The mirror case: no abandoned holder to displace at all. Every deeper steal
 # level fails identically while the name grows, so the recursion never returns.
 # Bounded here rather than left to hang, since the regression is an unbounded
@@ -1195,6 +1231,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_walks_a_fully_abandoned_steal_chain
+test_lock_recovers_when_only_the_steal_companion_remains
 test_lock_refuses_to_recurse_when_the_lock_cannot_be_created
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
