@@ -433,14 +433,30 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   pass "empty prefix mate cleanup preserves another mate's stall receipt"
 }
 
-test_drain_asserts_watcher_liveness() {
+# The drain runs bin/fm-guard.sh, which no longer reports watcher liveness at
+# all: the passive "WATCHER DOWN - SUPERVISION IS OFF" banner was removed for
+# every supervision model after the 2026-09-04 investigation showed it could not
+# tell a working watcher from a stopped one, and nothing replaced it. What this
+# case pins is that the removal is complete on the drain path in BOTH directions,
+# and that it did not take the independent queued-wakes warning with it.
+test_drain_reports_no_watcher_liveness() {
   local dir state err identity
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
-  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
+
+  # Work in flight and no live watcher at all: the worst reading the old banner
+  # had, and the one it was wrong about nearly every time.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with no live watcher"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "the removed watcher-down banner is back on the drain path"
+  ! grep -F 'SUPERVISION IS OFF' "$err" >/dev/null \
+    || fail "the removed supervision-off text is back on the drain path"
+  ! grep -F 'watcher still down' "$err" >/dev/null \
+    || fail "the removed episode reminder is back on the drain path"
+
+  # A live, identity-matched watcher with a fresh beacon: silent, as before.
   : > "$err"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
     || fail "could not identify the live watcher fixture"
@@ -452,10 +468,10 @@ test_drain_asserts_watcher_liveness() {
   touch "$state/.last-watcher-beat"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" \
     || fail "drain failed with a live watcher and fresh beacon"
-  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed with a live watcher and fresh beacon"
-  fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "drain false-alarmed with a live watcher and fresh beacon"
+
+  pass "the drain reports nothing about watcher liveness, in either direction"
 }
 
 test_structural_signal_enrichment_preserves_raw_rows() {
@@ -1586,7 +1602,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
-test_drain_asserts_watcher_liveness
+test_drain_reports_no_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
