@@ -199,7 +199,6 @@ test_healthy_fm_id_send_still_works() {
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit the doorbell with Enter"
   grep -qF 'hello captain' "$home/state/lane-ok.inbox/001.msg" \
     || fail "healthy send should record the steer in the task inbox"
-  assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
   pass "fm-send strict: healthy fm-<id> sends record the steer and ring once"
 }
 

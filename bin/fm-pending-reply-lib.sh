@@ -671,10 +671,10 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   # in a plain function would clobber the caller's own.
   local state=$1 corr=$2 lock rc=0 settled
   # Already settled and archived: resolution is idempotent, so answer from the
-  # archive without taking the lock. Retention moves a record out of the hot set
-  # the moment it resolves (fm_pending_reply_archive), so without this a repeat
-  # resolve of the same correlation would read as a failure purely because the
-  # record had been filed away.
+  # archive without taking the lock. Retention moves settled records out of the
+  # hot set during a watcher tick, so without this a repeat resolve of the same
+  # correlation would read as a failure purely because the record had been filed
+  # away.
   settled="$(fm_pending_reply_archive_dir "$state")/$corr"
   if [ ! -f "$(fm_pending_reply_path "$state" "$corr")" ] && [ -f "$settled" ]; then
     [ "$(fm_pending_reply_get "$settled" phase)" = resolved ] && return 0
@@ -739,17 +739,6 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
-  # Retention: a settled record leaves the hot set the moment it settles, so the
-  # watcher tick's working set is open records only. Before this, every settled
-  # record was re-read on every poll forever - 1,883 of them cost ~103s per poll
-  # on this home and grew by roughly 3s a day, which is what pushed a single poll
-  # iteration past the liveness grace (2026-09-04 supervision investigation).
-  # Only archive once the escalation is closed, so the retry above still has a
-  # hot record to converge on.
-  if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
-    || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-    _fm_pending_reply_archive_locked "$state" "$corr" || true
-  fi
   return 0
 }
 

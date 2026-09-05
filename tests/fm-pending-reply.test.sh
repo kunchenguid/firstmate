@@ -440,8 +440,8 @@ test_legacy_escalation_closes_default_decision() {
     || fail "legacy escalation did not append one guarded default-key resolution"
   open=$(status_open_decisions "$state/hibit.status")
   [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
-  # Retention moves a settled record into pending-replies/archive/, so the path
-  # captured before the resolve above is stale here: re-locate it.
+  # Retention may move a settled record into pending-replies/archive/, so use
+  # the lookup that remains valid before and after the watcher tick.
   rec=$(record_of "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "legacy escalation closure was not recorded"
@@ -688,7 +688,8 @@ test_delivery_confirmation_fallback_reconciles() {
     fm_pending_reply_tick "$state" || fail "watcher should accept a late delivery report"
     [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
       || fail "late report should resolve escalated delivery-unknown"
-    # The record settled during that tick, so retention filed it under archive/.
+    # The record settled during that tick and remains available until retention
+    # files it during the next tick.
     prepared_rec=$(record_of "$state" "$prepared_corr")
     [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
       || fail "late report should provide delivery evidence"
@@ -708,7 +709,8 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "attempted delivery with a report should resolve directly"
     [ "$(phase_of "$state" "$reported_corr")" = resolved ] \
       || fail "correlated report should resolve attempted delivery"
-    # Settled during the resolve above, so retention filed it under archive/.
+    # Direct resolution leaves the settled record available until the watcher
+    # tick files it under archive/.
     reported_rec=$(record_of "$state" "$reported_corr")
     [ "$(fm_pending_reply_get "$reported_rec" delivered_epoch)" = 5800 ] \
       || fail "correlated report should provide delivery evidence"
@@ -1583,7 +1585,7 @@ test_local_parent_replies_is_wrong_home_evidence
 # already-settled record on every poll. 1,883 of them cost about 103s per poll on
 # the primary home and grew by roughly 3s a day, which is what pushed a single
 # watch iteration past the 300s liveness grace and made a healthy watcher read as
-# dead. Settled records now leave the hot set at resolve time.
+# dead. Settled records now leave the hot set on the next watcher tick.
 
 test_settled_record_leaves_the_hot_set() {
   local home state corr hot archive
@@ -1596,6 +1598,7 @@ test_settled_record_leaves_the_hot_set() {
   [ -f "$hot" ] || fail "an open record must live in the hot set"
   printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  fm_pending_reply_tick "$state" || fail "tick should archive the settled record"
   archive="$(fm_pending_reply_archive_dir "$state")/$corr"
   [ ! -e "$hot" ] || fail "a settled record must leave the hot set"
   [ -f "$archive" ] || fail "a settled record must be filed under archive/"
@@ -1618,6 +1621,7 @@ test_tick_scans_only_open_records() {
     printf 'done [corr=%s]: settled %s\n' "$settled" "$i" >> "$state/hibit.status"
     fm_pending_reply_try_resolve "$state" "$settled" || fail "settled $i should resolve"
   done
+  fm_pending_reply_tick "$state" || fail "tick should archive settled records"
   # The hot directory is the tick's working set: it must hold the open record and
   # the archive directory, and nothing else.
   scanned=0
@@ -1641,6 +1645,7 @@ test_archived_record_is_still_found_by_correlation_id() {
   fm_pending_reply_mark_delivered "$state" "$corr"
   printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  fm_pending_reply_tick "$state" || fail "tick should archive the settled record"
   # Lazy lookup by id spans both sets, which is what lets the hot set shrink.
   [ -n "$(fm_pending_reply_locate "$state" "$corr")" ] \
     || fail "an archived record must still be locatable by correlation id"
@@ -1712,6 +1717,7 @@ test_pre_existing_archive_is_adopted_not_clobbered() {
   fm_pending_reply_mark_delivered "$state" "$corr"
   printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  fm_pending_reply_tick "$state" || fail "tick should archive the settled record"
   [ -f "$archive_dir/$legacy" ] \
     || fail "a pre-existing archived record was destroyed by the first retention run"
   [ -f "$archive_dir/$corr" ] \
