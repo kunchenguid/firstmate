@@ -117,7 +117,7 @@ SH
 make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{},"agent_gets":{},"launch_pending":{}}\n' > "$dir/state.json"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -133,12 +133,13 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
-ws=""; label=""
+ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
+    --cwd) cwd=${args[$((i+1))]:-} ;;
   esac
 done
 
@@ -164,14 +165,47 @@ case "$cmd $sub" in
     ;;
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
-    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
-      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" --arg cwd "$cwd" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, foreground_cwd:$cwd}]
        | .next = (.next + 1)' | save
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
     ;;
+  "pane get")
+    pane=${3:-}
+    jq_state --arg p "$pane" '
+      [.tabs[] | select(.pane_id == $p)] as $matches
+      | if ($matches | length) == 1 then
+          {result:{pane:($matches[0] | {pane_id,tab_id,workspace_id,foreground_cwd:(.foreground_cwd // "")})}}
+        else
+          {error:{code:"pane_not_found",message:"pane not found"}}
+        end'
+    ;;
+  "pane process-info")
+    pane=${4:-}
+    jq_state --arg p "$pane" '
+      [.tabs[] | select(.pane_id == $p)] as $matches
+      | if ($matches | length) == 1 then
+          {result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:4242,foreground_process_group_id:4242,foreground_processes:[{pid:4242,name:"zsh",argv0:"zsh"}]}}}
+        else
+          {error:{code:"pane_not_found",message:"pane not found"}}
+        end'
+    ;;
+  "pane send-keys")
+    pane=${3:-}; key=${4:-}
+    if [ "$key" = enter ] \
+      && [ "$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')" = done ] \
+      && [ "$(jq_state -r --arg p "$pane" '.launch_pending[$p] // false')" = true ]; then
+      jq_state --arg p "$pane" '.agent_status[$p] = "idle" | del(.launch_pending[$p])' | save
+    fi
+    ;;
+  "pane send-text")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.launch_pending[$p] = true' | save
+    ;;
+  "pane run") : ;;
   "pane close")
     pane=${3:-}
     jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
@@ -182,6 +216,11 @@ case "$cmd $sub" in
     ;;
   "agent get")
     pane=${3:-}
+    jq_state --arg p "$pane" --arg transition "${FM_FAKE_HERDR_AGENT_WORKING_ON_GET:-}" '
+      ((.agent_gets[$p] // 0) + 1) as $count
+      | .agent_gets[$p] = $count
+      | if $transition == ($p + ":" + ($count | tostring)) then .agent_status[$p] = "working" else . end
+    ' | save
     status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
     if [ -n "$status" ]; then
       printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
@@ -670,7 +709,9 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   # 4: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
@@ -698,7 +739,10 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   # 5: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
@@ -726,7 +770,13 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/7.out"
   printf '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}\n' > "$resp/8.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/11.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/13.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/14.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/15.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/17.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
@@ -757,8 +807,11 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '1\n' > "$resp/6.exit"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '1\n' > "$resp/9.exit"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
@@ -792,6 +845,49 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+test_create_task_refuses_an_error_tab_list_envelope() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-error-tab-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A result alongside an error must not authorize a tab create.
+  printf '%s\n' '{"error":{"code":"temporary"},"result":{"tabs":[]}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-error-list /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse an error tab-list envelope"
+  assert_contains "$out" "could not parse herdr tab list" \
+    "create_task did not report its unreadable tab list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+    "create_task created a tab from an error tab-list envelope"
+  pass "fm_backend_herdr_create_task: refuses an error tab-list envelope without creating a tab"
+}
+
+test_create_task_refuses_an_ambiguous_duplicate_pane_list() {
+  # A recovered task tab has one root pane. If Herdr returns two candidates for
+  # the same tab, do not select whichever happens to sort first and create a
+  # replacement alongside a potentially live endpoint.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-ambiguous-pane-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-ambig-pane","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p9","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  # These responses would authorize a replacement if the adapter selected the
+  # first candidate rather than refusing the ambiguous public CLI result.
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-ambig-pane /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse an ambiguous pane list"
+  assert_contains "$out" "already exists" "create_task did not report the ambiguous duplicate tab"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+    "create_task created a replacement after an ambiguous pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "create_task closed a tab after an ambiguous pane list"
+  pass "fm_backend_herdr_create_task: refuses an ambiguous pane list without creating or closing tabs"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -806,7 +902,9 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/3.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/5.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
@@ -1532,6 +1630,263 @@ SH
 
 death_process_info_fixture() {  # <pane> <pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$1" "$2" "$2" "$2"
+}
+
+# A done registration alone is not enough to replace a worker: it has to stay
+# done across a strict proof that the pane has only its idle shell. This models
+# the stale registry left after a Pi process exits back to its shell.
+test_agent_state_accepts_only_a_stale_done_registration() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/stale-done-agent-state"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = stale-done ] \
+    || fail "a stale done registration over a proved bare shell should classify stale-done, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 2 ] \
+    || fail "stale done recovery did not re-read the agent registration after proving the shell"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw2:p2' \
+    "stale done recovery did not prove the pane had returned to its bare shell"
+  pass "fm_backend_herdr_agent_state: a stale done registration remains distinct from generic dead state"
+}
+
+test_agent_state_refuses_done_without_a_bare_shell() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/done-agent-active-process"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"},{"pid":4243,"name":"pi","argv0":"pi"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
+    || fail "a done registration with a foreground Pi process must refuse recovery, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 1 ] \
+    || fail "an unsafe done registration should not be reclassified after its shell proof failed"
+  pass "fm_backend_herdr_agent_state: done with an active foreground process remains unverified"
+}
+
+test_agent_state_refuses_fractional_process_identities() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/done-agent-fractional-process"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":4242.5,"foreground_process_group_id":4242.5,"foreground_processes":[{"pid":4242.5,"name":"zsh","argv0":"zsh"}]}}}\n' > "$resp/3.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
+    || fail "a done registration with fractional process identities must remain unreadable, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 1 ] \
+    || fail "a fractional process identity reached the done-registration recheck"
+  pass "fm_backend_herdr_agent_state: fractional process identities do not prove a stale done registration"
+}
+
+test_agent_state_refuses_contradictory_done_envelopes() {
+  local kind dir log resp fb out status pid=4242
+  for kind in agent process agent-stream process-stream; do
+    dir="$TMP_ROOT/done-agent-contradictory-$kind"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+    printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+    case "$kind" in
+      agent)
+        death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+        printf '%s\n' '{"error":{"code":"internal_error"},"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+        ;;
+      process)
+        printf '{"error":{"code":"internal_error"},"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
+        ;;
+      agent-stream)
+        death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+        printf '%s\n' '{"error":{"code":"temporary"}}' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+        ;;
+      process-stream)
+        printf '%s\n' '{"error":{"code":"temporary"}}' > "$resp/3.out"
+        death_process_info_fixture w2:p2 "$pid" >> "$resp/3.out"
+        ;;
+    esac
+    make_death_lab "$dir" "$pid"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
+      || fail "a contradictory $kind response must remain unreadable, got '$out'"
+  done
+  pass "fm_backend_herdr_agent_state: contradictory done and process response streams refuse stale recovery"
+}
+
+test_create_task_refuses_when_stale_done_changes_before_close() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/stale-done-close-boundary"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-boundary","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+  death_process_info_fixture w1:p2 "$pid" > "$resp/5.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/10.out"
+  # Deliberately leave response 11 absent. The old rollback consumed this as
+  # an unreadable pane-list response and stranded the replacement; the exact
+  # tab returned from create is unpublished, so it must be closed directly.
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-boundary /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when stale done becomes working before close"
+  assert_contains "$out" "changed before its stale pane could be replaced" \
+    "create_task did not report the changed stale registration"
+  assert_not_contains "$(cat "$log")" $'tab\x1fclose\x1fw1:t2' \
+    "create_task closed a pane that became working after stale-done proof"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw1:t3' \
+    "create_task left its unpublished replacement tab behind after stale-done proof changed"
+  pass "fm_backend_herdr_create_task: rechecks stale done before closing its old tab and retires its unpublished replacement despite unreadable cleanup reads"
+}
+
+test_spawn_relaunch_refuses_when_stale_done_changes_before_input() {
+  local dir home proj wt log state fb out status
+  dir="$TMP_ROOT/stale-done-input-boundary"; home="$dir/home"; proj="$dir/proj"; wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data/hdoneinput" "$home/config"
+  printf '# replacement brief\n' > "$home/data/hdoneinput/brief.md"
+  fm_git_worktree "$proj" "$wt" "task-hdoneinput"
+  log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  jq -n --arg cwd "$wt" '{
+    next:2,
+    workspaces:[{workspace_id:"w1",label:"firstmate"}],
+    tabs:[{tab_id:"w1:t1",label:"fm-hdoneinput",workspace_id:"w1",pane_id:"w1:p1",foreground_cwd:$cwd}],
+    agent_status:{"w1:p1":"done"}
+  }' > "$state"
+  make_death_lab "$dir" 4242
+  {
+    echo 'window=fmtest:w1:p1'
+    echo 'endpoint_task_id=hdoneinput'
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=claude'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'model=default'
+    echo 'effort=default'
+    echo 'backend=herdr'
+    echo 'herdr_session=fmtest'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t1'
+    echo 'herdr_pane_id=w1:p1'
+  } > "$home/state/hdoneinput.meta"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    HERDR_SESSION=fmtest FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_FAKE_HERDR_AGENT_WORKING_ON_GET=w1:p1:3 FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" hdoneinput --relaunch --harness claude 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "relaunch must refuse when stale done becomes working before input"
+  assert_contains "$out" "changed from 'stale-done' to 'live'" \
+    "relaunch did not report the changed stale registration before input"
+  assert_not_contains "$(cat "$log")" $'pane\x1frun\x1f' \
+    "relaunch sent a command after the stale registration became working"
+  assert_not_contains "$(cat "$log")" $'pane\x1fsend-text\x1f' \
+    "relaunch typed a replacement launch after the stale registration became working"
+  assert_not_contains "$(cat "$log")" $'pane\x1fsend-keys\x1f' \
+    "relaunch submitted input after the stale registration became working"
+  pass "fm-spawn relaunch: a stale done registration changing to working receives no replacement input"
+}
+
+test_agent_state_keeps_active_registered_statuses_live() {
+  local candidate dir log resp fb out status
+  for candidate in working idle blocked; do
+    dir="$TMP_ROOT/agent-state-$candidate"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$candidate" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = alive ] \
+      || fail "registered agent_status=$candidate must remain live, got '$out'"
+    assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' \
+      "registered agent_status=$candidate should not enter stale-done recovery"
+  done
+  pass "fm_backend_herdr_agent_state: working, idle, and blocked registrations remain live"
+}
+
+# Drive fm-control's complete relaunch transaction against the stale-done
+# classifier. The stateful Herdr double accepts a replacement only when its
+# launch Enter lands, so the test proves the transaction did not type an exit
+# command into the returned shell before it launched the replacement.
+test_control_relaunch_replaces_a_stale_done_registration() {
+  local dir home proj wt log state fb out status
+  dir="$TMP_ROOT/control-stale-done"; home="$dir/home"; proj="$dir/proj"; wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data/hdone" "$home/config"
+  printf '# replacement brief\n' > "$home/data/hdone/brief.md"
+  fm_git_worktree "$proj" "$wt" "task-hdone"
+  log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  jq -n --arg cwd "$wt" '{
+    next:2,
+    workspaces:[{workspace_id:"w1",label:"firstmate"}],
+    tabs:[{tab_id:"w1:t1",label:"fm-hdone",workspace_id:"w1",pane_id:"w1:p1",foreground_cwd:$cwd}],
+    agent_status:{"w1:p1":"done"}
+  }' > "$state"
+  make_death_lab "$dir" 4242
+  {
+    echo 'window=fmtest:w1:p1'
+    echo 'endpoint_task_id=hdone'
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=claude'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'model=default'
+    echo 'effort=default'
+    echo 'backend=herdr'
+    echo 'herdr_session=fmtest'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t1'
+    echo 'herdr_pane_id=w1:p1'
+  } > "$home/state/hdone.meta"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    HERDR_SESSION=fmtest FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_LAUNCH_WAIT=0.2 \
+    "$ROOT/bin/fm-control.sh" hdone relaunch --note 'continue from the preserved local copy' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "stale done recovery should complete the relaunch transaction: $out"
+  assert_contains "$out" 'relaunched hdone harness=claude' \
+    "stale done recovery did not report a replacement agent"
+  [ "$(jq -r '.agent_status["w1:p1"]' "$state")" = idle ] \
+    || fail "replacement launch did not replace the stale done registration with a live agent"
+  assert_not_contains "$(cat "$log")" $'\x1f/exit' \
+    "stale done recovery typed an exit command into the proved returned shell"
+  pass "fm-control relaunch: a proved stale done registration is replaced without sending a lifecycle command to the shell"
 }
 
 test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
@@ -2687,6 +3042,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
           case "$mode" in
             live) printf live ;;
             unknown) printf unknown ;;
+            stale-done) printf stale-done ;;
             *) printf no-agent ;;
           esac
         }
@@ -2707,15 +3063,16 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
       run_case ambiguous "$JOURNAL" "$HOME_A"
       run_case live "$JOURNAL" "$HOME_A"
       run_case unknown "$JOURNAL" "$HOME_A"
+      run_case stale-done "$JOURNAL" "$HOME_A"
       run_case focus-unknown "$JOURNAL" "$HOME_A"
     ')
-  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nfocus-unknown:2' ] \
+  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nstale-done:1\nfocus-unknown:2' ] \
     || fail "reclaim refusal matrix returned wrong decisions: $out"
   [ ! -s "$mutation_log" ] \
-    || fail "legacy, cross-home, ambiguous, live/unknown, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
+    || fail "legacy, cross-home, ambiguous, live/unknown, stale-done, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
   [ "$(sed -n 's/^workspace_label=//p' "$journal")" = "$label" ] \
     || fail "reclaim refusal matrix rewrote the bound workspace label"
-  pass "herdr presentation reclaim: legacy, cross-home, ambiguous, live/unknown, and focus-unknown cases refuse without mutation"
+  pass "herdr presentation reclaim: stale-done and every ambiguous case refuse without mutation"
 }
 
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
@@ -2831,7 +3188,22 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   [ "$status" -ne 0 ] || fail "a token match with a live registered agent must refuse duplicate launch"
   assert_contains "$out" "has a live pane" "live duplicate refusal did not explain the risk"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "live duplicate refusal closed a pane"
-  pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
+
+  : > "$log"; rm -f "$resp"/*.out "$resp"/*.exit "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-p3 · p:%s"}]}}\n' "$token" > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_agent_state() { printf stale-done; }
+      fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3
+    ' "$ROOT" "$journal" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stale done token match must refuse flat fallback without a launch-boundary proof"
+  assert_contains "$out" "stale done registration" "stale done fallback refusal did not explain the proof boundary"
+  assert_not_contains "$(cat "$log")" $'tab\x1fcreate' "stale done fallback created a tab"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "stale done fallback closed a pane"
+  pass "herdr presentation recovery: duplicate-token inspection is read-only and live or stale-done risk refuses fallback"
 }
 
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
@@ -4516,6 +4888,16 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_create_task_refuses_an_error_tab_list_envelope
+test_create_task_refuses_an_ambiguous_duplicate_pane_list
+test_agent_state_accepts_only_a_stale_done_registration
+test_agent_state_refuses_done_without_a_bare_shell
+test_agent_state_refuses_fractional_process_identities
+test_agent_state_refuses_contradictory_done_envelopes
+test_create_task_refuses_when_stale_done_changes_before_close
+test_spawn_relaunch_refuses_when_stale_done_changes_before_input
+test_agent_state_keeps_active_registered_statuses_live
+test_control_relaunch_replaces_a_stale_done_registration
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag

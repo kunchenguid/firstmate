@@ -936,6 +936,11 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+A stale `done` registration cannot be fabricated with that API.
+On 2026-08-31, Herdr 0.8.2 protocol 20 rejected the guarded-lab probe `pane report-agent <pane> --source fm-stale-done-probe --agent pi --state done` with `invalid pane agent state: done (expected idle, working, blocked, or unknown)`.
+A clean isolated Pi `/quit` removed its pane instead of leaving `done`, so the executable regression uses a stateful Herdr fixture for the stale-registry edge while retaining the real lab coverage above.
+`tests/fm-backend-herdr.test.sh` requires two `done` reads around the shared strict bare-idle-shell proof, keeps `working`, `idle`, and `blocked` live, rejects foreground Pi evidence, and drives `fm-control.sh ... relaunch` through a replacement without sending `/exit` to the returned shell.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:

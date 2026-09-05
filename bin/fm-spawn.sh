@@ -83,7 +83,7 @@
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
 #   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
+#   plus authoritative metadata may replace one exact unregistered husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
@@ -1125,6 +1125,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_HERDR_PANE_STATE=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1158,7 +1159,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  if [ "$BACKEND" = herdr ]; then
+    fm_backend_herdr_parse_target "$RELAUNCH_TARGET" || exit 1
+    RELAUNCH_HERDR_PANE_STATE=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    case "$RELAUNCH_HERDR_PANE_STATE" in
+      no-agent|stale-done) RELAUNCH_STATE=dead ;;
+      dead) RELAUNCH_STATE=missing ;;
+      live) RELAUNCH_STATE=alive ;;
+      *) RELAUNCH_STATE=unreadable ;;
+    esac
+  else
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
@@ -2074,7 +2086,9 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
+# dead or unregistered endpoint before token inspection may allow flat fallback.
+# A stale done registration remains reserved for a dedicated replacement flow
+# that revalidates it immediately before the first launch input.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
@@ -2124,6 +2138,10 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
     case "$old_state" in
       dead|no-agent) return 0 ;;
+      stale-done)
+        echo "error: existing herdr endpoint for $ID has a stale done registration; refusing flat fallback without a fresh launch-boundary proof" >&2
+        return 1
+        ;;
       live|unknown)
         echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
         return 1
@@ -3230,6 +3248,17 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_parse_target "$T" || {
+    echo "error: task $ID's Herdr endpoint became malformed before replacement input; refusing relaunch" >&2
+    exit 1
+  }
+  RELAUNCH_STATE=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  if [ "$RELAUNCH_STATE" != "$RELAUNCH_HERDR_PANE_STATE" ]; then
+    echo "error: task $ID's Herdr endpoint changed from '$RELAUNCH_HERDR_PANE_STATE' to '$RELAUNCH_STATE' before replacement input; refusing relaunch" >&2
+    exit 1
+  fi
+fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped

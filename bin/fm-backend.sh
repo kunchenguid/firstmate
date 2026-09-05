@@ -881,10 +881,12 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   alive      - a verified harness agent is running.
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
+#   stale-done - a Herdr done registration strictly proved detached from its agent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
+# Only `dead` and `missing` license generic recovery; `stale-done` requires a
+# dedicated Herdr replacement flow. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk
 # classifier. Zellij remains unverified because its secondmate ghost-tab and

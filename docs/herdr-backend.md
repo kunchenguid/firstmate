@@ -131,12 +131,12 @@ If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
-A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
+A same-identity version 2 binding may replace one exact unregistered restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
 The replacement tab and pane are created and verified before the old pane is rechecked and closed, then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
 Version 1 journals, dead or missing panes, duplicate or absent tokens, renamed or detached spaces, cross-home mismatches, inconsistent endpoint bindings, active target tabs, and ambiguous identity or focus fall back flat without mutating the old projection when duplicate-agent risk is positively absent.
-A live or unknown recorded or token-matched endpoint refuses duplicate launch.
+A `stale-done`, live, or unknown recorded or token-matched endpoint refuses duplicate launch; [Restart and liveness behavior](#restart-and-liveness-behavior) owns the classification boundary.
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
 It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
@@ -264,13 +264,18 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
-Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+A same-labeled tab with a missing pane, no registered agent, or a strictly proved stale `done` registration is a husk.
+Create replaces only a confidently dead, no-agent, or `stale-done` husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
-Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, and registered `working`, `idle`, and `blocked` agents remain `alive`.
+A registered `done` entry becomes `stale-done` only after the exact pane independently proves it holds one bare idle shell with no child process or foreground command, then a second registry read still reports `done`.
+The classification performs only registry and process reads.
+Generic lifecycle and projected-layout recovery treat `stale-done` as protected; only dedicated replacement flows may consume it, and each repeats the exact classification immediately before an old-tab close or relaunch input.
+A stale registration in a quarantined projection refuses a flat fallback.
+A `done` entry with any changed, unreadable, or non-idle process evidence becomes `unreadable` and refuses recovery.
+Unlike tmux process-name inspection, this combines native registration with a structural shell proof rather than guessing from a generic interpreter name.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
