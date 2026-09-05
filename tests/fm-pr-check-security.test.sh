@@ -1436,6 +1436,28 @@ poll_artifact_snapshot() {
   done
 }
 
+# Emit the captured evidence for a failed bounded watcher cycle: its exit code
+# (124 means run_watcher_bounded's alarm fired, i.e. a timeout rather than a
+# genuine non-zero exit), both captured streams, and the relevant state files.
+# Diagnostics only - it never changes what a caller asserts.
+dump_watcher_cycle() {  # <label> <rc> <dir> <state>
+  local label=$1 rc=$2 dir=$3 state=$4 f
+  printf 'watcher cycle %s exit=%s\n' "$label" "$rc" >&2
+  printf -- '--- stdout (%s.out) ---\n' "$label" >&2
+  cat "$dir/$label.out" >&2 2>/dev/null || true
+  printf -- '--- stderr (%s.err) ---\n' "$label" >&2
+  cat "$dir/$label.err" >&2 2>/dev/null || true
+  printf -- '--- state listing (%s) ---\n' "$state" >&2
+  ls -la "$state" >&2 2>/dev/null || true
+  for f in .wake-queue .last-check; do
+    [ -e "$state/$f" ] || continue
+    printf -- '--- %s ---\n' "$f" >&2
+    cat "$state/$f" >&2 2>/dev/null || true
+  done
+  printf -- '--- poll artifacts ---\n' >&2
+  poll_artifact_snapshot "$state" task-a >&2 2>/dev/null || true
+}
+
 test_merged_poll_retires_once() {
   local dir state rc first second meta_before
   dir=$(make_case merged-retirement-once)
@@ -1939,7 +1961,10 @@ test_external_merge_transition_retires_only_terminal_poll() {
     esac
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
+    if [ "$rc" -ne 0 ]; then
+      dump_watcher_cycle "$label" "$rc" "$dir" "$state"
+      fail "$label watcher cycle failed (exit $rc)"
+    fi
     case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
