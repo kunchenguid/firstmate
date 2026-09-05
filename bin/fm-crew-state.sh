@@ -619,7 +619,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
         && log_reports_daemon_socket_down "$LOG_LINE" \
-        && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; }; then
+        && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ] || [ "$COARSE_STATUS" = running ]; }; then
         emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite active run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
