@@ -168,6 +168,7 @@ jq -e '.stopReason == "end_turn" and .stop_hook_active == true' \
   "$REPO/.agent-stop-payload.json" >/dev/null \
   || fail "the final agentStop payload did not report the bounded continuation"
 
+# shellcheck disable=SC2016 # Backticks are literal prompt markup.
 WATCHER_PROMPT='Run exactly `bin/fm-watch-arm.sh` as its own attached asynchronous bash task and then stop. After a later Firstmate watcher wake arrives, follow that Firstmate watcher wake instruction exactly and then reply exactly LIVE_WATCH_NOTIFICATION_OK. Never run bin/fm-wake-drain.sh unless a Firstmate watcher wake tells you to.'
 WATCHER_OUT=$(cd "$REPO" && copilot -p "$WATCHER_PROMPT" --allow-all --no-ask-user \
   --no-auto-update --no-remote --no-remote-export --add-dir "$REPO" --silent)
