@@ -118,7 +118,7 @@ make_case() {
     'queued=false' \
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
-  printf 'ci\tcompleted\tsuccess\n' > "$case_dir/github-checks"
+  printf '1\tci\tcompleted\tsuccess\n' > "$case_dir/github-checks"
   : > "$case_dir/gh.log"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
@@ -1823,7 +1823,7 @@ test_github_red_check_refuses_naming_the_check() {
   case_dir=$(make_case github-checks-red)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 9090909090909090909090909090909090909090
-  printf 'unit-tests\tcompleted\tfailure\n' > "$case_dir/github-checks"
+  printf '1\tunit-tests\tcompleted\tfailure\n' > "$case_dir/github-checks"
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -1869,7 +1869,7 @@ test_github_pending_check_refuses() {
   case_dir=$(make_case github-checks-pending)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 9292929292929292929292929292929292929292
-  printf 'unit-tests\tin_progress\t\n' > "$case_dir/github-checks"
+  printf '1\tunit-tests\tin_progress\t\n' > "$case_dir/github-checks"
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -1896,7 +1896,7 @@ test_github_skipped_check_passes_but_cancelled_refuses() {
   case_dir=$(make_case github-checks-skipped-and-cancelled)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 9393939393939393939393939393939393939393
-  printf 'docs-only\tcompleted\tskipped\nunit-tests\tcompleted\tcancelled\n' \
+  printf '1\tdocs-only\tcompleted\tskipped\n2\tunit-tests\tcompleted\tcancelled\n' \
     > "$case_dir/github-checks"
   : > "$case_dir/gh-axi.log"
 
@@ -1914,6 +1914,56 @@ test_github_skipped_check_passes_but_cancelled_refuses() {
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "github-checks-skipped-and-cancelled: the merge was attempted despite the cancelled check"
   pass "fm-pr-merge accepts a skipped check but still refuses a cancelled one"
+}
+
+# The attestation race this fix targets: an earlier run of a check failed at
+# this same head, but a later run of that same check name succeeded. Only the
+# highest-id run per name is judged, so the merge proceeds.
+test_github_older_failure_newer_success_merges() {
+  local case_dir rc
+  case_dir=$(make_case github-checks-older-failure-newer-success)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9696969696969696969696969696969696969696
+  printf '1\tunit-tests\tcompleted\tfailure\n2\tunit-tests\tcompleted\tsuccess\n' \
+    > "$case_dir/github-checks"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/96 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-checks-older-failure-newer-success: a later successful run must not be blocked by an earlier failed run at the same head"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-checks-older-failure-newer-success: the merge was not attempted despite the latest run being green"
+  pass "fm-pr-merge merges when an earlier failed run is superseded by a later successful run of the same check"
+}
+
+# The reverse order: the earlier run of the check succeeded, but the latest
+# run of that same name failed. The latest run still governs, so the merge is
+# refused and names the check with its latest conclusion.
+test_github_older_success_newer_failure_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-checks-older-success-newer-failure)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9797979797979797979797979797979797979797
+  printf '1\tunit-tests\tcompleted\tsuccess\n2\tunit-tests\tcompleted\tfailure\n' \
+    > "$case_dir/github-checks"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/97 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-checks-older-success-newer-failure: the latest run's failure must still refuse the merge"
+  assert_grep 'unit-tests completed with conclusion "failure"' "$case_dir/stderr" \
+    "github-checks-older-success-newer-failure: the latest failing run was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-checks-older-success-newer-failure: the merge was attempted despite the latest run being red"
+  pass "fm-pr-merge refuses when the latest run of a check is red, even though an earlier run of it succeeded"
 }
 
 test_github_checks_green_pins_the_live_head() {
@@ -2303,6 +2353,8 @@ test_github_red_check_refuses_naming_the_check
 test_github_missing_checks_refuses
 test_github_pending_check_refuses
 test_github_skipped_check_passes_but_cancelled_refuses
+test_github_older_failure_newer_success_merges
+test_github_older_success_newer_failure_refuses
 test_github_checks_green_pins_the_live_head
 test_github_match_head_commit_override_refuses_before_recording
 test_gitlab_url_resolves_and_merges

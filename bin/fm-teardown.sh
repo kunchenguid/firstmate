@@ -1159,6 +1159,48 @@ pr_is_merged() {
   return 0
 }
 
+# A read-only confirmation that the task's own recorded pr= is reported merged
+# by GitHub, independent of the data-loss safety check above (pr_is_merged /
+# work_is_landed): this answers "is the task's own completion actually
+# confirmed", not "would returning the worktree lose anything". Reuses the
+# same "pr view --json state,headRefOid,url" shape pr_is_merged already reads
+# so both consult one live view; only the state column is used here. A GitLab
+# pr= fails this read and refuses to close, since gh has no GitLab equivalent.
+github_pr_confirmed_merged() {
+  local url=$1 view state
+  view=$(gh pr view "$url" --json state,headRefOid,url \
+    -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  state=${view%%$'\t'*}
+  [ "$state" != "$view" ] || return 1
+  case "$state" in
+    MERGED|merged) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A ship task that carries a recorded pr= may close (backlog transition, worktree
+# return, and record removal below) only once that pull request is confirmed
+# merged: this is what actually closes the loop the PR represents, distinct
+# from the reachable-from-any-remote data-loss safety validated above by
+# validate_worktree_teardown_safety, which stays exactly as it was. A ship task
+# with no pr= ever recorded is unaffected here and keeps its existing
+# landed-work fallback (bin/fm-pr-check.sh's yolo/no-CI-merge path via
+# pr_number_from_branch), since this gate has nothing recorded to confirm.
+validate_pr_confirmed_before_close() {
+  [ "$KIND" = ship ] || return 0
+  [ -n "$PR_URL" ] || return 0
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "REFUSED: task $ID has pr=$PR_URL recorded but gh is unavailable to confirm it merged." >&2
+    echo "Install/authenticate gh, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  if ! github_pr_confirmed_merged "$PR_URL"; then
+    echo "REFUSED: task $ID's recorded pull request ($PR_URL) is not confirmed merged; refusing to close its records." >&2
+    echo "Merge it, wait for a readable merged state, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -2762,6 +2804,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+if [ "$FORCE" != "--force" ]; then
+  validate_pr_confirmed_before_close || exit 1
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole

@@ -8,11 +8,16 @@
 #
 # Before any GitHub mutation, this script reads the pull request's own live
 # head commit and that exact commit's check runs (gh is a hard prerequisite for
-# this read; there is no gh-axi equivalent). Every check must be completed with
-# conclusion success, neutral, or skipped - skipped is accepted unconditionally
-# because the check-runs API exposes no field distinguishing why a check was
-# skipped, so any other conclusion or an incomplete status refuses, naming the
-# exact failing check. The verified head is then passed to gh-axi as
+# this read; there is no gh-axi equivalent). The check-runs API can return more
+# than one run per check name at the same head - for example a re-raised
+# workflow - so runs are grouped by name and only the most recent run per name
+# (the highest numeric id) is judged; an earlier failed attempt at the same
+# head never blocks a merge a later run at that same head already passed. Every
+# such latest run must be completed with conclusion success, neutral, or
+# skipped - skipped is accepted unconditionally because the check-runs API
+# exposes no field distinguishing why a check was skipped, so any other
+# conclusion or an incomplete status refuses, naming the check and its latest
+# conclusion. The verified head is then passed to gh-axi as
 # --match-head-commit, the same live-head-pinning contract GitLab's --sha
 # already uses below, so a push that lands between the read and the merge
 # fails the merge instead of landing an unverified commit. A caller-supplied
@@ -368,34 +373,31 @@ github_read_head_sha() {
   FM_PR_GITHUB_HEAD=$sha
 }
 
-# Every check run at the given head must be completed with conclusion success,
-# neutral, or skipped. GITHUB_TOKEN/GH_TOKEN are unset for this read so it
-# cannot be answered by a stale or narrower-scoped ambient credential instead
-# of gh's own authenticated identity. Every failing check is reported, not
-# just the first.
+# The latest check run per name (highest id) at the given head must be
+# completed with conclusion success, neutral, or skipped. An earlier run of the
+# same check name at the same head - an attestation race where a stale failed
+# run and a later successful run both exist - is superseded and never judged.
+# GITHUB_TOKEN/GH_TOKEN are unset for this read so it cannot be answered by a
+# stale or narrower-scoped ambient credential instead of gh's own authenticated
+# identity. Every failing latest-run check is reported, not just the first.
 github_check_runs_green() {
-  local head=$1 lines line name status conclusion refusals='' any=false
+  local head=$1 lines line id name status conclusion refusals='' any=false
+  local -A latest_id=() latest_status=() latest_conclusion=()
+  local check_name
   if ! lines=$(env -u GITHUB_TOKEN -u GH_TOKEN gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs" \
-    --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv' 2>/dev/null); then
+    --jq '.check_runs[] | [.id, .name, .status, .conclusion] | @tsv' 2>/dev/null); then
     echo "error: could not read GitHub check runs at head $head before merging" >&2
     return 1
   fi
-  while IFS=$'\t' read -r name status conclusion; do
+  while IFS=$'\t' read -r id name status conclusion; do
     [ -n "$name" ] || continue
     any=true
-    if [ "$status" != completed ]; then
-      refusals="$refusals  - $name is \"${status:-unreadable}\", not completed
-"
-      continue
+    if [ -z "${latest_id[$name]:-}" ] || [ "$id" -gt "${latest_id[$name]}" ]; then
+      latest_id[$name]=$id
+      latest_status[$name]=$status
+      latest_conclusion[$name]=$conclusion
     fi
-    case "$conclusion" in
-      success|neutral|skipped) ;;
-      *)
-        refusals="$refusals  - $name completed with conclusion \"${conclusion:-unreadable}\", not success, neutral, or skipped
-"
-        ;;
-    esac
   done <<CHECKS
 $lines
 CHECKS
@@ -403,6 +405,22 @@ CHECKS
     echo "error: refusing to merge $URL: no checks were found at head $head" >&2
     return 1
   fi
+  for check_name in "${!latest_id[@]}"; do
+    status=${latest_status[$check_name]}
+    conclusion=${latest_conclusion[$check_name]}
+    if [ "$status" != completed ]; then
+      refusals="$refusals  - $check_name is \"${status:-unreadable}\", not completed
+"
+      continue
+    fi
+    case "$conclusion" in
+      success|neutral|skipped) ;;
+      *)
+        refusals="$refusals  - $check_name completed with conclusion \"${conclusion:-unreadable}\", not success, neutral, or skipped
+"
+        ;;
+    esac
+  done
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s: not every check is green at head %s\n' "$URL" "$head" >&2
     printf '%s' "$refusals" >&2

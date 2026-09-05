@@ -273,6 +273,37 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Override GitHub lookups to report PR 7 as still open (not merged) at the
+# supplied head, for proving the pr-confirmed-before-close gate refuses an
+# unmerged recorded PR rather than treating a pushed branch alone as done.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -645,6 +676,7 @@ test_teardown_closes_the_backlog_item_itself() {
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   seed_backlog_in_flight "$case_dir"
   seed_ready_queued_item "$case_dir" task-x2
 
@@ -671,6 +703,7 @@ test_teardown_ready_probe_failure_falls_back_to_legacy_reminder() {
   case_dir=$(make_case tasks-axi-ready-probe-fails)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/8' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   seed_backlog_in_flight "$case_dir"
   seed_ready_queued_item "$case_dir" task-x2
   write_tasks_axi_ready_failure_stub "$case_dir"
@@ -690,6 +723,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
 
@@ -760,6 +794,66 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+# --- pr-confirmed-before-close gate (attestation-race fix) -------------------
+# A ship task that has a recorded pr= may close (worktree return, meta removal,
+# backlog transition) only once GitHub actually reports that pull request
+# merged. This is distinct from the reachable-from-origin data-loss check just
+# above: HEAD being fully pushed to origin is not proof the recorded PR ever
+# landed. Both cases leave every durable record - worktree, meta, backlog - in
+# place on refusal.
+
+test_pr_recorded_but_open_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pr-open-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_open_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-open-refuses: teardown must refuse a recorded PR that is not confirmed merged"
+  assert_grep 'is not confirmed merged' "$case_dir/stderr" \
+    "pr-open-refuses: the unmerged recorded PR was not named in the refusal"
+  [ -d "$case_dir/wt" ] || fail "pr-open-refuses: the worktree was removed despite the refusal"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "pr-open-refuses: task metadata was removed despite the refusal"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pr-open-refuses: the backlog item was closed despite the refusal: $(backlog_row_state "$case_dir")"
+  pass "fm-teardown refuses to close a ship task whose recorded PR is open, leaving worktree/meta/backlog untouched"
+}
+
+test_pr_recorded_but_merge_state_unreadable_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pr-state-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  add_gh_axi_error "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-state-unreadable: teardown must refuse when the recorded PR's merge state cannot be read"
+  assert_grep 'is not confirmed merged' "$case_dir/stderr" \
+    "pr-state-unreadable: the missing merge record was not reported"
+  [ -d "$case_dir/wt" ] || fail "pr-state-unreadable: the worktree was removed despite the refusal"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "pr-state-unreadable: task metadata was removed despite the refusal"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pr-state-unreadable: the backlog item was closed despite the refusal: $(backlog_row_state "$case_dir")"
+  pass "fm-teardown refuses to close a ship task when its recorded PR's merge state cannot be confirmed"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -3256,6 +3350,8 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_pr_recorded_but_open_refuses
+test_pr_recorded_but_merge_state_unreadable_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
