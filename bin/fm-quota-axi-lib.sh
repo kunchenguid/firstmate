@@ -10,17 +10,20 @@
 # turns a failing check into the operator-facing MISSING diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
 #
-# fm_quota_axi_read_codex_home <codex-home> [quota-axi flags...]
+# fm_quota_axi_read_codex_home [--timeout <secs>] <codex-home> [quota-axi flags...]
 #   quota-axi reads the Codex account from CODEX_HOME, the same variable the
 #   codex CLI reads, so one ChatGPT account's evidence is one read with that
 #   account's home exported. This helper expands and validates the home through
 #   bin/fm-codex-home-lib.sh (a missing or empty auth.json refuses with that
 #   reason on stderr instead of silently reporting the default account), then
 #   runs `CODEX_HOME=<expanded> quota-axi --provider codex` with any extra flags
-#   appended, so the default TOON and the skill's narrow --json fallback share
-#   one entry point. The output is that home's provider-level Codex evidence
-#   and bounds only candidates carrying that codexHome (quota-array-dispatch
-#   owns how it is ranked).
+#   appended, so the default TOON, the skill's narrow --json fallback, and the
+#   per-account quota watch (bin/fm-procevent-quota.sh --codex-home) share one
+#   entry point. With --timeout the read is bounded through fm_run_timed
+#   (bin/fm-timeout-lib.sh must already be sourced), so a hung quota-axi ends
+#   with 124 instead of stalling the caller. The output is that home's
+#   provider-level Codex evidence and bounds only candidates carrying that
+#   codexHome (quota-array-dispatch owns how it is ranked).
 
 # shellcheck source=bin/fm-codex-home-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-home-lib.sh"
@@ -28,7 +31,17 @@
 FM_QUOTA_AXI_MIN=0.1.29
 
 fm_quota_axi_read_codex_home() {
-  local home
+  local home timeout=
+  if [ "${1:-}" = --timeout ]; then
+    timeout=${2:-}
+    case "$timeout" in
+      ''|*[!0-9]*|0)
+        echo "error: codex quota read needs a positive integer --timeout" >&2
+        return 1
+        ;;
+    esac
+    shift 2
+  fi
   fm_codex_home_validate "${1:-}" || {
     echo "error: codex quota read refused: $FM_CODEX_HOME_ERROR" >&2
     return 1
@@ -39,7 +52,15 @@ fm_quota_axi_read_codex_home() {
     echo "error: quota-axi is not installed" >&2
     return 1
   }
-  CODEX_HOME=$home quota-axi --provider codex "$@" </dev/null
+  if [ -n "$timeout" ]; then
+    [ "$(type -t fm_run_timed)" = function ] || {
+      echo "error: codex quota read --timeout needs bin/fm-timeout-lib.sh" >&2
+      return 1
+    }
+    CODEX_HOME=$home fm_run_timed "$timeout" quota-axi --provider codex "$@" </dev/null
+  else
+    CODEX_HOME=$home quota-axi --provider codex "$@" </dev/null
+  fi
 }
 
 fm_quota_axi_compatible() {
