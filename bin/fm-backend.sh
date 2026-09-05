@@ -388,6 +388,29 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_orca_worktree_id_valid: a real Orca worktree id is
+# "<repo-id>::<absolute-path>" (verified live), so it legitimately contains ':'
+# and '/', which the strict endpoint-atom validator forbids. Accept either the
+# simple atom form (used by fixtures) or the real two-part form: an atom-valid
+# repo id, then an absolute path free of newline/tab/CR. This is what lets real
+# Orca task and secondmate-home teardown validate instead of being refused.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local v=$1 repo path
+  fm_backend_endpoint_atom_valid "$v" && return 0
+  case "$v" in *::*) ;; *) return 1 ;; esac
+  repo=${v%%::*}
+  path=${v#*::}
+  fm_backend_endpoint_atom_valid "$repo" || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  return 0
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +531,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
@@ -781,6 +804,40 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
+# fm_backend_home_create: create a backend-managed worktree to host a secondmate
+# home. Only a worktree-owning backend (orca) implements this; session-provider
+# backends (tmux/herdr/zellij/cmux) host a secondmate in an ordinary directory
+# supplied by the caller and never reach here.
+fm_backend_home_create() {  # <backend> <project-path> <name>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_home_create "$@" ;;
+    *) echo "error: backend '$backend' does not create managed secondmate homes" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_home_terminal_create() {  # <backend> <home-path> <title>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_home_terminal_create "$@" ;;
+    *) echo "error: backend '$backend' does not create managed secondmate homes" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_home_remove() {  # <backend> <home-path>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_home_remove "$@" ;;
+    *) echo "error: backend '$backend' does not own managed secondmate homes" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
@@ -794,6 +851,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    orca) fm_backend_orca_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -887,15 +945,18 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# classifier. Orca correlates its terminal handle to Orca's native agent status
+# (worktree ps state + terminal orphaned/connected/agentIdentity), returning
+# `dead`/`missing` only on strong evidence and `ambiguous` for a connected
+# terminal with no attributable agent. Zellij and cmux remain unverified: their
+# secondmate ghost-tab and agent-process recovery paths are not validated.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    orca) fm_backend_orca_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

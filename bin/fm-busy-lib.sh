@@ -41,7 +41,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   endpoint-gone, herdr-native, orca-native, grok-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -50,7 +50,7 @@
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   4. no record at all: a native herdr or orca busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the Grok-only
 #      temporary regex fallback classifies a grok task from its rendered tail,
@@ -893,17 +893,21 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
-  fi
+  # No record at all. A native herdr or orca busy verdict is semantic enough to
+  # trust for BUSY (a reported working state means a turn is running); native
+  # idle is narrower than turn state (a long foreground tool call can read idle)
+  # and stays unknown here.
+  case "$backend" in
+    herdr|orca)
+      if command -v fm_backend_busy_state >/dev/null 2>&1; then
+        native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        if [ "$native" = busy ]; then
+          printf 'busy %s-native' "$backend"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   case "$harness" in
     muse*)
       # Semantic, on demand: fold this task's bound session log. An open run is

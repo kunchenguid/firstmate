@@ -49,6 +49,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -401,6 +403,21 @@ acquire_treehouse_home() {
   printf '%s\n' "$home"
 }
 
+acquire_orca_home() {
+  local id=$1 home
+  # Orca can only give a terminal to an Orca-MANAGED worktree, so an Orca
+  # secondmate home is created as an Orca worktree of the firstmate repo, placed
+  # OUTSIDE the repo (fm_backend_orca_home_base_path) so the home-isolation
+  # invariant holds. Durable like a treehouse lease: it persists with no live
+  # process until teardown removes it with `orca worktree rm`.
+  home=$(fm_backend_home_create orca "$FM_ROOT" "2ndmate-$id") || {
+    echo "error: orca worktree create failed to provision a firstmate home" >&2
+    return 1
+  }
+  [ -n "$home" ] || { echo "error: orca worktree create did not report a firstmate home" >&2; return 1; }
+  printf '%s\n' "$home"
+}
+
 ensure_home() {
   local id=$1 requested=$2 home
   if [ "$requested" = "-" ]; then
@@ -518,6 +535,7 @@ seed_exit_cleanup() {
 }
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
+SEED_HOME_ORCA=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
@@ -588,6 +606,15 @@ seed_return_treehouse_home() {
   }
 }
 
+seed_remove_orca_home() {
+  local home=$1 abs_home
+  abs_home=$(seed_rollback_target "$home" "orca-acquired home") || return 0
+  if ! fm_backend_home_remove orca "$abs_home" >/dev/null 2>&1; then
+    echo "warning: failed to remove orca-acquired home $abs_home during seed rollback; the Orca worktree may still exist" >&2
+    return 0
+  fi
+}
+
 seed_remove_created_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "created home") || return 0
@@ -637,7 +664,11 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      if [ "${SEED_HOME_ORCA:-0}" = 1 ]; then
+        seed_remove_orca_home "$SEED_HOME"
+      else
+        seed_return_treehouse_home "$SEED_HOME"
+      fi
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -838,9 +869,10 @@ seed_home() {
   SEED_COMMITTED=0
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
+  SEED_HOME_ORCA=0
   SEED_HOME_CREATED=0
-  SEED_HOME_ACQUIRED=0
   SEED_HOME_BACKED_UP=0
+  SEED_BACKEND=$(fm_backend_name 2>/dev/null || echo tmux)
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
   : > "$SEED_CREATED_PROJECTS_FILE"
@@ -858,10 +890,19 @@ seed_home() {
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
-    home=$(acquire_treehouse_home "$id")
+    if [ "$SEED_BACKEND" = orca ]; then
+      SEED_HOME_ORCA=1
+      home=$(acquire_orca_home "$id")
+    else
+      home=$(acquire_treehouse_home "$id")
+    fi
     SEED_HOME="$home"
     home=$(verify_firstmate_home "$home")
   else
+    if [ "$SEED_BACKEND" = orca ]; then
+      echo "error: on the orca backend a secondmate home must be leased with '-'; Orca hosts a terminal only in an Orca-managed worktree it creates, not an arbitrary path" >&2
+      return 1
+    fi
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1

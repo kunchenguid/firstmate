@@ -1096,10 +1096,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
+  # Orca secondmates ARE supported: the home is an Orca-managed worktree created
+  # at seed time (bin/fm-home-seed.sh), and the terminal is created in it below.
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
@@ -1152,8 +1150,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
+  # one into the same endpoint, and only tmux, herdr, and orca have a
+  # recovery-grade classifier that can (bin/fm-control-lib.sh owns that
+  # capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
@@ -2398,29 +2397,41 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
-    set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
-    set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
+    if [ "$KIND" = secondmate ]; then
+      # The secondmate home is ALREADY an Orca-managed worktree, created and
+      # seeded by bin/fm-home-seed.sh and validated above by
+      # validate_firstmate_home_for_spawn. Never create or remove a worktree here
+      # (removing it would destroy the durable, seeded home), so no
+      # ORCA_ABORT_CLEANUP is armed. Just create the terminal inside it and
+      # resolve the home's worktree id for metadata.
+      ORCA_WORKTREE_ID=$(fm_backend_orca_worktree_id_for_path "$PROJ_ABS") || exit 1
+      ORCA_TERMINAL=$(fm_backend_home_terminal_create orca "$PROJ_ABS" "$W") || exit 1
+      T="$ORCA_TERMINAL"
+    else
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+            ORCA_ABORT_CLEANUP=1
+          fi
         fi
+        exit 1
       fi
-      exit 1
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      ORCA_ABORT_CLEANUP=1
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
+        echo "error: orca did not return a worktree id/path for $W" >&2
+        exit 1
+      fi
+      validate_spawn_worktree "orca worktree create" "$W"
+      if [ -z "$ORCA_TERMINAL" ]; then
+        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      fi
+      T="$ORCA_TERMINAL"
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
-    ORCA_ABORT_CLEANUP=1
-    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-      echo "error: orca did not return a worktree id/path for $W" >&2
-      exit 1
-    fi
-    validate_spawn_worktree "orca worktree create" "$W"
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-    fi
-    T="$ORCA_TERMINAL"
     ;;
 esac
 fi

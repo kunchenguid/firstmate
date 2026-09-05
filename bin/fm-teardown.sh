@@ -2076,7 +2076,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -2085,6 +2085,18 @@ remove_firstmate_home() {
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
+  fi
+  if [ "$backend" = orca ]; then
+    # An Orca-managed home is itself a git worktree of FM_ROOT, so it would
+    # spuriously match the treehouse-slot check below. Release it through Orca
+    # (orca worktree rm), which removes both the worktree and its directory.
+    if ! fm_backend_home_remove orca "$abs_home_path"; then
+      echo "error: orca worktree rm failed for $label $abs_home_path; home may still exist" >&2
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    fi
+    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    return 0
   fi
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
     command -v treehouse >/dev/null 2>&1 || {
@@ -2567,7 +2579,7 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -2932,7 +2944,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
     :
   else
     rc=$?

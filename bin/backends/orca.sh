@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # bin/backends/orca.sh - the Orca terminal session-provider adapter.
 #
-# Orca owns both the task worktree and the terminal endpoint. Escape key support
-# remains unsupported until Orca exposes a terminal-send primitive for it.
+# Orca owns both the task worktree and the terminal endpoint. Escape and Ctrl-U
+# are delivered as their raw --text control bytes (verified live); see
+# fm_backend_orca_send_key.
 #
 # Target string shape: the Orca terminal id accepted by `orca terminal ...`.
 
@@ -196,10 +197,192 @@ fm_backend_orca_worktree_path() {
   printf '%s' "$path"
 }
 
+# --- Orca-managed secondmate home lifecycle ----------------------------------
+#
+# An Orca terminal can only be created inside an Orca-MANAGED worktree (verified:
+# terminal create against a plain checkout, or one merely `repo add`ed or
+# imported with `project setup-existing-folder`, fails selector_not_found). A
+# secondmate home must therefore be an Orca-managed worktree. Orca places
+# worktrees under the project setup's worktree base path; firstmate points that
+# base OUTSIDE the firstmate repo so the home-isolation invariant in fm-spawn.sh
+# (a secondmate home cannot live inside the firstmate repo) still holds. The home
+# path is authoritative: its Orca worktree id is `<repo-id>::<path>` and stays
+# re-resolvable from the path, so no extra durable id is stored for the home.
+
+# fm_backend_orca_home_base_path: the firstmate-owned directory OUTSIDE any
+# firstmate repo where Orca places firstmate-repo worktrees used as secondmate
+# homes. Overridable for tests.
+fm_backend_orca_home_base_path() {
+  printf '%s' "${FM_ORCA_HOME_BASE:-${HOME:-/tmp}/.firstmate-orca-homes}"
+}
+
+# fm_backend_orca_setup_base_path_get: the worktree base path currently recorded
+# for <setup-id>, or empty when unset. Read-only.
+fm_backend_orca_setup_base_path_get() {  # <setup-id>
+  fm_backend_orca_tool_check || return 1
+  orca project setups --json 2>/dev/null | node -e '
+const fs = require("fs");
+const setup = process.argv[1];
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (e) { process.exit(0); }
+const arr = (data.result && (data.result.setups || data.result.items)) || [];
+let v = "";
+for (const s of arr) {
+  if (s && s.id === setup) { v = String(s.worktreeBasePath || ""); break; }
+}
+process.stdout.write(v);
+' "$1"
+}
+
+# fm_backend_orca_ensure_home_base_path: make the firstmate project setup place
+# its worktrees at the external home base path. Idempotent: writes only when the
+# recorded value differs. Prints the resolved base path.
+fm_backend_orca_ensure_home_base_path() {  # <setup-id>
+  local setup=$1 base current
+  base=$(fm_backend_orca_home_base_path)
+  mkdir -p "$base" 2>/dev/null || true
+  current=$(fm_backend_orca_setup_base_path_get "$setup" 2>/dev/null || true)
+  if [ "$current" != "$base" ]; then
+    fm_backend_orca_run_json orca project setup-update --setup "$setup" --worktree-base-path "$base" --json || return 1
+  fi
+  printf '%s' "$base"
+}
+
+# fm_backend_orca_home_create: create an Orca-managed worktree of the firstmate
+# repo to host a secondmate home, at the external base path. Prints the home path.
+fm_backend_orca_home_create() {  # <project-path> <name>
+  local project=$1 name=$2 setup out wt_path
+  setup=$(fm_backend_orca_repo_ensure "$project") || return 1
+  fm_backend_orca_ensure_home_base_path "$setup" >/dev/null || return 1
+  out=$(orca worktree create --repo "id:$setup" --name "$name" --no-parent --setup skip --json) || return 1
+  wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
+    echo "error: orca worktree create did not return a path for home $name" >&2
+    return 1
+  }
+  printf '%s' "$wt_path"
+}
+
+# fm_backend_orca_home_terminal_create: a terminal inside an existing Orca-managed
+# home worktree, addressed by its path. Prints the terminal handle.
+fm_backend_orca_home_terminal_create() {  # <home-path> <title>
+  local home=$1 title=$2 out terminal
+  fm_backend_orca_tool_check || return 1
+  out=$(orca terminal create --worktree "path:$home" --title "$title" --json) || return 1
+  terminal=$(printf '%s' "$out" | fm_backend_orca_json_get terminal-handle) || {
+    echo "error: orca terminal create did not return a terminal handle for home $home" >&2
+    return 1
+  }
+  printf '%s' "$terminal"
+}
+
+# fm_backend_orca_home_remove: release a secondmate home worktree by path. The
+# worktree id embeds the path, so path: addressing is exact.
+fm_backend_orca_home_remove() {  # <home-path>
+  local home=${1:-}
+  [ -n "$home" ] || { echo "error: missing Orca home path; cannot remove home worktree" >&2; return 1; }
+  fm_backend_orca_tool_check || return 1
+  fm_backend_orca_run_json orca worktree rm --worktree "path:$home" --force --json
+}
+
+# fm_backend_orca_worktree_id_for_path: resolve an Orca-managed worktree's id
+# from its path. Used to record a secondmate home's orca_worktree_id in metadata
+# without storing it separately at seed time.
+fm_backend_orca_worktree_id_for_path() {  # <path>
+  local path=${1:-} out id
+  [ -n "$path" ] || { echo "error: missing path; cannot resolve Orca worktree id" >&2; return 1; }
+  fm_backend_orca_tool_check || return 1
+  out=$(orca worktree show --worktree "path:$path" --json) || return 1
+  id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
+    echo "error: orca worktree show did not return an id for $path" >&2
+    return 1
+  }
+  printf '%s' "$id"
+}
+
+# --- native agent status (busy/idle + recovery-grade liveness) ---------------
+#
+# Orca's agent-status hooks post working|done|blocked to the runtime (the
+# authoritative vocabulary, taken from Orca's own hook source), surfaced per
+# worktree in `worktree ps agents[].state`. `terminal list` maps a task's
+# terminal handle to its worktree and carries connected/orphaned/agentIdentity.
+# A firstmate task owns exactly one terminal in one worktree, so at most one
+# agent is correlated; if several are present the most-active state wins.
+
+# fm_backend_orca_agent_snapshot: prints "liveness=<alive|dead|missing|ambiguous|unreadable> state=<working|done|blocked|none>".
+fm_backend_orca_agent_snapshot() {  # <terminal-handle>
+  local terminal=$1 tlist wps
+  fm_backend_orca_tool_check || { printf 'liveness=unreadable state=none'; return 0; }
+  tlist=$(orca terminal list --json 2>/dev/null) || { printf 'liveness=unreadable state=none'; return 0; }
+  wps=$(orca worktree ps --json 2>/dev/null || printf '{}')
+  FM_ORCA_TL="$tlist" FM_ORCA_WP="$wps" node -e '
+const handle = process.argv[1];
+let tl, wp;
+try { tl = JSON.parse(process.env.FM_ORCA_TL || ""); }
+catch (e) { process.stdout.write("liveness=unreadable state=none"); process.exit(0); }
+if (tl && tl.ok === false) { process.stdout.write("liveness=unreadable state=none"); process.exit(0); }
+try { wp = JSON.parse(process.env.FM_ORCA_WP || "{}"); } catch (e) { wp = {}; }
+if (wp && wp.ok === false) wp = {};
+const terms = (tl.result && tl.result.terminals) || [];
+const t = terms.find(x => x && x.handle === handle);
+if (!t) { process.stdout.write("liveness=missing state=none"); process.exit(0); }
+const wtId = t.worktreeId || "";
+const rank = { working: 3, blocked: 2, done: 1 };
+let best = "none", bestRank = 0, hasAgent = false;
+for (const w of ((wp.result && wp.result.worktrees) || [])) {
+  if ((w.worktreeId || "") !== wtId) continue;
+  for (const a of (w.agents || [])) {
+    hasAgent = true;
+    const r = rank[a.state] || 0;
+    if (r > bestRank) { bestRank = r; best = a.state; }
+  }
+}
+if (t.agentIdentity) hasAgent = true;
+const down = (t.orphaned === true) || (t.connected === false);
+let liveness;
+if (hasAgent) liveness = "alive";
+else if (down) liveness = "dead";
+else liveness = "ambiguous";
+process.stdout.write("liveness=" + liveness + " state=" + best);
+' "$terminal"
+}
+
+# fm_backend_orca_busy_state: native busy/idle. working -> busy; done or blocked
+# -> idle (an agent between turns or parked on a prompt is not mid-turn);
+# anything unresolved -> unknown, so the caller falls back to the harness
+# adapter's own lifecycle record.
+fm_backend_orca_busy_state() {  # <terminal-handle>
+  case "$(fm_backend_orca_agent_snapshot "$1")" in
+    *"state=working"*) printf 'busy' ;;
+    *"state=done"*|*"state=blocked"*) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_orca_agent_state: recovery-grade endpoint classifier (see the
+# shared vocabulary in bin/fm-backend.sh). Only `dead` and `missing` license
+# recovery; a connected terminal with no attributable agent stays `ambiguous`.
+fm_backend_orca_agent_state() {  # <terminal-handle>
+  case "$(fm_backend_orca_agent_snapshot "$1")" in
+    *"liveness=missing"*) printf 'missing' ;;
+    *"liveness=dead"*) printf 'dead' ;;
+    *"liveness=alive"*) printf 'alive' ;;
+    *"liveness=unreadable"*) printf 'unreadable' ;;
+    *) printf 'ambiguous' ;;
+  esac
+}
+
+# fm_backend_orca_capture: a bounded RENDERED-screen read of the live terminal.
+# --screen is required: Orca's default stream mode returns accumulated output
+# with repaints stacked into fragments (its own read docs call the default
+# "unsuitable for verifying rendered output"), which garbled every TUI composer
+# read the classifier depends on. --screen returns what the terminal actually
+# renders; when no screen can be rendered Orca reports source=screen-unavailable
+# and returns the accumulated tail instead, which fm_backend_orca_json_text
+# still consumes. Verified live against Orca 1.4.x.
 fm_backend_orca_capture() {  # <terminal-id> <lines>
   local terminal=$1 lines=${2:-40} out
   fm_backend_orca_tool_check || return 1
-  out=$(orca terminal read --terminal "$terminal" --limit "$lines" --json) || return 1
+  out=$(orca terminal read --terminal "$terminal" --limit "$lines" --screen --json) || return 1
   fm_backend_orca_json_text "$out"
 }
 
@@ -253,6 +436,14 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   printf '%s' "$verdict"
 }
 
+# fm_backend_orca_send_key: one named special key.
+# C-c uses Orca's dedicated --interrupt (SIGINT-style) primitive. Enter is an
+# empty --enter send. Escape and C-u are delivered as their raw control bytes
+# through --text, which passes bytes straight to the PTY (verified live: an ESC
+# byte reaches a `cat -v` as ^[, and a C-u byte performs the tty line-kill).
+# This matters because --interrupt is NOT a substitute for Escape: every
+# harness except grok cancels a turn with Escape, not Ctrl-C (bin/fm-control-lib.sh),
+# so aliasing them would mis-fire (e.g. exit Claude instead of interrupting it).
 fm_backend_orca_send_key() {  # <terminal-id> <key>
   local terminal=$1 key=$2
   fm_backend_orca_tool_check || return 1
@@ -262,6 +453,12 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
       ;;
     Enter|enter)
       fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "" --enter --json
+      ;;
+    Escape|escape|Esc|esc)
+      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$(printf '\033')" --json
+      ;;
+    C-u|ctrl+u|Ctrl-u|Ctrl-U)
+      fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$(printf '\025')" --json
       ;;
     *)
       echo "error: unsupported Orca key '$key'" >&2
