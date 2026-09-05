@@ -73,6 +73,7 @@ Firstmate's wrapper still matters: crewmates route every `ask-user` finding to f
 Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the broad behavior suite plus platform-specific compatibility lanes.
 Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
 The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
+When a test embeds a script in a heredoc inside a command substitution (`out=$(... <<'EOF'`), keep every body line free of apostrophes: bash 3.2, the system bash on macOS, still syntax-scans those lines, so one stray contraction unbalances the whole test file.
 
 Check and test the toolbelt before pushing:
 

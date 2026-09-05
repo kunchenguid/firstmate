@@ -46,6 +46,20 @@ No adapter starts a replacement with shell `&`.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
 
+## Ordinary wake presentation coalescing
+
+Pi's fixed follow-up dock gained one queued row per ordinary watcher notification, so a burst of actionable closes during one long handling turn could bury the conversation under rows even though every event was already durable in the wake queue.
+The Pi adapter therefore separates presentation from delivery: while one ordinary work-waiting row is pending, later ordinary wakes add no row, because the pending row already directs the model to run `bin/fm-wake-drain.sh` over the durable queue.
+The run that consumes or discards the pending row re-arms presentation, so a genuinely later wake still presents one new row, and a replacement session presents fresh.
+Suppression is bounded by the run that consumed or discarded the row: the latch never outlives it, so no wake is suppressed indefinitely and no generation is left blind.
+A wake arriving after an inline follow-up drain but before that run settles is suppressed for the remainder of that one run.
+Every suppressed event stays durable in the wake queue regardless, and the drain presents it.
+Urgent supervision failures bypass the latch and always surface as their own row, including a typed continuity-restoration failure that rides the ordinary delivery branch.
+Only presentation coalesces: the durable wake queue still receives every event, and the latch acknowledges and truncates nothing; holding a row back from the dock is the whole of what it does.
+Pi gives an extension no way to see that a wake failed to deliver, so a failed send can leave presentation held until the next run starts or settles, in practice the next captain turn; the durable queue still holds the event throughout.
+The pending-row latch lifecycle, the run boundaries that re-arm it, and the `watcher: FAILED` urgency marker every failure text must carry follow the presentation-coalescing contract in `.pi/extensions/fm-primary-pi-watch.ts`.
+Coalescing is Pi-specific because the accumulating dock is; the other primaries deliver a wake as a single turn-boundary message or as the return of the one blocking command the session is already waiting on.
+
 ## Recovery episode acknowledgement
 
 A recovery episode is one generation of `state/.watcher-down`, and it is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
@@ -104,6 +118,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+The same suite covers ordinary wake presentation coalescing against the real extension through a follow-up fake matching Pi's `void` extension send: a four-event burst presents one docked row while the durable queue keeps every event and every close completes its handshake, a wake consumed at run start leaves presentation re-armed so a genuinely later wake presents exactly one new row, a row consumed by a busy run's inline follow-up drain re-arms presentation the same way, continuity-restoration exhaustion and restoration-time lock loss each present their own row while an ordinary row is pending, retry-path lock loss and a refused handling handshake do the same, and session replacement discards the latch with its generation.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, same-instance shutdown-plus-start, automatic re-arm before any model turn, a fresh extension-module rebind carrying all in-flight actionable closes exactly once, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.

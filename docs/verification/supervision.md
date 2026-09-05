@@ -473,6 +473,50 @@ Stale prior-generation tool callbacks could not mutate the active child, repeate
 The strict no-emit check used the installed Pi SDK declarations to hold the lifecycle event contract.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Ordinary wake presentation coalescing was verified on 2026-09-01 with Node v22.23.1 against Pi 0.84.4, driving the tracked extension through a follow-up fake matching Pi's `void` extension send surface rather than a live Pi session.
+The surface the fakes model was read from the installed `@earendil-works/pi-coding-agent` runtime rather than assumed, and it is the `ExtensionAPI` one, not `AgentSession`.
+`ExtensionAPI.sendUserMessage` is declared `void` in `dist/core/extensions/types.d.ts`; `dist/core/extensions/loader.js` calls the runtime method without returning its promise, and the runtime binding in `dist/core/agent-session.js` routes every rejection to `runner.emitError`.
+The extension can therefore neither await delivery nor observe a delivery failure: the call only queues the row, and every runtime effect happens afterwards, off that call stack.
+That is why the latch is set before the call rather than after the await, and it is also the reason a failed send is invisible, which the extension header records as a residual.
+The runtime effects themselves: an idle send makes the runtime start a run that takes the queued row and emits `agent_start` (`pi-agent-core/dist/agent-loop.js:49` and `:67`, the only two emission sites); a row queued while a run is in flight is drained inline by that same run, which sets `pendingMessages` from the follow-up queue and continues, so it is consumed with no second `agent_start`; a queued row can instead be discarded without ever being consumed, which is what Escape while streaming does through `clearQueue`; and `agent_settled` is emitted from the `_runAgentPrompt` `finally` in `dist/core/agent-session.js` after a run has fully settled with no automatic retry, compaction, or queued continuation left, an aborted run included.
+Two earlier drafts of this record stated ordering this supersedes: that a continuation run emits `agent_start` when it consumes a docked row, and that an idle send resolves only after its handling run ends. Both were read from `AgentSession` rather than the `ExtensionAPI` surface the extension actually calls, and neither claim is carried forward.
+
+The change was rebased onto upstream main at `77ee3c8` on 2026-09-02 and re-verified there with Node v22.23.1.
+That base settles a main delivery once Pi accepts the follow-up rather than once Pi reports the docked row back, and observes consumption at `before_agent_start` for an idle main and at the user `message_start` for a streaming one, from `fix(pi): settle watcher delivery on Pi accepting the follow-up (#3513)`.
+Presentation coalescing sits above that contract: a coalesced ordinary wake never enters the unconsumed-wake map, so it reports as presented by the row already docked and its pending record is finished rather than left waiting for a consumption that will never come.
+That base also owns a streaming-time delivery regression that drove two actionable closes through one streaming run and expected one docked row for each. Coalescing presents the second close through the row already docked, so that regression now proves the successor chain still advances without a second row, and takes its unconsumed handoff wake from a later close raised after the docked row is consumed at the user `message_start` and its run settles.
+The discarded-dock regression is not carried on either base; the `agent_settled` clearing edge stays covered by the busy-path re-arm test.
+Setting the latch after the send instead of before it fails no test on this base either, because the fakes model the `void` extension send and the run the send starts emits `agent_start` after the delivery continuation has already run. The set-before-send ordering is kept as the defensive one the extension header states, not as one these tests distinguish.
+
+Each regression was run against deliberately broken variants of the extension to establish it is not vacuous, and the whole matrix was re-run on the `77ee3c8` base after the rebase.
+The suite exits at its first failure, so each variant was run one coalescing test at a time to get the full failing set rather than only the first.
+The unmodified extension fails only the burst test; clearing the latch on `agent_settled` alone fails only the run-start consumption re-arm test, because a row consumed at run start would otherwise stay latched for the rest of that run; clearing it on `agent_start` alone, which is the defect an earlier round of this change carried, fails only the busy-path re-arm test; classifying urgency by call site alone fails both restoration-failure tests; removing urgency entirely fails all four failure-bypass tests; and sharing one latch across generations fails only the session-replacement test.
+Both clearing edges are therefore load-bearing, each against a different test.
+The rejection rollback is kept as the companion to the catch this base itself holds around the send, but it has no counterfactual: removing it fails no test, because the `void` extension surface never reports a rejection for a test to drive.
+
+```sh
+node --version
+pi --version
+tests/fm-pi-watch-extension.test.sh
+tests/fm-watch-arm.test.sh
+tests/fm-watch-recovery-loop.test.sh
+tests/fm-pi-branch-extension.test.sh
+tests/fm-calm-pi-extension.test.sh
+tests/fm-turnend-guard.test.sh
+CI=true bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+Observed guarantee: `ok - Pi ordinary burst coalesces to one dock row and preserves every durable event`, `ok - Pi idle-consumed row re-arms presentation so a genuinely later wake presents one new row`, `ok - Pi busy-path consumed row re-arms presentation so a genuinely later wake presents one new row`, `ok - Pi restoration exhaustion surfaces separately from a pending ordinary row`, `ok - Pi restoration-time lock loss surfaces separately from a pending ordinary row`, `ok - Pi retry-path lock loss surfaces separately from a pending ordinary row`, `ok - Pi refused handshake surfaces separately from a pending ordinary row`, and `ok - Pi session replacement discards the ordinary latch so a new session presents fresh`, inside a 52-test extension suite at exit 0, with the watcher-arm (14), recovery-loop (2), branch-extension (34), Calm-extension (9), and turn-end-guard (70) suites also at exit 0, `fm-lint.sh` green under the pinned ShellCheck 0.11.0 and actionlint 1.7.12, and `fm-doc-audience-check: ok surfaces=89 local_links=302`.
+`tests/fm-pi-primary-types.test.sh` reported `skip: tsc not found for Pi extension typecheck`, so the TypeScript surface is exercised only by importing the real extension under Node type stripping, which the extension suite does.
+
+Applicability across supported primaries and runtime backends was reviewed by inspecting each integration surface rather than assumed.
+Plain Pi and pi-signed load the same tracked extension and are both changed.
+OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` re-arms the same way and delivers through `client.session.promptAsync`, a structurally comparable queued prompt, but it has no accumulating fixed dock and no recorded accumulation symptom, so it is deliberately unchanged here and behaves exactly as before.
+Claude and Cursor run the watcher only between turns under their Stop-hook auto-arm and stop-hook park, so a wake arrives as a single turn-boundary message with no window in which unconsumed wake prompts stack.
+Codex takes its wake as the return of the one bounded foreground checkpoint it is already blocked on, and Grok, Kimi, Muse, and the other persistent-model harnesses surface a wake through their own single arm return, so none of them has a presentation surface to coalesce.
+Every runtime backend is unaffected because the change lives entirely inside the Pi session process's own follow-up presentation and touches no spawn, endpoint, or task-metadata path.
+
 On 2026-09-02 the same suite, the strict typecheck, and the credential-free real-SDK guard were rerun against `@earendil-works/pi-coding-agent` 0.84.4 after the extension stopped waiting for `before_agent_start` before settling a main delivery; [`runtime-backends.md`](runtime-backends.md#2026-09-02-streaming-time-watcher-delivery) owns the exact commands and output.
 Observed guarantee: a wake delivered while main was streaming was followed by a verified successor and by delivery of the next actionable close, a replacement replayed only the follow-up Pi had not consumed, an exhausted restoration delivered its typed failure without launching an arm past the retry bound, and a verified successor that failed while a branch settlement still held its wake took the ordinary bounded retry once that delivery settled.
 
