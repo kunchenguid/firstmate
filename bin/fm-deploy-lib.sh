@@ -149,3 +149,206 @@ fm_deploy_json_escape() {
   s=${s//$'\r'/\\r}
   printf '%s' "$s"
 }
+
+# --- host preconditions the units enforce at start ----------------------------
+
+# Where a project keeps its unit files. bin/fm-deploy.sh already installs
+# <checkout>/deploy/systemd/<unit>.service from this directory; drop-ins live
+# beside them in <unit>.service.d/, and their ExecStartPre lines gate the start
+# of the surrounding stack just as much as a .service file's do.
+FM_DEPLOY_UNIT_DIR='deploy/systemd'
+
+# fm_deploy_unit_files <repo> <sha>
+# Prints every unit file and drop-in carried at <sha>, one path per line.
+fm_deploy_unit_files() {
+  git -C "$1" ls-tree -r --name-only "$2" -- "$FM_DEPLOY_UNIT_DIR/" 2>/dev/null
+}
+
+# fm_deploy_unit_user <repo> <sha> <unit-file>
+# Prints the user the unit runs as, empty when it does not say (systemd runs it
+# as root then). Section-aware, because `User=` is only meaningful in [Service].
+fm_deploy_unit_user() {
+  local content line section=''
+  content=$(git -C "$1" show "$2:$3" 2>/dev/null) || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case "$line" in
+      '#'* | ';'* | '') continue ;;
+      '['*']')
+        section=$line
+        continue
+        ;;
+    esac
+    [ "$section" = '[Service]' ] || continue
+    case "$line" in
+      User=*)
+        printf '%s\n' "${line#User=}"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$content
+EOF
+  return 0
+}
+
+# fm_deploy_preconditions <repo> <sha> <checkout> <precheck-dir>
+#
+# Prints one tab-separated record per ExecStartPre found in <sha>'s unit files:
+#
+#   check<TAB><unit-file><TAB><user><TAB><command to run>
+#   skip<TAB><unit-file><TAB><user><TAB><why it cannot be checked first>
+#
+# A `check` record is a start-time precondition this home can honestly prove
+# BEFORE it stops anything: it names at least one absolute path outside the
+# checkout, so its verdict depends on host-owned state rather than on the new
+# release being in place. That is the class the failed cutover hit - an
+# allow-list file at /etc that the incoming release required and the machine did
+# not have - and the class is what is selected here, never a named list.
+#
+# Everything else is a `skip` with its reason, printed rather than silently
+# dropped, because "not proved" and "proved good" must not look the same.
+#
+# Tokens naming a path the commit itself carries are rewritten into
+# <precheck-dir>, so what runs is the TARGET version of the validator, not the
+# one the machine still has. A token under the checkout that the commit does not
+# carry - the virtualenv interpreter, say - is host state and is left alone.
+#
+# Only the top-level directories the selected commands actually reference are
+# extracted into <precheck-dir>, so a validator that imports across trees fails
+# its pre-check loudly rather than passing on a file that was never put there.
+#
+# The command is assembled from the project's own unit file, which this deploy
+# would install and run moments later, so it is no wider a trust boundary than
+# the deploy itself. It is still held to the same data-only discipline as
+# config/deploy-target: anything that could end a word and start a command is
+# skipped rather than quoted and hoped about.
+fm_deploy_preconditions() {
+  local repo=$1 sha=$2 checkout=$3 precheck=$4
+  local unit content line section user cmd prefix tok rel
+  local -a cmds=() tokens=() rebuilt=()
+  local host_owned rewritten reason as_root ignore_failure
+
+  checkout=${checkout%/}
+  while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    content=$(git -C "$repo" show "$sha:$unit" 2>/dev/null) || continue
+    section=''
+    user=''
+    cmds=()
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line%"${line##*[![:space:]]}"}
+      case "$line" in
+        '#'* | ';'* | '') continue ;;
+        '['*']')
+          section=$line
+          continue
+          ;;
+      esac
+      [ "$section" = '[Service]' ] || continue
+      case "$line" in
+        User=*)
+          user=${line#User=}
+          continue
+          ;;
+        ExecStartPre=*) ;;
+        *) continue ;;
+      esac
+      cmd=${line#ExecStartPre=}
+      # An empty assignment resets the list systemd has accumulated so far.
+      if [ -z "$cmd" ]; then
+        cmds=()
+        continue
+      fi
+      cmds+=("$cmd")
+    done <<EOF
+$content
+EOF
+
+    for cmd in "${cmds[@]:-}"; do
+      [ -n "$cmd" ] || continue
+      # systemd's command prefixes. `-` means systemd ignores a failure, so it
+      # is not a precondition at all; `+`, `!` and `!!` run with full
+      # privileges regardless of User=.
+      as_root=0
+      ignore_failure=0
+      prefix=1
+      while [ "$prefix" -eq 1 ]; do
+        case "$cmd" in
+          -*)
+            cmd=${cmd#-}
+            ignore_failure=1
+            ;;
+          '+'*)
+            cmd=${cmd#+}
+            as_root=1
+            ;;
+          '!!'*)
+            cmd=${cmd#!!}
+            as_root=1
+            ;;
+          '!'*)
+            cmd=${cmd#!}
+            as_root=1
+            ;;
+          ':'*) cmd=${cmd#:} ;;
+          *) prefix=0 ;;
+        esac
+      done
+      cmd=${cmd#"${cmd%%[![:space:]]*}"}
+      [ -n "$cmd" ] || continue
+      # systemd starts the unit anyway when this one fails, so it decides
+      # nothing and this home must not refuse a deploy on its verdict.
+      [ "$ignore_failure" -eq 0 ] || continue
+
+      reason=''
+      case "$cmd" in
+        *[\;\&\|\`\$\<\>\(\)\"\'\\]*)
+          reason='its command line is not plain data this home can safely re-run'
+          ;;
+        /*) ;;
+        *) reason='it does not name an absolute program' ;;
+      esac
+      if [ -n "$reason" ]; then
+        printf 'skip\t%s\t%s\t%s\n' "$unit" "$user" "$reason"
+        continue
+      fi
+
+      read -r -a tokens <<<"$cmd"
+      host_owned=0
+      rebuilt=()
+      for tok in "${tokens[@]}"; do
+        rewritten=$tok
+        case "$tok" in
+          "$checkout"/*)
+            rel=${tok#"$checkout"/}
+            if git -C "$repo" cat-file -e "$sha:$rel" 2>/dev/null; then
+              rewritten="$precheck/$rel"
+            fi
+            ;;
+          /*) host_owned=$((host_owned + 1)) ;;
+        esac
+        rebuilt+=("$rewritten")
+      done
+      # The program itself is not the host-owned file this looks for; a
+      # validator that takes no host path is a runtime check (readiness,
+      # environment) and cannot be answered before the app is stopped.
+      case "${tokens[0]}" in
+        "$checkout"/*) ;;
+        /*) host_owned=$((host_owned - 1)) ;;
+      esac
+      if [ "$host_owned" -le 0 ]; then
+        printf 'skip\t%s\t%s\t%s\n' "$unit" "$user" \
+          'it checks no host-owned file, so its answer depends on the release already running'
+        continue
+      fi
+      if [ "$as_root" -eq 1 ] || [ -z "$user" ]; then
+        printf 'check\t%s\troot\t%s\n' "$unit" "${rebuilt[*]}"
+      else
+        printf 'check\t%s\t%s\t%s\n' "$unit" "$user" "${rebuilt[*]}"
+      fi
+    done
+  done < <(fm_deploy_unit_files "$repo" "$sha")
+}

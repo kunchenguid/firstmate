@@ -7,11 +7,12 @@
 #   fm-deploy.sh <project> --rollback
 #
 # The procedure is the one deploy/PROVISIONING.md and the recorded cutover
-# already establish: stop the app, check out the exact commit, put the sealed
-# front-end bundle in place, reinstall that one unit, verify the bundle with the
-# project's own verifier, restart, and prove it answers. It never touches the
-# sign-in or TLS units, never reads or writes a secrets file, and never forces,
-# stashes, or discards anything.
+# already establish: fetch the new version, prove the start-time requirements it
+# makes of the machine, set the current version aside, stop the app, check out
+# the exact commit, put the sealed front-end bundle in place, reinstall that one
+# unit, verify the bundle, prove the user the app runs as can read it, restart,
+# and prove it answers. It never touches the sign-in or TLS units, never reads
+# or writes a secrets file, and never forces, stashes, or discards anything.
 #
 # It refuses, rather than proceeds, when:
 #   - the range from what is live to <sha> touches a path the project's deploy
@@ -21,7 +22,14 @@
 #   - the live commit is not an ancestor of <sha>;
 #   - the sealed bundle for <sha> cannot be obtained (the build artifact has
 #     expired past its retention, or that commit never built one). There is no
-#     fallback to a bundle built for some other commit.
+#     fallback to a bundle built for some other commit;
+#   - a start-time requirement <sha>'s own units make of a host-owned file does
+#     not hold yet. Those validators run read-only, from <sha>'s own copy, as
+#     the user the unit runs as, BEFORE anything is stopped, and the refusal
+#     names the validator and the unit that would have refused to start.
+#
+# The fetch happens before the stop for the same reason: a version the machine
+# cannot even obtain must not be discovered after the app is already down.
 #
 # --rollback needs no captain permission: it restores the exact version that was
 # live before the last deploy, which the captain already had. It uses the copy
@@ -57,7 +65,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --rollback) ROLLBACK=1 ;;
     -h | --help)
-      sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"
       exit 0
       ;;
     -*)
@@ -191,9 +199,22 @@ if [ -n "$FM_DEPLOY_TGT_run_lock" ]; then
 fi
 
 # --- obtain the sealed bundle for this exact commit ---------------------------
+CO="$FM_DEPLOY_TGT_checkout"
+UNIT="$FM_DEPLOY_TGT_unit"
+PRECHECK_DIR="$FM_DEPLOY_TGT_rollback_root/.precheck-$TARGET_SHA"
+PRECHECK_MADE=0
 BUNDLE_DIR=''
 BUNDLE_NEEDED=0
 SAVED_BUNDLE=0
+
+# Both scratch copies go away on every exit, refusals included, so a refused
+# deploy leaves nothing of its own behind on either side.
+cleanup() {
+  [ -z "$BUNDLE_DIR" ] || rm -rf "$BUNDLE_DIR"
+  [ "$PRECHECK_MADE" -eq 0 ] || fm_deploy_ssh "sudo rm -rf '$PRECHECK_DIR'" </dev/null >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
 if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
   # A rollback returns to a version this machine already ran, and the front end
   # it ran with was copied aside at that time. Prefer that copy: builds stay
@@ -211,7 +232,6 @@ if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
     GH_REPO=$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -e 's#^git@[^:]*:##' -e 's#^https\{0,1\}://[^/]*/##' -e 's#\.git$##')
     [ -n "$GH_REPO" ] || refuse "cannot tell which GitHub repository $PROJECT publishes its build to"
     BUNDLE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-deploy-bundle.XXXXXX")
-    trap 'rm -rf "$BUNDLE_DIR"' EXIT
     run_id=$(gh run list --repo "$GH_REPO" --workflow "$FM_DEPLOY_TGT_bundle_workflow" \
       --json databaseId,headSha --limit 100 2>/dev/null \
       | sed -n 's/.*"databaseId":\([0-9]*\),"headSha":"'"$TARGET_SHA"'".*/\1/p' | head -1) || true
@@ -227,9 +247,61 @@ if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
   fi
 fi
 
+# --- prove what the new version requires of the machine ------------------------
+# The units gate their own start on validators that read host-owned files: an
+# operator allow-list, a pinned binary. Those files are not in the repository
+# and do not arrive with the release, so a version that starts requiring one the
+# machine does not have takes the stack down at start - after the app has
+# already been stopped, which is exactly how a dashboard came back while the
+# sign-in stack stayed down. Asking first costs a fetch and a read.
+#
+# The validators come from the TARGET commit, not the one the machine still has,
+# extracted read-only beside the rollback copies. Each runs as the user its own
+# unit runs as: the allow-list validator requires the file to be owned by the
+# euid opening it, so a root-run check would answer a question nobody asked.
+#
+# The scratch path is named for the commit rather than drawn from mktemp, which
+# is safe because the `rm -rf` below runs before the `install -d` and the
+# extraction: a symlink planted at that name is removed rather than followed,
+# so nothing is written through it. rollback_root itself is trusted exactly as
+# far as the set-aside step already trusts it, and no further.
+fm_deploy_ssh "sudo git -C '$CO' fetch origin" \
+  || refuse "could not fetch $TARGET_SHA onto the machine, so nothing was changed"
+
+PRECONDITIONS=$(fm_deploy_preconditions "$REPO" "$TARGET_SHA" "$CO" "$PRECHECK_DIR")
+mapfile -t PRECHECKS < <(printf '%s\n' "$PRECONDITIONS" | grep "^check	" || true)
+PRECHECK_SKIPPED=$(printf '%s\n' "$PRECONDITIONS" | grep -c "^skip	" || true)
+if [ "${#PRECHECKS[@]}" -gt 0 ]; then
+  archive_dirs=$(printf '%s\n' "${PRECHECKS[@]}" | tr ' \t' '\n\n' \
+    | sed -n "s#^$PRECHECK_DIR/\([^/]*\)/.*#\1#p" | sort -u | tr '\n' ' ')
+  PRECHECK_MADE=1
+  fm_deploy_ssh "sudo sh -c 'rm -rf \"$PRECHECK_DIR\" && install -d -o root -g root -m 0755 \"$FM_DEPLOY_TGT_rollback_root\" \"$PRECHECK_DIR\" && git -C \"$CO\" archive '$TARGET_SHA' $archive_dirs | tar -C \"$PRECHECK_DIR\" -x && chmod -R a+rX \"$PRECHECK_DIR\"'" </dev/null \
+    || refuse "could not read what $TARGET_SHA requires of the machine, so nothing was changed"
+
+  for precheck in "${PRECHECKS[@]}"; do
+    pc_rest=${precheck#*	}
+    pc_unit=${pc_rest%%	*}
+    pc_rest=${pc_rest#*	}
+    pc_user=${pc_rest%%	*}
+    pc_cmd=${pc_rest#*	}
+    pc_what=$(printf '%s\n' "$pc_cmd" | tr ' ' '\n' | sed -n "s#^$PRECHECK_DIR/##p" | head -1)
+    [ -n "$pc_what" ] || pc_what=$pc_cmd
+    # A user the machine does not have yet reads nothing like a validator that
+    # ran and said no, so it must not be reported as one.
+    fm_deploy_ssh "sudo id -u '$pc_user'" </dev/null >/dev/null 2>&1 \
+      || refuse "$TARGET_SHA starts ${pc_unit##*/} as the user $pc_user, and the machine has no such user; nothing was changed"
+    pc_err=$(fm_deploy_ssh "sudo -u '$pc_user' $pc_cmd" </dev/null 2>&1) \
+      || refuse "${pc_unit##*/} will not start until $pc_what passes on this machine, and it does not yet: ${pc_err:-it gave no reason}. Nothing was changed"
+  done
+  printf 'Checked %d start-time requirement(s) of %s against files this machine owns; all hold.\n' \
+    "${#PRECHECKS[@]}" "$TARGET_SHA"
+fi
+# What was NOT proved is said out loud: silence here would read as "all of it
+# holds" when it means "the rest can only be answered once it is running".
+[ "$PRECHECK_SKIPPED" -eq 0 ] || printf '%d further start-time requirement(s) of %s can only be answered once it is running, and were not checked first.\n' \
+  "$PRECHECK_SKIPPED" "$TARGET_SHA"
+
 # --- perform the update -------------------------------------------------------
-CO="$FM_DEPLOY_TGT_checkout"
-UNIT="$FM_DEPLOY_TGT_unit"
 ROLLBACK_DIR="$FM_DEPLOY_TGT_rollback_root/$DEPLOYED_SHA"
 
 printf 'Taking %s from %s to %s.\n' "$PROJECT" "$DEPLOYED_SHA" "$TARGET_SHA"
@@ -240,7 +312,7 @@ printf 'Taking %s from %s to %s.\n' "$PROJECT" "$DEPLOYED_SHA" "$TARGET_SHA"
 fm_deploy_ssh "sudo install -d -o root -g root -m 0755 '$FM_DEPLOY_TGT_rollback_root' '$ROLLBACK_DIR'" \
   || refuse "could not set aside the current version of $PROJECT for a rollback, so nothing was changed"
 if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
-  fm_deploy_ssh "sudo sh -c 'if [ -d \"$CO/$FM_DEPLOY_TGT_bundle_path\" ] && [ ! -d \"$ROLLBACK_DIR/bundle\" ]; then cp -a \"$CO/$FM_DEPLOY_TGT_bundle_path\" \"$ROLLBACK_DIR/bundle\"; fi'" \
+  fm_deploy_ssh "sudo sh -c 'if [ -d \"$CO/$FM_DEPLOY_TGT_bundle_path\" ] && [ ! -d \"$ROLLBACK_DIR/bundle\" ]; then cp -a \"$CO/$FM_DEPLOY_TGT_bundle_path\" \"$ROLLBACK_DIR/bundle\" && chmod -R a+rX \"$ROLLBACK_DIR/bundle\"; fi'" \
     || refuse "could not set aside the current front-end of $PROJECT for a rollback, so nothing was changed"
 fi
 
@@ -253,19 +325,30 @@ step_failed() {
   exit 1
 }
 
-fm_deploy_ssh "sudo git -C '$CO' fetch origin" || step_failed "could not fetch the new version onto the machine"
 fm_deploy_ssh "sudo git -C '$CO' checkout --detach '$TARGET_SHA'" || step_failed "could not switch the machine to $TARGET_SHA"
 
 if [ "$BUNDLE_NEEDED" -eq 1 ]; then
   tar -C "$BUNDLE_DIR" -czf - . \
-    | fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && install -d -o root -g root -m 0755 \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && tar -C \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" -xzf - && rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && mv \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" \"$CO/$FM_DEPLOY_TGT_bundle_path\" && chown -R root:root \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
+    | fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && install -d -o root -g root -m 0755 \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && tar -C \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" -xzf - && chmod -R a+rX \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && mv \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" \"$CO/$FM_DEPLOY_TGT_bundle_path\" && chown -R root:root \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
     || step_failed "could not install the front-end bundle for $TARGET_SHA"
 elif [ "$SAVED_BUNDLE" -eq 1 ]; then
-  fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && cp -a \"$FM_DEPLOY_TGT_rollback_root/$TARGET_SHA/bundle\" \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
+  fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && cp -a \"$FM_DEPLOY_TGT_rollback_root/$TARGET_SHA/bundle\" \"$CO/$FM_DEPLOY_TGT_bundle_path\" && chmod -R a+rX \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
     || step_failed "could not put the previous front-end bundle back"
 fi
 
-fm_deploy_ssh "sudo install -o root -g root -m 0644 '$CO/deploy/systemd/$UNIT.service' '/etc/systemd/system/$UNIT.service' && sudo systemctl daemon-reload" \
+# The bundle verifier below runs as root, and root reads a bundle no service
+# user can. That gap is the whole of it: a 0700 bundle directory passed the
+# root-run check and then the unit's own start-time verifier could not open the
+# seal inside it. Ask the question from the only perspective that decides
+# whether the app starts.
+UNIT_USER=$(fm_deploy_unit_user "$REPO" "$TARGET_SHA" "$FM_DEPLOY_UNIT_DIR/$UNIT.service")
+if [ -n "$FM_DEPLOY_TGT_bundle_path" ] && [ -n "$UNIT_USER" ]; then
+  unreadable=$(fm_deploy_ssh "sudo -u '$UNIT_USER' find '$CO/$FM_DEPLOY_TGT_bundle_path' '!' -readable -print" </dev/null 2>&1) || unreadable=${unreadable:-the front end could not be listed at all}
+  [ -z "$unreadable" ] \
+    || step_failed "the front end for $TARGET_SHA is on the machine, but $UNIT_USER, the user $UNIT runs as, cannot read all of it: $(printf '%s' "$unreadable" | head -3 | tr '\n' ' ')"
+fi
+
+fm_deploy_ssh "sudo install -o root -g root -m 0644 '$CO/$FM_DEPLOY_UNIT_DIR/$UNIT.service' '/etc/systemd/system/$UNIT.service' && sudo systemctl daemon-reload" \
   || step_failed "could not reinstall how $PROJECT is started"
 
 if [ -n "$FM_DEPLOY_TGT_bundle_verify" ]; then

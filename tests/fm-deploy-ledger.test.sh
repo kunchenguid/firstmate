@@ -56,6 +56,37 @@ make_case() {
   git_c init -q -b main
   commit_file README.md base "base"
   DEPLOYED=$(git_c rev-parse HEAD)
+  # A real unit set: the app's own unit, and a second unit whose start is gated
+  # on a file the MACHINE owns rather than one the release brings. That second
+  # requirement is the class this deploy path has to prove before it stops
+  # anything, so the fixture has to carry one or every assertion below passes
+  # over an empty precondition set.
+  mkdir -p "$REPO/deploy/systemd"
+  cat > "$REPO/deploy/systemd/demo-app.service" <<'UNIT'
+[Unit]
+Description=demo app
+[Service]
+User=demo
+ExecStartPre=/opt/demo/.venv/bin/python -B /opt/demo/deploy/verify_bundle.py
+ExecStart=/opt/demo/.venv/bin/demo
+UNIT
+  cat > "$REPO/deploy/systemd/demo-proxy.service" <<'UNIT'
+[Unit]
+Description=demo sign-in proxy
+[Service]
+User=demo-proxy
+ExecStartPre=-/opt/demo/.venv/bin/python -B /opt/demo/deploy/optional_note.py /etc/demo/note
+ExecStartPre=/opt/demo/.venv/bin/python -B /opt/demo/deploy/require_ready.py --timeout-seconds 30
+ExecStartPre=/opt/demo/.venv/bin/python -B /opt/demo/deploy/validate_allowed_emails.py /etc/demo/allowed-emails
+ExecStart=/opt/demo/.venv/bin/demo-proxy
+UNIT
+  printf 'x\n' > "$REPO/deploy/validate_allowed_emails.py"
+  printf 'x\n' > "$REPO/deploy/require_ready.py"
+  printf 'x\n' > "$REPO/deploy/optional_note.py"
+  printf 'x\n' > "$REPO/deploy/verify_bundle.py"
+  git_c add -A
+  git_c commit -qm "the machine's own units"
+  DEPLOYED=$(git_c rev-parse HEAD)
   commit_file src/engine.py engine "a plain code change"
   PLAIN=$(git_c rev-parse HEAD)
   git_c remote add origin git@github.com:example/demo.git
@@ -89,6 +120,14 @@ case "\$cmd" in
   *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
   *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
   *'http_code'*)      printf '%s\n' "\${FMTEST_HEALTH:-200}" ;;
+  # A start-time requirement the machine does not meet yet: FMTEST_PRECHECK_FAILS
+  # names the validator this fake machine refuses.
+  *'sudo -u '*'validate_allowed_emails.py'*)
+    [ -z "\${FMTEST_PRECHECK_FAILS:-}" ] || { printf 'operator allow-list refused\n' >&2; exit 1; } ;;
+  # The service user's own view of the front end. FMTEST_BUNDLE_UNREADABLE is how
+  # a test says the bundle landed in a mode that user cannot read.
+  *'-readable'*)
+    [ -z "\${FMTEST_BUNDLE_UNREADABLE:-}" ] || { printf '/opt/demo/dashboard/v2/dist\n'; exit 1; } ;;
   # The set-aside copy of a version's front end is real state on this fake
   # machine: only a version whose front end was actually copied aside answers
   # yes when the deployer asks whether it still has one.
@@ -173,9 +212,24 @@ test_a_clean_range_deploys_in_the_documented_order() {
     && [ "$unit" -lt "$verify" ] && [ "$verify" -lt "$restart" ] \
     || fail "clean-deploy: steps ran out of order: $(tr '\n' '|' < "$SSH_LOG")"
 
-  # The proxy and sign-in units are never touched. This is a standing safety
-  # boundary of the deployment posture, not an incidental property.
-  assert_no_grep 'oauth2-proxy' "$SSH_LOG" "clean-deploy: the sign-in unit was touched"
+  # The sign-in and TLS units are never STARTED, STOPPED, or REINSTALLED. That
+  # is the standing safety boundary, and it is what these assert. The deploy
+  # does now READ the sign-in unit's start-time requirements before it stops
+  # anything, so a bare mention of that unit's name is no longer the right
+  # test; a systemctl action or a unit-file install on it still is.
+  # These are fixed strings, as assert_no_grep requires: the deploy quotes the
+  # unit it acts on, so these are exactly what a stop, a restart, or a
+  # reinstall of the sign-in unit would put in the log.
+  assert_no_grep "systemctl stop 'demo-proxy'" "$SSH_LOG" \
+    "clean-deploy: the sign-in unit was stopped"
+  assert_no_grep "systemctl restart 'demo-proxy'" "$SSH_LOG" \
+    "clean-deploy: the sign-in unit was restarted"
+  assert_no_grep '/etc/systemd/system/demo-proxy' "$SSH_LOG" \
+    "clean-deploy: the sign-in unit was reinstalled"
+  # ...and it did read that unit's start-time requirement, which is what makes
+  # the three assertions above a narrower boundary rather than a vacuous one.
+  assert_grep "sudo -u 'demo-proxy'" "$SSH_LOG" \
+    "clean-deploy: the sign-in unit's start-time requirement was never checked at all"
   assert_no_grep 'caddy' "$SSH_LOG" "clean-deploy: the TLS unit was touched"
   pass "a clean auto-deployable range deploys in the documented order and touches no other unit"
 }
@@ -229,7 +283,50 @@ test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one() {
   pass "a restart that never comes up healthy is reported as a failed deploy with its rollback command"
 }
 
+test_the_precheck_runs_before_the_stop_and_only_on_host_owned_files() {
+  local out rc=0 precheck stop
+  make_case precheck-order
+  out=$(run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -eq 0 ] || fail "precheck-order: the deploy failed: $out"
+
+  precheck=$(step_line 'validate_allowed_emails.py')
+  stop=$(step_line 'systemctl stop')
+  [ -n "$precheck" ] \
+    || fail "precheck-order: the allow-list requirement was never checked: $(tr '\n' '|' < "$SSH_LOG")"
+  [ -n "$stop" ] && [ "$precheck" -lt "$stop" ] \
+    || fail "precheck-order: the machine was stopped before its start-time requirements were checked"
+  assert_grep "sudo -u 'demo-proxy'" "$SSH_LOG" \
+    "precheck-order: the requirement was not checked as the user the unit runs as"
+
+  # A requirement whose answer needs the new release already running cannot be
+  # proved first, and must not be pretended: the readiness check and the
+  # ignore-failure line are both absent from what ran before the stop.
+  assert_no_grep 'require_ready.py' "$SSH_LOG" \
+    "precheck-order: a runtime readiness check was run as if it were a precondition"
+  assert_no_grep 'optional_note.py' "$SSH_LOG" \
+    "precheck-order: a requirement systemd itself ignores was treated as one"
+  pass "the start-time requirements a machine can answer are checked, as the unit's own user, before anything stops"
+}
+
+test_a_bundle_the_service_user_cannot_read_never_restarts() {
+  local out rc=0
+  make_case unreadable-bundle
+  out=$(FMTEST_BUNDLE_UNREADABLE=1 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "unreadable-bundle: a front end the app could not read was reported as live"
+  assert_not_contains "$out" "is live at" "unreadable-bundle"
+  assert_contains "$out" "demo" "unreadable-bundle"
+  assert_no_grep 'systemctl restart' "$SSH_LOG" \
+    "unreadable-bundle: the app was restarted onto a front end it cannot read"
+  assert_grep 'chmod -R a+rX' "$SSH_LOG" \
+    "unreadable-bundle: the installed front end was never made readable at all"
+  assert_grep '"result":"failed"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "unreadable-bundle: the failure was not recorded"
+  pass "a front end the service user cannot read fails the deploy instead of restarting into it"
+}
+
 test_a_clean_range_deploys_in_the_documented_order
 test_the_completed_deploy_is_recorded
+test_the_precheck_runs_before_the_stop_and_only_on_host_owned_files
+test_a_bundle_the_service_user_cannot_read_never_restarts
 test_rollback_targets_the_version_the_last_deploy_came_from
 test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one

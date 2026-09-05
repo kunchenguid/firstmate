@@ -16,6 +16,8 @@
 #   (d) a run in progress refuses, before stopping anything
 #   (e) an unobtainable sealed bundle refuses, before stopping anything, and
 #       never falls back to a bundle built for another commit
+#   (e2) a start-time requirement the new version's own units make of a file the
+#       MACHINE owns is checked, and refuses by name, before stopping anything
 #   (f) a deploy target that is missing a key, that names an unknown key, or
 #       that carries shell metacharacters is refused rather than partly used
 #   (g) every refusal is recorded in the durable ledger
@@ -55,6 +57,28 @@ make_case() {
 
   git_c init -q -b main
   commit_file README.md base "base"
+  # The sign-in unit's start is gated on a file the MACHINE owns rather than one
+  # the release brings. Without a unit set carrying one, every assertion about
+  # checking those requirements first would pass over an empty set.
+  mkdir -p "$REPO/deploy/systemd"
+  cat > "$REPO/deploy/systemd/demo-app.service" <<'UNIT'
+[Unit]
+Description=demo app
+[Service]
+User=demo
+ExecStart=/opt/demo/.venv/bin/demo
+UNIT
+  cat > "$REPO/deploy/systemd/demo-proxy.service" <<'UNIT'
+[Unit]
+Description=demo sign-in proxy
+[Service]
+User=demo-proxy
+ExecStartPre=/opt/demo/.venv/bin/python -B /opt/demo/deploy/validate_allowed_emails.py /etc/demo/allowed-emails
+ExecStart=/opt/demo/.venv/bin/demo-proxy
+UNIT
+  printf 'x\n' > "$REPO/deploy/validate_allowed_emails.py"
+  git_c add -A
+  git_c commit -qm "the machine's own units"
   DEPLOYED=$(git_c rev-parse HEAD)
   commit_file src/engine.py engine "a plain code change"
   PLAIN=$(git_c rev-parse HEAD)
@@ -95,12 +119,38 @@ case "\$cmd" in
   *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
   *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
   *'http_code'*)      printf '%s\n' "\${FMTEST_HEALTH:-200}" ;;
+  # Only the bundle install is fed on stdin; draining it for every command
+  # would block on a pipe nothing ever closes.
+  *'-xzf -'*)         cat >/dev/null 2>&1 || true ;;
+  # A start-time requirement this machine does not meet yet.
+  *'sudo -u '*'validate_allowed_emails.py'*)
+    [ -z "\${FMTEST_PRECHECK_FAILS:-}" ] || { printf 'operator allow-list refused\n' >&2; exit 1; } ;;
 esac
 exit \${FMTEST_SSH_RC:-0}
 SH
+  # By default no build is obtainable, which is what the missing-bundle case
+  # needs. FMTEST_GH_RC=0 is how a case says the build for the commit it is
+  # deploying is still downloadable, so the run reaches the steps past it.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-exit "${FMTEST_GH_RC:-1}"
+set -u
+[ "${FMTEST_GH_RC:-1}" = 0 ] || exit "${FMTEST_GH_RC:-1}"
+case "${1:-} ${2:-}" in
+  'run list')
+    printf '[{"databaseId":4242,"headSha":"%s"}]\n' "${FMTEST_TARGET_SHA:-}"
+    ;;
+  'run download')
+    out=''
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = -D ] && { shift; out=$1; }
+      shift
+    done
+    mkdir -p "$out"
+    printf 'built\n' > "$out/index.html"
+    printf '{}\n' > "$out/bundle-seal.json"
+    ;;
+esac
+exit 0
 SH
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -113,7 +163,9 @@ SH
 }
 
 run_deploy() {
-  ( PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" "$ROOT/bin/fm-deploy.sh" "$@" 2>&1 )
+  ( PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+      FMTEST_TARGET_SHA="${FMTEST_TARGET_SHA:-$PLAIN}" \
+      "$ROOT/bin/fm-deploy.sh" "$@" 2>&1 )
 }
 
 assert_machine_untouched() {  # <case label>
@@ -191,6 +243,22 @@ test_an_unobtainable_bundle_refuses_before_touching_the_machine() {
   pass "an unobtainable sealed bundle refuses before anything on the machine changes"
 }
 
+test_an_unmet_host_requirement_refuses_before_touching_the_machine() {
+  local out rc=0
+  make_case unmet-host-requirement
+  # The new version's own units gate their start on a file this machine owns and
+  # does not have yet. Discovering that after the app is stopped is how a
+  # dashboard came back while the sign-in stack stayed down.
+  out=$(FMTEST_GH_RC=0 FMTEST_PRECHECK_FAILS=1 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "unmet-host-requirement: deployed although the machine did not meet the new version's requirements"
+  assert_contains "$out" "validate_allowed_emails.py" "unmet-host-requirement"
+  assert_contains "$out" "demo-proxy.service" "unmet-host-requirement"
+  assert_machine_untouched unmet-host-requirement
+  assert_grep '"result":"refused"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "unmet-host-requirement: the refusal was not recorded in the ledger"
+  pass "a start-time requirement the machine does not meet refuses by name, before anything on the machine changes"
+}
+
 test_a_broken_deploy_target_is_refused_rather_than_partly_used() {
   local out rc broken
   for broken in missing-key unknown-key metacharacters; do
@@ -265,6 +333,7 @@ test_the_captains_words_let_the_same_range_through
 test_a_run_in_progress_refuses_before_touching_the_machine
 test_an_unreadable_run_state_refuses
 test_an_unobtainable_bundle_refuses_before_touching_the_machine
+test_an_unmet_host_requirement_refuses_before_touching_the_machine
 test_a_broken_deploy_target_is_refused_rather_than_partly_used
 test_the_merge_trigger_is_inert_without_a_policy
 test_the_merge_trigger_never_deploys_a_reserved_range
