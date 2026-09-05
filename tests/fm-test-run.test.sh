@@ -1707,6 +1707,25 @@ SH
     "baseline replacement race omitted the inventory failure"
   assert_contains "$out" $'53\t600\tfm-remote\t'"$tmp/reused-cwd" \
     "replacement during baseline collection was not reported as new"
+
+  : > "$tmp/before"
+  cp "$tmp/portable-candidate" "$tmp/after"
+  printf '%s\n' '52 Fri Sep 5 08:00:00 2026 S herdr server --session fm-lab-replacement' \
+    > "$tmp/portable-session-replacement"
+  printf '%s\n' '52 S herdr server --session fm-lab-replacement' \
+    > "$tmp/portable-session-candidate"
+  rm -f "$tmp/ps-calls"
+  rc=0
+  out=$(FM_LEAK_PS_BEFORE="$tmp/before" FM_LEAK_PS_AFTER="$tmp/after" \
+    FM_LEAK_PS_CALLS="$tmp/ps-calls" FM_TEST_RUN_PROC_ROOT="$tmp/no-proc" \
+    FM_LEAK_PORTABLE_PID=52 FM_LEAK_PORTABLE_CANDIDATE="$tmp/portable-session-candidate" \
+    FM_LEAK_PORTABLE_IDENTITY_BEFORE="$tmp/portable-session-replacement" \
+    FM_LEAK_PORTABLE_IDENTITY_AFTER="$tmp/portable-session-replacement" \
+    FM_LEAK_PORTABLE_CWD="$tmp/reused-cwd" PATH="$tmp/fakebin:$PATH" \
+    "$repo/bin/fm-test-run.sh" --jobs 1 --check-herdr-leaks tests/fm-fixture.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a portable Herdr session replacement passed"
+  assert_contains "$out" 'could not inspect Herdr server processes after the suite' \
+    "portable session replacement was omitted instead of failing inventory"
   pass "Herdr leak check preserves Linux and portable baseline identity contracts"
 }
 

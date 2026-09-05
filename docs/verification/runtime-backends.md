@@ -980,8 +980,9 @@ It also retains the helper's refusal, default-session tripwire, failed-deletion,
 The runner records each matching server's PID and Linux `/proc` start time before the suite, then revalidates that the same start identity still belongs to the same server and session after collecting its working directory.
 If the PID is replaced during that inventory boundary, the snapshot fails closed and the replacement is reported as new by the final inventory instead of entering the baseline.
 On hosts without `/proc`, it records the process start time under the C locale and UTC with a revalidated working directory, but fails closed for every survivor because second-resolution identity cannot prove that a PID was not reused.
+A still-live portable PID whose command or named session changes during inspection fails the inventory instead of being treated as an exited candidate.
 It warns with PID, start time, working directory, and session only when a kernel identity proves that a pre-existing process remains, so shared-host contamination stays visible without misclassifying a replacement.
-The runner regression separately proves both identity paths reject new and reused identities, rejects a same-session PID replacement during baseline collection, and rejects unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
+The runner regression separately proves both identity paths reject new and reused identities, rejects same-session and changed-session replacements during collection, and rejects unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
 Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
@@ -996,15 +997,20 @@ An armed running claim whose ownership record is unreadable or malformed is reta
 New Linux claims require a kernel start identity before the waiting child is armed, so an identity inventory failure returns 125 without executing the staged command.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
-The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
+The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, and waits for a replacement child after the initial cleanup snapshot before releasing a FIFO barrier.
+It proves that cleanup promptly signals newly discovered scoped identities, prevents further respawn, and preserves another queue.
 The legacy identity regression probes installed locales for two that render the same process start differently under EST5, then exercises locale-only reconstruction with that pair or prints an explicit skip naming every locale probed.
 This host exposed only `C`, `C.utf8`, and `POSIX`, whose `ps lstart` renderings were identical, so only the locale-only case skipped here.
 The worker-stop regression runs a tracked job that changes its working directory to the account home, then proves its active claim PID and kernel start identity stop it without reaching another queue or an unrelated process.
 The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
-The Linux supervisor lease records its canonical code root and start identity before publishing its owner PID, and ensure replaces an exact live lease whose root is missing, unreadable, or different from the requested root only while that identity still matches before every signal.
+The Linux supervisor and serving-worker leases expose their validated current start identity to the shared stop boundary, which refuses PID-only calls and revalidates that identity before every signal.
+The serving-owner resolver rejects an earlier validated identity that no longer matches instead of replacing it with a fresh PID lookup.
+The public orphan reaper also passes a private-namespace PID-reuse regression at the boundary between candidate validation and cleanup: it reports the mismatch and leaves the unrelated replacement alive.
+Linux stop authority requires the boot identifier and kernel start ticks, while Darwin retains its portable process start identity.
 
 ```sh
-bin/fm-test-run.sh --jobs 1 tests/fm-remote-job-orphan-reap.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks --per-script-timeout-secs 300 --json .no-mistakes/host-repro/local-recovery-final.json tests/fm-test-run.test.sh tests/fm-remote-job-orphan-reap.test.sh tests/fm-remote-job.test.sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks --per-script-timeout-secs 300 tests/fm-remote-job.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh
 bin/fm-lint.sh
 ```
 
@@ -1013,14 +1019,20 @@ ok - stop finds adopted sibling supervisors, prevents respawn, and preserves ano
 ok - legacy active claim reports manual cleanup without signalling a recycled group
 ok - replacement-worker reclaim preserves a legacy recycled group
 ok - mismatched supervisor replacement refuses a recycled PID
+ok - orphan reaper refuses a recycled PID after candidate validation
 ok - active claim identity stops a job descendant after it changes directory outside the root
 ok - leaderless active claim fails closed with surviving process metadata
 ok - malformed armed claim fails closed with its path and reason
 ok - missing kernel claim identity prevents command side effects
 ok - Darwin portable claim identity executes commands without Linux kernel identity
 ok - ensure replaces a live supervisor lease serving an old root
+ok - supervisor publishes a replacement after the stop snapshot
 ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```
+
+The runner and orphan suites passed, while the first three-suite command reported `FM_TEST_SUMMARY total=3 failed=1 skipped_gate=0 duration_ms=193238` at the remote-job assertion `a queued sibling poll preempted a running poll`.
+The separate caller run reported `FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=76424`; that rerun does not establish that the unchanged sibling-poll timing assertion is stable.
+Both runs reported no new Herdr survivors, and full pinned ShellCheck and actionlint passed.
 
 The signal-injection fixture also passes when its runner is a background Bash job with inherited ignored SIGINT.
 It restores the signal disposition before executing each suite, retaining the nonzero-exit and teardown assertions.

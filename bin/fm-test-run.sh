@@ -170,7 +170,7 @@ herdr_portable_candidate_status() { # <pid> <session>
     return 2
   fi
   printf '%s\n' "$listing" | herdr_candidate_from_ps "$pid" "$session" && return 0
-  return 2
+  return 1
 }
 
 herdr_portable_process_identity() { # <pid> <session>

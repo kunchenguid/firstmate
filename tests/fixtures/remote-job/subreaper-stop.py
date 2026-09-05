@@ -48,14 +48,19 @@ def pid_reuse_case(repo, mode=None):
     for path in (root / "bin", state, account, outside):
         path.mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("fixture\n")
-    if mode in ("reclaim", "lease"):
+    if mode in ("reclaim", "lease", "worker", "reaper"):
         for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
             shutil.copy2(repo / "bin" / name, root / "bin" / name)
+        if mode in ("worker", "reaper"):
+            (root / "bin/fm-remote-job-worker.sh").write_text(
+                "#!/bin/bash\nwhile :; do read -r -t 300 _ || true; done\n")
+            (root / "bin/fm-remote-job-worker.sh").chmod(0o755)
     else:
         (root / "bin/fm-remote-job-worker.sh").write_text("#!/bin/bash\n")
     os.mkfifo(fifo)
     environment = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                        FM_REMOTE_JOB_STATE_ROOT=str(state),
+                       FM_PID_REUSE_REPO=str(repo),
                        FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO=str(fifo), TZ="UTC0", LC_ALL="C")
     if mode == "reclaim":
         environment["FM_REMOTE_JOB_TEST_STOP_ATTEMPTS"] = "2"
@@ -64,10 +69,21 @@ def pid_reuse_case(repo, mode=None):
     try:
         while time.time() % 1 > 0.1:
             time.sleep(0.01)
-        leader = subprocess.Popen(["sleep", "300"], env=environment, cwd=root,
-                                  start_new_session=True)
+        leader_command = ["sleep", "300"]
+        if mode in ("worker", "reaper"):
+            leader_command = [str(root / "bin/fm-remote-job-worker.sh")]
+        leader = subprocess.Popen(leader_command, env=environment, cwd=root, start_new_session=True)
         leader_start = process_start(leader.pid)
         assert os.getpgid(leader.pid) == leader.pid
+        if mode in ("worker", "reaper"):
+            deadline = time.monotonic() + 3
+            expected_argument = os.fsencode(root / "bin/fm-remote-job-worker.sh")
+            while time.monotonic() < deadline:
+                if expected_argument in Path(f"/proc/{leader.pid}/cmdline").read_bytes().split(b"\0"):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("serving-worker fixture did not publish its worker command identity")
         legacy_start = subprocess.check_output(
             ["/bin/ps", "-p", str(leader.pid), "-o", "lstart="], env=environment, text=True)
         if legacy_claim:
@@ -79,26 +95,50 @@ def pid_reuse_case(repo, mode=None):
             (claim / "group_start").write_text(legacy_start)
             (claim.parent / "stdout").touch()
             (claim.parent / "stderr").touch()
-        if mode == "lease":
+        if mode == "reaper":
+            driver = fixture / "reaper" / "bin"
+            driver.mkdir(parents=True)
+            shutil.copy2(repo / "bin/fm-remote-job-reap-orphans.sh", driver)
+            # Pause the public reaper after it validated its candidate, before
+            # the real shared stop function consumes that recorded identity.
+            (driver / "fm-remote-job-lib.sh").write_text('''
+. "$FM_PID_REUSE_REPO/bin/fm-remote-job-lib.sh"
+definition=$(declare -f fm_remote_job_stop_worker_tree)
+eval "${definition/fm_remote_job_stop_worker_tree/fm_fixture_original_stop}"
+fm_remote_job_stop_worker_tree() {
+  IFS= read -r _ < "$FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO" || return 1
+  fm_fixture_original_stop "$@"
+}
+''')
+            shutil.rmtree(root)
+            stop = subprocess.Popen(
+                [str(driver / "fm-remote-job-reap-orphans.sh")], env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elif mode in ("lease", "worker"):
             requested = fixture / "requested"
             shutil.copytree(root, requested, symlinks=True)
-            lock = state / "supervisor.lock"
+            lock = state / ("worker.lock" if mode == "worker" else "supervisor.lock")
             lock.mkdir()
             command = subprocess.check_output(
                 ["/bin/ps", "-p", str(leader.pid), "-o", "command="], text=True)
             (lock / "pid").write_text(f"{leader.pid}\n")
             (lock / "start").write_text(f"{leader_start}\n")
             (lock / "command").write_text(command)
-            (lock / "root").write_text(f"{root}\n")
+            if mode == "worker":
+                (state / "worker.pid").write_text(f"{leader.pid}\n")
+                (state / "worker.identity").write_text("stale identity\n")
+            else:
+                (lock / "root").write_text(f"{root}\n")
             stop = subprocess.Popen(
                 ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; '
                  'fm_remote_job_start_linux_worker "$2" "$HOME"',
-                 "fixture", str(repo), str(requested)],
+                 "fixture", str(repo), str(requested if mode == "lease" else root)],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         elif mode != "reclaim":
             stop = subprocess.Popen(
-                ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; fm_remote_job_stop_worker_tree "$2"',
-                 "fixture", str(repo), str(leader.pid)],
+                ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; '
+                 'fm_remote_job_stop_worker_tree "$2" "$3"',
+                 "fixture", str(repo), str(leader.pid), leader_start],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if mode != "reclaim":
             deadline = time.monotonic() + 10
@@ -147,15 +187,19 @@ def pid_reuse_case(repo, mode=None):
             assert f"surviving pid {unrelated.pid}" in report, report
             assert unrelated.poll() is None, "replacement-worker reclaim signalled a recycled group"
             return 0
-        if mode == "lease":
+        if mode in ("lease", "worker", "reaper"):
             os.write(release_fd, b"release\n")
             os.close(release_fd)
             release_fd = None
             stdout, stderr = stop.communicate(timeout=10)
-            assert stop.returncode != 0, (stdout, stderr)
+            if mode == "reaper":
+                assert stop.returncode == 0, (stdout, stderr)
+                assert "survived reaping" in stderr, (stdout, stderr)
+            else:
+                assert stop.returncode != 0, (stdout, stderr)
             assert "no longer matches validated identity" in stderr, (stdout, stderr)
             assert leader_start in stderr, (stdout, stderr)
-            assert unrelated.poll() is None, "mismatched supervisor replacement signalled a recycled PID"
+            assert unrelated.poll() is None, f"mismatched {mode} replacement signalled a recycled PID"
             return 0
         os.write(release_fd, b"release\n")
         os.close(release_fd)
@@ -165,9 +209,11 @@ def pid_reuse_case(repo, mode=None):
             assert stop.returncode != 0, (stdout, stderr)
             assert "NEEDING MANUAL CLEANUP" in stderr, (stdout, stderr)
             assert f"pid {leader.pid}" in stderr, (stdout, stderr)
-            assert legacy_start.strip() in stderr, (stdout, stderr)
+            assert leader_start in stderr, (stdout, stderr)
         else:
-            assert stop.returncode == 0, (stdout, stderr)
+            assert stop.returncode != 0, (stdout, stderr)
+            assert "no longer matches validated identity" in stderr, (stdout, stderr)
+            assert leader_start in stderr, (stdout, stderr)
         assert unrelated.poll() is None, "stop signalled the unrelated recycled identity"
         return 0
     finally:
@@ -219,7 +265,7 @@ def processes():
                 continue
             fields = (path / "stat").read_text().rsplit(") ", 1)[1].split()
             result[int(path.name)] = (int(fields[1]), int(fields[2]), "--serve" in [os.fsdecode(a) for a in args])
-        except (FileNotFoundError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
     known.update(result)
     return result
@@ -274,13 +320,19 @@ def call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=
     assert result.returncode == 0, (result.stdout, result.stderr)
 
 
+def stop_command(pid):
+    return (f'_fm_stop_pid={pid}; '
+            'fm_remote_job_resolve_stop_owner "$_fm_stop_pid" && '
+            'fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"')
+
+
 def queue_processes(queue):
     result = set()
     expected = os.fsencode(queue)
     for pid in processes():
         try:
             entries = (Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"))
-        except (FileNotFoundError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
         if b"FM_REMOTE_JOB_STATE_ROOT=" + expected in entries:
             result.add(pid)
@@ -325,6 +377,11 @@ fm_remote_job_signal_scope_snapshot "$7" "$3" "$4" TERM
             timeout=10)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert candidate.poll() is None
+        refusal = run_call(
+            f'fm_remote_job_resolve_stop_owner {candidate.pid} "{stale_start}"', queue)
+        assert refusal.returncode != 0, (refusal.stdout, refusal.stderr)
+        assert "no longer matches validated identity" in refusal.stderr
+        assert candidate.poll() is None, "owner resolution replaced a validated identity"
     finally:
         stop_process(candidate)
         extra_pids.discard(candidate.pid)
@@ -342,7 +399,10 @@ def run_kernel_pid_reuse_case(mode=None):
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     timeout=40)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or b""
+            if b"FM_PID_REUSE_READY" in output:
+                raise AssertionError("PID-reuse regression timed out after setup completed") from error
             return "private user/PID namespace setup timed out"
         if "legacy replacement crossed the ps lstart second boundary" not in result.stdout:
             break
@@ -359,7 +419,7 @@ def queue_process_identity(pid, queue):
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
         entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
         args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-    except (FileNotFoundError, ProcessLookupError):
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
         return None
     assert b"FM_REMOTE_JOB_STATE_ROOT=" + os.fsencode(queue) in entries
     assert os.fsencode(worker) in args
@@ -432,6 +492,16 @@ done
     queue = fixture / "queue"
     other = fixture / "other-queue"
     start = 'fm_remote_job_start_linux_worker "$FM_ROOT_OVERRIDE" "$HOME"'
+    pid_only = subprocess.Popen(["sleep", "300"], cwd=fixture)
+    extra_pids.add(pid_only.pid)
+    pid_only_result = run_call(f"fm_remote_job_stop_worker_tree {pid_only.pid}", queue)
+    assert pid_only_result.returncode != 0, (pid_only_result.stdout, pid_only_result.stderr)
+    assert "has no caller-validated identity" in pid_only_result.stderr
+    assert pid_only.poll() is None, "PID-only stop signalled its target"
+    pid_only.terminate()
+    pid_only.wait(timeout=3)
+    extra_pids.discard(pid_only.pid)
+    print("ok - PID-only stop fails closed without signalling")
     call(start, queue)
     wait_for(lambda: len(processes()) == 2)
     call(start, queue)
@@ -450,14 +520,14 @@ done
                for pid, (parent, group, serving) in snapshot.items() if not serving)
     other_child = int((other / "worker.pid").read_text())
     other_group = snapshot[other_child][1]
-    call(f'fm_remote_job_stop_worker_tree {leaderless_child}', queue)
+    call(stop_command(leaderless_child), queue)
     wait_for(lambda: len(processes()) == 2)
     for _ in range(30):
         assert all(group == other_group for _, group, _ in processes().values()), "worker respawned after stop"
         reap()
         time.sleep(0.1)
     assert other_child in processes(), "stop reached another queue"
-    call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', other)
+    call(stop_command('$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")'), other)
     wait_for(lambda: not processes())
     print("ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue")
 
@@ -469,7 +539,7 @@ done
         wait_for(lambda: (direct_queue / "worker.pid").is_file() and len(processes()) == 2)
         direct_child = int((direct_queue / "worker.pid").read_text())
         assert os.getpgid(direct.pid) == os.getpgrp()
-        call(f"fm_remote_job_stop_worker_tree {direct_child}", direct_queue)
+        call(stop_command(direct_child), direct_queue)
         wait_for(lambda: not processes())
         direct.wait(timeout=5)
         for _ in range(30):
@@ -503,6 +573,16 @@ done
         print(f"skip - validated supervisor lease PID reuse containment: {lease_skip}")
     else:
         print("ok - mismatched supervisor replacement refuses a recycled PID")
+    worker_skip = run_kernel_pid_reuse_case("worker")
+    if worker_skip:
+        print(f"skip - validated serving-worker PID reuse containment: {worker_skip}")
+    else:
+        print("ok - stale serving-worker replacement refuses a recycled PID")
+    reaper_skip = run_kernel_pid_reuse_case("reaper")
+    if reaper_skip:
+        print(f"skip - orphan reaper PID reuse containment: {reaper_skip}")
+    else:
+        print("ok - orphan reaper refuses a recycled PID after candidate validation")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
@@ -615,7 +695,7 @@ printf 'executed\n' > "$HOME/claim-side-effect"
         claim_group = int(next((job_queue / "jobs").glob("job-*/.claim/group")).read_text())
         assert chdir_pid != claim_group and os.getpgid(chdir_pid) == claim_group
         job_serving = int((job_queue / "worker.pid").read_text())
-        call(f"fm_remote_job_stop_worker_tree {job_serving}", job_queue)
+        call(stop_command(job_serving), job_queue)
         wait_for(lambda: not process_alive(chdir_pid))
         try:
             os.waitpid(chdir_pid, os.WNOHANG)
@@ -650,7 +730,7 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     assert os.getpgid(leaderless_pid) == leaderless_group
     leaderless_start = process_start(leaderless_pid)
     leaderless_serving = int((leaderless_queue / "worker.pid").read_text())
-    leaderless_result = run_call(f"fm_remote_job_stop_worker_tree {leaderless_serving}",
+    leaderless_result = run_call(stop_command(leaderless_serving),
                                  leaderless_queue)
     assert leaderless_result.returncode != 0, (leaderless_result.stdout, leaderless_result.stderr)
     assert "NEEDING MANUAL CLEANUP" in leaderless_result.stderr
@@ -681,7 +761,7 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     (malformed_claim / "group_start").write_text("")
     malformed_serving = int((malformed_queue / "worker.pid").read_text())
     malformed_started = time.monotonic()
-    malformed_result = run_call(f"fm_remote_job_stop_worker_tree {malformed_serving}",
+    malformed_result = run_call(stop_command(malformed_serving),
                                 malformed_queue)
     assert time.monotonic() - malformed_started < 5
     assert malformed_result.returncode != 0, (malformed_result.stdout, malformed_result.stderr)
@@ -711,7 +791,7 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     assert (identity_job / "exit").read_text().strip() == "125"
     assert not (account / "claim-side-effect").exists()
     identity_serving = int((identity_queue / "worker.pid").read_text())
-    call(f"fm_remote_job_stop_worker_tree {identity_serving}", identity_queue)
+    call(stop_command(identity_serving), identity_queue)
     wait_for(lambda: not queue_processes(identity_queue))
     assert set(processes()) == original, "claim identity failure reached another queue"
     print("ok - missing kernel claim identity prevents command side effects")
@@ -731,7 +811,7 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     assert (darwin_job / "exit").read_text().strip() == "0"
     assert (account / "claim-side-effect").read_text() == "executed\n"
     darwin_serving = int((darwin_queue / "worker.pid").read_text())
-    call(f"fm_remote_job_stop_worker_tree {darwin_serving}", darwin_queue,
+    call(stop_command(darwin_serving), darwin_queue,
          environment_overrides=darwin_identity_override)
     wait_for(lambda: not queue_processes(darwin_queue))
     assert set(processes()) == original, "Darwin identity path reached another queue"
@@ -751,14 +831,16 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     wait_for(lambda: not (upgrade_queue / "worker.pid").exists())
     assert process_alive(old_supervisor)
     upgrade_started = time.monotonic()
-    call('fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; '
-         '[ "$FM_REMOTE_JOB_REPAIRED" -eq 1 ]', upgrade_queue)
+    call('fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME" || '
+         '{ printf "ensure failed: %s\\n" "$FM_REMOTE_JOB_ERROR" >&2; exit 1; }; '
+         '[ "$FM_REMOTE_JOB_REPAIRED" -eq 1 ] || '
+         '{ printf "ensure did not report repair\\n" >&2; exit 1; }', upgrade_queue)
     assert time.monotonic() - upgrade_started < 10
     wait_for(lambda: len(queue_processes(upgrade_queue)) == 2)
     assert not process_alive(old_supervisor)
     extra_pids.discard(old_supervisor)
     upgraded_serving = int((upgrade_queue / "worker.pid").read_text())
-    call(f"fm_remote_job_stop_worker_tree {upgraded_serving}", upgrade_queue)
+    call(stop_command(upgraded_serving), upgrade_queue)
     wait_for(lambda: not queue_processes(upgrade_queue))
     assert set(processes()) == original, "root-mismatch replacement reached another queue"
     print("ok - ensure replaces a live supervisor lease serving an old root")
@@ -781,24 +863,47 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     os.kill(supervisor, signal.SIGSTOP)
     os.kill(serving, signal.SIGKILL)
     wait_for(lambda: process_state(serving) == "Z")
+    zombie_fifo = fixture / "zombie-stop.fifo"
+    os.mkfifo(zombie_fifo)
+    resumed_child = []
+    resume_errors = []
 
     def resume_supervisor():
-        time.sleep(0.2)
         try:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    descriptor = os.open(zombie_fifo, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError as error:
+                    if error.errno != errno.ENXIO or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
             os.kill(supervisor, signal.SIGCONT)
-        except ProcessLookupError:
-            pass
+            try:
+                wait_for(lambda: (queue / "worker.pid").is_file() and
+                         int((queue / "worker.pid").read_text()) != serving)
+                resumed_child.append(int((queue / "worker.pid").read_text()))
+                print("ok - supervisor publishes a replacement after the stop snapshot", flush=True)
+                os.write(descriptor, b"release\n")
+            finally:
+                os.close(descriptor)
+        except Exception as error:
+            resume_errors.append(error)
 
     resume = threading.Thread(target=resume_supervisor)
     resume.start()
-    call(f"fm_remote_job_stop_worker_tree {serving}", queue)
+    call(stop_command(serving), queue,
+         environment_overrides={"FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO": str(zombie_fifo)})
     resume.join(timeout=2)
+    assert not resume.is_alive() and not resume_errors, resume_errors
+    assert resumed_child and resumed_child[0] != serving
     wait_for(lambda: not queue_processes(queue))
     for _ in range(30):
         assert not queue_processes(queue), "real supervisor respawned after zombie-child stop"
         assert_queue_unchanged(real_other, unrelated)
         time.sleep(0.1)
-    call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', real_other)
+    call(stop_command('$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")'), real_other)
     wait_for(lambda: not processes())
     print("ok - zombie serving ownership recovers its scoped supervisor without respawn")
 finally:

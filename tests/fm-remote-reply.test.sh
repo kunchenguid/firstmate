@@ -25,10 +25,11 @@ cleanup() {
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] || worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
   if [ -n "$worker_pid" ]; then
-    fm_remote_job_stop_worker_tree "$worker_pid" || {
+    if ! fm_remote_job_resolve_stop_owner "$worker_pid" ||
+      ! fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"; then
       printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
       return 1
-    }
+    fi
   fi
   fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   rm -rf -- "$TMP_ROOT"

@@ -31,7 +31,8 @@ doctor_cleanup() {
   if [ -n "$pid" ]; then
     # shellcheck source=bin/fm-remote-job-lib.sh
     . "$ROOT/bin/fm-remote-job-lib.sh"
-    fm_remote_job_stop_worker_tree "$pid" || status=1
+    fm_remote_job_resolve_stop_owner "$pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" || status=1
   fi
   fm_test_cleanup || status=1
   return "$status"
@@ -617,7 +618,9 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker 
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
-fm_remote_job_stop_worker_tree "$DOCTOR_WORKER_PID" || fail "the refreshed worker tree did not stop"
+fm_remote_job_resolve_stop_owner "$DOCTOR_WORKER_PID" || fail "the refreshed worker owner was not validated"
+fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" \
+  || fail "the refreshed worker tree did not stop"
 DOCTOR_WORKER_PID=
 pass "doctor refreshes stale worker identity before probing tools"
 

@@ -103,7 +103,9 @@ extension_test_cleanup() {
       # worker.pid names the serving child; the copied remote helper stops its
       # known isolated supervisor tree so it cannot respawn during teardown.
       . "$REMOTE_ROOT/bin/fm-remote-job-lib.sh"
-      fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")"
+      pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+      fm_remote_job_resolve_stop_owner "$pid" &&
+        fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"
     ) 2>/dev/null || true
   fi
   if [ -n "$first_bind_pid" ]; then

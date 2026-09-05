@@ -41,7 +41,9 @@ mkdir -p "$REMOTE_ROOT/bin" "$HOME_A" "$HOME_B" "$HOME_EDGE" "$LOCAL_HOME/data" 
 
 cleanup_lane_fixture() {
   if [ -f "$STATE_ROOT/worker.pid" ]; then
-    fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
+    pid=$(cat "$STATE_ROOT/worker.pid")
+    fm_remote_job_resolve_stop_owner "$pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" || true
   fi
   rm -rf -- "$TMP_ROOT"
 }

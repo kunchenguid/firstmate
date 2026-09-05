@@ -30,7 +30,9 @@ cleanup_remote_job_fixture() {
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
-    fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
+    pid=$(cat "$STATE_ROOT/worker.pid")
+    fm_remote_job_resolve_stop_owner "$pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -542,7 +544,8 @@ pass "the worker drains bounded output without changing command results"
 
 SIDE_EFFECT="$TMP_ROOT/side-effect"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
-fm_remote_job_stop_worker_tree "$WORKER_PID" \
+fm_remote_job_resolve_stop_owner "$WORKER_PID" || fail "the worker owner was not validated before the staged-record tamper"
+fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" \
   || fail "the worker tree did not stop before the staged-record tamper"
 assert_absent "$STATE_ROOT/worker.pid" "the worker did not clear its pid before the staged-record tamper"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$SIDE_EFFECT" < /dev/null > /dev/null

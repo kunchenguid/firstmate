@@ -20,7 +20,9 @@ cleanup() {
     # shellcheck source=bin/fm-remote-job-lib.sh
     . "$ROOT/bin/fm-remote-job-lib.sh"
     FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
-    fm_remote_job_stop_worker_tree "$pid" 2>/dev/null || true
+    fm_remote_job_resolve_stop_owner "$pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" \
+      2>/dev/null || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -311,7 +313,9 @@ WORKER_PID=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
-fm_remote_job_stop_worker_tree "$WORKER_PID" || fail "could not stop the worker tree"
+fm_remote_job_resolve_stop_owner "$WORKER_PID" || fail "could not validate the worker owner"
+fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" \
+  || fail "could not stop the worker tree"
 for _ in $(seq 1 100); do
   [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] && break
   sleep 0.05
