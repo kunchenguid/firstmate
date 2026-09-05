@@ -885,10 +885,17 @@ const cases = [
   ["ls", { path: "." }, { content: [{ type: "text", text: "sample.txt" }], details: {}, isError: false }],
 ];
 const renderUi = { requestRender() {} };
+const { createAllToolDefinitions } = await import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href);
+const stockDefinitions = createAllToolDefinitions(process.cwd());
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, undefined, renderUi, process.cwd());
+  // Pi resolves built-in renderers before constructing a stock tool row;
+  // an undefined definition exercises the unknown-tool fallback instead.
+  const stockDefinition = InteractiveMode.prototype.getRegisteredToolDefinition.call(
+    { session: { getToolDefinition(toolName) { return stockDefinitions[toolName]; } } }, name,
+  );
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinition, renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
