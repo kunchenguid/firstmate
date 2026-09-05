@@ -542,8 +542,9 @@ A budget that is not a whole number from 1 to 120 is still refused outright.
 
 ## Mail plane (.env)
 
-The mail plane (bin/fm-mail.sh) reads unseen IMAP messages, sends one SMTP message, or answers the last unseen one.
+The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
 Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed (only at worst surfaced twice under a triple write fault).
 It is off unless the home's gitignored `.env` provides the connection values.
 This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
 
@@ -556,7 +557,8 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-`FM_IMAP_PORT` (default 993) and `FM_SMTP_PORT` (default 465) are optional.
+`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+The per-poll wake cap bounds how many messages one `poll` run surfaces; a flood leaves the rest unseen so the next poll surfaces the next batch, keeping the durable wake queue bounded without ever dropping mail.
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
 Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, while the standing check itself prints a line (and the watcher turns that line into a wake) only when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
@@ -940,6 +942,7 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
+FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
