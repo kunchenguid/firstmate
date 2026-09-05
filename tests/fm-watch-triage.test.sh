@@ -1485,7 +1485,7 @@ test_secondmate_buried_block_wakes_despite_busy_agent() {
     out="$dir/watch.out"
     printf 'kind=secondmate\n' > "$state/mate.meta"
     printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$state/mate.status"
-    [ "$(status_line_verb "$(status_current_line "$state/mate.status")")" = blocked ] \
+    [ "$(status_line_verb "$(status_current_line "$state/mate.status" secondmate)")" = blocked ] \
       || fail "unrelated '$suffix' hid an open blocker from current-state resolution"
     export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
     watch_bg "$state" "$fakebin" "$out"
