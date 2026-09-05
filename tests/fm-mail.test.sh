@@ -610,6 +610,51 @@ SH
   pass "fm-mail: a failed retry write fails the poll instead of losing recovery"
 }
 
+test_poll_fetch_raise_does_not_abort_the_scan() {
+  local harness out rc=0
+  harness="$TMP_ROOT/fetch-raise-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_POLL_MAX_WAKES': '2',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'1 2 3'])
+        if cmd == 'fetch':
+            if args[0] == b'1':
+                raise RuntimeError('simulated imap fetch failure')
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "a raised fetch must not abort the scan"
+  assert_contains "$out" $'1\t\t(no header)\tunfetchable header - see fm-mail read\tdegraded' "the raising uid is surfaced degraded"
+  assert_contains "$out" $'2\t\ta@b.c\tgood\tok' "the scan advances past the raising uid"
+  pass "fm-mail: a raised FETCH surfaces that uid degraded and advances"
+}
+
 test_poll_retry_rotation_advances_past_failures() {
   local harness out1 out2 rc1=0 rc2=0
   harness="$TMP_ROOT/retry-rotate-harness.py"
@@ -1208,6 +1253,7 @@ test_poll_retry_rotation_advances_past_failures
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_cap_one_never_suppresses_new_mail
 test_poll_fails_closed_when_retry_unwritable
+test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain

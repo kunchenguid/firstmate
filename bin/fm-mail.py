@@ -268,21 +268,26 @@ def cmd_poll_list():
                     continue
             elif new_emitted >= new_budget:
                 continue
-            typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
-            if typ != 'OK' or not msg or not msg[0]:
+            # A raised or empty FETCH is treated as a failure for THIS uid only,
+            # so one bad message can never abort the bounded scan: a new uid is
+            # surfaced degraded, a retry uid is rotated, and the scan advances.
+            try:
+                typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
+                if typ != 'OK' or not msg or not msg[0]:
+                    raise ValueError('no header data')
+                mi = email.message_from_bytes(msg[0][1])
+                uid = clean(u)
+                idate = clean(dec(mi.get('Date')))
+                subj = clean(dec(mi.get('Subject')))
+                fr = clean(dec(mi.get('From')))
+            except Exception:
                 if is_retry:
                     rotate_retry_failed(os.environ.get('FM_MAIL_RETRY', ''), u)
                     continue
-                uid = clean(u)
-                out.append((uid, '', '(no header)',
+                out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
                 new_emitted += 1
                 continue
-            mi = email.message_from_bytes(msg[0][1])
-            uid = clean(u)
-            idate = clean(dec(mi.get('Date')))
-            subj = clean(dec(mi.get('Subject')))
-            fr = clean(dec(mi.get('From')))
             status = 'retry' if is_retry else 'ok'
             out.append((uid, idate, fr, subj, status))
             if is_retry:
