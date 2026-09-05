@@ -17,6 +17,14 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   repo-name stays a free-form caller-supplied label. It is resolved best-effort
+#   under FM_PROJECTS_OVERRIDE when set, otherwise under $FM_HOME/projects;
+#   projects/<repo-name>, explicit directory paths, and a bare name relative to
+#   the caller's cwd work too. Resolution only succeeds when the candidate is
+#   itself a git work-tree ROOT. A repo that resolves renders its real default
+#   branch into the startup base-freshness check; one that does not still gets
+#   the same mandatory check, deferred to the worker at runtime. An unresolvable
+#   label never fails the scaffold.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -47,7 +55,21 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs open with an explicitly numbered safety contract: 1 worktree
+# isolation, 2 base freshness, 3 branch creation. Nothing is read or written
+# until steps 1 and 2 pass.
+# Which base that check names depends on the delivery path: PR-based modes
+# (no-mistakes, direct-PR) compare against `origin/<default>` after exactly one
+# fetch, local-only compares against the clone's LOCAL default branch with no
+# network refresh, and a scout has no delivery mode so it prefers origin and
+# degrades to the local default. The default branch is always resolved from the
+# repository, never hard-coded to main.
+# Every base ref the brief emits reaches the worker as one shell word: a
+# scaffold-resolved ref is shell-quoted here, and a worker-resolved `<default>`
+# is rendered inside quotes with its substitution rule spelled out.
+# A refname may itself hold a backtick, so a scaffold-resolved ref also reaches
+# the worker as one complete markdown code span through md_code_span, which is
+# what delimits the command it must run.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -113,6 +135,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -191,6 +214,101 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+# Renders <text> as the markdown code span the worker reads as a command boundary.
+# git permits a backtick in a refname, so a fixed one-backtick fence around a
+# resolved ref ends at that character and hands the worker a truncated command
+# instead of the freshness check: shell_quote keeps the ref one shell WORD, and
+# this keeps the whole command one readable SPAN. The fence is one backtick longer
+# than the longest run in the content, because a span closes only on a run of the
+# same length, and content carrying a backtick is padded so the span can neither
+# open nor close on one; both extras render away.
+md_code_span() {  # <text>
+  local text=$1 run='`' fence=
+  while :; do
+    case $text in
+      *"$run"*) fence=$run; run="$run\`" ;;
+      *) break ;;
+    esac
+  done
+  fence="$fence\`"
+  case $text in
+    *'`'*) printf '%s %s %s\n' "$fence" "$text" "$fence" ;;
+    *) printf '%s%s%s\n' "$fence" "$text" "$fence" ;;
+  esac
+}
+
+resolve_brief_repo() {  # <repo-name-or-directory>
+  local repo=$1 candidate resolved
+  case "$repo" in
+    projects/*) candidate="$PROJECTS/${repo#projects/}" ;;
+    /*|./*|../*) candidate=$repo ;;
+    *)
+      if [ -d "$PROJECTS/$repo" ]; then
+        candidate="$PROJECTS/$repo"
+      elif [ "$repo" = "$(basename "$FM_ROOT")" ]; then
+        candidate="$FM_ROOT"
+      else
+        candidate=$repo
+      fi
+      ;;
+  esac
+  [ -d "$candidate" ] || return 1
+  resolved=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || return 1
+  # Must BE a work tree root, not merely sit inside one: `projects/` is a
+  # gitignored subdirectory of the firstmate checkout, so an inside-a-work-tree
+  # test resolves any `projects/<name>` that is not itself a clone to the
+  # firstmate repo and renders ITS default branch as that project's base.
+  [ "$(git -C "$resolved" rev-parse --show-toplevel 2>/dev/null)" = "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
+# Reads the FULL ref, never the `--short` abbreviation: `--short` output is
+# ambiguity-dependent, so a clone that also holds a ref literally named
+# `origin/<default>` (a local branch or a tag) gets `remotes/origin/<default>`
+# back instead. An unparseable answer here is indistinguishable from an absent
+# `origin/HEAD`, which is the one case allowed to fall through to the
+# main/master guess, so this parse must never fail on a resolvable default.
+origin_default_branch_name() {  # <repo-dir>
+  local repo=$1 ref
+  ref=$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  case "$ref" in
+    refs/remotes/origin/*) printf '%s\n' "${ref#refs/remotes/origin/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# origin/HEAD only supplies the NAME; the comparison must still target the
+# clone's local branch, which may legitimately be ahead of origin. Resolution
+# never reads HEAD: a primary stranded on a feature branch (the worktree tangle
+# bin/fm-tangle-lib.sh exists to detect) would otherwise have that feature branch
+# rendered into the brief as its own base. When origin names a default this clone
+# has no local ref for, resolution FAILS rather than substituting main/master:
+# origin/HEAD is the authority, and presenting some other branch as "your local
+# default branch" would be the same confidently-wrong base this check exists to
+# catch. The main/master guess applies only where no authority exists at all.
+resolve_local_default_branch() {  # <repo-dir>
+  local repo=$1 branch
+  if branch=$(origin_default_branch_name "$repo"); then
+    git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_origin_default_branch() {  # <repo-dir>
+  local repo=$1 branch
+  branch=$(origin_default_branch_name "$repo") || return 1
+  git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
@@ -308,6 +426,170 @@ fi
 
 REPO=${POS[1]}
 
+# The repo positional is a free-form caller-supplied label rendered into the
+# brief text, so firstmate can legitimately name a repo this scaffold has no
+# local view of. Resolution is therefore best-effort and never fails the
+# scaffold. A resolved repo renders its real base ref; an unresolved one carries
+# the identical mandatory check with the base determined by the worker at
+# runtime. The check is never softened or omitted either way.
+#
+# A local-only task lands into the clone's local default branch, which can be
+# ahead of its origin tracking ref, so it uses that branch with no network
+# refresh. PR-based tasks instead need the remote default branch their PR will
+# merge into, and the tracking ref only answers truthfully after a fetch (a
+# `fm-spawn.sh --relaunch` worktree is reused without one), so those paths
+# mandate a single `git fetch origin --quiet` first. Scouts have no delivery
+# mode: prefer the remote path, and otherwise use their local base.
+BASE_REF=
+BASE_REF_CODE=
+BASE_SHELL_REF=
+BASE_DESCRIPTION=
+BASE_NEEDS_FETCH=0
+BASE_NO_FETCH_REASON=
+BASE_UNRESOLVED_REASON=
+case "$KIND:$MODE" in
+  ship:local-only) BASE_POLICY=local ;;
+  scout:*) BASE_POLICY='origin-then-local' ;;
+  *) BASE_POLICY=origin ;;
+esac
+
+# BASE_REF and BASE_SHELL_REF are two spellings of the same base and are
+# deliberately not interchangeable: BASE_REF is the short readable name used in
+# prose, while BASE_SHELL_REF is what the worker EXECUTES, so it is fully
+# qualified and shell-quoted. git's refname precedence puts `refs/tags/<name>`
+# above both heads and remotes, so an unqualified `release` or `origin/release`
+# lets a same-named TAG decide the pass/fail count this check exists to trust,
+# and the quoting keeps a shell-significant branch name one shell word.
+set_origin_base() {  # <repo-dir>
+  local branch
+  branch=$(resolve_origin_default_branch "$1") || return 1
+  BASE_REF="origin/$branch"
+  BASE_REF_CODE=$(md_code_span "$BASE_REF")
+  BASE_SHELL_REF=$(shell_quote "refs/remotes/origin/$branch")
+  BASE_DESCRIPTION="the freshly fetched default branch $BASE_REF_CODE"
+  BASE_NEEDS_FETCH=1
+}
+
+set_local_base() {  # <repo-dir> <why-no-fetch>
+  local branch
+  branch=$(resolve_local_default_branch "$1") || return 1
+  BASE_REF=$branch
+  BASE_REF_CODE=$(md_code_span "$BASE_REF")
+  BASE_SHELL_REF=$(shell_quote "refs/heads/$branch")
+  BASE_DESCRIPTION="your local default branch $BASE_REF_CODE"
+  BASE_NO_FETCH_REASON=$2
+}
+
+if REPO_DIR=$(resolve_brief_repo "$REPO"); then
+  case "$BASE_POLICY" in
+    local)
+      set_local_base "$REPO_DIR" "This task lands locally, so do not fetch" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine the local default branch of \`$REPO\`"
+      ;;
+    origin)
+      set_origin_base "$REPO_DIR" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine origin's default branch for \`$REPO\`"
+      ;;
+    origin-then-local)
+      set_origin_base "$REPO_DIR" \
+        || set_local_base "$REPO_DIR" "Origin's default branch could not be resolved, so do not fetch" \
+        || BASE_UNRESOLVED_REASON="This brief could not determine a default branch for \`$REPO\`"
+      ;;
+  esac
+else
+  BASE_UNRESOLVED_REASON="This brief could not resolve \`$REPO\` to a local checkout"
+fi
+
+# The one rule for naming a LOCAL default branch at runtime, shared by every
+# fallback that has to fall back to one so their wording cannot drift apart.
+# It has the worker read the FULL `origin/HEAD` ref for the same reason
+# origin_default_branch_name does, and confirm `refs/heads/<default>` rather than
+# a bare `<default>`: git resolves `remotes/origin/<default>` to the tracking
+# ref, which would satisfy a check meant to prove a LOCAL branch exists and leave
+# the worker measuring against origin while its local default is ahead.
+IFS= read -r -d '' LOCAL_DEFAULT_RULE <<EOF || true
+   Read \`git symbolic-ref --quiet refs/remotes/origin/HEAD\`. If it names a ref, that ref with the leading \`refs/remotes/origin/\` dropped IS \`<default>\`: confirm the local branch exists with \`git rev-parse --verify 'refs/heads/<default>'\`, and if it does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+   Only when that ref is absent entirely may \`<default>\` be the local \`main\` or \`master\`, confirmed the same way. Never substitute \`main\`, \`master\`, or whatever branch happens to be checked out for a default branch this clone is missing, and append the same \`blocked:\` line and stop if none of these resolves.
+EOF
+LOCAL_DEFAULT_RULE=${LOCAL_DEFAULT_RULE%$'\n'}
+
+# The runtime twin of BASE_SHELL_REF's shell_quote, and the reason every
+# `<default>` below is already wrapped in single quotes: a fallback names a base
+# the WORKER resolves, and git permits refnames holding `$`, backticks and `;`,
+# so a name spliced raw into these commands can split the ref or run as a second
+# command in the worker's shell. Stated once here so the three fallbacks cannot
+# drift apart, exactly like LOCAL_DEFAULT_RULE.
+IFS= read -r -d '' RUNTIME_REF_QUOTING_RULE <<'EOF' || true
+   These commands name the base as `<default>`, a name you resolve at runtime and then substitute yourself.
+   Substitute it inside the single quotes already shown - as in `'refs/heads/<default>'` - so the whole ref stays one shell word, and never paste the resolved name into an unquoted argument.
+   If the resolved name itself contains a single quote, close the quoted run, escape that quote, and reopen it (`'a'\''b'`).
+EOF
+RUNTIME_REF_QUOTING_RULE=${RUNTIME_REF_QUOTING_RULE%$'\n'}
+
+# Sets BASE_FRESHNESS_SECTION as the numbered startup step <step-number>.
+build_base_freshness_section() {  # <step-number>
+  local step=$1 count_command rebase_target
+  # Both spans carry the resolved ref, so both take their fence from its content.
+  count_command=$(md_code_span "git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF")
+  rebase_target=$(md_code_span "$BASE_SHELL_REF")
+  if [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = 'origin-then-local' ]; then
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
+$RUNTIME_REF_QUOTING_RULE
+   Try origin first: run \`git remote set-head origin --auto\`, then read \`git symbolic-ref --quiet refs/remotes/origin/HEAD\` and drop the leading \`refs/remotes/origin/\` to get \`<default>\`.
+   If that names a branch, refresh the remote exactly once BEFORE verifying or comparing its tracking ref - the fetch is what creates a pruned or never-fetched \`origin/<default>\`:
+   \`git fetch origin --quiet\`
+   If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
+   Then confirm the tracking ref with \`git rev-parse --verify 'refs/remotes/origin/<default>'\` and measure:
+   \`git rev-list --count \$(git merge-base HEAD 'refs/remotes/origin/<default>')..'refs/remotes/origin/<default>'\`
+   Only \`0\` passes. If the count is not \`0\`, rebase onto \`'refs/remotes/origin/<default>'\` before reading or writing anything.
+   If no usable origin default remains after that single fetch - no \`origin\` remote, no \`origin/HEAD\`, or its tracking ref still missing - fall back to a local default branch with NO further network refresh, named by exactly this rule:
+$LOCAL_DEFAULT_RULE
+   Then measure against that local branch:
+   \`git rev-list --count \$(git merge-base HEAD 'refs/heads/<default>')..'refs/heads/<default>'\`
+   Only \`0\` passes, and if the count is not \`0\`, rebase onto \`'refs/heads/<default>'\` before reading or writing anything.
+EOF
+  elif [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = origin ]; then
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
+$RUNTIME_REF_QUOTING_RULE
+   Determine \`<default>\` with \`git remote set-head origin --auto\` then \`git symbolic-ref --quiet refs/remotes/origin/HEAD\`, dropping the leading \`refs/remotes/origin/\`. Never substitute whatever branch happens to be checked out.
+   If you cannot determine it, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+   Then refresh the remote exactly once and measure:
+   \`git fetch origin --quiet\`
+   \`git rev-list --count \$(git merge-base HEAD 'refs/remotes/origin/<default>')..'refs/remotes/origin/<default>'\`
+   Only \`0\` passes. If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
+   If the count is not \`0\`, rebase onto \`'refs/remotes/origin/<default>'\` before reading or writing anything.
+EOF
+  elif [ -n "$BASE_UNRESOLVED_REASON" ]; then
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
+$RUNTIME_REF_QUOTING_RULE
+$LOCAL_DEFAULT_RULE
+   This task lands locally, so do not fetch; measure against the local branch:
+   \`git rev-list --count \$(git merge-base HEAD 'refs/heads/<default>')..'refs/heads/<default>'\`
+   Only \`0\` passes. If the count is not \`0\`, rebase onto \`'refs/heads/<default>'\` before reading or writing anything.
+EOF
+  elif [ "$BASE_NEEDS_FETCH" -eq 1 ]; then
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** Refresh the remote exactly once, then measure:
+   \`git fetch origin --quiet\`
+   $count_command
+   Only \`0\` passes against $BASE_DESCRIPTION.
+   If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
+   If the count is not \`0\`, rebase onto $rebase_target before reading or writing anything.
+EOF
+  else
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
+   $count_command
+   Only \`0\` passes against $BASE_DESCRIPTION.
+   If the count is not \`0\`, rebase onto $rebase_target before reading or writing anything.
+EOF
+  fi
+  BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}
+}
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -351,6 +633,7 @@ EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
+build_base_freshness_section 1
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -359,7 +642,9 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD supplied by the worktree pool.
+$BASE_FRESHNESS_SECTION
+
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -404,6 +689,8 @@ echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
 
+build_base_freshness_section 2
+
 # Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
 # above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
@@ -416,11 +703,15 @@ case "$MODE" in
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    if [ -n "$BASE_REF" ]; then
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local $BASE_REF_CODE."
+    else
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into the local default branch you resolved in Setup."
+    fi
     ;;
   *)  # no-mistakes
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+4. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
@@ -434,13 +725,15 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD supplied by the worktree pool.
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
+   The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
+   If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BASE_FRESHNESS_SECTION
+
+3. Create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1

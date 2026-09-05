@@ -199,8 +199,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
-`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
+`fm-spawn.sh` also owns the spawn-time base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+Generated ship and scout briefs carry the complementary runtime layer, which also covers a base that spawn never freshened, such as the worktree a `relaunch` reuses: before reading or writing anything the crewmate measures its base against the resolved default branch, treats only a zero count as a pass, and rebases when it is behind.
+`bin/fm-brief.sh`'s header owns which base each path resolves - `origin/<default>` for PR-based delivery, the clone's local default branch for `local-only`, origin then local for a scout - and how an unresolvable repo label defers the same mandatory check to the worker, while `tests/fm-brief.test.sh` owns the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
