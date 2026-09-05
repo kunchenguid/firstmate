@@ -1543,6 +1543,54 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   pass "recovery backfills recorded links onto already Done items"
 }
 
+# A no-change disposition (bin/fm-teardown.sh --no-change) records its reason
+# as a --note marker arg, exactly like the two cases above record --pr. Both
+# the marker validator and the replay's own literal-only decode of the
+# local-only landing note (fm-backlog-transition-lib.sh) must treat this note
+# the same way: valid to replay, and never collapsed into "local main".
+
+test_recovery_backfills_a_no_change_note_on_an_already_done_item() {
+  local case_dir id marker out
+  id=atomic-no-change-done-backfill-b9
+  case_dir=$(make_home no-change-done-backfill)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-no-change-done\narg=--note\narg=fix already on main\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "a stale no-change close marker blocked an already-Done item: $out"
+  assert_grep 'fix already on main' "$(backlog_of "$case_dir")" \
+    "recovery discarded the recorded no-change reason because the item was already Done"
+  assert_absent "$marker" "recovery retained an applied no-change close marker"
+  pass "a stale no-change close marker on an already-Done item replays its reason instead of blocking cleanup"
+}
+
+test_recovery_replays_a_no_change_close_without_corrupting_its_reason() {
+  local case_dir id out
+  id=atomic-no-change-note-b9
+  case_dir=$(make_home no-change-note-preserved)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-no-change-note\narg=--note\narg=fix already on main\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left an interrupted no-change cleanup's item at $(row_state "$case_dir" "$id"): $out"
+  assert_grep 'fix already on main' "$(backlog_of "$case_dir")" \
+    "the replayed no-change close lost its own recorded reason"
+  assert_not_contains "$(cat "$(backlog_of "$case_dir")")" $'\nlocal main\n' \
+    "a --note marker replay corrupted the no-change reason into the local-only landing literal"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed no-change close left its record behind"
+  pass "a replayed no-change close preserves its own reason rather than the local-only landing literal"
+}
+
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   local case_dir id out
   id=atomic-heal-read-error-b10
@@ -2360,6 +2408,8 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
+test_recovery_backfills_a_no_change_note_on_an_already_done_item
+test_recovery_replays_a_no_change_close_without_corrupting_its_reason
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation

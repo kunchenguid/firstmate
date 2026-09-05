@@ -1700,6 +1700,121 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# --- no-change disposition ---------------------------------------------------
+# A ship task whose fix already landed on main before the crewmate ever
+# committed anything has a clean worktree with no PR to record or discover, and
+# used to refuse teardown forever. --no-change records that disposition instead
+# of a PR, without weakening the dirty/unpushed/landed-work floor above and
+# without skipping the check-artifacts validation later in the script (both are
+# unconditional and run exactly as they do for any other non-force teardown).
+
+test_no_change_clean_landed_worktree_allows() {
+  local case_dir rc
+  case_dir=$(make_case no-change-clean)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  # No wt_commit at all: HEAD is exactly the commit the worktree was cut from,
+  # so the worktree is clean with nothing unpushed or unlanded to discover a PR
+  # for - the exact "fix was already on main" scenario.
+
+  set +e
+  run_teardown "$case_dir" --no-change "fix already on main" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-change-clean: teardown should accept the no-change disposition on a clean, landed worktree"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "no-change-clean: teardown printed a REFUSED line: $(cat "$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "no-change-clean: backlog item was not closed: $(backlog_row_state "$case_dir")"
+  assert_grep 'fix already on main' "$case_dir/data/backlog.md" \
+    "no-change-clean: closed backlog item did not record the no-change reason"
+  grep -qF 'no-change disposition' "$case_dir/stdout" \
+    || fail "no-change-clean: teardown output did not record the no-change disposition"
+  pass "a clean, landed ship worktree with no discoverable PR closes with --no-change and its reason recorded"
+}
+
+test_no_change_refuses_dirty_worktree() {
+  local case_dir rc
+  case_dir=$(make_case no-change-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  set +e
+  run_teardown "$case_dir" --no-change "fix already on main" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-change-dirty: --no-change must not bypass the dirty-worktree floor"
+  grep -q REFUSED "$case_dir/stderr" || fail "no-change-dirty: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "no-change-dirty: refusal did not cite uncommitted changes"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "no-change-dirty: the backlog item was closed despite the refusal: $(backlog_row_state "$case_dir")"
+  pass "--no-change still refuses a dirty worktree (the landed-work floor is never weakened)"
+}
+
+test_no_change_refuses_unlanded_unpushed_commits() {
+  local case_dir rc
+  case_dir=$(make_case no-change-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  # Real content that is not pushed, has no PR, and never landed on
+  # origin/main: --no-change asserts nothing changed, but this worktree did
+  # change something and it is genuinely unlanded, so it must still refuse.
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+
+  set +e
+  run_teardown "$case_dir" --no-change "fix already on main" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-change-unlanded: --no-change must not bypass the unlanded-work floor"
+  grep -q REFUSED "$case_dir/stderr" || fail "no-change-unlanded: no REFUSED line in stderr"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "no-change-unlanded: the backlog item was closed despite the refusal: $(backlog_row_state "$case_dir")"
+  pass "--no-change still refuses genuinely unlanded, unpushed commits"
+}
+
+test_no_change_refuses_scout_kind() {
+  local case_dir rc
+  case_dir=$(make_case no-change-scout)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+
+  set +e
+  run_teardown "$case_dir" --no-change "not applicable" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "no-change-scout: --no-change should be refused outright for a scout task"
+  grep -q "only valid for a ship task" "$case_dir/stderr" \
+    || fail "no-change-scout: refusal did not explain the kind restriction: $(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] || fail "no-change-scout: worktree removed despite the refused option"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "no-change-scout: backlog item changed despite the refused option"
+  pass "--no-change is refused outright for a scout task; scout teardown is unaffected"
+}
+
+test_no_change_requires_a_reason() {
+  local case_dir rc
+  case_dir=$(make_case no-change-empty-reason)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --no-change "" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "no-change-empty-reason: --no-change with no reason must be refused"
+  grep -q "requires a reason" "$case_dir/stderr" \
+    || fail "no-change-empty-reason: refusal did not explain the missing reason: $(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] || fail "no-change-empty-reason: worktree removed despite the refused option"
+  pass "--no-change with an empty reason is refused before anything is touched"
+}
+
 # Mark the case's home as a secondmate home bound to a parent: teardown and
 # fm-pr-check run with FM_HOME="$case_dir/home" so the parent-channel
 # publishers resolve that binding while the task state stays in $case_dir/state.
@@ -3565,6 +3680,11 @@ test_pr_recorded_but_open_refuses
 test_pr_recorded_but_merge_state_unreadable_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_no_change_clean_landed_worktree_allows
+test_no_change_refuses_dirty_worktree
+test_no_change_refuses_unlanded_unpushed_commits
+test_no_change_refuses_scout_kind
+test_no_change_requires_a_reason
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes

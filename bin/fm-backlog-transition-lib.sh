@@ -710,7 +710,18 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          # The local-only landing note is pinned to this one percent-encoded
+          # token (fm_backlog_close_marker_stage's special case); a --no-change
+          # disposition note is free text instead, bounded and non-blank the
+          # same way --report is - control bytes are already excluded above by
+          # the whole-file fm_backlog_control_bytes_valid check.
+          arg_value=${args[1]}
+          case "$arg_value" in
+            local%20main) true ;;
+            *) [ "${#arg_value}" -le 4096 ] && [ -n "${arg_value// /}" ] ;;
+          esac
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -884,7 +895,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  # Only the pinned local-only token round-trips through its percent-encoded
+  # form; any other --note value (a --no-change disposition's reason) was
+  # stored as its own raw text and must replay verbatim, not be overwritten.
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = "local%20main" ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"

@@ -98,9 +98,17 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
+#        fm-teardown.sh <task-id> --no-change "<reason>"
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --no-change records that a ship task produced no code change (its fix was
+#   already on main, or otherwise already satisfied) and closes the backlog
+#   item with the given reason as its note, instead of a recorded/discoverable
+#   PR. It never weakens the ordinary dirty/unpushed/landed-work floor below -
+#   that floor still runs exactly as it does for any other non-force teardown -
+#   and it never skips the check-artifacts validation. It is refused for any
+#   task whose kind is not ship.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -231,6 +239,15 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+NO_CHANGE_REASON=
+if [ "$FORCE" = --no-change ]; then
+  NO_CHANGE_REASON=${3:-}
+  if [ -z "$NO_CHANGE_REASON" ]; then
+    echo "error: --no-change requires a reason" >&2
+    exit 2
+  fi
+  FORCE=
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -800,6 +817,10 @@ CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 KIND=$TEARDOWN_META_KIND
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+if [ -n "$NO_CHANGE_REASON" ] && [ "$KIND" != ship ]; then
+  echo "error: --no-change is only valid for a ship task; task $ID is kind $KIND" >&2
+  exit 2
+fi
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1248,6 +1269,11 @@ work_is_landed() {
 # (validate_worktree_teardown_safety's own PR discovery only runs on its
 # unpushed-commits path, so it never reaches PR_URL here on its own) would
 # otherwise close silently with no completion link at all.
+# A ship task with an explicit --no-change disposition (NO_CHANGE_REASON) carves
+# out of the PR requirement the same way local-only's landing note does: the
+# dirty/unpushed/landed-work floor above already proved nothing here is at risk
+# of being lost, so the captain-facing completion link is the recorded reason
+# instead of a PR.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative branch
@@ -1258,7 +1284,9 @@ backlog_done_args() {
       BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
       ;;
     *)
-      if [ "$MODE" = local-only ]; then
+      if [ -n "$NO_CHANGE_REASON" ]; then
+        BACKLOG_DONE_ARGS=(--note "$NO_CHANGE_REASON")
+      elif [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ "$FORCE" = "--force" ]; then
         # --force already authorized discarding this task's data-loss safety
@@ -2862,6 +2890,8 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     exit 1
   }
   BACKLOG_CLOSED=1
+  [ -z "$NO_CHANGE_REASON" ] \
+    || echo "no-change disposition: $ID closes with no code change ($NO_CHANGE_REASON)"
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
     "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
