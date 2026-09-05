@@ -1123,7 +1123,7 @@ SH
   status=0
   FM_TEST_FIRST="$first" FM_TEST_SECOND="$second" FM_HOME="$dir" \
     FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=1 \
-    FM_ARM_BUSY_HOLDER_WAIT_MAX=1 "$arm" > "$dir/arm.out" 2>&1 || status=$?
+    "$arm" > "$dir/arm.out" 2>&1 || status=$?
   out=$(cat "$dir/arm.out")
   held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   is_live_non_zombie "$second" && second_alive=1
@@ -1138,6 +1138,75 @@ SH
   [ "$held" = "$second" ] && [ "$second_alive" -eq 1 ] \
     || fail "the replacement holder was signalled or displaced"
   pass "a replacement holder must be reverified before a busy wait can close quietly"
+}
+
+test_busy_holder_uses_watcher_stale_threshold() {
+  local dir state arm holder identity refresher armpid i out early_attach=0 attached=0
+  dir=$(make_case busy-holder-threshold)
+  state="$dir/state"
+  mkdir -p "$dir/bin"
+  cp "$WATCH_ARM" "$dir/bin/fm-watch-arm.sh"
+  cp "$LIB" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+mkdir "$FM_STATE_OVERRIDE/.watch.lock"
+printf '%s\n' "$FM_TEST_HOLDER" > "$FM_STATE_OVERRIDE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_STATE_OVERRIDE/.watch.lock/fm-home"
+printf '%s\n' "$0" > "$FM_STATE_OVERRIDE/.watch.lock/watcher-path"
+printf '%s\n' "$FM_TEST_IDENTITY" > "$FM_STATE_OVERRIDE/.watch.lock/pid-identity"
+printf 'watcher: busy holder pid=%s beacon=2s (grace 1s)\n' "$FM_TEST_HOLDER"
+exit 64
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  sleep 60 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the threshold holder"
+  touch "$state/.last-watcher-beat"
+  sleep 2
+  (
+    i=0
+    while [ "$i" -lt 50 ] && [ ! -e "$state/.watch.lock/pid" ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    sleep 1
+    touch "$state/.last-watcher-beat"
+  ) &
+  refresher=$!
+  arm="$dir/bin/fm-watch-arm.sh"
+  FM_TEST_HOLDER="$holder" FM_TEST_IDENTITY="$identity" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=30 FM_WATCHER_STALE_GRACE=1 \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$arm" > "$dir/arm.out" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    grep -qF "watcher: busy holder pid=$holder" "$dir/arm.out" 2>/dev/null && break
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 0.2
+  grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null && early_attach=1
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null; then
+      attached=1
+      break
+    fi
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$dir/arm.out" 2>/dev/null || true)
+  reap "$armpid"
+  reap "$holder"
+  wait "$refresher" 2>/dev/null || true
+  [ "$early_attach" -eq 0 ] || fail "the arm attached while the watcher still classified its holder as stale: $out"
+  [ "$attached" -eq 1 ] || fail "the arm did not attach after the unchanged holder beat again: $out"
+  case "$out" in *"watcher: FAILED"*) fail "the unchanged holder was failed loudly: $out" ;; esac
+  pass "busy-holder validation and attachment use the watcher stale threshold"
 }
 
 test_recovering_holder_is_attached_to_not_replaced() {
@@ -1493,6 +1562,7 @@ test_msys_pid_identity_uses_proc() {
 test_singleton_start
 test_stale_beacon_holder_is_not_reported_as_a_failure
 test_busy_holder_replacement_stays_a_loud_failure
+test_busy_holder_uses_watcher_stale_threshold
 test_recovering_holder_is_attached_to_not_replaced
 test_frame_identity_is_per_subshell_and_stable
 test_lock_acquisition_refuses_unobtainable_frame_identity

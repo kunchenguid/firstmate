@@ -269,26 +269,13 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
 }
 
 # Rewrite one key in a pending-reply record atomically. Other keys preserved.
-# A collision-free staging path beside <final-path>, for a same-directory
-# atomic rename. $$ CANNOT be used for this: in a subshell - which is what every
-# `resolver &` is - $$ still expands to the parent shell's pid, so concurrent
-# writers of one record all chose the identical staging name. One writer's mv
-# then consumed the file another had just written, and a third's mv failed with
-# "No such file or directory", losing that write. $BASHPID would be per-subshell
-# but does not exist in the stock macOS bash 3.2 this repo still supports, so
-# uniqueness comes from mktemp rather than from any pid.
-_fm_pending_reply_stage() {  # <final-path>
-  local final=$1 dir base
-  dir=$(dirname "$final")
-  base=$(basename "$final")
-  mktemp "$dir/.${base}.tmp.XXXXXX" 2>/dev/null
-}
-
 fm_pending_reply_set() {  # <record-path> <key> <value>
-  local rec=$1 key=$2 value=$3 tmp line
+  local rec=$1 key=$2 value=$3 dir base tmp line
   [ -f "$rec" ] || return 1
-  tmp=$(_fm_pending_reply_stage "$rec") || return 1
-  [ -n "$tmp" ] || return 1
+  dir=$(dirname "$rec")
+  base=$(basename "$rec")
+  tmp="$dir/.${base}.tmp.$$"
+  : > "$tmp" || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "${key}="*) continue ;;
@@ -355,8 +342,7 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
     /*) ;;
     *) parent_home=$(cd "$parent_home" 2>/dev/null && pwd) || parent_home=$1 ;;
   esac
-  tmp=$(_fm_pending_reply_stage "$dir/$corr") || return 1
-  [ -n "$tmp" ] || return 1
+  tmp="$dir/.${corr}.tmp.$$"
   cat > "$tmp" <<EOF
 schema=$FM_PENDING_REPLY_SCHEMA
 corr_id=$corr
@@ -421,8 +407,7 @@ fm_pending_reply_write_delivery_confirmation() {  # <state-dir> <corr_id> <state
   marker=$(fm_pending_reply_delivery_confirmation_path "$pending_state" "$corr")
   dir=$(dirname "$marker")
   mkdir -p "$dir" || return 1
-  tmp=$(_fm_pending_reply_stage "$marker") || return 1
-  [ -n "$tmp" ] || return 1
+  tmp="$marker.tmp.$$"
   printf '%s=%s\n' "$delivery_state" "$value" > "$tmp" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$marker"
@@ -925,8 +910,7 @@ fm_pending_reply_note_remote_channel_caught_up() {  # <state-dir> <task_id> [epo
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
   [ ! -L "$path" ] || return 1
-  tmp=$(_fm_pending_reply_stage "$dir/caught-up.$task_id") || return 1
-  [ -n "$tmp" ] || return 1
+  tmp="$dir/.caught-up.$task_id.$$"
   printf 'caught_up_epoch=%s\n' "$epoch" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$path"
