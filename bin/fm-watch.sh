@@ -189,13 +189,11 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # a working fleet's supervision as broken.
 #
 # The invariant that makes the beacon mean anything: only the watcher process
-# touches it, and only on completing a unit of work. There is deliberately no
-# timer, no background ticker, and no beat inside a blocking wait, because a
-# watcher genuinely stuck inside one phase MUST stop beating - that is the
-# signal the arm layer reads, not a defect to paper over. Every phase is
-# separately bounded so no single one can legitimately outlive the grace: checks
-# by CHECK_TIMEOUT, the signal linger by SIGNAL_GRACE, backend reads by their own
-# callers.
+# touches it. There is no background ticker. Phase boundaries beat after real
+# progress, and bounded check captures beat while the watcher waits for their
+# enforced deadline; the parent enforces that same deadline so a broken timeout
+# child cannot keep the beacon fresh indefinitely. Every external phase is
+# separately bounded so no single one can legitimately outlive the grace.
 beat() {
   touch "$STATE/.last-watcher-beat"
 }
@@ -1228,7 +1226,7 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid deadline status
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -1248,7 +1246,18 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  deadline=$(( $(date +%s) + CHECK_TIMEOUT + 1 ))
+  while kill -0 "$FM_ACTIVE_CHECK_PID" 2>/dev/null; do
+    status=$(ps -o stat= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+    case "$status" in *Z*) break ;; esac
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fm_active_check_stop || return 1
+      break
+    fi
+    beat
+    sleep 1
+  done
+  [ -z "${FM_ACTIVE_CHECK_PID:-}" ] || wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -1650,14 +1659,6 @@ while :; do
   # with its own beat, so the beacon's age is the age of the CURRENT phase.
   beat
 
-  # Iteration boundary, distinct from the beacon and read by nothing in
-  # production. The beacon used to double as this marker because it was touched
-  # exactly once per iteration; now that it tracks phase progress it can advance
-  # several times inside one iteration, so "a whole cycle has elapsed" needs its
-  # own observable. Supervision never reads this file - only the regression suite
-  # does, to wait for a complete cycle without depending on the phase beacon.
-  touch "$STATE/.last-poll-cycle"
-
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi
@@ -1731,10 +1732,9 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      # One beat per check: each check is separately bounded by CHECK_TIMEOUT, so
-      # a sweep of many checks stays inside the grace without any beat during a
-      # single check's blocking wait - which would be a wall-clock beat and would
-      # hide a check that never returns.
+      # Each check is separately bounded by CHECK_TIMEOUT. run_check_capture
+      # beats while that enforced wait is making progress, and stops the process
+      # group itself if the child-side deadline does not return.
       beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then

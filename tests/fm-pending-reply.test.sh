@@ -1585,7 +1585,7 @@ test_local_parent_replies_is_wrong_home_evidence
 # already-settled record on every poll. 1,883 of them cost about 103s per poll on
 # the primary home and grew by roughly 3s a day, which is what pushed a single
 # watch iteration past the 300s liveness grace and made a healthy watcher read as
-# dead. Settled records now leave the hot set on the next watcher tick.
+# dead. Settled records now leave the hot set during resolution.
 
 test_settled_record_leaves_the_hot_set() {
   local home state corr hot archive
@@ -1598,7 +1598,6 @@ test_settled_record_leaves_the_hot_set() {
   [ -f "$hot" ] || fail "an open record must live in the hot set"
   printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
-  fm_pending_reply_tick "$state" || fail "tick should archive the settled record"
   archive="$(fm_pending_reply_archive_dir "$state")/$corr"
   [ ! -e "$hot" ] || fail "a settled record must leave the hot set"
   [ -f "$archive" ] || fail "a settled record must be filed under archive/"

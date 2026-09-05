@@ -82,10 +82,6 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
-# Longest this arm will wait for an identity-matched holder whose beacon has aged
-# to beat again. Fixed rather than configurable: it exists to keep a turn
-# boundary short, which is a property of the model and not a local preference.
-BUSY_HOLDER_WAIT_MAX=30
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -294,13 +290,7 @@ wait_for_healthy_successor() {
 wait_for_busy_holder() {
   local holder=$1 deadline budget
   case "$holder" in ''|*[!0-9]*) return 2 ;; esac
-  # Half the grace is the ceiling, but the wait is also capped outright: this
-  # runs at a turn boundary, and a default 300s grace would otherwise hold the
-  # turn for 150s. The cap is safe because the beacon is beaten at every PHASE
-  # boundary now, so a holder that is genuinely working reappears in seconds
-  # rather than minutes; anything slower is left alone and retried next turn.
   budget=$(( WATCHER_STALE_GRACE / 2 ))
-  [ "$budget" -le "$BUSY_HOLDER_WAIT_MAX" ] || budget=$BUSY_HOLDER_WAIT_MAX
   [ "$budget" -ge 1 ] || budget=1
   deadline=$(( $(date +%s) + budget + 1 ))
   while :; do

@@ -186,8 +186,8 @@ autoarm_commit() {  # <outcome> [marker-file]
 
 # Best-effort ownership-checked record for exit-0 paths, where supersession
 # changes nothing about the action taken.
-autoarm_record() {  # <outcome>
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+autoarm_record() {  # <outcome> [details]
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "${2:-}" >/dev/null 2>&1 || true
 }
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -206,6 +206,8 @@ OUT=
 ACTIONABLE=0
 HEALTHY=0
 BUSY_HOLDER=0
+BUSY_HOLDER_PID=
+BUSY_HOLDER_AGE=
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -242,8 +244,12 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # expiry cannot turn a detached arm close into a healthy attachment.
   if [ -n "$OUT" ] \
     && grep -Eq '^watcher: busy holder pid=[0-9]+ still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
-    BUSY_HOLDER=1
-    break
+    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) beacon=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* beacon=\([0-9][0-9]*\)s .*$/\1/p' "$OUT" | head -1)
+    if [ -n "$BUSY_HOLDER_PID" ] && [ -n "$BUSY_HOLDER_AGE" ]; then
+      BUSY_HOLDER=1
+      break
+    fi
   fi
 
   # A non-actionable close is benign when another verified watcher already owns
@@ -273,7 +279,7 @@ fi
 # Nothing here signals, kills or replaces the holder.
 if [ "$BUSY_HOLDER" -eq 1 ]; then
   fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
-  autoarm_record busy-holder
+  autoarm_record busy-holder "holder_pid=$BUSY_HOLDER_PID beacon_age=${BUSY_HOLDER_AGE}s"
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
