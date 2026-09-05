@@ -1777,9 +1777,7 @@ crew_absorb_class() {  # <id>
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-on-positive-evidence. This is the sole proof for stale wakes and the
-# shared authoritative proof for no-verb signals. Where a home opts in, fm-watch.sh
-# may additionally absorb a bare turn-end on bounded pane churn, while every other
-# failed verdict surfaces
+# shared authoritative proof for no-verb signals; every failed verdict surfaces
 # because the crew may be done, waiting on a decision, or wedged. For stale panes
 # it is checked before trusting the status log so a pre-validation captain-relevant
 # line does not override an active run. See crew_absorb_class for the exact
