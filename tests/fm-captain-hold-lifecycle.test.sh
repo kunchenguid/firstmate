@@ -1950,6 +1950,67 @@ test_teardown_never_closes_a_captain_held_task() {
   pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
 }
 
+test_retained_row_artifacts_survive_captain_answers() {
+  local home report_id pr_id question_id repo wt pr json
+  home=$(make_home retained-row-artifacts)
+  report_id=sample-retained-report
+  mkdir -p "$home/data/$report_id"
+  tasks_in "$home" add "$report_id" "Investigate retained report evidence" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the retained report fixture"
+  write_origin_meta "$home" "$report_id"
+  printf 'done: report complete\n' > "$home/state/$report_id.status"
+  printf '# Retained report\n\nThe captain must choose the follow-up.\n' \
+    > "$home/data/$report_id/report.md"
+  run_captain "$home" hold "$report_id" --reason "captain must choose the report follow-up" \
+    >/dev/null || fail "could not hold the retained report"
+  run_captain "$home" complete "$report_id" "$report_id" >/dev/null \
+    || fail "completion gate failed for the retained report"
+  run_teardown "$home" "$report_id" > "$home/report-teardown.out" \
+    2> "$home/report-teardown.err" \
+    || fail "retained report cleanup failed: $(cat "$home/report-teardown.err")"
+  printf 'Proceed with the report follow-up.\n' > "$home/report-answer.txt"
+  run_captain "$home" answer "$report_id" --decision-file "$home/report-answer.txt" >/dev/null \
+    || fail "could not answer the retained report call"
+
+  pr_id=sample-retained-pr
+  repo="$home/projects/sample-pr"
+  wt="$home/projects/$pr_id"
+  pr="https://github.com/sample/sample/pull/23"
+  fm_git_worktree "$repo" "$wt" fm/retained-pr
+  tasks_in "$home" add "$pr_id" "Ship the retained pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the retained PR fixture"
+  fm_write_meta "$home/state/$pr_id.meta" \
+    "window=firstmate:fm-$pr_id" "endpoint_task_id=$pr_id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$pr_id"
+  printf 'done: PR %s merged\n' "$pr" > "$home/state/$pr_id.status"
+  run_captain "$home" hold "$pr_id" --reason "captain must choose the PR follow-up" \
+    >/dev/null || fail "could not hold the retained PR"
+  run_teardown "$home" "$pr_id" > "$home/pr-teardown.out" 2> "$home/pr-teardown.err" \
+    || fail "retained PR cleanup failed: $(cat "$home/pr-teardown.err")"
+  printf 'Proceed with the PR follow-up.\n' > "$home/pr-answer.txt"
+  run_captain "$home" answer "$pr_id" --decision-file "$home/pr-answer.txt" >/dev/null \
+    || fail "could not answer the retained PR call"
+
+  question_id=sample-retained-question
+  run_captain "$home" hold "$question_id" --title "Choose the release wording" \
+    --reason "captain must choose the release wording" --repo sample >/dev/null \
+    || fail "could not create the no-delivery captain question"
+  printf 'Use the shorter wording.\n' > "$home/question-answer.txt"
+  run_captain "$home" answer "$question_id" --decision-file "$home/question-answer.txt" \
+    >/dev/null || fail "could not answer the no-delivery captain question"
+
+  json=$(run_bearings "$home") || fail "Bearings failed after retained delivery answers"
+  printf '%s' "$json" | jq -e \
+    --arg report_id "$report_id" --arg report "data/$report_id/report.md" \
+    --arg pr_id "$pr_id" --arg pr "$pr" --arg question_id "$question_id" '
+      (.landed | any(.id == $report_id and .artifact == $report))
+        and (.landed | any(.id == $pr_id and .artifact == $pr))
+        and (.landed | any(.id == $question_id) | not)
+    ' >/dev/null || fail "retained deliveries or answered question were misclassified: $json"
+  pass "retained report and PR artifacts survive captain answers"
+}
+
 # Retention happens after destructive cleanup, through the same pending record
 # an ordinary close stages first. A cleanup that fails part-way therefore leaves
 # the row exactly as it was, and the next session start finishes the retention
@@ -2176,6 +2237,7 @@ test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
+test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention

@@ -334,15 +334,15 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
-# of the task body (a line already present is left alone) and return the row to
-# Queued, the conventional post-cleanup shape for an open captain call.
+# of the task body (a line already present is left alone), preserve supported
+# artifacts on the row, and return it to Queued, the conventional post-cleanup
+# shape for an open captain call.
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
-# written into the body rather than through `tasks-axi update --report`,
-# because that flag rewrites the title of a row that is not Done.
+# fields; only bin/fm-captain-hold.sh answer closes the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp
+  local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -351,8 +351,16 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
     case "$previous_arg" in
-      --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
-      --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
+      --report)
+        deliverable="${deliverable:+$deliverable; }report $arg"
+        case "$arg" in
+          data/"$id"/report.md) row_args=(--report "$arg") ;;
+        esac
+        ;;
+      --pr)
+        deliverable="${deliverable:+$deliverable; }PR $arg"
+        row_args=(--pr "$arg")
+        ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
     previous_arg=$arg
@@ -400,6 +408,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         rm -f -- "$tmp"
         ;;
     esac
+  fi
+  if [ "${#row_args[@]}" -gt 0 ]; then
+    fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
   fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
 }
