@@ -229,6 +229,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/skills-verifier/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/skills-verifier/references/agent-cookbook/README.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
