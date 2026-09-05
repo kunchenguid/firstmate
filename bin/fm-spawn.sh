@@ -141,7 +141,8 @@
 #   default-branch commit when safe: directly for a local home, or through the
 #   configured host for a remote home. Skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from both the spawning project and its repository's
+#   primary checkout, including when the spawning project is a linked worktree.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1961,6 +1962,7 @@ real_path_or_raw() {  # <path>
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local wt_git_dir proj_common
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1971,8 +1973,17 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  # The primary checkout uses the repository's common git dir as its own git
+  # dir. A linked spawning home has a different top-level, but the same common
+  # dir, so comparing only the two working directories cannot protect primary.
+  wt_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null) \
+    && wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
+  proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] \
+     || [ "$wt_real" = "$proj_real" ] || [ -z "$wt_git_dir" ] || [ -z "$proj_common" ] \
+     || [ "$wt_git_dir" = "$proj_common" ]; then
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }

@@ -324,6 +324,29 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_from_linked_home_preserves_recorded_worktree() {
+  local dir out rc head
+  dir=$(new_case linked-home rl42)
+  add_ship_task "$dir" rl42 claude
+  git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
+  sed "s|^project=.*|project=$dir/secondmate|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
+  mv "$dir/linked.meta" "$dir/home/state/rl42.meta"
+  printf 'committed task work\n' > "$dir/wt/task.txt"
+  git -C "$dir/wt" add task.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-work
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'unfinished task work\n' >> "$dir/wt/task.txt"
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue from linked home"); rc=$?
+  expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
+  [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
+  assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
+  [ ! -e "$dir/proj/.git/FETCH_HEAD" ] || fail "relaunch fetched instead of preserving the recorded copy"
+  pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -1495,6 +1518,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
