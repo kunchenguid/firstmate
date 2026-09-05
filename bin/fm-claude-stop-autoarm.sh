@@ -47,10 +47,13 @@
 #     watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
-#     hook. Only an exhausted failure with no verified watcher emits one
-#     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     hook, WAITING between attempts rather than re-running the predicate a
+#     second later. A live identity-matched holder inside the wedge bound is
+#     supervision mid-phase and closes quietly. Only an exhausted failure with
+#     no verified watcher emits one last-resort notice per failure episode;
+#     later consecutive failures still exit 2 to guarantee the next Stop-owned
+#     retry without repeating notice, until the synchronous guard has consumed
+#     its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome so the synchronous Stop guard
@@ -82,6 +85,11 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+# How long one attempt waits for a live holder to prove itself before the next
+# attempt. Derived from the grace, not configurable: half a grace window keeps
+# two attempts well inside one grace while never re-running the same predicate a
+# second later.
+AUTOARM_BUSY_WAIT=$((GRACE / 2))
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -93,6 +101,10 @@ esac
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+
+# bin/fm-wake-lib.sh owns where "slow" ends and "wedged" begins; this hook only
+# consumes it, so the watcher, the arm, and this hook cannot disagree.
+WEDGE_BOUND=$(fm_watcher_wedge_bound "$GRACE")
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
@@ -202,9 +214,32 @@ autoarm_record() {  # <outcome>
 # Every non-actionable close is checked against the same identity-matched live
 # watcher and fresh-beacon predicate used by the turn-end guard before it is
 # retried or translated into an operator-visible failure.
+
+# Wait for THIS home's live, identity-matched watcher to prove itself instead of
+# re-running the same predicate immediately. Two attempts a second apart is not a
+# retry - on 2026-09-04 both refusals landed within one second of each other, so
+# a healthy watcher that was 3 seconds from delivering a real wake was reported
+# as a broken mechanism. Polls once a second until the watcher beats (0), the
+# holder leaves (1, so the next attempt can start a fresh one), or the budget
+# runs out with the holder still live and still inside the wedge bound (2, which
+# is supervision alive and mid-phase, never a failure).
+autoarm_wait_for_watcher() {
+  local deadline age
+  deadline=$(( $(date +%s) + AUTOARM_BUSY_WAIT + 1 ))
+  while :; do
+    fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && return 0
+    fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" || return 1
+    age=$FM_WATCHER_BUSY_BEACON_AGE
+    [ "$age" -lt "$WEDGE_BOUND" ] || return 1
+    [ "$(date +%s)" -lt "$deadline" ] || return 2
+    sleep 1
+  done
+}
+
 OUT=
 ACTIONABLE=0
 HEALTHY=0
+BUSY_HOLDER=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -237,9 +272,17 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   [ "$ACTIONABLE" -eq 1 ] && break
 
   # A non-actionable close is benign when another verified watcher already owns
-  # this home and is still beating within the shared grace window.
-  if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+  # this home and is still beating within the shared grace window - or when it is
+  # a live identity-matched holder that has simply not reached its next beat yet.
+  # Wait for that verdict rather than deciding it instantly.
+  autoarm_wait_rc=0
+  autoarm_wait_for_watcher || autoarm_wait_rc=$?
+  if [ "$autoarm_wait_rc" -eq 0 ]; then
     HEALTHY=1
+    break
+  fi
+  if [ "$autoarm_wait_rc" -eq 2 ]; then
+    BUSY_HOLDER=1
     break
   fi
   [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
@@ -253,6 +296,14 @@ if ! need_supervision; then
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
+fi
+
+# A live, identity-matched holder inside the wedge bound IS supervision: it is
+# mid-phase and will deliver its own wake. Close quietly on the same path a
+# verified healthy watcher takes; the one thing this must never do is print
+# "auto-arm FAILED" for a working watcher.
+if [ "$BUSY_HOLDER" -eq 1 ] && [ "$HEALTHY" -eq 0 ]; then
+  HEALTHY=1
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then

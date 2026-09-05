@@ -1933,7 +1933,7 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
-fm_backend_herdr_agent_state() {  # <target>
+_fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
@@ -1942,6 +1942,19 @@ fm_backend_herdr_agent_state() {  # <target>
     live) printf 'alive' ;;
     *) printf 'unreadable' ;;
   esac
+}
+
+fm_backend_herdr_agent_state() {  # <target>
+  local result
+  if ! command -v fm_backend_compound_read >/dev/null 2>&1; then
+    _fm_backend_herdr_agent_state "$1"
+    return
+  fi
+  result=$(fm_backend_compound_read _fm_backend_herdr_agent_state "$1") || {
+    printf 'unreadable'
+    return 0
+  }
+  printf '%s' "$result"
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

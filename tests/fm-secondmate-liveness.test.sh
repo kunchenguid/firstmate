@@ -136,6 +136,81 @@ test_tmux_agent_state_classifies() {
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
+test_tmux_agent_state_shares_one_read_deadline() {
+  local fakebin out started elapsed
+  fakebin=$(fm_fakebin "$TMP_ROOT/tmux-one-deadline")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf 'win\n' ;;
+  *) sleep 2; printf 'bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_GUARD_GRACE=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$out" = unreadable ] || fail "an exhausted compound read deadline must be unreadable, got '$out'"
+  [ "$elapsed" -lt 4 ] || fail "compound tmux probes received independent deadlines ($elapsed seconds)"
+  pass "fm_backend_tmux_agent_state: one deadline bounds the complete observation"
+}
+
+test_backend_capture_bounds_readiness_and_capture_together() {
+  local fakebin started elapsed rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT/capture-one-deadline")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+printf '{"server":{"running":true}}\n'
+SH
+  chmod +x "$fakebin/herdr"
+  started=$(date +%s)
+  PATH="$fakebin:$BASE_PATH" FM_GUARD_GRACE=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture herdr default:w1:p2 20' "$ROOT" \
+    >/dev/null 2>&1 || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$rc" -ne 0 ] || fail "a timed-out Herdr readiness probe reported a capture"
+  [ "$elapsed" -lt 3 ] || fail "Herdr readiness escaped the semantic capture deadline ($elapsed seconds)"
+  pass "fm_backend_capture: one deadline includes backend readiness"
+}
+
+test_backend_busy_state_bounds_readiness_and_returns_unknown() {
+  local fakebin started elapsed out
+  fakebin=$(fm_fakebin "$TMP_ROOT/busy-one-deadline")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+printf '{"server":{"running":true}}\n'
+SH
+  chmod +x "$fakebin/herdr"
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_GUARD_GRACE=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state herdr default:w1:p2' "$ROOT")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$out" = unknown ] || fail "a timed-out Herdr busy observation must be unknown, got '$out'"
+  [ "$elapsed" -lt 3 ] || fail "Herdr busy readiness escaped the semantic deadline ($elapsed seconds)"
+  pass "fm_backend_busy_state: one deadline includes readiness and returns unknown"
+}
+
+test_pending_reply_observation_shares_backend_deadline() {
+  local fakebin started elapsed out
+  fakebin=$(fm_fakebin "$TMP_ROOT/pending-observation-deadline")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+sleep 2
+printf '{"server":{"running":true}}\n'
+SH
+  chmod +x "$fakebin/herdr"
+  started=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_GUARD_GRACE=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-pending-reply-lib.sh"; fm_pending_reply_backend_observation herdr default:w1:p2' "$ROOT")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$out" = unknown ] || fail "an exhausted pending-reply observation must be unknown, got '$out'"
+  [ "$elapsed" -lt 3 ] || fail "pending-reply fallback received a second backend deadline ($elapsed seconds)"
+  pass "pending-reply backend observation shares one elapsed deadline"
+}
+
 test_tmux_agent_state_rejects_malformed_targets_before_probe() {
   local fakebin marker target out
   fakebin=$(fm_fakebin "$TMP_ROOT/tmux-malformed")
@@ -541,6 +616,10 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_state_classifies
+test_tmux_agent_state_shares_one_read_deadline
+test_backend_capture_bounds_readiness_and_capture_together
+test_backend_busy_state_bounds_readiness_and_returns_unknown
+test_pending_reply_observation_shares_backend_deadline
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility

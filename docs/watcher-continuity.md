@@ -15,8 +15,8 @@ Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-au
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
-After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
-A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
+After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon, waits for a live identity-matched busy holder below the wedge bound to prove progress, and only then retries a bounded number of times.
+A cycle-end failure is benign when the watcher is healthy or the live holder remains below that bound, and the hook suppresses the arm output and continues silently.
 Only an exhausted failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
@@ -39,7 +39,7 @@ A handling successor does not re-announce; it enters its poll loop immediately a
 The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
-Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Terminal arm-output classification (`started`, `attached`, typed busy-holder, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -100,6 +100,13 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+The watcher touches it at every phase boundary of its poll rather than once per iteration, so the beacon's age measures the current phase, not the whole iteration.
+
+That distinction is what makes a stale beacon on a live holder usable as evidence.
+`fm_watcher_busy_holder` names that state - a live, identity-matched holder of this home's lock whose beacon has aged past the grace - and `fm_watcher_wedge_bound`, fixed at twice the grace, is where the arm layer stops waiting for it and starts reclaiming it.
+Below the bound the holder is supervision mid-phase: `bin/fm-watch.sh` exits with the typed `watcher: busy holder pid=<N> beacon=<age>s` outcome instead of a bare failure, `bin/fm-watch-arm.sh` waits for it for half a grace window and attaches when it beats again, and `bin/fm-claude-stop-autoarm.sh` waits the same way between its bounded attempts instead of re-deciding a second later.
+Past the bound the arm reclaims it through the same identity-verified stop `--restart` uses, escalating from `SIGCONT` plus `SIGTERM` to `SIGKILL` only after that stop has had its bounded window, then publishes a `check: watcher-wedge-reclaimed pid=<N>` wake.
+Only a reap that does not take is reported as a failure; a live holder inside the wedge bound never produces `auto-arm FAILED`.
 
 ## Regression coverage
 
@@ -108,6 +115,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also pins the two halves of the busy-holder split against each other: a healthy watcher whose single iteration outlives the grace is attached to and never reported failed, while a SIGSTOPped holder past the wedge bound is reclaimed and named in a wake.
+`tests/fm-watch-triage.test.sh` pins the beacon staying inside the grace while one phase deliberately runs longer than the whole grace.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

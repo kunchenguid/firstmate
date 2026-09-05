@@ -97,6 +97,21 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
+FM_PENDING_REPLY_OBSERVE_TIMEOUT=20
+
+_fm_pending_reply_observe_timeout() {
+  fm_timeout_with_wedge_margin "$FM_PENDING_REPLY_OBSERVE_TIMEOUT" \
+    "${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}"
+}
+
+# bin/fm-timeout-lib.sh is the single owner of bounded execution. Load it only
+# for the remote path that needs it, and only once per process.
+_fm_pending_reply_require_timeout() {
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-timeout-lib.sh"
+}
+
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
@@ -117,7 +132,9 @@ fm_pending_reply_grace_secs() {
   printf '%s' "$g"
 }
 
-# Directory holding durable pending-reply records for <state-dir>.
+# Directory holding durable pending-reply records for <state-dir>. This is the
+# HOT set: fm_pending_reply_tick scans it on every watcher poll, so only OPEN
+# records (and a resolved record whose escalation is still open) may live here.
 fm_pending_reply_dir() {  # <state-dir>
   local state=$1
   if [ -n "${FM_PENDING_REPLY_DIR_OVERRIDE:-}" ]; then
@@ -127,8 +144,34 @@ fm_pending_reply_dir() {  # <state-dir>
   printf '%s/pending-replies' "$state"
 }
 
+# Archive holding settled records. Never scanned: it is read only by exact corr
+# id through fm_pending_reply_path below, which is what keeps the poll tick's
+# cost proportional to OPEN work instead of to every request this home has ever
+# sent. Without it the tick grew without bound - 1,883 records, all resolved,
+# 103s per poll and rising by ~3s a day on 2026-09-04, which is what pushed one
+# poll iteration past the liveness grace and produced a false wedge alarm.
+fm_pending_reply_archive_dir() {  # <state-dir>
+  printf '%s/archive' "$(fm_pending_reply_dir "$1")"
+}
+
+# The record for <corr_id>, wherever it currently lives. A record present in the
+# hot set wins; otherwise an archived one is returned, so corr reuse, the
+# wrong-home detector, teardown, and the handoff receiver all keep resolving a
+# settled correlation by id without any of them scanning the archive. A corr with
+# no record anywhere resolves to its hot-set path, which is where a new record is
+# created.
 fm_pending_reply_path() {  # <state-dir> <corr_id>
-  printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+  local dir live archived
+  dir=$(fm_pending_reply_dir "$1")
+  live="$dir/$2"
+  if [ ! -e "$live" ] && [ ! -L "$live" ]; then
+    archived="$dir/archive/$2"
+    if [ -f "$archived" ] && [ ! -L "$archived" ]; then
+      printf '%s' "$archived"
+      return 0
+    fi
+  fi
+  printf '%s' "$live"
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -244,7 +287,23 @@ fm_pending_reply_set() {  # <record-path> <key> <value>
     printf '%s\n' "$line" >> "$tmp" || return 1
   done < "$rec"
   printf '%s=%s\n' "$key" "$value" >> "$tmp" || return 1
-  mv -f "$tmp" "$rec"
+  mv -f "$tmp" "$rec" || return 1
+  # Atomic publication, not check-then-act: the rename above CREATES the record
+  # if archival moved it out from under this write, resurrecting a settled record
+  # into the hot set the poll tick rescans. Not every mutator holds the
+  # correlation lock (fm_pending_reply_mark_delivered,
+  # fm_pending_reply_mark_delivery_unknown and fm_pending_reply_detect_wrong_home
+  # do not), so the race cannot be closed by locking this path without adding
+  # another wake-lib re-source. Instead the ARCHIVE is authoritative: a hot entry
+  # that duplicates an archived record can only be such a resurrection, because
+  # archival is itself a rename, and it is withdrawn here.
+  case "${dir##*/}" in
+    archive) return 0 ;;
+  esac
+  if [ -f "$dir/archive/$base" ] && [ ! -L "$dir/archive/$base" ]; then
+    rm -f -- "$rec" 2>/dev/null || true
+    return 1
+  fi
 }
 
 # Embed or replace a correlation token after the from-firstmate marker.
@@ -628,13 +687,27 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now resolved_epoch resolved_via
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
+    resolved_epoch=$(fm_pending_reply_get "$rec" resolved_epoch)
+    resolved_via=$(fm_pending_reply_get "$rec" resolved_via)
+    if [ -z "$resolved_via" ]; then
+      status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+      line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
+      [ -n "$line" ] || return 1
+      via=$(fm_pending_reply_resolve_via_of_line "$line")
+      fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+    fi
+    if [ -z "$resolved_epoch" ]; then
+      now=$(fm_pending_reply_now)
+      fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
+    fi
     _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+    _fm_pending_reply_archive_settled "$state" "$corr" || true
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -661,16 +734,20 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
     rm -f "$marker" 2>/dev/null || true
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  fm_pending_reply_set "$rec" phase resolved || return 1
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+  # Same hold: a record that settles here leaves the hot set NOW rather than
+  # waiting for a later tick to notice it, so the poll's working set is the OPEN
+  # records at all times instead of converging to them one poll behind.
+  _fm_pending_reply_archive_settled "$state" "$corr" || true
   return 0
 }
 
@@ -762,19 +839,46 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # global OR of every vendor signature), so one harness's output cannot make
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
-fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
-  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
+fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness] [result-var]
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} output_var=${5-} native tail40 result capture_rc=0
+  local previous=${FM_BACKEND_READ_DEADLINE_EPOCH-} deadline timeout
+  timeout=$(fm_backend_read_timeout)
+  if [ "$timeout" -le 0 ]; then
+    if [ -n "$output_var" ]; then
+      printf -v "$output_var" '%s' unknown
+    else
+      printf 'unknown'
+    fi
+    return 0
+  fi
+  deadline=$(( $(date +%s) + timeout ))
+  case "$previous" in ''|*[!0-9]*) previous= ;; *) [ "$previous" -ge "$deadline" ] || deadline=$previous ;; esac
+  FM_BACKEND_READ_DEADLINE_EPOCH=$deadline
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+  _fm_pending_reply_tick_beat
   case "$native" in
-    busy|idle) printf '%s' "$native"; return 0 ;;
+    busy|idle) result=$native ;;
+    *)
+      tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) || capture_rc=$?
+      if [ "$capture_rc" -ne 0 ]; then
+        result=unknown
+      elif printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+        | fm_busy_lines_match "$harness"; then
+        result=busy
+      else
+        result='fallback-idle'
+      fi
+      ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
-  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | fm_busy_lines_match "$harness"; then
-    printf 'busy'
+  if [ -n "$previous" ]; then
+    FM_BACKEND_READ_DEADLINE_EPOCH=$previous
   else
-    printf 'fallback-idle'
+    unset FM_BACKEND_READ_DEADLINE_EPOCH
+  fi
+  if [ -n "$output_var" ]; then
+    printf -v "$output_var" '%s' "$result"
+  else
+    printf '%s' "$result"
   fi
 }
 
@@ -1112,6 +1216,9 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
+  # Same hold: a record whose close has landed leaves the hot set here, so the
+  # poll tick's working set converges to the OPEN records.
+  [ "$rc" -ne 0 ] || _fm_pending_reply_archive_settled "$state" "$corr" || true
   fm_lock_release "$lock"
   return "$rc"
 }
@@ -1407,28 +1514,91 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   return 0
 }
 
+# Optional watcher-owned liveness callback, named by FM_PENDING_REPLY_TICK_BEAT.
+# Only bin/fm-watch.sh sets it, and it names that process's own beat helper, so
+# the beacon keeps its single-writer contract while a long tick keeps proving
+# liveness between records.
+_fm_pending_reply_tick_beat() {
+  [ -n "${FM_PENDING_REPLY_TICK_BEAT:-}" ] || return 0
+  "$FM_PENDING_REPLY_TICK_BEAT" 2>/dev/null || true
+}
+
+# 0 when <record-path> is fully settled: resolved, with no escalation still open.
+# One pass over the record and no subprocess per key, because this runs for every
+# record on every poll and is the gate that keeps the settled majority off the
+# expensive path (a per-record lock plus a re-source of fm-wake-lib.sh).
+_fm_pending_reply_settled() {  # <record-path>
+  local rec=$1 line phase='' escalated='' closed='' resolved_epoch='' resolved_via=''
+  [ -f "$rec" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      phase=*) phase=${line#phase=} ;;
+      escalated_epoch=*) escalated=${line#escalated_epoch=} ;;
+      escalation_closed_epoch=*) closed=${line#escalation_closed_epoch=} ;;
+      resolved_epoch=*) resolved_epoch=${line#resolved_epoch=} ;;
+      resolved_via=*) resolved_via=${line#resolved_via=} ;;
+    esac
+  done < "$rec"
+  [ "$phase" = resolved ] || return 1
+  [ -n "$resolved_epoch" ] && [ -n "$resolved_via" ] || return 1
+  [ -z "$escalated" ] || [ -n "$closed" ]
+}
+
+# Move a fully settled record out of the hot set into the archive. Idempotent
+# and best-effort: a record that cannot be archived stays hot and is retried on
+# the next tick. Concurrent unlocked mutators cannot resurrect it because
+# fm_pending_reply_set withdraws a hot duplicate whenever the archive exists.
+_fm_pending_reply_archive_settled() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 dir archive live
+  dir=$(fm_pending_reply_dir "$state")
+  archive=$(fm_pending_reply_archive_dir "$state")
+  live="$dir/$corr"
+  [ -f "$live" ] && [ ! -L "$live" ] || return 0
+  _fm_pending_reply_settled "$live" || return 0
+  # A pre-existing archive directory (an operator may have moved records out of
+  # the hot path by hand) is adopted as-is rather than replaced.
+  if [ ! -d "$archive" ]; then
+    [ ! -e "$archive" ] && [ ! -L "$archive" ] || return 1
+    mkdir -p "$archive" || return 1
+    chmod 700 "$archive" 2>/dev/null || true
+  fi
+  [ ! -L "$archive" ] || return 1
+  mv -f -- "$live" "$archive/$corr"
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local state=$1 dir rec base corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+  local observation observation_task found i observe_timeout
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in
+    base=${rec##*/}
+    case "$base" in
       .*) continue ;;
     esac
+    _fm_pending_reply_tick_beat
+    # Settled records leave the hot set instead of being re-read forever. This
+    # gate is one file read with no subprocess, and it runs BEFORE the corr,
+    # task, and phase reads below, so the common case costs neither the
+    # per-record lock nor the re-source of fm-wake-lib.sh that
+    # fm_pending_reply_close_escalation takes.
+    if _fm_pending_reply_settled "$rec"; then
+      corr=$(fm_pending_reply_get "$rec" corr_id)
+      [ -n "$corr" ] || corr=$base
+      _fm_pending_reply_archive_settled "$state" "$corr" || true
+      continue
+    fi
     corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
+    [ -n "$corr" ] || corr=$base
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      fm_pending_reply_try_resolve "$state" "$corr" || true
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
@@ -1506,11 +1676,28 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+            # A remote observation is a round trip bounded only by SSH keepalive
+            # behavior, which can outlast the caller's whole liveness grace on its
+            # own - and beats around it do not help while the call itself is
+            # stalled, so the watcher could cross the wedge bound and be reclaimed
+            # while still inside this authorized phase. Bound it through the
+            # shared owner and read a timeout as no observation.
+            _fm_pending_reply_tick_beat
+            _fm_pending_reply_require_timeout
+            observe_timeout=$(_fm_pending_reply_observe_timeout)
+            if [ "$observe_timeout" -gt 0 ]; then
+              observation=$(fm_run_timed "$observe_timeout" \
+                "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+                fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+            else
+              observation=unknown
+            fi
+            _fm_pending_reply_tick_beat
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+            _fm_pending_reply_tick_beat
+            fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness" observation
+            _fm_pending_reply_tick_beat
           fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")

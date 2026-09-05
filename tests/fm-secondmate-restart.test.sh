@@ -291,7 +291,8 @@ test_persist_precedes_restart() {
   [ "$doorbell_line" -lt "$exit_line" ] \
     || fail "the agent was stopped before it was asked to persist (persist line $doorbell_line, exit line $exit_line)"
   # The reply expectation is settled rather than left open behind the restart.
-  grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=resolved$' \
+  grep -h '^phase=' "$dir/home/state/pending-replies"/* "$dir/home/state/pending-replies/archive"/* 2>/dev/null \
+    | grep -q '^phase=resolved$' \
     || fail "the persist answer did not settle its durable expectation"
   pass "T2 the mate persists before anything is stopped"
 }

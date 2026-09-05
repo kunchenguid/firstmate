@@ -41,7 +41,7 @@ fm_backend_tmux_resolve_bare_selector() {  # <name>
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's and fm-watch.sh's `tmux capture-pane -p -t "$T" -S -"$N"`.
 fm_backend_tmux_capture() {  # <target> <lines>
-  tmux capture-pane -p -t "$1" -S -"$2"
+  fm_backend_run_read_timed tmux capture-pane -p -t "$1" -S -"$2"
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
@@ -151,7 +151,7 @@ fm_backend_tmux_kill() {  # <target>
 # own name throughout; the value reverts to the shell's own name only once
 # the foreground command actually exits). Empty on any tmux error.
 fm_backend_tmux_current_command() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
+  fm_backend_run_read_timed tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
 # fm_backend_tmux_classify_process_name: the single owner of the process-name
@@ -223,9 +223,9 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
 # does, or they will describe some other pane entirely.
 fm_backend_tmux_foreground_comms() {  # <target>
   local target=$1 tty pid pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_run_read_timed tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C fm_backend_run_read_timed ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -238,22 +238,22 @@ fm_backend_tmux_foreground_comms() {  # <target>
 # argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
 fm_backend_tmux_foreground_args() {  # <target>
   local target=$1 tty pid pgid tpgid comm args
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_run_read_timed tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C fm_backend_run_read_timed ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        args=$(LC_ALL=C fm_backend_run_read_timed ps -p "$pid" -o args= 2>/dev/null) || continue
         [ -n "$args" ] && printf '%s\n' "$args"
       done
 }
 
 fm_backend_tmux_foreground_pids() {  # <target>
   local target=$1 tty pid pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_run_read_timed tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C fm_backend_run_read_timed ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -263,13 +263,13 @@ fm_backend_tmux_foreground_pids() {  # <target>
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  tty=$(fm_backend_run_read_timed tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C fm_backend_run_read_timed ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        args=$(LC_ALL=C fm_backend_run_read_timed ps -p "$pid" -o args= 2>/dev/null) || continue
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
@@ -292,7 +292,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
+_fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
   local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
@@ -302,7 +302,7 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C fm_backend_run_read_timed tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
@@ -399,6 +399,15 @@ EOF
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac
+}
+
+fm_backend_tmux_agent_state() {  # <target>
+  local result
+  result=$(fm_backend_compound_read _fm_backend_tmux_agent_state "$1") || {
+    printf 'unreadable'
+    return 0
+  }
+  printf '%s' "$result"
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

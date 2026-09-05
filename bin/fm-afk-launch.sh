@@ -382,7 +382,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches the captain's active tab. Prints the record line on success.
 fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result
+  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result config grace
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
     fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
@@ -414,8 +414,11 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+  cmd=$(printf 'exec env FM_HOME=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q FM_GUARD_GRACE=%q FM_WATCHER_STALE_GRACE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+    "$FM_HOME" "$FM_AFK_LAUNCH_STATE" "$config" "$grace" "$grace" \
+    "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -436,13 +439,16 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
 fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
+  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce config grace
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+  cmd=$(printf 'exec env FM_HOME=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q FM_GUARD_GRACE=%q FM_WATCHER_STALE_GRACE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+    "$FM_HOME" "$FM_AFK_LAUNCH_STATE" "$config" "$grace" "$grace" \
+    "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -524,6 +530,112 @@ fm_afk_launch_start() {
   else
     rm -rf "$backup" || result=1
   fi
+  return "$result"
+}
+
+fm_afk_launch_start_watcher() {
+  local captain_target captain_backend read_result result grace wedge
+  local old_backend old_target old_pid old_beat beat_now holder_pid established
+  local main_record next_record deadline wait_secs
+  FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.watch-arm-terminal"
+  FM_AFK_LAUNCH_WS_LABEL="firstmate-watch-arm"
+  FM_AFK_LAUNCH_ENTRY="$FM_ROOT/bin/fm-watch-arm.sh"
+  captain_target=$(discover_supervisor_target) || {
+    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    return 1
+  }
+  captain_backend=$(discover_supervisor_backend) || {
+    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
+    return 1
+  }
+  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  fm_afk_launch_record_read
+  read_result=$?
+  if [ "$read_result" -eq 0 ]; then
+    if fm_afk_launch_terminal_alive "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+      grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+      # Rounds 2-4 converge on one ownership rule: round 2 preserves a working
+      # watcher, round 3 lets a proven wedge reach identity-verified reclaim,
+      # and round 4 replaces a watcher-less shell. Preserve only positive life
+      # evidence: a healthy beat, or an identity-proven busy holder below the
+      # wedge bound. Reconcile every other exact recorded terminal.
+      if fm_watcher_healthy "$FM_AFK_LAUNCH_STATE" "$FM_ROOT/bin/fm-watch.sh" "$grace" "$FM_HOME"; then
+        printf 'watcher-owner: preserved healthy holder\n'
+        return 0
+      fi
+      if fm_watcher_busy_holder "$FM_AFK_LAUNCH_STATE" "$FM_ROOT/bin/fm-watch.sh" "$grace" "$FM_HOME"; then
+        wedge=$(fm_watcher_wedge_bound "$grace")
+        if [ "$FM_WATCHER_BUSY_BEACON_AGE" -lt "$wedge" ]; then
+          printf 'watcher-owner: preserved busy holder pid=%s beacon=%ss\n' \
+            "$FM_WATCHER_BUSY_PID" "$FM_WATCHER_BUSY_BEACON_AGE"
+          return 0
+        fi
+        old_backend=$FM_AFK_REC_BACKEND
+        old_target=$FM_AFK_REC_TARGET
+        old_pid=$FM_WATCHER_BUSY_PID
+        old_beat=$(fm_path_mtime "$FM_AFK_LAUNCH_STATE/.last-watcher-beat" 2>/dev/null || echo 0)
+        main_record=$FM_AFK_LAUNCH_RECORD
+        next_record="$FM_AFK_LAUNCH_STATE/.watch-arm-terminal.next"
+        rm -f "$next_record" || return 1
+        FM_AFK_LAUNCH_RECORD=$next_record
+        case "$captain_backend" in
+          herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
+          tmux) fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+          *) result=1 ;;
+        esac
+        if [ "$result" -eq 0 ]; then
+          wait_secs=$(fm_watcher_phase_timeout 10 "$grace")
+          deadline=$(( $(date +%s) + wait_secs ))
+          established=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            holder_pid=$(cat "$FM_AFK_LAUNCH_STATE/.watch.lock/pid" 2>/dev/null || true)
+            if [ "$holder_pid" != "$old_pid" ] \
+              && fm_watcher_healthy "$FM_AFK_LAUNCH_STATE" "$FM_ROOT/bin/fm-watch.sh" "$grace" "$FM_HOME"; then
+              established=1
+              break
+            fi
+            beat_now=$(fm_path_mtime "$FM_AFK_LAUNCH_STATE/.last-watcher-beat" 2>/dev/null || echo 0)
+            if ! fm_pid_alive "$old_pid" && [ "$beat_now" -gt "$old_beat" ]; then
+              established=1
+              break
+            fi
+            sleep 0.1
+          done
+          [ "$established" -eq 1 ] || result=1
+        fi
+        if [ "$result" -eq 0 ]; then
+          fm_afk_launch_close_terminal "$old_backend" "$old_target" >/dev/null 2>&1 || true
+          fm_afk_launch_terminal_absent "$old_backend" "$old_target" || result=1
+        fi
+        if [ "$result" -eq 0 ]; then
+          if ! mv "$next_record" "$main_record"; then
+            result=1
+          fi
+        fi
+        if [ "$result" -ne 0 ]; then
+          if fm_afk_launch_record_read >/dev/null 2>&1; then
+            fm_afk_launch_close_recorded >/dev/null 2>&1 || true
+          fi
+          rm -f "$next_record" || true
+        fi
+        FM_AFK_LAUNCH_RECORD=$main_record
+        return "$result"
+      fi
+      fm_afk_launch_close_recorded || return 1
+    else
+      fm_afk_launch_close_recorded || return 1
+    fi
+  elif [ "$read_result" -eq 2 ]; then
+    return 1
+  fi
+  case "$captain_backend" in
+    herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
+    tmux) fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
+    *)
+      fm_afk_launch_log "no non-visible watcher-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
+      result=1
+      ;;
+  esac
   return "$result"
 }
 
@@ -637,6 +749,7 @@ fm_afk_launch_main() {
   fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
+    start-watcher) fm_afk_launch_start_watcher ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;

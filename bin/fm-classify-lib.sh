@@ -1720,10 +1720,26 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
+_fm_classify_observation_timeout() {
+  local grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}} timeout maximum
+  timeout=$(fm_timeout_with_wedge_margin 30 "$grace")
+  [ "$timeout" -gt 0 ] || return 1
+  case "${FM_BACKEND_READ_DEADLINE_EPOCH:-}" in
+    ''|*[!0-9]*) ;;
+    *)
+      maximum=$((FM_BACKEND_READ_DEADLINE_EPOCH - $(date +%s)))
+      [ "$maximum" -gt 0 ] || return 1
+      [ "$timeout" -le "$maximum" ] || timeout=$maximum
+      ;;
+  esac
+  printf '%s\n' "$timeout"
+}
+
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src timeout
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  timeout=$(_fm_classify_observation_timeout) || { printf 'none'; return; }
+  line=$(fm_run_timed "$timeout" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -1877,7 +1893,11 @@ signal_crew_provably_working() {  # <file> ...
     esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    if ! crew_is_provably_working "$task"; then
+      command -v beat >/dev/null 2>&1 && beat
+      return 1
+    fi
+    command -v beat >/dev/null 2>&1 && beat
   done
   [ -n "$seen" ] || return 1
   return 0

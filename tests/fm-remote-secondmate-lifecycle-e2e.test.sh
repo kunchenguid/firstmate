@@ -901,7 +901,9 @@ RESULT="$PARENT/state/procevent-inbox/$SID.1.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 1 "$RESULT" >/dev/null \
   || fail "remote reply ingest failed"
 assert_grep "done [corr=$CORR]: remote build passed" "$PARENT/state/ios.status" "correlated remote reply did not reach the parent status channel"
-phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
+pending_record="$PARENT/state/pending-replies/$CORR"
+[ -f "$pending_record" ] || pending_record="$PARENT/state/pending-replies/archive/$CORR"
+phase=$(grep '^phase=' "$pending_record" | cut -d= -f2-)
 [ "$phase" = resolved ] || fail "correlated remote reply did not resolve the parent expectation"
 pass "marked send and routed reply complete through the existing parent correlation owner"
 rm -f "$PARENT/state/.wake-queue"

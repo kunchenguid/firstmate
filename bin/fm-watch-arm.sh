@@ -28,14 +28,24 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: busy holder pid=<N> beacon=<age>s ...       - a LIVE identity-matched watcher of this
+#                                                          home holds the lock mid-phase; supervision
+#                                                          is alive, so this is a typed outcome (exit
+#                                                          FM_WATCH_BUSY_HOLDER_EXIT), never a failure
+#   watcher: reclaimed wedged holder pid=<N> ...         - that holder passed the wedge bound and was
+#                                                          stopped through the identity-verified path;
+#                                                          a check: wake names the reaped pid
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: FAILED - wedged holder pid=<N> ... did not stop
+#                                                        - the reclaim of a proven wedge did not take
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
-# stale-beacon or dead-pid holder either self-heals (the fresh child steals the
-# dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
+# dead-pid holder self-heals (the fresh child steals the dead lock per the
+# singleton self-eviction/steal path and is confirmed), a LIVE identity-matched
+# holder whose beacon has aged out is waited for and only reclaimed past the
+# wedge bound (settle_busy_holder), and anything else returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
@@ -77,6 +87,17 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
+# A live, identity-matched holder whose beacon has aged past GRACE is neither
+# attachable nor replaceable by the ordinary paths, and before per-phase beats
+# it was the routine reading of a healthy watcher mid-iteration - the dead zone
+# that turned a working 330s cycle into "auto-arm FAILED" on 2026-09-04. Wait for
+# such a holder rather than reporting or reaping it: WEDGE_BOUND
+# (fm_watcher_wedge_bound) is where waiting stops and a reclaim is justified.
+# Derived from the grace, not configurable: half a grace window is long enough
+# for a holder mid-phase to reach its next beat and short enough that two Stop
+# attempts still close inside one grace.
+BUSY_HOLDER_WAIT=$((GRACE / 2))
+WEDGE_BOUND=$(fm_watcher_wedge_bound "$GRACE")
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -254,6 +275,153 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# Home-scoped, identity-verified stop of the pid recorded in THIS home's lock.
+# NEVER a pattern kill: bin/fm-watch.sh runs in every firstmate home, so only the
+# pid this home's own lock names may be signalled. Waiting for the pid to leave
+# before returning is what lets the successor take a released lock (or reclaim a
+# now-dead-pid stale one) instead of seeing the dying holder as live.
+# With --escalate, a holder that will not leave on TERM is continued and then
+# killed: the textbook wedge is a STOPPED process, which cannot process TERM at
+# all, so a reclaim that only ever sends TERM could never clear one. SIGCONT
+# first, so an otherwise healthy watcher still runs its own cleanup and releases
+# its lock; SIGKILL only after it has had the same bounded window. A killed
+# holder leaves a dead-pid lock, which the successor steals through the ordinary
+# path. Without --escalate the sequence is TERM plus one bounded wait, unchanged.
+# 0 = the recorded holder is gone, was never live, or its stale lock was cleared;
+# 1 = it survived the bound; 2 = its stale lock could not be cleared.
+expected_watcher_identity_alive() {  # <pid> <identity>
+  local current
+  fm_pid_alive "$1" || return 1
+  current=$(fm_pid_identity "$1" 2>/dev/null) || return 1
+  [ -n "$2" ] && [ "$current" = "$2" ]
+}
+
+expected_watcher_still_holds_lock() {  # <pid> <identity>
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$1" ] || return 1
+  [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" = "$2" ] || return 1
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$1" "$FM_HOME" || return 1
+  expected_watcher_identity_alive "$1" "$2"
+}
+
+stop_recorded_watcher() {  # [--escalate] [expected-pid] [expected-identity]
+  local escalate=0 lock_pid lock_identity expected_pid expected_identity i
+  if [ "${1:-}" = --escalate ]; then
+    escalate=1
+    shift
+  fi
+  expected_pid=${1:-}
+  expected_identity=${2:-}
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  if [ -n "$expected_pid" ] \
+    && { [ "$lock_pid" != "$expected_pid" ] || [ "$lock_identity" != "$expected_identity" ]; }; then
+    return 3
+  fi
+  if ! fm_pid_alive "$lock_pid"; then
+    [ -z "$expected_pid" ] || return 3
+    return 0
+  fi
+  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    [ -z "$expected_pid" ] || return 3
+    clear_stale_recorded_watcher_lock || return 2
+    return 0
+  fi
+  if [ -n "$expected_pid" ]; then
+    expected_watcher_still_holds_lock "$expected_pid" "$expected_identity" || return 3
+  fi
+  if [ "$escalate" -eq 1 ]; then
+    [ -z "$expected_pid" ] || expected_watcher_still_holds_lock "$expected_pid" "$expected_identity" || return 3
+    kill -CONT "$lock_pid" 2>/dev/null || { [ -z "$expected_pid" ] || return 3; }
+  fi
+  [ -z "$expected_pid" ] || expected_watcher_still_holds_lock "$expected_pid" "$expected_identity" || return 3
+  if ! kill -TERM "$lock_pid" 2>/dev/null; then
+    [ -z "$expected_pid" ] || return 3
+  fi
+  i=0
+  while [ "$i" -lt 50 ]; do
+    fm_pid_alive "$lock_pid" || return 0
+    [ -z "$expected_pid" ] || expected_watcher_identity_alive "$expected_pid" "$expected_identity" || return 3
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$escalate" -eq 1 ]; then
+    [ -z "$expected_pid" ] || expected_watcher_still_holds_lock "$expected_pid" "$expected_identity" || return 3
+    kill -KILL "$lock_pid" 2>/dev/null || { [ -z "$expected_pid" ] || return 3; }
+    i=0
+    while [ "$i" -lt 50 ]; do
+      fm_pid_alive "$lock_pid" || return 0
+      [ -z "$expected_pid" ] || expected_watcher_identity_alive "$expected_pid" "$expected_identity" || return 3
+      sleep 0.1
+      i=$((i + 1))
+    done
+  fi
+  fm_pid_alive "$lock_pid" || return 0
+  [ -z "$expected_pid" ] || expected_watcher_identity_alive "$expected_pid" "$expected_identity" || return 3
+  return 1
+}
+
+# Reclaim a PROVEN wedge, and only a proven one: a live identity-matched holder
+# that has not beaten for WEDGE_BOUND. With the watcher beating at every phase
+# boundary, that is evidence it is stuck inside one phase rather than running a
+# long one. Reuses the same identity-verified stop --restart uses, then publishes
+# a check: wake naming the reaped pid so the operator learns about the reclaim
+# through the ordinary wake path instead of a failure notice. Only a reap that
+# does not take is a failure.
+reclaim_wedged_holder() {  # <pid> <beacon-age> <identity>
+  local pid=$1 age=$2 identity=$3 stop_rc=0
+  stop_recorded_watcher --escalate "$pid" "$identity" || stop_rc=$?
+  if [ "$stop_rc" -eq 3 ]; then
+    echo "watcher: wedge holder changed before reclaim pid=$pid"
+    return 2
+  fi
+  if [ "$stop_rc" -ne 0 ]; then
+    echo "watcher: FAILED - wedged holder pid=$pid (beacon ${age}s) did not stop" >&2
+    return 1
+  fi
+  # The wake IS the reclaim's durable record: it is the only way the operator
+  # learns a watcher was killed. A reclaim whose wake could not be published has
+  # therefore lost its evidence, so it is reported as a failure rather than as a
+  # success with a silently dropped notification.
+  if ! fm_wake_append check watcher-wedge-reclaim \
+    "check: watcher-wedge-reclaimed pid=$pid beacon=${age}s"; then
+    echo "watcher: FAILED - reclaimed wedged holder pid=$pid but could not publish its wake" >&2
+    return 1
+  fi
+  echo "watcher: reclaimed wedged holder pid=$pid (beacon ${age}s)"
+}
+
+# Settle the one lock state that is neither healthy nor free before deciding to
+# start a watcher. Returns:
+#   0  nothing to settle, the holder beat again, the holder left, or a proven
+#      wedge was reclaimed - the ordinary attach/start paths take it from here
+#   FM_WATCH_BUSY_HOLDER_EXIT  a live sub-wedge holder outlasted the wait budget:
+#      supervision is alive and mid-phase, so this is a typed outcome, never a
+#      failure
+#   1  a proven wedge could not be reclaimed
+settle_busy_holder() {
+  local deadline pid age identity reclaim_rc
+  fm_watcher_busy_holder "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 0
+  deadline=$(( $(date +%s) + BUSY_HOLDER_WAIT + 1 ))
+  while :; do
+    healthy_watcher && return 0
+    fm_watcher_busy_holder "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 0
+    pid=$FM_WATCHER_BUSY_PID
+    age=$FM_WATCHER_BUSY_BEACON_AGE
+    identity=$FM_WATCHER_BUSY_IDENTITY
+    if [ "$age" -ge "$WEDGE_BOUND" ]; then
+      reclaim_rc=0
+      reclaim_wedged_holder "$pid" "$age" "$identity" || reclaim_rc=$?
+      [ "$reclaim_rc" -ne 1 ] || return 1
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "watcher: busy holder pid=$pid beacon=${age}s (grace ${GRACE}s, wedge ${WEDGE_BOUND}s)"
+      return "$FM_WATCH_BUSY_HOLDER_EXIT"
+    fi
+    sleep 1
+  done
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -408,26 +576,25 @@ if [ "$mode" = handling-delivered ]; then
 fi
 
 if [ "$mode" = restart ]; then
-  # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
-  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  if fm_pid_alive "$lock_pid"; then
-    if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
-    else
-      if ! clear_stale_recorded_watcher_lock; then
-        echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
-        exit 1
-      fi
-    fi
+  # Home-scoped stop: only the watcher pid recorded in THIS home's lock. A holder
+  # that outlives the bound is not fatal here, exactly as before; only an
+  # unclearable stale lock is.
+  restart_stop_rc=0
+  stop_recorded_watcher || restart_stop_rc=$?
+  if [ "$restart_stop_rc" -eq 2 ]; then
+    echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
+    exit 1
   fi
+fi
+
+# Settle a live identity-matched holder whose beacon has aged out BEFORE deciding
+# to start a watcher: wait for it while it is plausibly mid-phase, reclaim it
+# only past the wedge bound, and never fork a child into a refusal.
+# (--restart just stopped this home's watcher and wants a fresh one.)
+if [ "$mode" = arm ]; then
+  settle_rc=0
+  settle_busy_holder || settle_rc=$?
+  [ "$settle_rc" -eq 0 ] || exit "$settle_rc"
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
@@ -523,6 +690,22 @@ owned_child_finished() {
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     return 1
+  fi
+
+  # The one nonzero exit that is not a failure: the child found a live,
+  # identity-matched holder of this home's lock whose beacon had aged out. The
+  # settle above normally absorbs that, but the holder can appear in the race
+  # between the settle and the child's own lock attempt. Report the typed
+  # outcome the child printed and propagate its status - reporting supervision
+  # broken here is what cost the operator four turns on 2026-09-04.
+  if [ "$rc" -eq "$FM_WATCH_BUSY_HOLDER_EXIT" ] \
+    && grep -q '^watcher: busy holder ' "$child_out" 2>/dev/null; then
+    cycle_log_append "$rc" "$signal" busy-holder none
+    print_watch_output "$child_out"
+    rm -f "$child_out" 2>/dev/null || true
+    child=
+    child_out=
+    return "$rc"
   fi
 
   reason_type="nonzero-exit"

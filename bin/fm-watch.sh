@@ -138,6 +138,7 @@ WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+case "$WATCHER_STALE_GRACE" in ''|*[!0-9]*|0) WATCHER_STALE_GRACE=300 ;; esac
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -157,6 +158,48 @@ if [ "$(uname)" = Darwin ]; then
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
+
+# Liveness beacon for fm-guard.sh and the arm layer: a fresh mtime here means a
+# watcher is alive and still moving. Call it at EVERY phase boundary of the poll
+# below, never once per iteration: the 2026-09-04 investigation found the single
+# top-of-loop touch (then bin/fm-watch.sh:1562) proving liveness once per
+# iteration while one iteration on a busy home had grown to 100-350s against the
+# 300s FM_GUARD_GRACE, so a healthy working watcher read as wedged and the arm
+# layer reported supervision broken.
+# Only THIS process ever touches the beacon (docs/watcher-continuity.md), so the
+# per-phase cadence does not weaken the invariant: a watcher genuinely stuck
+# inside one phase still stops beating, which is exactly what makes a stale
+# beacon on a live holder trustworthy wedge evidence for fm_watcher_wedge_bound.
+beat() {
+  touch "$STATE/.last-watcher-beat" 2>/dev/null || true
+}
+
+# Longest gap between beats inside a blocking phase: a quarter of the configured
+# liveness grace, capped at 5s. The cap keeps a production 300s grace at one
+# touch every 5 seconds, and the quarter keeps a small configured grace (tests
+# run with single-digit seconds) far from its own threshold.
+BEAT_STEP=$((WATCHER_STALE_GRACE / 4))
+[ "$BEAT_STEP" -ge 1 ] || BEAT_STEP=1
+[ "$BEAT_STEP" -le 5 ] || BEAT_STEP=5
+
+# A sleep that keeps proving liveness: one beat per BEAT_STEP, so a long linger
+# inside the loop (the signal grace, a slow check's wait) can never look like a
+# stopped watcher. A non-integer budget falls back to one plain sleep.
+beat_sleep() {  # <seconds>
+  local total=$1 slept=0 step
+  case "$total" in
+    ''|*[!0-9]*) beat; sleep "$total"; beat; return 0 ;;
+  esac
+  beat
+  while [ "$slept" -lt "$total" ]; do
+    step=$((total - slept))
+    [ "$step" -le "$BEAT_STEP" ] || step=$BEAT_STEP
+    sleep "$step"
+    slept=$((slept + step))
+    beat
+  done
+}
+
 # bin/fm-classify-lib.sh owns status reported-state signatures and presentation
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
@@ -166,6 +209,11 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+PROCEVENT_RECONCILE_TIMEOUT=$(fm_timeout_with_wedge_margin 30 "$WATCHER_STALE_GRACE")
+# bin/fm-timeout-lib.sh is the single owner of bounded execution; load it
+# explicitly rather than relying on a transitive source, because the poll loop
+# bounds its own external calls above.
+_fm_wake_require_timeout
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -352,6 +400,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  beat
   if window_is_busy "$w" "$tail40"; then
     return 0
   fi
@@ -516,7 +565,11 @@ signal_turnend_panes_churned() {  # <file> ...
   done
   for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
     task=${signal_tasks[$i]}
-    crew_is_provably_working "$task" && continue
+    if crew_is_provably_working "$task"; then
+      beat
+      continue
+    fi
+    beat
     task_index=${signal_indexes[$i]}
     churn_indexes+=("$task_index")
   done
@@ -539,7 +592,11 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
+    if ! now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null); then
+      beat
+      return 1
+    fi
+    beat
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
@@ -927,7 +984,7 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
-pause_state_class() {  # <window> <task>
+_pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
@@ -981,6 +1038,26 @@ pause_state_class() {  # <window> <task>
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
+}
+
+pause_state_class() {  # <window> <task>
+  local previous=${FM_BACKEND_READ_DEADLINE_EPOCH-} deadline timeout result rc=0
+  case "$previous" in *[!0-9]*) previous= ;; esac
+  timeout=$(fm_backend_read_timeout)
+  [ "$timeout" -gt 0 ] || return 1
+  deadline=$(( $(date +%s) + timeout ))
+  if [ -n "$previous" ] && [ "$previous" -lt "$deadline" ]; then
+    deadline=$previous
+  fi
+  FM_BACKEND_READ_DEADLINE_EPOCH=$deadline
+  result=$(_pause_state_class "$@") || rc=$?
+  if [ -n "$previous" ]; then
+    FM_BACKEND_READ_DEADLINE_EPOCH=$previous
+  else
+    unset FM_BACKEND_READ_DEADLINE_EPOCH
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "$result"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1175,7 +1252,7 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid check_wait_beats
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -1195,7 +1272,18 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  # Keep beating while the check runs. A check is bounded by FM_CHECK_TIMEOUT,
+  # but that bound is a large fraction of the liveness grace, and a sweep runs
+  # one per registered check - so a blind wait here is one of the two long
+  # blocking primitives the watcher owns that used to age the beacon out.
+  check_wait_beats=0
+  while kill -0 "$FM_ACTIVE_CHECK_PID" 2>/dev/null; do
+    [ $((check_wait_beats % (BEAT_STEP * 5))) -eq 0 ] && beat
+    sleep 0.2
+    check_wait_beats=$((check_wait_beats + 1))
+  done
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  beat
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -1381,7 +1469,24 @@ fi
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-    if [ -e "$BEAT" ]; then
+    # An aged beacon behind a live holder is only a supervision statement when
+    # that holder is provably THIS home's own watcher. For one that is, it is
+    # NOT a failure to report: with per-phase beats above it is a watcher inside
+    # one long phase, and only past fm_watcher_wedge_bound is it a proven wedge.
+    # Say which, typed, on stdout - the channel the arm actually reads - and
+    # leave the wait-or-reclaim decision to bin/fm-watch-arm.sh. The old bare
+    # `exit 1` plus a stderr explanation reached that arm as
+    # "FAILED - exited 1 without an actionable reason" and, through it, the Stop
+    # hook's "auto-arm FAILED" notice, which is how a healthy 330s cycle cost the
+    # operator four recovery turns on 2026-09-04.
+    # An unidentified squatter keeps the original loud refusal: nothing here can
+    # vouch for it, so there is nothing to wait for.
+    if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$WATCHER_STALE_GRACE" "$FM_HOME"; then
+      echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=${FM_WATCHER_BUSY_BEACON_AGE}s (grace ${WATCHER_STALE_GRACE}s, wedge $(fm_watcher_wedge_bound "$WATCHER_STALE_GRACE")s)"
+      exit "$FM_WATCH_BUSY_HOLDER_EXIT"
+    elif fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$FM_LOCK_HELD_PID" "$FM_HOME"; then
+      :
+    elif [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
         echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
@@ -1546,6 +1651,13 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# bin/fm-pending-reply-lib.sh's per-poll tick beats through this hook so a home
+# with many records keeps proving liveness between them. It is set here, inside
+# the runtime that owns the beacon, and never when this file is merely sourced,
+# which is what keeps the beacon single-writer.
+# shellcheck disable=SC2034 # Read by the pending-reply tick in the library sourced above.
+FM_PENDING_REPLY_TICK_BEAT=beat
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -1557,9 +1669,10 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Top of the iteration. Every phase below closes with its own beat (see beat),
+  # so the beacon's age measures the CURRENT phase rather than the whole
+  # iteration, and it is deliberately no longer an iteration boundary.
+  beat
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -1576,7 +1689,12 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
+  # The tick itself beats between records through FM_PENDING_REPLY_TICK_BEAT
+  # (set below the loop's helpers), because it was the single most expensive
+  # phase in the 2026-09-04 investigation: 103s re-scanning every already
+  # resolved record, unbounded and growing daily.
   fm_pending_reply_tick "$STATE" || true
+  beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -1585,17 +1703,24 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+  beat
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
-  if [ -d "$STATE/procevent" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  if [ -d "$STATE/procevent" ] && [ "$PROCEVENT_RECONCILE_TIMEOUT" -gt 0 ]; then
+    # Bounded: reconcile restarts source runners, so an unbounded call here puts
+    # an unknown deadline between two beats. On the bound the next poll
+    # reconciles again.
+    FM_HOME="$FM_HOME" fm_run_timed "$PROCEVENT_RECONCILE_TIMEOUT" \
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
+  beat
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  beat
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
@@ -1613,6 +1738,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  beat
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1625,6 +1751,10 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # One beat per check: a sweep runs every registered check in series, each
+      # bounded only by FM_CHECK_TIMEOUT, so the sweep as a whole is unbounded
+      # in the number of checks.
+      beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1688,6 +1818,7 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    beat
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
@@ -1696,8 +1827,11 @@ while :; do
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
+  beat
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    # A beating linger: this grace is a fixed floor on every signal-bearing
+    # iteration, and in a busy fleet nearly every iteration bears a signal.
+    beat_sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
@@ -1808,11 +1942,16 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # One beat per window: each window costs a pane capture plus a busy verdict
+    # plus, for a declared wait, a full fm-crew-state.sh read, and the scan runs
+    # once per recorded window with no bound on how many a home has.
+    beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
+    beat
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
@@ -1828,7 +1967,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      beat
+      continue
+    fi
+    beat
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1843,6 +1986,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    beat
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2005,6 +2149,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  beat
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
@@ -2043,9 +2188,12 @@ EOF
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
+    beat
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
-  # else the blind poll sleep. See event_wait_or_sleep.
+  # else the blind poll sleep. See event_wait_or_sleep. Beat first: this is the
+  # one phase whose whole purpose is to block, and it is bounded by FM_POLL.
+  beat
   event_wait_or_sleep
 done

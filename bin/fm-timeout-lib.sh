@@ -86,6 +86,15 @@ fm_run_bash_timeout() {
   return "$command_rc"
 }
 
+fm_timeout_with_wedge_margin() {  # <preferred-seconds> <liveness-grace-seconds>
+  local preferred=${1:-30} grace=${2:-300} maximum
+  case "$preferred" in ''|*[!0-9]*|0) preferred=30 ;; esac
+  case "$grace" in ''|*[!0-9]*|0) grace=300 ;; esac
+  maximum=$((grace * 2 - 2))
+  [ "$preferred" -le "$maximum" ] || preferred=$maximum
+  printf '%s\n' "$preferred"
+}
+
 fm_run_external_timeout() {
   local runner=$1 seconds=$2 status_file runner_pid runner_rc command_rc
   shift 2
@@ -96,7 +105,7 @@ fm_run_external_timeout() {
   # ignores TERM; timeout then considers the command finished and does not send
   # its configured KILL. Explicitly reap that leftover group on a real timeout.
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  "$runner" -k 1 "$seconds" bash -c '
+  "$runner" -k 0.2 "$seconds" bash -c '
     status_file=$1
     shift
     "$@"

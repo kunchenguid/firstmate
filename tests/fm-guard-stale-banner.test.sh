@@ -17,7 +17,65 @@ make_guard_case() {
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   root="$dir/root"
-  mkdir -p "$home/state" "$home/config" "$root"
+  mkdir -p "$home/state" "$home/config" "$root" "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+session=
+previous=
+for arg in "$@"; do
+  [ "$previous" = -s ] || [ "$previous" = -t ] && session=$arg
+  previous=$arg
+done
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+record="$state/.fake-tmux-${session//\//-}"
+case "${1:-}" in
+  new-session)
+    command=${!#}
+    python3 - "$command" "$record" <<'PY'
+import os
+import subprocess
+import sys
+log = open(sys.argv[2] + ".log", "ab", buffering=0)
+process = subprocess.Popen(
+    ["/bin/bash", "-c", sys.argv[1]],
+    stdin=subprocess.DEVNULL,
+    stdout=log,
+    stderr=log,
+    start_new_session=True,
+)
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(f"{process.pid}\n")
+PY
+    [ "${FM_FAKE_TMUX_LAUNCH_DELAY:-0}" = 0 ] || sleep "$FM_FAKE_TMUX_LAUNCH_DELAY"
+    ;;
+  has-session)
+    if [ "${FM_FAKE_TMUX_STICKY:-0}" = 1 ] && [ -s "$record" ]; then
+      exit 0
+    fi
+    if [ -s "$record" ] && kill -0 "$(cat "$record")" 2>/dev/null; then
+      exit 0
+    fi
+    printf "can't find session: %s\n" "$session" >&2
+    exit 1
+    ;;
+  kill-session)
+    [ -s "$record" ] || exit 1
+    kill -CONT "$(cat "$record")" 2>/dev/null || true
+    kill -TERM "$(cat "$record")" 2>/dev/null || true
+    rm -f "$record"
+    ;;
+  list-windows)
+    case " $* " in
+      *' -a '*) printf 'firstmate:fm-task\n' ;;
+      *) printf '%s\n' captain fm-task ;;
+    esac
+    ;;
+  display-message) printf 'claude\n' ;;
+  capture-pane|list-panes) : ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
   fm_write_meta "$home/state/task.meta" "window=firstmate:fm-task" "kind=ship"
   printf '%s\n' "$dir"
 }
@@ -28,6 +86,17 @@ case_home() {
 
 case_root() {
   printf '%s/root\n' "$1"
+}
+
+age_path() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+import time
+age = int(sys.argv[2])
+when = time.time() - age
+os.utime(sys.argv[1], (when, when))
+PY
 }
 
 record_live_watcher() {
@@ -67,9 +136,12 @@ run_guard_case_read_only() {
 # beacon with no live watcher process is the healthy mid-turn state.
 run_guard_case_autoarm() {
   local dir=$1
-  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+  FM_ROOT_OVERRIDE="$ROOT" \
     FM_HOME="$(case_home "$dir")" \
-    FM_GUARD_GRACE=999 \
+    PATH="$dir/fakebin:$PATH" \
+    FM_GUARD_GRACE="${FM_TEST_GUARD_GRACE:-999}" \
+    FM_SUPERVISOR_TARGET=test:captain \
+    FM_SUPERVISOR_BACKEND=tmux \
     FM_SUPERVISION_MODEL=autoarm \
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
@@ -130,6 +202,36 @@ record_pi_extension_session() {
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0
+}
+
+start_fake_tracked_watcher() {
+  local dir=$1 session=$2 grace=$3 home command i=0 pid
+  home=$(case_home "$dir")
+  printf 'working: still running\n' > "$home/state/task.status"
+  command=$(printf 'exec env FM_HOME=%q FM_STATE_OVERRIDE=%q FM_GUARD_GRACE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=tmux %q' \
+    "$home" "$home/state" "$grace" test:captain "$ROOT/bin/fm-watch.sh")
+  PATH="$dir/fakebin:$PATH" FM_HOME="$home" tmux new-session -d -s "$session" "$command"
+  printf 'tmux\t%s\t\n' "$session" > "$home/state/.watch-arm-terminal"
+  pid=$(cat "$home/state/.fake-tmux-$session")
+  while [ "$i" -lt 50 ] \
+    && { [ ! -s "$home/state/.watch.lock/pid" ] || [ ! -e "$home/state/.last-watcher-beat" ]; }; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -e "$home/state/.last-watcher-beat" ] || return 1
+  printf '%s\n' "$pid"
+}
+
+stop_fake_watcher() {
+  local dir=$1 home state=${2:-} record session
+  home=$(case_home "$dir")
+  [ -n "$state" ] || state="$home/state"
+  record="$state/.watch-arm-terminal"
+  [ -f "$record" ] || return 0
+  session=$(awk -F '\t' 'NR == 1 { print $2 }' "$record")
+  PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    tmux kill-session -t "$session" >/dev/null 2>&1 || true
 }
 
 count_text() {
@@ -369,30 +471,214 @@ test_autoarm_fresh_beacon_without_watcher_is_healthy() {
   pass "fm-guard stale banner: auto-arm fresh beacon without a live watcher is healthy"
 }
 
-test_autoarm_stale_beacon_alarms_with_correct_reason() {
+# 2026-09-04 stale-beacon investigation, section 9. Under the Stop auto-arm model
+# the watcher runs only BETWEEN turns, so mid-turn an aged beacon is the ordinary
+# state: the passive "WATCHER DOWN - SUPERVISION IS OFF" banner printed 21 times
+# in the incident session, prompted exactly one action (a health check that
+# concluded nothing was broken), and trained the operator to filter guard output
+# entirely - which also hid the independent queued-wakes and tangle alarms. It is
+# deleted for this model rather than made smarter.
+test_autoarm_stale_beacon_prints_no_passive_banner() {
   local dir out
   dir=$(make_guard_case autoarm-stale)
-  # No beacon at all -> a genuine supervision lapse even under the auto-arm model.
+  # No beacon at all, with the auto-arm ledger still advancing: the mechanism is
+  # arming at every turn end, so the guard has nothing to say.
+  touch "$(case_home "$dir")/state/.claude-autoarm-epoch"
   out=$(run_guard_case_autoarm "$dir")
-  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
-    || fail "auto-arm model with an absent/stale beacon must alarm: $out"
-  assert_contains "$out" "no watcher has a fresh beacon" \
-    "auto-arm stale-beacon banner must name the stale-beacon reason"
-  pass "fm-guard stale banner: auto-arm stale beacon alarms with the true reason"
+  [ -z "$out" ] \
+    || fail "auto-arm model printed a passive supervision banner: $out"
+  pass "fm-guard: the auto-arm model has no passive stale-beacon banner"
 }
 
-test_autoarm_stale_episode_is_stable() {
-  local dir out1 out2
-  dir=$(make_guard_case autoarm-stable-episode)
+test_watcher_launcher_replaces_unproven_tracked_owner() {
+  local dir home session pid before after out
+  dir=$(make_guard_case watcher-owner-unproven)
+  home=$(case_home "$dir")
+  session=existing-watch-owner
+  printf 'working: still running\n' > "$home/state/task.status"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$home" tmux new-session -d -s "$session" 'exec sleep 60'
+  printf 'tmux\t%s\t\n' "$session" > "$home/state/.watch-arm-terminal"
+  pid=$(cat "$home/state/.fake-tmux-$session")
+  before=$(cat "$home/state/.watch-arm-terminal")
+  out=$(PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SUPERVISOR_TARGET=test:captain FM_SUPERVISOR_BACKEND=tmux \
+    "$ROOT/bin/fm-afk-launch.sh" start-watcher 2>&1)
+  after=$(cat "$home/state/.watch-arm-terminal")
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null && fail "watcher-less tracked shell blocked replacement"
+  [ "$after" != "$before" ] || fail "watcher-less tracked owner record was preserved"
+  assert_contains "$out" "daemon launched in detached tmux session" \
+    "replacing an unproven tracked owner did not launch its successor"
+  stop_fake_watcher "$dir"
+  pass "watcher self-heal replaces a tracked owner without life evidence"
+}
+
+test_guard_preserves_subwedge_tracked_watcher() {
+  local dir home session pid out before after
+  dir=$(make_guard_case tracked-subwedge)
+  home=$(case_home "$dir")
+  session=subwedge-owner
+  pid=$(start_fake_tracked_watcher "$dir" "$session" 10) \
+    || fail "could not start sub-wedge watcher"
+  kill -STOP "$pid"
+  age_path "$home/state/.watch.lock/pid" 11
+  age_path "$home/state/.last-watcher-beat" 11
+  before=$(cat "$home/state/.watch-arm-terminal")
+  out=$(FM_TEST_GUARD_GRACE=10 run_guard_case_autoarm "$dir")
+  after=$(cat "$home/state/.watch-arm-terminal")
+  [ -z "$out" ] || fail "a preserved sub-wedge watcher caused a self-heal warning: $out"
+  kill -0 "$pid" 2>/dev/null || fail "the guard reaped a sub-wedge watcher"
+  [ "$after" = "$before" ] || fail "the guard replaced a sub-wedge tracked owner"
+  stop_fake_watcher "$dir"
+  pass "guard accepts a tracked watcher below the proven wedge bound"
+}
+
+test_watcher_launcher_settles_proven_tracked_wedge() {
+  local dir home session pid i=0 out
+  dir=$(make_guard_case tracked-proven-wedge)
+  home=$(case_home "$dir")
+  session=wedged-owner
+  pid=$(start_fake_tracked_watcher "$dir" "$session" 2) \
+    || fail "could not start proven watcher wedge"
+  kill -STOP "$pid"
+  age_path "$home/state/.watch.lock/pid" 5
+  age_path "$home/state/.last-watcher-beat" 5
+  out=$(PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_GUARD_GRACE=2 FM_SUPERVISOR_TARGET=test:captain FM_SUPERVISOR_BACKEND=tmux \
+    "$ROOT/bin/fm-afk-launch.sh" start-watcher 2>&1)
+  while [ "$i" -lt 90 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && fail "tracked owner shielded a proven watcher wedge"
+  i=0
+  while [ "$i" -lt 30 ] \
+    && ! grep -F "check: watcher-wedge-reclaimed pid=$pid" "$home/state/.wake-queue" >/dev/null 2>&1; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -F "check: watcher-wedge-reclaimed pid=$pid" "$home/state/.wake-queue" >/dev/null \
+    || fail "tracked wedge settlement did not publish reclaim evidence: $out; owner logs: $(cat "$home/state"/.fake-tmux-*.log 2>/dev/null || true)"
+  assert_absent "$home/state/.fake-tmux-$session" "old tracked terminal was not reconciled by exact id"
+  assert_absent "$home/state/.watch-arm-terminal.next" "successor terminal record was left staged"
+  [ "$(awk -F '\t' 'NR == 1 { print $2 }' "$home/state/.watch-arm-terminal")" != "$session" ] \
+    || fail "old tracked terminal identifier replaced the successor record"
+  stop_fake_watcher "$dir"
+  pass "tracked lifecycle hands a proven wedge to identity-verified reclaim"
+}
+
+test_watcher_launcher_forwards_effective_home_configuration() {
+  local dir home state config i=0 out
+  dir=$(make_guard_case watcher-owner-overrides)
+  home=$(case_home "$dir")
+  state="$dir/custom-state"
+  config="$dir/custom-config"
+  mkdir -p "$state" "$config"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$state/x-watch.check.sh"
+  chmod +x "$state/x-watch.check.sh"
+  out=$(PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_GUARD_GRACE=3 \
+    FM_SUPERVISOR_TARGET=test:captain FM_SUPERVISOR_BACKEND=tmux \
+    "$ROOT/bin/fm-afk-launch.sh" start-watcher 2>&1)
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  assert_present "$state/.last-watcher-beat" "tracked watcher did not use the effective state override"
+  assert_absent "$home/state/.last-watcher-beat" "tracked watcher fell back to the default home state"
+  assert_contains "$out" "daemon launched in detached tmux session" \
+    "tracked watcher launch with effective overrides did not report its tracked owner"
+  stop_fake_watcher "$dir" "$state"
+  pass "tracked watcher launch forwards effective state, config, and grace"
+}
+
+# The beacon-independent tripwire: an auto-arm ledger that has gone quiet past a
+# generous bound while supervision is needed means the Stop hook has stopped
+# arming. The guard repairs what it can reach and stays SILENT when the repair
+# takes, so a long working turn can never produce a false alarm.
+test_autoarm_fast_actionable_self_heal_stays_silent() {
+  (
+    local dir home out
+    dir=$(make_guard_case autoarm-fast-actionable)
+    home=$(case_home "$dir")
+    cat > "$home/state/x-watch.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'check: immediate self-heal delivery\n'
+SH
+    chmod +x "$home/state/x-watch.check.sh"
+    export FM_FAKE_TMUX_LAUNCH_DELAY=1 FM_FAKE_TMUX_STICKY=1
+    out=$(run_guard_case_autoarm "$dir")
+    [ -z "$out" ] || fail "a self-heal cycle that delivered immediately was reported failed: $out"
+    [ -s "$home/state/.watch-deliveries.log" ] \
+      || fail "the fast self-heal cycle did not publish its delivered wake"
+  ) || fail "fast actionable self-heal regression failed"
+  pass "fm-guard: an immediately delivered self-heal cycle stays silent"
+}
+
+test_autoarm_stale_ledger_self_heals_silently() {
+  local dir home out
+  dir=$(make_guard_case autoarm-self-heal)
+  home=$(case_home "$dir")
+  printf 'working: still running\n' > "$home/state/task.status"
+  : > "$home/state/.claude-autoarm-failure-notified"
+  : > "$home/state/.claude-autoarm-failure-alarmed"
+  out=$(run_guard_case_autoarm "$dir")
+  [ -z "$out" ] || fail "a successful self-heal was not silent: $out"
+  [ -s "$home/state/.watch-arm-terminal" ] \
+    || fail "the stale-ledger guard did not launch a tracked watcher owner"
+  stop_fake_watcher "$dir"
+  [ ! -e "$home/state/.claude-autoarm-failure-alarmed" ] \
+    || fail "the self-heal left the attended-alarm marker in place"
+  [ -e "$home/state/.claude-autoarm-failure-notified" ] \
+    || fail "the self-heal retired the failure notice"
+  pass "fm-guard: a watcher-less stale ledger silently launches and verifies supervision"
+}
+
+# Only a self-heal that cannot take is surfaced, once per episode.
+test_autoarm_self_heal_failure_surfaces_once() {
+  local dir home out1 out2 marker outcome
+  dir=$(make_guard_case autoarm-self-heal-failure)
+  home=$(case_home "$dir")
+  # The attended-alarm marker is the obstruction the self-heal must clear BEFORE
+  # it can arm, because it suppresses the next Stop-owned continuation. Make it a
+  # path the guard cannot remove - a non-empty directory - so the repair provably
+  # cannot take.
+  marker="$home/state/.claude-autoarm-failure-alarmed"
+  mkdir -p "$marker/unremovable"
   out1=$(run_guard_case_autoarm "$dir")
   out2=$(run_guard_case_autoarm "$dir")
-  [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
-    || fail "first auto-arm stale call did not print the full banner: $out1"
-  [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
-    || fail "auto-arm stale episode re-printed the full banner instead of deduping: $out2"
-  assert_contains "$out2" "full banner already printed this episode" \
-    "second auto-arm stale call did not print the concise reminder"
-  pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
+  assert_contains "$out1" "supervision could not re-arm" \
+    "a failed self-heal did not surface"
+  [ "$(count_text "$out1" "supervision could not re-arm")" -eq 1 ] \
+    || fail "the failed self-heal printed more than one line: $out1"
+  [ -z "$out2" ] \
+    || fail "the failed self-heal repeated its notice in the same episode: $out2"
+  outcome=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_autoarm_ledger_read "$2" || exit 1; printf "%s" "$FM_AUTOARM_OUTCOME"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$home/state") || fail "failed self-heal ledger was unreadable"
+  [ "$outcome" != healthy ] || fail "failed self-heal was published as healthy"
+  pass "fm-guard: a self-heal that cannot take surfaces one line, once per episode"
+}
+
+# The false alarm the deleted banner used to produce: a long working turn with a
+# quiet fleet. The ledger's own bound - not the beacon - is what gates the
+# self-heal, so a turn that produces no wakes stays completely silent.
+test_autoarm_quiet_but_working_fleet_stays_silent() {
+  local dir home out
+  dir=$(make_guard_case autoarm-quiet-working)
+  home=$(case_home "$dir")
+  # A ledger written recently: the Stop hook armed at the last turn end and this
+  # turn simply has not ended yet. No beacon at all, work in flight.
+  touch "$home/state/.claude-autoarm-epoch"
+  : > "$home/state/.claude-autoarm-failure-notified"
+  out=$(run_guard_case_autoarm "$dir")
+  [ -z "$out" ] || fail "a quiet but working fleet produced a supervision warning: $out"
+  [ -e "$home/state/.claude-autoarm-failure-notified" ] \
+    || fail "a fresh ledger must not trigger the self-heal at all"
+  pass "fm-guard: a long working turn with a fresh auto-arm ledger stays silent"
 }
 
 test_persistent_no_watcher_banner_names_missing_process() {
@@ -739,8 +1025,15 @@ test_branch_actor_is_not_told_to_drain_queued_wakes
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
-test_autoarm_stale_beacon_alarms_with_correct_reason
-test_autoarm_stale_episode_is_stable
+test_autoarm_stale_beacon_prints_no_passive_banner
+test_watcher_launcher_replaces_unproven_tracked_owner
+test_guard_preserves_subwedge_tracked_watcher
+test_watcher_launcher_settles_proven_tracked_wedge
+test_watcher_launcher_forwards_effective_home_configuration
+test_autoarm_fast_actionable_self_heal_stays_silent
+test_autoarm_stale_ledger_self_heals_silently
+test_autoarm_self_heal_failure_surfaces_once
+test_autoarm_quiet_but_working_fleet_stays_silent
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm

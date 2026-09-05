@@ -65,6 +65,20 @@ make_crewmate_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
+# Age a path to exactly <seconds> old. touch -t takes a local-time stamp rather
+# than an epoch on both platforms, so convert through BSD `date -r` or GNU
+# `date -d @`.
+age_path() {  # <path> <seconds>
+  local path=$1 secs=$2 stamp epoch
+  epoch=$(( $(date +%s) - secs ))
+  if stamp=$(date -r "$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null); then
+    :
+  else
+    stamp=$(date -d "@$epoch" '+%Y%m%d%H%M.%S') || return 1
+  fi
+  touch -t "$stamp" "$path"
+}
+
 # Run the hook as a child of the fake harness holding the fixture home's
 # session lock. $1 = fixture dir. Any extra env assignments must be exported
 # before invocation. Captures stdout+stderr; exit code on stdout of the caller.
@@ -537,6 +551,80 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "benign live cycle must not leave a failure-notice marker"
   [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "benign live cycle must not leave an attended-alarm marker"
   pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
+}
+
+# 2026-09-04 stale-beacon investigation, section 8.3. A LIVE, identity-matched
+# watcher whose beacon has aged past the grace but not past the wedge bound is
+# supervision mid-phase, not a broken mechanism. The hook used to run the same
+# predicate twice a second apart (both refusals landed at 1788501895 and
+# 1788501896) and then print "auto-arm FAILED - the Stop-owned automatic
+# supervision mechanism is broken", which sent the operator to investigate a
+# watcher that was seconds from delivering a real wake.
+test_live_busy_holder_never_reports_a_broken_mechanism() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/busy-holder")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the busy holder"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # The wedge bound is twice the grace and the hook waits half a grace, so the
+  # beacon must stay sub-wedge for the whole wait: 40s stale against a 30s grace
+  # is past the grace and still far inside the 60s wedge bound even after the
+  # 15s wait. Aged directly rather than slept, so the margin costs no wall clock.
+  export FM_GUARD_GRACE=30
+  age_path "$dir/state/.last-watcher-beat" 40 || fail "could not age the beacon"
+  # The holder must predate its stale beacon. A beacon older than the current
+  # lock claim is correctly treated as pre-holder evidence, not this holder's
+  # missed beat, so age the ownership record with the same fixture timeline.
+  age_path "$dir/state/.watch.lock/pid" 40 || fail "could not age the holder lock"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_GUARD_GRACE
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live sub-wedge holder must close quietly, not alarm"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" \
+    "a working watcher mid-phase was reported as a broken mechanism"
+  [ -z "$out" ] || fail "live busy holder produced an operator notice: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] \
+    || fail "live busy holder must record outcome=clean, got: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" \
+    "a live busy holder opened a failure episode"
+  pass "auto-arm: a live holder inside the wedge bound is never reported as a broken mechanism"
+}
+
+# The same section's second half: the retry must actually WAIT. A holder that
+# reaches its next beat while the hook is waiting must be verified healthy,
+# which is impossible if the hook only re-runs its predicate a second later.
+test_retry_waits_for_the_holder_to_beat_again() {
+  local dir out status pid identity toucher
+  dir=$(make_primary_dir "$TMP_ROOT/busy-holder-beats")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the busy holder"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  export FM_GUARD_GRACE=30
+  age_path "$dir/state/.last-watcher-beat" 40 || fail "could not age the beacon"
+  age_path "$dir/state/.watch.lock/pid" 40 || fail "could not age the holder lock"
+  ( sleep 2; touch "$dir/state/.last-watcher-beat" ) &
+  toucher=$!
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_GUARD_GRACE
+  wait "$toucher" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "the hook must verify the holder that beat during the wait"
+  [ -z "$out" ] || fail "a holder that beat again during the wait produced a notice: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] \
+    || fail "a verified holder must record outcome=clean, got: $(epoch_outcome "$dir")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] \
+    || fail "the hook burned a second instant attempt instead of waiting"
+  pass "auto-arm: a bounded attempt waits for the holder's next beat instead of re-deciding a second later"
 }
 
 test_positive_recovery_budget_contention_preserves_episode() {
@@ -1165,6 +1253,8 @@ test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
+test_live_busy_holder_never_reports_a_broken_mechanism
+test_retry_waits_for_the_holder_to_beat_again
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight

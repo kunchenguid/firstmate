@@ -206,7 +206,7 @@ pass "later generations cannot invalidate an unacknowledged ingested result"
 # line reaches the parent stream, the new decision reaches the parent's
 # open-decision fold, the correlated line still settles its pending-reply record,
 # and the cursor advances so the channel cannot wedge on a line it once refused.
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 PENDING_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'audit the release chain')
 [ -n "$PENDING_CORR" ] || fail "could not create the parent pending-reply record"
@@ -232,12 +232,12 @@ pass "the remote status and decision model mirrors and the cursor advances"
 
 # The newly raised decision must be indistinguishable from a local mate's, so the
 # shared fold - not this adapter - decides it is open.
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 OPEN=$(status_open_decisions "$PARENT/state/ios.status")
 printf '%s' "$OPEN" | grep -q '^rough-cut-version	needs-decision	' \
   || fail "the remote mate's new decision did not surface as open to the parent: $OPEN"
-[ "$(fm_pending_reply_get "$PARENT/state/pending-replies/$PENDING_CORR" phase)" = resolved ] \
+[ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$PENDING_CORR")" phase)" = resolved ] \
   || fail "the correlated answer in the same delta did not settle its pending-reply record"
 pass "a remote mate's new decision folds open exactly as a local mate's does"
 
@@ -392,7 +392,7 @@ printf 'done [corr=%s]: notarization confirmed\n' "$ESCALATED_CORR" \
   >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "the correlated reply was not captured"
-[ "$(fm_pending_reply_get "$PARENT/state/pending-replies/$ESCALATED_CORR" phase)" = resolved ] \
+[ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$ESCALATED_CORR")" phase)" = resolved ] \
   || fail "the correlated reply left its escalated request unresolved"
 fm_pending_reply_tick "$PARENT/state" || fail "supervision tick failed"
 assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" \

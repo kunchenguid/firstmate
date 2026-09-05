@@ -48,6 +48,54 @@
 
 FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
 FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
+
+_fm_backend_require_timeout() {
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+}
+
+fm_backend_read_timeout() {
+  local preferred=${1:-30} grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+  _fm_backend_require_timeout
+  fm_timeout_with_wedge_margin "$preferred" "$grace"
+}
+
+fm_backend_run_read_timed() {
+  local timeout now remaining
+  _fm_backend_require_timeout
+  timeout=$(fm_backend_read_timeout)
+  [ "$timeout" -gt 0 ] || return 124
+  if [ -n "${FM_BACKEND_READ_DEADLINE_EPOCH:-}" ]; then
+    now=$(date +%s)
+    remaining=$((FM_BACKEND_READ_DEADLINE_EPOCH - now))
+    [ "$remaining" -gt 0 ] || return 124
+    [ "$timeout" -le "$remaining" ] || timeout=$remaining
+  fi
+  fm_run_timed "$timeout" "$@"
+}
+
+fm_backend_compound_read() {  # <function> [args...]
+  local function_name=$1 timeout deadline result rc=0 previous=${FM_BACKEND_READ_DEADLINE_EPOCH-}
+  shift
+  case "$previous" in *[!0-9]*) previous= ;; esac
+  timeout=$(fm_backend_read_timeout)
+  [ "$timeout" -gt 0 ] || return 124
+  deadline=$(( $(date +%s) + timeout ))
+  if [ -n "$previous" ] && [ "$previous" -lt "$deadline" ]; then
+    deadline=$previous
+  fi
+  FM_BACKEND_READ_DEADLINE_EPOCH=$deadline
+  result=$("$function_name" "$@") || rc=$?
+  [ "$(date +%s)" -lt "$deadline" ] || rc=124
+  if [ -n "$previous" ]; then
+    FM_BACKEND_READ_DEADLINE_EPOCH=$previous
+  else
+    unset FM_BACKEND_READ_DEADLINE_EPOCH
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "$result"
+}
 unset FM_BACKEND_SCRIPT
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
@@ -697,7 +745,7 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # changing call sites.
 
 # fm_backend_capture: bounded plain-text session capture.
-fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
+_fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -709,6 +757,19 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
+  # The positional parameters in the literal script expand in the child shell.
+  # shellcheck disable=SC2016
+  fm_backend_run_read_timed env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" \
+    FM_BACKEND_READ_DEADLINE_EPOCH="${FM_BACKEND_READ_DEADLINE_EPOCH:-}" \
+    FM_GUARD_GRACE="${FM_GUARD_GRACE:-300}" \
+    FM_WATCHER_STALE_GRACE="${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}" \
+    bash -c '. "$1"; shift; _fm_backend_capture "$@"' \
+    _ "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -788,12 +849,33 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # uses unknown as the cue for harness-scoped pane-tail detection, while
 # fm-crew-state.sh also corroborates native idle verdicts with the recorded
 # harness's signature before treating a no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target>
+_fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_busy_state() {  # <backend> <target>
+  local result
+  # The positional parameters in the literal script expand in the child shell.
+  # shellcheck disable=SC2016
+  result=$(fm_backend_run_read_timed env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" \
+    FM_BACKEND_READ_DEADLINE_EPOCH="${FM_BACKEND_READ_DEADLINE_EPOCH:-}" \
+    FM_GUARD_GRACE="${FM_GUARD_GRACE:-300}" \
+    FM_WATCHER_STALE_GRACE="${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}" \
+    bash -c '. "$1"; shift; _fm_backend_busy_state "$@"' \
+    _ "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@") || {
+      printf 'unknown'
+      return 0
+    }
+  case "$result" in
+    busy|idle|unknown) printf '%s' "$result" ;;
     *) printf 'unknown' ;;
   esac
 }

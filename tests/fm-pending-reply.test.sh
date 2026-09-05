@@ -33,7 +33,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$ROOT/bin/fm-marker-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
@@ -149,6 +149,27 @@ test_normal_correlated_reply_resolves_once() {
   [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
     || fail "resolved_via should be status"
   pass "normal correlated reply resolves once (idempotent)"
+}
+
+test_interrupted_resolution_completes_before_archive() {
+  local home state corr status hot archived
+  home=$(setup_parent interrupted-resolution)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1100
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "audit the ledger")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  status="$state/hibit.status"
+  printf 'done [corr=%s]: ledger clean\n' "$corr" > "$status"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$hot" phase resolved || fail "could not stage interrupted resolution"
+  fm_pending_reply_tick "$state" || fail "tick could not recover interrupted resolution"
+  archived=$(fm_pending_reply_path "$state" "$corr")
+  [ "$archived" != "$hot" ] && [ -f "$archived" ] || fail "recovered resolution stayed in the hot set"
+  [ "$(fm_pending_reply_get "$archived" resolved_epoch)" = 1100 ] \
+    || fail "recovered resolution omitted its epoch"
+  [ "$(fm_pending_reply_get "$archived" resolved_via)" = status ] \
+    || fail "recovered resolution omitted its source"
+  pass "interrupted resolution completes metadata before leaving the hot set"
 }
 
 test_completed_turn_no_report_triggers_one_recovery() {
@@ -431,7 +452,9 @@ test_legacy_escalation_closes_default_decision() {
     || fail "legacy escalation did not append one guarded default-key resolution"
   open=$(status_open_decisions "$state/hibit.status")
   [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
-  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+  # The record archives out of the hot set as it resolves, so read it back
+  # through the correlation id rather than the path captured before the resolve.
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" escalation_closed_epoch)" ] \
     || fail "legacy escalation closure was not recorded"
   pass "legacy escalation closes under the shared default key"
 }
@@ -486,6 +509,9 @@ test_foreign_blocker_is_not_selected_as_escalation() {
     "genuine keyed escalation remained open"
   assert_no_grep 'resolved [key=release]: pending-reply-resolved:' "$state/hibit.status" \
     "foreign release decision was selected as the pending-reply escalation"
+  # A settled record archives out of the hot set inside the resolve itself, so
+  # re-resolve it by correlation id rather than reading the pre-resolve path.
+  rec=$(fm_pending_reply_path "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "genuine keyed escalation closure was not recorded"
   pass "foreign correlated blocker cannot impersonate a pending-reply escalation"
@@ -514,7 +540,7 @@ test_concurrent_resolution_closes_escalation_once() {
     || fail "concurrent resolvers left the expectation unresolved"
   [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
     || fail "concurrent resolvers did not append exactly one decision close"
-  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" escalation_closed_epoch)" ] \
     || fail "concurrent resolution did not record the closed escalation"
   pass "concurrent resolution closes one keyed escalation exactly once"
 }
@@ -541,6 +567,9 @@ test_concurrent_escalation_yields_to_late_reply() {
     || fail "concurrent escalation overwrote a resolved expectation"
   assert_no_grep "pending-reply-id=$corr" "$state/hibit.status" \
     "concurrent escalation published a false missed-reply blocker"
+  # A settled record archives out of the hot set inside the resolve itself, so
+  # re-resolve it by correlation id rather than reading the pre-resolve path.
+  rec=$(fm_pending_reply_path "$state" "$corr")
   [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
     || fail "concurrent escalation committed after the reply resolved"
   pass "concurrent escalation yields to a late correlated reply"
@@ -584,7 +613,10 @@ test_undelivered_records_are_scan_immutable() {
       || fail "undelivered wrong-home check should be inert"
     fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home" \
       || fail "undelivered direct tick should be inert"
+    # These override library functions that the tick must not invoke.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
     fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
     after=$(cat "$rec")
@@ -598,10 +630,110 @@ test_undelivered_records_are_scan_immutable() {
   pass "undelivered records remain immutable across scan paths"
 }
 
+# 2026-09-04 stale-beacon investigation: fm_pending_reply_tick at
+# bin/fm-pending-reply-lib.sh:1287 spent 103s rescanning 1,883 records, while
+# bin/fm-watch.sh:1562 beat only once per 100-350s iteration. A batch of fewer
+# than 50 slow records therefore received no between-record heartbeat and could
+# make a progressing watcher look wedged.
+test_pending_reply_tick_beats_each_record_below_the_old_batch_size() {
+  local home state beats=0 i
+  home=$(setup_parent beat-each-record)
+  state="$home/state"
+  # Reset the fixture clock after an earlier isolated subshell changed it.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=5550
+  for ((i = 1; i <= 21; i++)); do
+    fm_pending_reply_create "$home" "$state" "task-$i" "pending request $i" >/dev/null \
+      || fail "could not create pending record $i"
+  done
+  pending_reply_test_beat() { beats=$((beats + 1)); }
+  FM_PENDING_REPLY_TICK_BEAT=pending_reply_test_beat fm_pending_reply_tick "$state" \
+    || fail "pending-reply tick failed"
+  [ "$beats" -ge 21 ] \
+    || fail "21 progressing records produced only $beats watcher beats"
+  pass "pending-reply tick beats each record before a slow observation can accumulate"
+}
+
+# 2026-09-04 stale-beacon investigation: wedge reclaim trusts the watcher beacon
+# only because its singleton-lock owner is the sole writer. A backend observation
+# captured through command substitution previously ran its between-read beat in
+# that substitution's process instead of the watcher process.
+test_pending_reply_observation_beats_stay_in_tick_process() {
+  (
+    local home state corr beat_log owner_pid
+    home=$(setup_parent observation-beat-owner)
+    state="$home/state"
+    beat_log="$home/beats"
+    owner_pid=${BASHPID:-$$}
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5575
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "observe owner")
+    fm_pending_reply_mark_delivered "$state" "$corr" \
+      || fail "could not mark observation fixture delivered"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/sm" "sess:fm-hibit"
+    # Overrides the library function invoked indirectly by the tick.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'busy'; }
+    # Invoked indirectly through FM_PENDING_REPLY_TICK_BEAT.
+    # shellcheck disable=SC2329
+    pending_reply_owner_beat() { printf '%s\n' "${BASHPID:-$$}" >> "$beat_log"; }
+    FM_PENDING_REPLY_TICK_BEAT=pending_reply_owner_beat fm_pending_reply_tick "$state" \
+      || fail "pending-reply observation tick failed"
+    [ -s "$beat_log" ] || fail "pending-reply observation produced no beats"
+    if grep -Fvx "$owner_pid" "$beat_log" >/dev/null; then
+      fail "pending-reply observation refreshed the beacon outside its tick process"
+    fi
+  ) || fail "pending-reply observation beat ownership regression failed"
+  pass "pending-reply observation beats remain in the watcher process"
+}
+
+# 2026-09-04 stale-beacon investigation: the external calls inside the
+# bin/fm-pending-reply-lib.sh:1287 tick and bin/fm-watch.sh poll phases must end
+# before the twice-grace wedge verdict can reclaim their still-working owner.
+test_external_phase_deadlines_precede_the_wedge_bound() {
+  (
+    local home state pending_timeout wedge backend_timeout classify_timeout skipped rc
+    home=$(setup_parent phase-deadline)
+    state="$home/state"
+    # These child-facing overrides are intentionally scoped to this subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$state" \
+      FM_WATCHER_STALE_GRACE=3
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-watch.sh"
+    wedge=$(fm_watcher_wedge_bound "$FM_WATCHER_STALE_GRACE")
+    pending_timeout=$(_fm_pending_reply_observe_timeout)
+    [ "$pending_timeout" -lt "$wedge" ] \
+      || fail "pending observation timeout $pending_timeout reached ${wedge}s wedge bound"
+    [ "$PROCEVENT_RECONCILE_TIMEOUT" -lt "$wedge" ] \
+      || fail "procevent timeout $PROCEVENT_RECONCILE_TIMEOUT reached ${wedge}s wedge bound"
+    backend_timeout=$(fm_backend_read_timeout)
+    classify_timeout=$(_fm_classify_observation_timeout)
+    [ "$backend_timeout" = "$pending_timeout" ] \
+      || fail "backend and pending observations derived different bounds"
+    [ "$classify_timeout" = "$pending_timeout" ] \
+      || fail "classifier and pending observations derived different bounds"
+    FM_WATCHER_STALE_GRACE=1
+    [ "$(fm_backend_read_timeout)" -eq 0 ] \
+      || fail "one-second grace forced an observation into the 2s wedge window"
+    skipped="$home/unsafe-observation-ran"
+    rc=0
+    # The positional parameter expands in the child shell.
+    # shellcheck disable=SC2016
+    fm_backend_run_read_timed bash -c 'touch "$1"' _ "$skipped" || rc=$?
+    [ "$rc" -eq 124 ] || fail "unsafe minimum-grace observation returned $rc"
+    [ ! -e "$skipped" ] || fail "minimum-grace observation ran without a safe timeout"
+    [ "$(crew_absorb_class hibit)" = none ] \
+      || fail "minimum-grace classifier manufactured an observation"
+  ) || fail "external phase deadline regression failed"
+  pass "external phase deadlines remain inside the shared wedge bound"
+}
+
 test_delivery_confirmation_fallback_reconciles() {
   (
     local home state corr rec marker rc prepared_corr prepared_rec prepared_marker escalations
-    local reported_corr reported_rec reported_marker
+    local reported_corr reported_marker
     home=$(setup_parent delivery-confirmation)
     state="$home/state"
     # This fixture clock is intentionally scoped to the isolated subshell.
@@ -609,6 +741,8 @@ test_delivery_confirmation_fallback_reconciles() {
     export FM_PENDING_REPLY_NOW=5750
     corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
     rec=$(fm_pending_reply_path "$state" "$corr")
+    # Invoked indirectly by the pending-reply library loaded at runtime.
+    # shellcheck disable=SC2329
     fm_pending_reply_mark_delivered() { return 1; }
     if fm_pending_reply_confirm_delivery "$state" "$corr"; then
       fail "primary delivery commit failure should be reported"
@@ -623,7 +757,7 @@ test_delivery_confirmation_fallback_reconciles() {
     . "$ROOT/bin/fm-pending-reply-lib.sh"
     fm_pending_reply_tick_one "$state" "$corr" unknown \
       || fail "watcher should reconcile the delivery marker"
-    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 5750 ] \
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" delivered_epoch)" = 5750 ] \
       || fail "watcher should restore the confirmed delivery epoch"
     [ ! -e "$marker" ] || fail "reconciled delivery marker should be removed"
     prepared_corr=$(fm_pending_reply_create "$home" "$state" hibit "prepared delivery")
@@ -662,7 +796,7 @@ test_delivery_confirmation_fallback_reconciles() {
     fm_pending_reply_tick "$state" || fail "watcher should accept a late delivery report"
     [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
       || fail "late report should resolve escalated delivery-unknown"
-    [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$prepared_corr")" delivered_epoch)" = 5760 ] \
       || fail "late report should provide delivery evidence"
     escalations=$(grep -Fc "blocked [key=pending-reply-$prepared_corr]:" "$state/hibit.status")
     [ "$escalations" = 1 ] || fail "late report must not re-escalate delivery-unknown"
@@ -671,7 +805,6 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "late report resolution should remain durable"
     export FM_PENDING_REPLY_NOW=5800
     reported_corr=$(fm_pending_reply_create "$home" "$state" hibit "reported delivery")
-    reported_rec=$(fm_pending_reply_path "$state" "$reported_corr")
     fm_pending_reply_prepare_delivery "$state" "$reported_corr" \
       || fail "reported delivery attempt should persist"
     reported_marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$reported_corr")
@@ -680,7 +813,7 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "attempted delivery with a report should resolve directly"
     [ "$(phase_of "$state" "$reported_corr")" = resolved ] \
       || fail "correlated report should resolve attempted delivery"
-    [ "$(fm_pending_reply_get "$reported_rec" delivered_epoch)" = 5800 ] \
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$reported_corr")" delivered_epoch)" = 5800 ] \
       || fail "correlated report should provide delivery evidence"
     [ ! -e "$reported_marker" ] || fail "resolved delivery marker should be removed"
     fm_pending_reply_tick_one "$state" "$reported_corr" unknown \
@@ -705,6 +838,8 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     calls="$home/mark-delivered.calls"
     entered="$home/mark-delivered.entered"
     release="$home/mark-delivered.release"
+    # Invoked indirectly by the pending-reply library loaded at runtime.
+    # shellcheck disable=SC2329
     fm_pending_reply_mark_delivered() {
       local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
       printf '%s\n' "${BASHPID:-$$}" >> "$calls"
@@ -736,7 +871,7 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     count=$(wc -l < "$calls" | tr -d ' ')
     [ "$count" = 1 ] \
       || fail "confirmation and reconciliation raced through $count delivery commits"
-    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 5900 ] \
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" delivered_epoch)" = 5900 ] \
       || fail "serialized confirmation should retain delivered_epoch"
     [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
       || fail "serialized confirmation should retain awaiting_report phase"
@@ -783,7 +918,7 @@ test_restart_preserves_expectation_and_parent_destination() {
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   # Simulate process restart: re-source library and re-read the same record.
-  # shellcheck source=bin/fm-pending-reply-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   [ -f "$rec" ] || fail "record must survive restart"
   [ "$(fm_pending_reply_get "$rec" parent_status)" = "$parent_status" ] \
@@ -863,6 +998,8 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   run_send "$fb" "$home" "$log" "hibit" "audit the build"; rc=$?
   expect_code 0 "$rc" "secondmate send should succeed"
   got=$(latest_record_body "$home" hibit)
+  # FM_FROMFIRST_MARK is defined by the marker library sourced in the parent shell.
+  # shellcheck disable=SC2031
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
     *) fail "secondmate steer record must embed marker+corr"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
@@ -950,7 +1087,11 @@ test_unknown_backend_state_uses_capture_fallback() {
       fm_pending_reply_mark_delivered "$state" "$corr"
       fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
+      # Invoked indirectly by the pending-reply library loaded at runtime.
+      # shellcheck disable=SC2329
       fm_backend_busy_state() { printf 'unknown'; }
+      # Invoked indirectly by the pending-reply library loaded at runtime.
+      # shellcheck disable=SC2329
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
       # shellcheck disable=SC2329
@@ -994,7 +1135,11 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   corr=$(fm_pending_reply_create "$home" "$state" hibit "kimi fallback")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
+  # Invoked indirectly by the pending-reply library loaded at runtime.
+  # shellcheck disable=SC2329
   fm_backend_busy_state() { printf 'unknown'; }
+  # Invoked indirectly by the pending-reply library loaded at runtime.
+  # shellcheck disable=SC2329
   fm_backend_capture() { printf '%s' "$FM_PENDING_KIMI_CAPTURE"; }
   export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
 
@@ -1084,6 +1229,128 @@ test_tick_skips_terminal_and_reuses_target_observation() {
   pass "tick skips terminal records and reuses target observations"
 }
 
+# 2026-09-04 stale-beacon investigation, sections 5.3, 5.4 and 8.2. The poll tick
+# re-read EVERY record on every pass, and nothing ever left the directory: 1,883
+# records, all already resolved, cost 103s per poll and grew ~3s a day, which is
+# what pushed a whole poll iteration past the liveness grace. A settled record
+# must leave the hot set, and must still be resolvable by its correlation id.
+test_settled_records_leave_the_hot_set_and_stay_addressable() {
+  local home state settled open hot archive
+  home=$(setup_parent retention-archive)
+  state="$home/state"
+  # This fixture clock is read only by this test, after an earlier case's
+  # subshell-scoped clock.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=20000
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: complete\n' "$settled" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+  open=$(fm_pending_reply_create "$home" "$state" hibit "still open request")
+  fm_pending_reply_mark_delivered "$state" "$open"
+
+  hot=$(fm_pending_reply_dir "$state")
+  archive=$(fm_pending_reply_archive_dir "$state")
+  # Archival happens inside the resolve's own lock hold, so the record is gone
+  # from the hot set the moment it settles - not one tick later.
+  [ ! -e "$hot/$settled" ] \
+    || fail "resolving left the settled record in the hot set the tick rescans"
+
+  fm_pending_reply_tick "$state" || fail "tick failed"
+
+  [ ! -e "$hot/$settled" ] || fail "a settled record was left in the hot set the tick rescans"
+  [ -f "$archive/$settled" ] || fail "the settled record was not archived"
+  [ -f "$hot/$open" ] || fail "an OPEN record must stay in the hot set"
+  # Still addressable by correlation id, which is what corr reuse, the
+  # wrong-home detector, teardown, and the handoff receiver all depend on.
+  [ "$(fm_pending_reply_path "$state" "$settled")" = "$archive/$settled" ] \
+    || fail "an archived record is no longer resolvable by its correlation id"
+  [ "$(phase_of "$state" "$settled")" = resolved ] \
+    || fail "the archived record's phase is unreadable"
+  if fm_pending_reply_corr_reusable "$state" "$settled" hibit; then
+    fail "a settled correlation must not become reusable by being archived"
+  fi
+  pass "a settled pending-reply record leaves the hot set and stays addressable by correlation id"
+}
+
+# The migration case, and the one production actually starts from: records that
+# settled BEFORE this retention existed are already sitting in the hot set - 1,883
+# of them on 2026-09-04, all resolved, costing about 103s of every poll. The tick
+# must move those out, and a record whose escalation is still open must not be
+# moved while its close has yet to converge.
+test_legacy_settled_records_are_migrated_out_of_the_hot_set() {
+  local home state settled open_escalation hot archive
+  home=$(setup_parent retention-legacy-migration)
+  state="$home/state"
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=21000
+  hot=$(fm_pending_reply_dir "$state")
+  archive=$(fm_pending_reply_archive_dir "$state")
+
+  # A settled record placed directly in the hot set, exactly as a home upgraded
+  # into this retention finds it.
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "legacy settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  fm_pending_reply_set "$hot/$settled" phase resolved || fail "legacy fixture should settle"
+  fm_pending_reply_set "$hot/$settled" resolved_epoch 21000 || fail "legacy fixture should record resolution time"
+  fm_pending_reply_set "$hot/$settled" resolved_via status || fail "legacy fixture should record resolution source"
+  [ -f "$hot/$settled" ] || fail "legacy fixture should start hot"
+
+  (
+    # Overrides the library function invoked indirectly by the tick.
+    # shellcheck disable=SC2329
+    fm_pending_reply_close_escalation() {
+      fail "proven-settled migration entered the escalation lock path"
+    }
+    fm_pending_reply_tick "$state"
+  ) || fail "tick failed"
+  [ ! -e "$hot/$settled" ] || fail "the legacy settled record was left in the hot set"
+  [ -f "$archive/$settled" ] || fail "the legacy settled record was not archived"
+
+  # A resolved record whose escalation is still open is NOT settled, so the tick
+  # must converge its close instead of archiving it away unclosed.
+  open_escalation=$(fm_pending_reply_create "$home" "$state" hibit "legacy open escalation")
+  fm_pending_reply_mark_delivered "$state" "$open_escalation"
+  fm_pending_reply_set "$hot/$open_escalation" phase resolved || fail "fixture should resolve"
+  fm_pending_reply_set "$hot/$open_escalation" resolved_epoch 21000 || fail "fixture should record resolution time"
+  fm_pending_reply_set "$hot/$open_escalation" resolved_via status || fail "fixture should record resolution source"
+  fm_pending_reply_set "$hot/$open_escalation" escalated_epoch 20900 \
+    || fail "fixture should record an escalation"
+  _fm_pending_reply_settled "$hot/$open_escalation" \
+    && fail "a resolved record with an open escalation must not read as settled"
+  fm_pending_reply_tick "$state" || fail "open escalation retry failed"
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$open_escalation")" escalation_closed_epoch)" ] \
+    || fail "the tick did not converge the open escalation's close"
+  pass "legacy settled records are migrated out of the hot set while an open escalation converges first"
+}
+
+# An operator may already have moved records out of the hot path by hand into
+# state/pending-replies/archive/. That directory is adopted, not replaced, and
+# the records already in it stay addressable.
+test_a_preexisting_archive_is_adopted() {
+  local home state corr hot archive settled
+  home=$(setup_parent retention-preexisting-archive)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=22000
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "hand-archived request")
+  hot=$(fm_pending_reply_dir "$state")
+  archive=$(fm_pending_reply_archive_dir "$state")
+  mkdir -p "$archive"
+  mv "$hot/$corr" "$archive/$corr"
+
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: complete\n' "$settled" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+
+  fm_pending_reply_tick "$state" || fail "tick failed against a pre-existing archive"
+  [ -f "$archive/$corr" ] || fail "the pre-existing archived record was disturbed"
+  [ -f "$archive/$settled" ] || fail "the newly settled record did not join the existing archive"
+  [ "$(fm_pending_reply_path "$state" "$corr")" = "$archive/$corr" ] \
+    || fail "a hand-archived record is not resolvable by its correlation id"
+  pass "a pre-existing pending-reply archive is adopted rather than replaced"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -1113,6 +1380,8 @@ test_correlations_reuse_only_for_matching_open_task() {
     || fail "cross-task expectation must belong to the new target"
   printf 'done [corr=%s]: complete\n' "$corr1" > "$state/domain.status"
   fm_pending_reply_try_resolve "$state" "$corr1" || fail "first expectation should resolve"
+  # Defined by the marker library sourced in the parent shell.
+  # shellcheck disable=SC2031
   run_send "$fb" "$home" "$log" domain "${FM_FROMFIRST_MARK}corr=${corr1} follow-up" \
     || fail "resolved-correlation follow-up failed"
   corr3=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" domain)")
@@ -1291,6 +1560,9 @@ test_same_basename_self_home_corr_resolves_on_tick() {
   fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "same-basename self-home corr must resolve, got $(phase_of "$state" "$corr")"
+  # A settled record archives out of the hot set inside the resolve itself, so
+  # re-resolve it by correlation id rather than reading the pre-resolve path.
+  rec=$(fm_pending_reply_path "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" resolved_epoch)" ] \
     || fail "resolved_epoch must be set after the restatement copy"
   grep -Fq "corr=$corr" "$parent_status" \
@@ -1507,6 +1779,7 @@ test_failed_send_discards_undelivered_expectation() {
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
+test_interrupted_resolution_completes_before_archive
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
@@ -1520,6 +1793,9 @@ test_concurrent_resolution_closes_escalation_once
 test_concurrent_escalation_yields_to_late_reply
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
+test_pending_reply_tick_beats_each_record_below_the_old_batch_size
+test_pending_reply_observation_beats_stay_in_tick_process
+test_external_phase_deadlines_precede_the_wedge_bound
 test_delivery_confirmation_fallback_reconciles
 test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
@@ -1534,6 +1810,9 @@ test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
+test_settled_records_leave_the_hot_set_and_stay_addressable
+test_legacy_settled_records_are_migrated_out_of_the_hot_set
+test_a_preexisting_archive_is_adopted
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_remote_repost_waits_for_the_reply_channel
