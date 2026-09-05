@@ -13,9 +13,9 @@
 # A closed row is never actively held: tasks-axi clears the held flag when a
 # task closes, but a non-release answer keeps hold-kind and the hold reason.
 # Merge approval removes those annotations through the release contract before
-# cleanup records the merged PR, so a PR on a Done captain-hold row is not a
-# delivery. A retained scout closes with its hold-kind intact, so its recorded
-# report remains a delivery.
+# cleanup records the merged PR or local-only landing, so either artifact on a
+# Done captain-hold row is not a delivery. A retained scout closes with its
+# hold-kind intact, so its recorded report remains a delivery.
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
@@ -43,6 +43,7 @@ FM_LANDED_JQ_DEFS='
       and (.report_path // null) != null)
     or ((.kind // null) != null
       and .kind != "captain"
+      and .hold_kind != "captain"
       and .completion.verb == "done"
       and (.local_note // null) != null);
   def landed_record:

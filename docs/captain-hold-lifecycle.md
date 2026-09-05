@@ -88,10 +88,10 @@ Three accepted limits remain deliberate:
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 Recently Landed uses the shared selector in `bin/fm-landed-lib.sh`: a structured Done row is included when its artifacts and lifecycle state prove that it is delivered rather than merely answered.
-No legitimate merged pull request closes while it still carries `hold-kind: captain`, because merge approval releases the hold before cleanup records the merged artifact.
-A captain's rejection of a merge is therefore no longer recorded as if the merge had happened, even when the task title names that pull request.
+No legitimate merged pull request or local-only landing closes while it still carries `hold-kind: captain`, because merge approval releases the hold before cleanup records the landed artifact.
+A captain's rejection is therefore no longer recorded as if a merge had happened, even when the task title names a pull request or ends in `local main`.
 A completed report remains eligible when its row retains `hold-kind: captain`, because retained scout cleanup records the report before the captain answers its follow-up call.
-Released pull requests and reports remain eligible after cleanup closes them, while an answered captain question with no delivery artifact stays out.
+Released pull requests, local-only landings, and reports remain eligible after cleanup closes them, while an answered captain question with no delivery artifact stays out.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
 ## Record divergence

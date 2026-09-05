@@ -1951,7 +1951,8 @@ test_teardown_never_closes_a_captain_held_task() {
 }
 
 test_retained_row_artifacts_survive_captain_answers() {
-  local home retained_id rejected_id approved_id released_id repo wt
+  local home retained_id rejected_id rejected_local_id approved_id released_id local_id repo wt
+  local local_repo local_wt
   local rejected_pr approved_pr json show
   home=$(make_home retained-row-artifacts)
   retained_id=sample-retained-report
@@ -1986,6 +1987,21 @@ test_retained_row_artifacts_survive_captain_answers() {
   assert_contains "$show" "state: done" "the rejected merge answer did not close its call"
   assert_contains "$show" "hold_kind: captain" "the rejected merge lost its non-release evidence"
 
+  rejected_local_id=sample-rejected-local
+  tasks_in "$home" add "$rejected_local_id" "Decide whether to land local main" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the rejected local fixture"
+  run_captain "$home" hold "$rejected_local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the rejected local merge"
+  printf 'Do not land this change locally.\n' > "$home/rejected-local-answer.txt"
+  run_captain "$home" answer "$rejected_local_id" \
+    --decision-file "$home/rejected-local-answer.txt" >/dev/null \
+    || fail "could not record the rejected local merge"
+  show=$(tasks_in "$home" show "$rejected_local_id" --full) \
+    || fail "the rejected local merge disappeared"
+  assert_contains "$show" "state: done" "the rejected local answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the rejected local merge lost its non-release evidence"
+
   approved_id=sample-approved-merge
   approved_pr="https://github.com/sample/sample/pull/23"
   repo="$home/projects/sample-approved"
@@ -2010,6 +2026,38 @@ test_retained_row_artifacts_survive_captain_answers() {
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
 
+  local_id=sample-released-local
+  local_repo="$home/projects/sample-local"
+  local_wt="$home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'landed locally\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'local delivery'
+  tasks_in "$home" add "$local_id" "Land the approved local-only change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the released local fixture"
+  fm_write_meta "$home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  printf 'done: local merge ready\n' > "$home/state/$local_id.status"
+  run_captain "$home" hold "$local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the released local merge"
+  printf 'Land the approved change locally.\n' > "$home/local-answer.txt"
+  run_captain "$home" answer "$local_id" --release \
+    --decision-file "$home/local-answer.txt" >/dev/null \
+    || fail "could not release the local merge"
+  show=$(tasks_in "$home" show "$local_id" --full) || fail "the released local merge disappeared"
+  assert_not_contains "$show" "hold_kind: captain" \
+    "local merge approval retained its captain hold kind"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$home/local-merge.out" 2> "$home/local-merge.err" \
+    || fail "approved local merge failed: $(cat "$home/local-merge.err")"
+  run_teardown "$home" "$local_id" > "$home/local-teardown.out" \
+    2> "$home/local-teardown.err" \
+    || fail "released local cleanup failed: $(cat "$home/local-teardown.err")"
+
   released_id=sample-released-report
   mkdir -p "$home/data/$released_id"
   tasks_in "$home" add "$released_id" "Investigate released report evidence" --kind scout \
@@ -2032,15 +2080,18 @@ test_retained_row_artifacts_survive_captain_answers() {
   json=$(run_bearings "$home") || fail "Bearings failed after retained delivery answers"
   printf '%s' "$json" | jq -e \
     --arg retained_id "$retained_id" --arg retained "data/$retained_id/report.md" \
-    --arg rejected_id "$rejected_id" --arg approved_id "$approved_id" \
+    --arg rejected_id "$rejected_id" --arg rejected_local_id "$rejected_local_id" \
+    --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
     --arg released "data/$released_id/report.md" '
       (.landed | any(.id == $retained_id and .artifact == $retained))
         and (.landed | any(.id == $rejected_id) | not)
+        and (.landed | any(.id == $rejected_local_id) | not)
         and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
+        and (.landed | any(.id == $local_id))
         and (.landed | any(.id == $released_id and .artifact == $released))
     ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
-  pass "release and retention distinguish delivered work from rejected merges"
+  pass "release and retention distinguish delivered work from rejected merge answers"
 }
 
 # Retention happens after destructive cleanup, through the same pending record
