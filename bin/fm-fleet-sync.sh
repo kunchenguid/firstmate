@@ -20,8 +20,9 @@
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
 # Whole-fleet enumeration silently ignores entries that are not their own roots;
-# a directly requested nested path is reported as "skipped: not a clone root"
-# naming the repository that would have been touched.
+# a directly requested invalid path instead reports either "skipped: not a git
+# repo" or "skipped: not a clone root" naming the repository that would have
+# been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
