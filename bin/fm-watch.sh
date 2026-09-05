@@ -957,6 +957,20 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
+#
+# Liveness is read BEFORE the run-based working class, and a confidently dead
+# ordinary crew under a declared wait is paused without consulting that class at
+# all. The working class comes from crew_absorb_class, whose no-mistakes run
+# attribution binds a run by BRANCH (bin/fm-crew-state.sh), so once the captain's
+# one-PR-per-repo posture puts several crews' worktrees on one long-lived feature
+# branch, a crew that has exited still inherits a co-branch crew's active run and
+# reads `working` forever: the stale path then absorbs its empty pane as provably
+# working on every poll while the wedge timer escalates it as a possible wedge
+# every STALE_ESCALATE_SECS, indefinitely. A dead agent cannot be running that
+# pipeline, so its own declaration is the better evidence. The order is reversed
+# ONLY for a dead agent: a live or ambiguous agent still consults the working
+# class first, so a crew that declared a wait and then genuinely started a run is
+# never silenced.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
@@ -967,19 +981,28 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
+  # Read once past the declared-wait gate and reused by every liveness gate below,
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
+  agent_alive=''
+  if [ "$kind" != secondmate ]; then
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+  fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+    if [ "$kind" != secondmate ] && [ "$agent_alive" != dead ]; then
+      rm -f "$recheck_file"
+      printf 'none'
+      return
     fi
+    printf 'paused'
+    return
+  fi
+  # The declared wait wins outright once the agent is confidently dead: no live
+  # gate can be silenced, and skipping crew_absorb_class here is what keeps a
+  # co-branch crew's run from being credited to this closed crew.
+  if [ "$kind" != secondmate ] && [ "$agent_alive" = dead ]; then
+    date +%s > "$recheck_file"
     printf 'paused'
     return
   fi
@@ -990,21 +1013,18 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
+    # agent_alive was read above and is not dead here, so a declared wait on a
+    # still-live or ambiguous agent stays inconclusive and surfaces for inspection.
+    rm -f "$recheck_file"
+    printf 'none'
+    return
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # could not name. Only a secondmate reaches here, and its endpoint liveness is
+  # deliberately never read and so can never supply the dead confirmation above.
+  # Without this case a mate's captain hold - which has no current-state mapping and
+  # so arrives as `none` - would be silenced by every caller rather than taking the
+  # bounded re-surface cadence, and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;

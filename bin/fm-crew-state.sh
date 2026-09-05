@@ -30,6 +30,18 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
+#      KNOWN LIMIT - CONCURRENT crews on ONE branch: attribution here is by
+#      branch plus code identity, and no-mistakes exposes nothing that names the
+#      worktree a run was invoked from. `axi status` is repo-scoped and answers
+#      the identical run from any worktree of that repo (verified 2026-09-04
+#      against two live worktrees of one branch on v1.57.0), the `runs` listing
+#      carries no such column, and the private `runs.worktree_dir` record holds
+#      the pipeline's OWN internal checkout under ~/.no-mistakes/worktrees/,
+#      never the caller's. So when a one-PR-per-repo posture puts several crews'
+#      worktrees on one long-lived feature branch, every one of them satisfies
+#      the head rule for whichever run is current and all of them report that
+#      run's state. bin/fm-watch.sh's pause_state_class does not trust this proof
+#      for a crew whose agent the backend confidently reports dead.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or

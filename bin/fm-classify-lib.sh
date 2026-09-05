@@ -1784,6 +1784,11 @@ crew_absorb_class() {  # <id>
 # it is checked before trusting the status log so a pre-validation captain-relevant
 # line does not override an active run. See crew_absorb_class for the exact
 # working/paused/none decision.
+# The run half of that proof is attributed by BRANCH, so concurrent crews sharing
+# one long-lived feature branch all report the same run (bin/fm-crew-state.sh owns
+# that rule and its known limit). Callers that hold better evidence about a
+# specific crew - bin/fm-watch.sh's pause_state_class holds a confident dead-agent
+# verdict - weigh it before this predicate rather than after.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
