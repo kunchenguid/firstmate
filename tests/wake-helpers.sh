@@ -87,6 +87,12 @@ if [ "${1:-}" = "capture-pane" ]; then
       _prev=$_arg
     done
   fi
+  # Deliberately slow pane read, for beacon-progress fixtures: the watcher's
+  # stale scan reads one pane per recorded window, so this makes each window a
+  # measurably long phase without needing a real wedged backend.
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_SLEEP:-}" ]; then
+    sleep "$FM_FAKE_TMUX_CAPTURE_SLEEP"
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi

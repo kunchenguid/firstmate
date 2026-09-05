@@ -307,6 +307,53 @@ fm_afk_daemon_owns_supervision() {
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
+# Exit status bin/fm-watch.sh uses for the one refusal that is NOT a failure:
+# the singleton lock is held by a live, identity-matched watcher of this home
+# whose beacon has gone stale. It is distinct from every other nonzero exit so
+# bin/fm-watch-arm.sh can WAIT for that holder instead of reporting a working
+# fleet's supervision as broken.
+#
+# Before the beacon was beaten at every phase boundary (2026-09-04 supervision
+# investigation) this was the routine reading of a perfectly healthy watcher
+# whose single poll iteration had simply outgrown the grace, and the arm layer's
+# only answer was "auto-arm FAILED - exited 1 without an actionable reason".
+# shellcheck disable=SC2034 # Read by bin/fm-watch-arm.sh and bin/fm-claude-stop-autoarm.sh.
+FM_WATCHER_BUSY_HOLDER_STATUS=64
+
+# The one lock state that is neither healthy nor free: a LIVE, identity-matched
+# watcher for THIS home holds the lock while its beacon has gone stale.
+# Sets FM_WATCHER_BUSY_PID and FM_WATCHER_BUSY_BEACON_AGE on success.
+#
+# An aged beacon here is evidence of a SUSPECTED STALL and nothing stronger.
+# Identity verification proves WHICH process holds the lock - that it is this
+# home's watcher rather than a recycled pid - not that the process is stuck. A
+# slow phase, a descheduled process and a genuine wedge are indistinguishable
+# from the outside, which is why no caller of this predicate may signal, kill or
+# replace the holder: the captain ruled on 2026-09-05 that a running monitor is
+# never terminated on age alone.
+fm_watcher_busy_holder() {  # <state-dir> <watch-path> [grace] [home]
+  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  local lockdir beat pid age
+  FM_WATCHER_BUSY_PID=
+  FM_WATCHER_BUSY_BEACON_AGE=
+  lockdir="$state/.watch.lock"
+  beat="$state/.last-watcher-beat"
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch" "$pid" "$home" || return 1
+  if [ -e "$beat" ]; then
+    age=$(fm_path_age "$beat")
+  else
+    age=$(fm_path_age "$lockdir")
+  fi
+  [ "$age" -ge "$grace" ] || return 1
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_busy_holder returns.
+  FM_WATCHER_BUSY_PID=$pid
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_busy_holder returns.
+  FM_WATCHER_BUSY_BEACON_AGE=$age
+  return 0
+}
+
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
