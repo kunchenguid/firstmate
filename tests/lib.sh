@@ -37,7 +37,8 @@ umask 022
 # and system preferences. This affects only the sourcing test and its children;
 # config tests can still set local config, use -c, or supply their own env after
 # sourcing. Never write the developer's config or disable real project signing.
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
