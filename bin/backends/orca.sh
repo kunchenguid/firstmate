@@ -128,10 +128,13 @@ fm_backend_orca_repo_ensure() {  # <project-path>
   printf '%s' "$repo_id"
 }
 
-fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal
+fm_backend_orca_worktree_create() {  # <project-path> <name> [linear-issue]
+  local project=$1 name=$2 linear_issue=${3:-} repo_id out wt_id wt_path terminal
+  local create_args=()
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
+  create_args=(worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip)
+  [ -z "$linear_issue" ] || create_args+=(--linear-issue "$linear_issue")
+  out=$(orca "${create_args[@]}" --json) || return 1
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
     return 1
