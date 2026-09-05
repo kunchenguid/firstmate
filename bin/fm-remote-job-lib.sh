@@ -771,7 +771,7 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -906,12 +906,41 @@ fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worke
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
 fm_remote_job_process_start() {
-  local pid=$1 ps_bin value
+  local pid=$1 ps_bin value boot
+  local fields=()
+  if [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+    IFS= read -r value < "/proc/$pid/stat" || return 1
+    IFS=' ' read -r -a fields <<< "${value##*) }"
+    [ "${#fields[@]}" -gt 19 ] || return 1
+    value=${fields[19]}
+    IFS= read -r boot < /proc/sys/kernel/random/boot_id || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    case "$boot" in ''|*[!a-f0-9-]*) return 1 ;; esac
+    # Kernel ticks and boot identity survive timezone, locale and wall-clock
+    # changes. ps lstart is presentation text and falsely invalidated owners.
+    printf 'linux:%s:%s\n' "$boot" "$value"
+    return 0
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C TZ=UTC "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
+  local pid=$1 recorded=$2 actual=$3 ps_bin value
+  [ "$recorded" = "$actual" ] && return 0
+  # Accept existing lstart records while old workers/jobs drain during an
+  # upgrade. New kernel identities never take this compatibility path.
+  case "$recorded" in ???\ ???\ *) ;; *) return 1 ;; esac
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ] && return 0
+  value=$(LC_ALL=C TZ=UTC "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ] && return 0
+  value=$(env -u TZ "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ]
 }
 
 fm_remote_job_process_command() {
@@ -1099,7 +1128,7 @@ fm_remote_job_lock_owner_matches_process() {
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
   actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
   recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
@@ -1118,7 +1147,8 @@ fm_remote_job_worker_owned_alive() {
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   identity_file=$(fm_remote_job_worker_identity_path)
   fm_remote_job_regular_bounded "$identity_file" 256 || return 1
-  fm_remote_job_probe "$account_home" || return 1
+  # Ownership is process identity, not readiness. A delayed heartbeat must not
+  # authorize a second supervisor for the same live owner.
   if fm_remote_job_lock_owner_matches_process "$account_home"; then
     [ "$pid" = "$FM_REMOTE_JOB_OWNER_PID" ] || return 1
     return 0
@@ -1253,6 +1283,10 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     }
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
+  elif fm_remote_job_lock_owner_matches_process "$account_home" "$FM_REMOTE_JOB_STATE/supervisor.lock"; then
+    # The supervisor can be between serving children or publishing readiness.
+    # ensure_worker waits for readiness separately; it must not launch a rival.
+    return 0
   fi
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own

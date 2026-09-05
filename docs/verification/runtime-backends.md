@@ -1011,6 +1011,16 @@ bash tests/fm-calm-pi-extension.test.sh
 All three commands passed on this host.
 The native Pi cases ran; checks requiring the separately importable Pi SDK reported its absence as their existing prerequisite skip.
 
+Repeated ensure calls also reproduced a live-owner rejection when the worker started under UTC and a caller used another timezone.
+Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
+Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
+The subreaper regression changes caller timezones, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
+The previous implementation fails that check; the corrected implementation reports:
+
+```text
+ok - repeated ensure across timezones and delayed readiness preserves owners without new workers
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

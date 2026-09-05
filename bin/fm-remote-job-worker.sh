@@ -266,7 +266,7 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
     worker_process_or_group_alive process "$pid" && return 2
     return 1
   }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" && return 0
   return 1
 }
 
@@ -284,7 +284,7 @@ worker_group_identity_status() { # <job-dir> <pid>
     worker_process_or_group_alive group "$pid" && return 0
     return 1
   }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" && return 0
   return 1
 }
 
@@ -364,7 +364,7 @@ worker_lane_identity_matches() { # <pid> <start>
   local pid=$1 start=$2 actual_start
   [ -n "$start" ] || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$actual_start" = "$start" ]
+  fm_remote_job_start_identity_matches "$pid" "$start" "$actual_start"
 }
 
 worker_stop_active_execution() {
@@ -458,7 +458,7 @@ worker_claim_owner_alive() { # <job-dir>
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
     actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-    [ "$recorded_start" = "$actual_start" ]
+    fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start"
     return
   fi
   kill -0 "$pid" 2>/dev/null

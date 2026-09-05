@@ -21,6 +21,17 @@ account.mkdir()
 (root / "AGENTS.md").write_text("fixture\n")
 worker = root / "bin/fm-remote-job-worker.sh"
 known = set()
+launch_bin = fixture / "launch-bin"
+launch_bin.mkdir()
+launch_log = fixture / "launches"
+launch_log.touch()
+real_nohup = shutil.which("nohup")
+assert real_nohup, "nohup is required by the production Linux start path"
+(launch_bin / "nohup").write_text('''#!/bin/bash
+printf 'launch\n' >> "$FM_FIXTURE_LAUNCH_LOG"
+exec "$FM_FIXTURE_NOHUP" "$@"
+''')
+(launch_bin / "nohup").chmod(0o755)
 
 
 def processes():
@@ -58,9 +69,11 @@ def wait_for(predicate, seconds=10):
     raise AssertionError("condition did not become true before deadline")
 
 
-def call(script, queue):
+def call(script, queue, timezone="UTC0"):
     env = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
-               FM_REMOTE_JOB_STATE_ROOT=str(queue), FM_REMOTE_JOB_PLATFORM_OVERRIDE="Linux")
+               FM_REMOTE_JOB_STATE_ROOT=str(queue), FM_REMOTE_JOB_PLATFORM_OVERRIDE="Linux", TZ=timezone,
+               PATH=f"{launch_bin}:{os.environ['PATH']}", FM_FIXTURE_NOHUP=real_nohup,
+               FM_FIXTURE_LAUNCH_LOG=str(launch_log))
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -119,6 +132,31 @@ done
     call(start, queue)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     original = set(processes())
+    ensure = 'fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ]'
+    launches = launch_log.read_text()
+    for timezone in ("UTC0", "EST5", "JST-9", "UTC0"):
+        call(ensure, queue, timezone)
+        wait_for(lambda: set(processes()) == original)
+        assert launch_log.read_text() == launches, "ensure launched another worker"
+    serving = int((queue / "worker.pid").read_text())
+    os.kill(serving, signal.SIGSTOP)
+    try:
+        os.utime(queue / "worker.ready", (0, 0))
+        call('FM_REMOTE_JOB_REPAIRED=0; ' + start + '; [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ]', queue)
+        assert launch_log.read_text() == launches, "stale heartbeat launched another worker"
+    finally:
+        os.kill(serving, signal.SIGCONT)
+    # Old lstart records must remain verifiable while a deployment drains them.
+    for lock in (queue / "worker.lock", queue / "supervisor.lock"):
+        pid = (lock / "pid").read_text().strip()
+        kernel_identity = (lock / "start").read_text()
+        legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
+                                         env=dict(os.environ, TZ="UTC0", LC_ALL="C"), text=True)
+        (lock / "start").write_text(legacy)
+        call(ensure, queue, "EST5")
+        assert launch_log.read_text() == launches, "legacy identity launched another worker"
+        (lock / "start").write_text(kernel_identity)
+    print("ok - repeated ensure across timezones and delayed readiness preserves owners without new workers")
     (queue / "worker.lock/command").write_text("stale serving ownership\n")
     for _ in range(3):
         call(start, queue)
