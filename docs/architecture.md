@@ -54,7 +54,7 @@ In each home the scan considers only that home's long-inactive direct ordinary c
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
 A secondmate home's terminal child ledger lines, PR registrations, captain holds, and merges are published on that same parent route by the scripts that record them, so no captain-facing outcome depends on the mate model appending it ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
-Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
+Each `fm-wake-drain.sh` presentation runs `bin/fm-guard.sh`, so its independent worktree-tangle and queued-wakes alarms remain visible on a turn that only handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait or verified captain-held transfer trades that silence for one bounded recheck per pause window, naming which human the wait is on, so neither a forgotten pause nor a forgotten hold can remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
@@ -106,7 +106,7 @@ Optional Relay integrates with the watcher only after explicit opt-in; [configur
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
-`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, or nonzero `FAILED` status.
+`bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, typed `FAILED`, or live busy-holder-left-alone status.
 [`watcher-continuity.md`](watcher-continuity.md#arm-layer-cycle-contract) owns the arm layer's successor, terminal-delivery, re-arm recovery, and typed clean-close failure contract.
 The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
 Pi and OpenCode verify session-lock ownership and launch one singleton successor from their child-close handlers before delivering an actionable wake prompt, with bounded exponential retry for failed restoration.
@@ -116,7 +116,7 @@ It suppresses failed-looking closes when the same identity-matched watcher is he
 Cursor's `bin/fm-turnend-guard-cursor.sh` hook is the same between-turns shape in one synchronous step: it parks the awaited `stop` hook on the arm wrapper and translates an actionable close into one `followup_message`, with a generation baton that makes an older park still running after the next `stop` claim stand down instead of leaking a stale duplicate wake.
 The existing turn-end guard remains the final backstop for every harness-engine protocol, with pi-signed sharing Pi's protocol, the `--claude` mode cooperating with the auto-arm claim, and Cursor's `--cursor` mode rendering a block as one bounded follow-up because its `stop` step cannot be blocked.
 Its `--restart` mode signals only the watcher recorded in the current home's `state/.watch.lock`, so restarting one home cannot kill sibling secondmate watchers.
-A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled or if work, process-event sources, or Relay polling has an unhealthy model-aware supervision verdict; on main it also warns when queued wakes are waiting to be drained.
+A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if the primary checkout is tangled; on main it also warns when queued wakes are waiting to be drained.
 The drain script calls that guard after presenting the queue; records remain durable until the exact generation-bound acknowledgement printed by the drain succeeds after handling, and main may keep the queued-wakes warning visible until then.
 The Pi supervision branch's deliberate queued-wake warning exception is owned by [`pi-supervision-branch.md`](pi-supervision-branch.md#components-and-their-owners).
 It leads with a prominent bordered tangle banner.
@@ -405,5 +405,5 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 ## Development notes
 
-The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, generation-bound post-handling acknowledgement, deterministic re-arm recovery after watcher downtime, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
+The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, generation-bound post-handling acknowledgement, deterministic re-arm recovery after watcher downtime, a race-proof singleton lock, duplicate self-eviction, and a self-verifying tracked-child arm wrapper.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
