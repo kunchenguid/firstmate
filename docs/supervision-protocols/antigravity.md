@@ -14,5 +14,9 @@ When this session owns supervision and away mode is not active:
 7. The tracked `.agents/hooks.json` injects the startup reminder through Antigravity's `PreInvocation` hook in a primary or second-mate home.
    It is a backstop, not a second supervision owner.
 
-Interactive `agy` TUI sessions are the supported primary host.
+Interactive `agy` TUI sessions launched with `--add-dir "$PWD"` are the supported primary host.
+Always pass `--add-dir "$PWD"` (or the exact Firstmate repository path) when starting Antigravity.
+Antigravity CLI only discovers `.agents/hooks.json` and `AGENTS.md` from directories added with `--add-dir`.
+Without `--add-dir`, Antigravity defaults its workspace to `~/.gemini/antigravity-cli`, never loads `.agents/hooks.json`, and never fires the `firstmate-sessionstart` `PreInvocation` hook.
+In that degraded state, the session appears normal and conversational but never receives the session-start nudge to invoke `bin/fm-watch.sh`, leaving fleet events unmonitored between turns and requiring repeated manual wakes.
 Headless `agy --prompt` runs do not provide a persistent conversation for subsequent fleet notifications and are not a Firstmate primary.

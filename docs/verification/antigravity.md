@@ -92,3 +92,36 @@ tests/fm-antigravity-live-e2e.test.sh
 
 The guard refuses a non-Gemini model, an old CLI, unavailable Herdr isolation, a missing instruction/skill sentinel, a missing autonomous terminal result, a missing hook result, a wrong project path, or a missing model/effort display.
 It cannot pass merely because `agy` started.
+
+## Antigravity CLI 1.1.27 and primary watch investigation
+
+Date: 2026-09-05.
+Verified executable: `/Users/cam/.local/bin/agy` at Antigravity CLI 1.1.27.
+
+### Observed symptom and initiating trigger
+
+When launching Antigravity via a shortcut that runs `agy --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions` without `--add-dir`, the agent interacts normally in conversation but does not actively monitor the fleet.
+The session idles after every turn, and background fleet events in `state/.wake-queue` are not processed until the captain manually sends another prompt.
+
+### Masking condition and root cause
+
+Antigravity CLI does not automatically adopt the launching shell's current working directory as its workspace root.
+Without `--add-dir "$PWD"` (or the explicit Firstmate home path), Antigravity defaults its workspace root to `~/.gemini/antigravity-cli`.
+In this default workspace, Antigravity never discovers the Firstmate home's `AGENTS.md`, `.agents/skills/`, or `.agents/hooks.json`.
+Antigravity logs in `~/.gemini/antigravity-cli/log/` confirm: `hooks_manager.go:53 loaded 0 named hooks from 0 hooks.json file(s)`.
+Because Antigravity successfully connects to the Gemini model and executes tools unattended under `--dangerously-skip-permissions`, the session appears completely healthy and conversational.
+This masks the fact that Firstmate hooks were never loaded.
+
+### Primary supervision failure mode
+
+Because `.agents/hooks.json` is not discovered, the `firstmate-sessionstart` `PreInvocation` hook (`bin/fm-antigravity-hook.sh sessionstart`) never fires.
+The session-start nudge is never injected into the conversation.
+`bin/fm-session-start.sh` is never executed, the session lock is never acquired, and the agent is never directed to start foreground supervision via `bin/fm-watch.sh`.
+Unlike Pi (which has a background extension runtime) or Claude (which has an asynchronous Stop hook), Antigravity primary supervision relies on foreground terminal calls to `bin/fm-watch.sh`.
+Without `--add-dir`, foreground supervision never starts, leaving background fleet wakes unmonitored.
+
+### Counterfactual verification
+
+When launched with `--add-dir "$PWD"`, Antigravity CLI logs confirm discovery: `loaded 3 named hooks from 1 hooks.json file(s)`.
+The `firstmate-sessionstart` `PreInvocation` hook fires on the opening turn, delivering the operational session-start nudge.
+The agent then runs `bin/fm-session-start.sh`, takes the session lock, and starts foreground supervision via `bin/fm-watch.sh`, actively monitoring fleet events.

@@ -21,12 +21,23 @@ clear_identity_env() {
 }
 
 test_marker_precedence_and_ai_agent_rejection() {
-  local out
-  out=$(ANTIGRAVITY_AGENT=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi AI_AGENT=pi "$HARNESS")
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/marker-ps")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf 'bash\n' ;;
+  *"args="*) printf 'bash\n' ;;
+  *"ppid="*) printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(ANTIGRAVITY_AGENT=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi AI_AGENT=pi PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" = antigravity ] || fail "Antigravity's own marker must outrank inherited Pi identity, got '$out'"
-  out=$(clear_identity_env AI_AGENT=antigravity "$HARNESS")
+  out=$(clear_identity_env AI_AGENT=antigravity PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != antigravity ] || fail "AI_AGENT must never claim Antigravity identity"
-  out=$(clear_identity_env ANTIGRAVITY_AGENT=0 "$HARNESS")
+  out=$(clear_identity_env ANTIGRAVITY_AGENT=0 PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != antigravity ] || fail "only ANTIGRAVITY_AGENT=1 is the verified marker"
   pass "fm-harness.sh: Antigravity marker precedence rejects inherited AI_AGENT"
 }
@@ -341,6 +352,64 @@ SH
   pass "fm-spawn.sh accepts Antigravity through the remote secondmate interface"
 }
 
+test_sessionstart_hook_transport() {
+  local fixture out fakebin msg
+  fixture="$TMP_ROOT/sessionstart-hook"
+  make_primary_fixture "$fixture"
+  fakebin=$(fm_fakebin "$fixture/fakebin")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf 'bash\n' ;;
+  *"args="*) printf 'bash\n' ;;
+  *"ppid="*) printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(printf '{}\n' | clear_identity_env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    "$ROOT/bin/fm-antigravity-hook.sh" sessionstart)
+  msg=$(printf '%s' "$out" | jq -r '.injectSteps[0].ephemeralMessage // empty')
+  assert_contains "$msg" "FIRSTMATE_OP: v1 session-start" "sessionstart hook did not inject marked sessionstart nudge"
+  assert_contains "$msg" "bin/fm-session-start.sh" "sessionstart hook did not name session-start script"
+
+  out=$(printf '{}\n' | clear_identity_env FM_GATE_REFUSE_BYPASS=0 NO_MISTAKES_GATE=1 PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fixture" FM_HOME="$fixture" \
+    "$ROOT/bin/fm-antigravity-hook.sh" sessionstart)
+  [ "$out" = '{}' ] || fail "sessionstart hook must return empty object under gate: '$out'"
+
+  pass "Antigravity sessionstart hook delivers ephemeralMessage nudge"
+}
+
+# shellcheck disable=SC2016 # Literal $PWD is asserted in public documentation.
+test_antigravity_launch_and_failure_mode_documented() {
+  local docs
+  docs="$ROOT/docs/supervision-protocols/antigravity.md"
+  assert_grep '--add-dir "$PWD"' "$docs" "protocol does not mandate --add-dir"
+  assert_grep 'unmonitored' "$docs" "protocol does not explain unmonitored failure mode"
+
+  docs="$ROOT/README.md"
+  assert_grep '--add-dir "$PWD"' "$docs" "README does not document --add-dir"
+  assert_grep 'unmonitored' "$docs" "README does not document unmonitored failure mode"
+
+  docs="$ROOT/docs/configuration.md"
+  assert_grep '--add-dir "$PWD"' "$docs" "configuration doc does not document --add-dir"
+  assert_grep 'unmonitored' "$docs" "configuration doc does not document unmonitored failure mode"
+
+  docs="$ROOT/docs/sessionstart-nudge.md"
+  assert_grep 'Antigravity' "$docs" "sessionstart-nudge doc does not include Antigravity"
+  assert_grep 'unmonitored' "$docs" "sessionstart-nudge doc does not document unmonitored failure mode"
+
+  docs="$ROOT/.agents/skills/harness-adapters/references/harness/antigravity.md"
+  assert_grep '--add-dir "$PWD"' "$docs" "reference does not document --add-dir"
+  assert_grep 'unmonitored' "$docs" "reference does not document unmonitored failure mode"
+
+  docs="$ROOT/docs/verification/antigravity.md"
+  assert_grep '1.1.27' "$docs" "verification doc does not include 1.1.27 verification"
+  assert_grep 'unmonitored' "$docs" "verification doc does not document unmonitored failure mode"
+
+  pass "Antigravity --add-dir requirement and unmonitored failure mode are documented across all public interfaces"
+}
+
 test_marker_precedence_and_ai_agent_rejection
 test_exact_agy_ancestry_only
 test_control_and_busy_contracts
@@ -351,3 +420,5 @@ test_spawn_builds_canonical_antigravity_launch
 test_spawn_defaults_to_gemini_and_enforces_verified_boundaries
 test_positional_secondmate_adapter_reaches_antigravity_launch
 test_remote_secondmate_preflight_accepts_antigravity
+test_sessionstart_hook_transport
+test_antigravity_launch_and_failure_mode_documented

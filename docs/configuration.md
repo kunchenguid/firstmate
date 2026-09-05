@@ -342,6 +342,7 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For Antigravity primary and secondmate launches, start the interactive TUI with `agy --dangerously-skip-permissions --add-dir "$PWD" --model <gemini-model> --effort <low|medium|high>` so the tracked `.agents/hooks.json` loads from the exact Firstmate home.
 Antigravity otherwise chooses `~/.gemini/antigravity-cli` as its terminal workspace even when launched from another shell directory.
+Omitting `--add-dir` leaves the session conversational but suppresses `.agents/hooks.json`, the session-start reminder, and the foreground supervision wait (`bin/fm-watch.sh`), leaving background fleet events unmonitored and requiring repeated manual wakes.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

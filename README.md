@@ -116,6 +116,8 @@ agy --dangerously-skip-permissions --add-dir "$PWD" --model <gemini-model> --eff
 
 Install Antigravity from [antigravity.google/download](https://antigravity.google/download), sign in once, and use `agy models` for the current model ids.
 Run `agy update` when `agy --version` is older than 1.1.26.
+Always include `--add-dir "$PWD"`: Antigravity otherwise defaults its workspace to `~/.gemini/antigravity-cli` and will not discover `AGENTS.md` or `.agents/hooks.json`.
+Omitting `--add-dir` leaves the session conversational but suppresses the session-start reminder and foreground supervision wait (`bin/fm-watch.sh`), leaving fleet background events unmonitored and requiring repeated manual wakes.
 The tracked `.agents/hooks.json` loads startup and primary safety hooks from this repository; use the interactive TUI rather than headless `--print` for a primary session.
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.

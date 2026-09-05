@@ -129,6 +129,13 @@ test_antigravity_uses_foreground_terminal_supervision() {
     "Antigravity protocol lost its foreground wait"
   assert_contains "$out" "bin/fm-watch-arm.sh\` is not a valid substitute" \
     "Antigravity protocol must explicitly reject the background arm"
+  # shellcheck disable=SC2016 # Literal $PWD is asserted in protocol documentation.
+  assert_contains "$out" '--add-dir "$PWD"' \
+    "Antigravity protocol must require --add-dir"
+  assert_contains "$out" "Without \`--add-dir\`" \
+    "Antigravity protocol must explain missing --add-dir root cause"
+  assert_contains "$out" "unmonitored between turns and requiring repeated manual wakes" \
+    "Antigravity protocol must explain unmonitored failure mode"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "foreground bin/fm-watch.sh" "Antigravity ordinary continuation lost its foreground wait"
   out=$("$RENDER" --harness antigravity --repair-line)
