@@ -44,6 +44,15 @@ FM_COMPLETION_JQ_DEFS='
      | if length > 0 then [.[-1].value] else [] end);
 '
 
+fm_completion_last_record_field() {  # <line|value|format> <decoded-body>
+  local field=$1 body=$2
+  printf '%s\n' "$body" | jq -Rrs --arg field "$field" "$FM_COMPLETION_JQ_DEFS"'
+    split("\n")
+    | [ .[] | completion_record ]
+    | if length > 0 then .[-1][$field] else "" end
+  '
+}
+
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS=$FM_COMPLETION_JQ_DEFS'
   def landed_delivery:
