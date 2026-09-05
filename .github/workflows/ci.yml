@@ -64,6 +64,8 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned PyYAML for workflow contract test
+        run: python3 -m pip install PyYAML==6.0.3
       - name: Install tasks-axi
         run: |
           set -eu
