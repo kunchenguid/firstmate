@@ -451,19 +451,26 @@ mail_poll() {
         echo "fm-mail: per-poll wake cap ($MAIL_MAX_WAKES) reached; remaining mail surfaces on the next poll" >&2
         break
       fi
+      if [ "$status" = degraded ]; then
+        # Record the retry BEFORE the wake so a failed retry write can never
+        # leave the uid cursor-recorded but unrecoverable: the mail stays
+        # unseen and is retried next poll instead.
+        if ! mail_retry_add "$uid"; then
+          echo "fm-mail: could not record retry for $uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+      fi
       if wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}"; then
         echo "fm-mail: woke for $uid"
         woke=$((woke + 1))
-        if [ "$status" = degraded ]; then
-          if ! mail_retry_add "$uid"; then
-            echo "fm-mail: could not record retry for $uid; retried on next poll" >&2
-            fm_lock_release "$STATE_DIR/.mail-seen.lock"
-            return 1
-          fi
-        elif [ "$status" = retry ]; then
+        if [ "$status" = retry ]; then
           mail_retry_remove "$uid" || true
         fi
       else
+        if [ "$status" = degraded ]; then
+          mail_retry_remove "$uid" || true
+        fi
         echo "fm-mail: wake failed for $uid; retried on next poll" >&2
         fm_lock_release "$STATE_DIR/.mail-seen.lock"
         return 1

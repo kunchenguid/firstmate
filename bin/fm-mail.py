@@ -258,28 +258,43 @@ def cmd_poll_list():
         # repeatedly unfetchable uid (a corrupt message) cannot starve later
         # mail. A new unfetchable uid is still surfaced with a degraded row and
         # recorded in the cursor, so it is never missed; a retry-set uid that
-        # fails again emits nothing and stays in the retry set.
+        # fails again emits nothing and stays in the retry set. A quarter of
+        # the cap (at least one) is reserved for retry successes, so a
+        # sustained new-mail flood can never starve recovered metadata.
+        retry_budget = max(1, cap // 4) if retry_order else 0
+        new_budget = cap - retry_budget
         window = max(cap * 4, cap + 10)
         out = []
+        new_emitted = 0
+        retry_emitted = 0
         for u in candidates[:window]:
-            if len(out) >= cap:
-                break
+            is_retry = u in retry
+            if is_retry:
+                if retry_emitted >= retry_budget:
+                    continue
+            elif new_emitted >= new_budget:
+                continue
             typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
-                if u in retry:
+                if is_retry:
                     rotate_retry_failed(os.environ.get('FM_MAIL_RETRY', ''), u)
                     continue
                 uid = clean(u)
                 out.append((uid, '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
+                new_emitted += 1
                 continue
             mi = email.message_from_bytes(msg[0][1])
             uid = clean(u)
             idate = clean(dec(mi.get('Date')))
             subj = clean(dec(mi.get('Subject')))
             fr = clean(dec(mi.get('From')))
-            status = 'retry' if u in retry else 'ok'
+            status = 'retry' if is_retry else 'ok'
             out.append((uid, idate, fr, subj, status))
+            if is_retry:
+                retry_emitted += 1
+            else:
+                new_emitted += 1
         # Emit the mailbox generation guard first, then each message row
         # (uid, date, from, subject, status) so the bash layer diffs against
         # the cursor and the retry set.
