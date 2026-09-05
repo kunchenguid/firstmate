@@ -336,6 +336,29 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Supported forges (GitHub, GitLab, Gitea, Forgejo)
+
+Firstmate recognises four forge providers through one URL parser in `bin/fm-pr-lib.sh`, one wrapper shim for the Gitea/Forgejo CLI surface, and one provider-dispatch branch per script that needs it (merge, merge-poll preparation, teardown landed-work check).
+The parser and provider semantics are owned by `bin/fm-pr-lib.sh`'s `fm_pr_url_parse`; the merge and teardown scripts read `FM_PR_PROVIDER` and switch on it.
+The Gitea/Forgejo wrapper is `bin/fm-gitea-axi`, which prefers `forgejo-axi` (`npx -y forgejo-axi`) and falls back to `tea` (the official Gitea CLI) for the operations tea actually documents.
+Connection precedence for the Gitea/Forgejo shim is `--base-url` > `$GITEA_BASE_URL` / `$FORGEJO_BASE_URL` > `git remote get-url origin`; token precedence is `--token-env` > `$GITEA_TOKEN_ENV` / `$FORGEJO_TOKEN_ENV` > the literal `$GITEA_TOKEN` env var.
+The shim refuses operations neither underlying CLI supports (for example, `pr view` against `tea`, since `tea pulls view` is not a real subcommand) with a one-line `error:` message and exits non-zero, so the caller refuses rather than guessing.
+
+GitHub and GitLab have their own well-established flows and their provider-dispatch branches remain unchanged; the additions are additive only.
+The merge poll arming path runs `forgejo-axi pr view --fields head_sha` for Gitea PRs when `forgejo-axi` and `jq` are both on PATH; `pr_head=` is optional and the metadata write skips it when the call fails or returns nothing.
+The teardown landed-work check (`pr_is_merged` then `pr_is_merged_gitea`) falls through to the provider-agnostic `content_in_default` check when neither succeeds, so a Gitea PR without forgejo-axi installed still tears down cleanly when the merge is verified locally.
+
+The upstream `tasks-axi done --pr` validator only accepts GitHub and GitLab URL shapes; a Gitea PR cannot be recorded through that flag on day one.
+Workaround until upstream is patched: close the task with `tasks-axi done <id> --note "pr=<gitea-url>"` and the operator-facing record still carries the URL inline.
+The merge-metadata record is independent and lives in `state/<id>.meta`'s `pr=` line, which is updated by `bin/fm-pr-check.sh` and read back during teardown, so the Gitea merge flow does not depend on the `tasks-axi` validator.
+
+The supported operators at a glance:
+
+- GitHub PR: `https://github.com/<owner>/<repo>/pull/<n>`, axiom wrapper `gh-axi`, full coverage including auto-merge and merge-queue semantics.
+- GitLab MR: `https://<host>/<path>/-/merge_requests/<n>`, axiom wrapper `glab`, requires `glab` and `jq` on PATH.
+- Gitea PR: `https://<host>/<path>/pulls/<n>` on a Gitea instance, axiom wrapper `forgejo-axi` (preferred) or `tea` (fallback for what tea supports).
+- Forgejo PR: same URL shape as Gitea, same wrappers, no forge-specific flag in firstmate because Forgejo is a sibling fork of Gitea with a compatible API surface.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

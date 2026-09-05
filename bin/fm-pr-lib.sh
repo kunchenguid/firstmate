@@ -195,12 +195,29 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_gitlab_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Gitea and Forgejo (sibling forks) use the plural /pulls/<n> shape on
+  # self-hosted instances, so the host is part of the identity. The host and
+  # path rules match the GitLab validators above; reusing them keeps one
+  # canonical DNS / namespace definition for every non-GitHub forge.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
   fm_pr_gitlab_host_valid "$host" || return 1
   fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  FM_PR_PROVIDER=gitea
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path

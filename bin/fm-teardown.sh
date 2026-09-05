@@ -1157,6 +1157,25 @@ pr_is_merged() {
   return 0
 }
 
+# Gitea/Forgejo land detector: returns 0 when the recorded PR URL has merged.
+# Reads FM_PR_* identity set by fm_pr_url_parse; the caller must have already
+# parsed the PR_URL. The shim prefers forgejo-axi (which has pr merged) and
+# refuses if neither forgejo-axi nor a usable signal is available; failure
+# here lets the caller's content_in_default fallback decide.
+pr_is_merged_gitea() {
+  local target=$PR_URL
+  [ -n "$target" ] || return 1
+  if [ -z "${FM_PR_PROVIDER:-}" ]; then
+    fm_pr_url_parse "$target" || return 1
+  fi
+  case "$FM_PR_PROVIDER" in
+    gitea) ;;
+    *) return 1 ;;
+  esac
+  "$SCRIPT_DIR/fm-gitea-axi" --base-url "https://$FM_PR_HOST" pr merged "$target" >/dev/null 2>&1 || return 1
+  return 0
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -1190,6 +1209,7 @@ content_in_default() {
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
+  pr_is_merged_gitea && return 0
   content_in_default
 }
 

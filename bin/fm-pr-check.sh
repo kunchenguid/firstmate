@@ -71,10 +71,20 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
+# Gitea/Forgejo: forgejo-axi pr view with --fields head_sha is the canonical
+# shape; jq parses the JSON. pr_head remains optional.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+if [ "$PROVIDER" = gitea ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v forgejo-axi >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  if REMOTE_HEAD=$(cd "$WT" && forgejo-axi pr view "$NUMBER" \
+      --base-url "https://$HOST" --fields head_sha --json 2>/dev/null \
+    | jq -r '.head_sha // empty' 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
