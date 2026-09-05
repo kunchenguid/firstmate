@@ -1377,6 +1377,7 @@ test_lock_acquisition_refuses_unobtainable_frame_identity() {
   # sourced subshell: BASH_ENV applies the two conditions to the script and to
   # every child bash it spawns, so the waiting path is exercised end to end.
   bash_env="$dir/unset-bashpid"
+  # shellcheck disable=SC2016  # $PATH must expand when BASH_ENV is sourced, not here.
   printf 'unset BASHPID\nPATH=%s:$PATH\n' "$dir/stub" > "$bash_env"
   printf 'sentinel\n' > "$state/.branch-eligible-rows"
   BASH_ENV="$bash_env" FM_STATE_OVERRIDE="$state" \
