@@ -19,6 +19,12 @@
 # until every live open blocker is closed and `check` succeeds. Repeated begin/check
 # calls are idempotent. `guard` never mutates state and is suitable for ordinary
 # read entrypoints such as fm-bearings-snapshot.sh.
+#
+# state/.afk-native-wedge-watch, when present, records the id of a harness-native
+# background watch (Claude Monitor, Codex's background task tool) armed on entry
+# per the afk skill (native-tracked-background-tool path). This script reports
+# whether it ever fired and reminds firstmate to stop it; it never controls the
+# harness tool itself, since only firstmate's own turn can do that.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,7 +129,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.afk-native-wedge-watch"
 }
 
 return_guard() {
@@ -140,7 +147,7 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 native_watch native_watch_fired
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -175,6 +182,13 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)
     append_evidence escalation "$escalations" "$evidence"
+  fi
+
+  if [ -e "$STATE/.afk-native-wedge-watch" ]; then
+    native_watch=$(head -1 "$STATE/.afk-native-wedge-watch" 2>/dev/null || true)
+    native_watch_fired=no
+    [ -n "${wedge:-}" ] && native_watch_fired=yes
+    append_evidence native-watch "stop it now (${native_watch:-no id recorded}); fired: $native_watch_fired" "$evidence"
   fi
 
   scan_open_blockers > "$blockers"

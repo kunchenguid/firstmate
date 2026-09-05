@@ -693,15 +693,21 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg marker wedge_note=""
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  # If a wedge is still on record, name its marker and age in this flush so
+  # firstmate sees the evidence even without a separate return-catch-up read.
+  marker="$state/.subsuper-inject-wedged"
+  if [ -s "$marker" ]; then
+    wedge_note=$(printf ' (previously wedged %ss; marker was %s)' "$(_file_age "$marker")" "$marker")
+  fi
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s%s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg" "$wedge_note")
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }

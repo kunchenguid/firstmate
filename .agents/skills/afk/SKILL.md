@@ -34,6 +34,11 @@ batched digest rather than per-wake injections.
      The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
+     **Also arm a native wedge watch**, so a wedge reaches you through a background-task notification instead of requiring the composer to be read (the 2026-08 incident: a thousand escalations sat buffered for four hours because the composer was never read and the wedge alarm had no channel on this Linux/WSL host).
+     For Claude: start a background Bash loop (`run_in_background: true`) that polls only `state/.subsuper-inject-wedged` and the age of `state/.subsuper-escalations` against `FM_MAX_DEFER_SECS` (default 300s), prints exactly one line when either condition fires, and exits; then attach a `Monitor` to that background shell so its one printed line arrives as a task notification instead of sitting unread in a pane.
+     For Codex: use its own background task tool (the same native tracked-background primitive named above) with the same one-shot polling body; Codex has no separate Monitor tool, so the background task's own completion notification IS the wake.
+     Record what you armed as one line in `state/.afk-native-wedge-watch` (a task id or short description) so `bin/fm-afk-return.sh` can name it and report whether it ever fired.
+     This is a one-shot notifier, not a second daemon: it never re-arms itself, and it never classifies or routes wakes, which stays `fm-supervise-daemon.sh`'s job.
    - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
      the single owner of the daemon terminal: it creates a NON-VISIBLE tracked
      terminal for the current backend (a herdr dedicated `--no-focus` workspace,
@@ -61,6 +66,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns correct-ordered daemon shutdown, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, and the return-catch-up gate.
+  If it prints a `catch-up native-watch:` line, it read `state/.afk-native-wedge-watch` and is telling you whether the native wedge watch you armed at entry ever fired; stop that background task or Monitor now through your own harness tool (the script cannot reach into your tool state), then let the normal delivery-artifact cleanup remove the marker.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.

@@ -150,6 +150,36 @@ test_return_gate_orders_catchup_before_bearings() {
   pass "return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently"
 }
 
+test_native_wedge_watch_reported_and_cleared() {
+  local dir out
+  dir="$TMP_ROOT/native-watch-fired"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  printf 'claude-monitor:bg-42\n' > "$dir/home/state/.afk-native-wedge-watch"
+  printf 'fm away-mode inject WEDGED: 90s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "clean return with a fired native watch should not gate: $out"
+  assert_contains "$out" 'catch-up native-watch: stop it now (claude-monitor:bg-42); fired: yes' \
+    "return did not report the fired native wedge watch by its recorded id"
+  [ ! -e "$dir/home/state/.afk-native-wedge-watch" ] || fail "successful return left the native watch record behind"
+  [ ! -e "$dir/home/state/.subsuper-inject-wedged" ] || fail "successful return left the wedge marker behind"
+  pass "a fired native wedge watch is reported by its recorded id and cleared on successful return"
+}
+
+test_native_wedge_watch_reported_never_fired() {
+  local dir out
+  dir="$TMP_ROOT/native-watch-quiet"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  printf 'codex-bg-task:7\n' > "$dir/home/state/.afk-native-wedge-watch"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "clean return with an unfired native watch should not gate: $out"
+  assert_contains "$out" 'catch-up native-watch: stop it now (codex-bg-task:7); fired: no' \
+    "return did not report an unfired native wedge watch as never fired"
+  [ ! -e "$dir/home/state/.afk-native-wedge-watch" ] || fail "successful return left the unfired native watch record behind"
+  pass "an unfired native wedge watch is still reported so firstmate stops it, and cleared on successful return"
+}
+
 test_explicit_reclassification_requires_durable_reason() {
   local backend dir out rc
   for backend in tmux herdr; do
@@ -276,6 +306,8 @@ test_check_retries_recorded_terminal_teardown() {
 }
 
 test_return_gate_orders_catchup_before_bearings
+test_native_wedge_watch_reported_and_cleared
+test_native_wedge_watch_reported_never_fired
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain

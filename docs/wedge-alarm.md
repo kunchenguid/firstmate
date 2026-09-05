@@ -21,6 +21,13 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
 
+## Linux and WSL
+
+`auto` resolves to no OS channel on Linux and WSL: `wedge_alarm_platform_default` only recognizes `osascript` on Darwin, so an absent `config/wedge-alarm` is silent on these platforms beyond the durable marker and the log line.
+Configure `herdr` (when the herdr backend is in use) or a `command:` directive so a real alert channel exists.
+WSL interop (`interop.enabled`, used to shell out to a Windows-side notifier or command) may be unavailable or disabled by the distro's `/etc/wsl.conf`, so a `command:` channel on WSL needs a real end-to-end test against the target machine rather than an assumption that the command runs.
+The afk skill's native wedge watch (armed only for a harness with a native tracked-background tool) is a separate, pane-independent path to the same evidence and does not depend on this channel configuration.
+
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
 Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.
