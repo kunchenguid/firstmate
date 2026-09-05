@@ -197,6 +197,13 @@ wake_for() {
   # rolled back for a clean retry, and only when the journal, the cursor, and
   # the queue rewrite all fail does the poll fail closed, accepting a possible
   # duplicate over a lost mail.
+  #
+  # The one irreducible residual is a kill in the microseconds between the
+  # queue append and the journal write, followed by the drain acknowledging the
+  # row before the next poll heals it: neither the journal nor the cursor then
+  # holds the uid, and the next poll wakes the mail again. A possible duplicate
+  # (never a missed mail) is the deliberate, bounded tradeoff for keeping the
+  # durable record write on the same held lock as the publish.
   local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
