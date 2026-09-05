@@ -94,6 +94,12 @@ Two rules the commands cannot enforce for you:
   bin/fm-procevent.sh handled <source-id> <sequence>
   ```
   This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only this call durably retires the wake, so call it every time, including on a repeat wake for a sequence you already acted on.
+: For a `lavish` result, the review page's receipt is owned by the adapter's receipts record, and two of its visible states are yours to record. When you begin routing the answers the intake saved, and again when that routing is done, record it - the page states each of them only after its fact exists:
+  ```sh
+  bin/fm-procevent-lavish.sh applying <source-id> <sequence>   # routing begins
+  bin/fm-procevent-lavish.sh complete <source-id> <sequence>   # routing done
+  ```
+  Then acknowledge through the generic `handled` command above. Never claim receipt, saving, applying, or completion to the captain in chat on your own authority beyond what these records state: the page shows Received and Saved only after capture and the guarded intake, shows Already received for a replay that changed nothing, and an ended review retires only once its final receipt was displayed or became impossible to display.
 : Ask the adapter what the result means rather than parsing it yourself.
   `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `missing`, or `unknown`.
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` session-ending message as its own field.
@@ -113,7 +119,7 @@ Supported by tests:
 
 - output that reached the runner is stored atomically at mode `0600` **before** any event referencing it is published;
 - the remote-reply adapter reads its append-only source non-destructively from an offset plus prefix hash, so a pre-capture retry can derive the same bytes again, while source truncation or replacement is detected rather than silently rebased;
-- proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
+- proactive delivery, adapter-owned terminal retirement, adapter-owned automatic application, and the adapter-owned receipt seam follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;

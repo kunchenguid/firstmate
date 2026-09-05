@@ -569,29 +569,44 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
-# --- end-user-aligned regression: one Send & End, one captured result -------
+# --- end-user-aligned regression: one Send & End, receipt before retirement --
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
-# action, and the runner captured four results - the human's real feedback, then
-# recurring empty ended sessions - because it kept restarting a source whose own
-# adapter already knew the session had ended. Driven through the adapter's own
-# arm command against a stand-in for the published poll shape, so registration,
-# the runner, capture, publication, and retirement all run for real.
+# action and Firstmate retired the source immediately, so the page never
+# acknowledged the submission and the captain could not tell capture from loss.
+# Now the final feedback is captured, its receipt is presented through the next
+# poll's --agent-reply, and only that delivery lets the source retire. Driven
+# through the adapter's own arm command against a stand-in for the published
+# poll shape, so registration, the runner, capture, publication, and retirement
+# all run for real.
 HLT="$TMP_ROOT/hlt"; new_home "$HLT"
 LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
 LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
-export LAVISH_POLL_COUNT
+LAVISH_ARGV_LOG="$TMP_ROOT/lavish-argv.log"
+export LAVISH_POLL_COUNT LAVISH_ARGV_LOG
 cat > "$LAVISH_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 # Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
 # feedback is delivered exactly once carrying session_ended, and every later
 # poll returns an empty ended session immediately.
+printf '%s\n' "$*" >> "$LAVISH_ARGV_LOG"
 n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
 if [ "$n" = 1 ]; then
-  printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
+  printf '%s\n' 'session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "7","Ship call: ship it\n\nContext data:\n{\n  \"question\": \"sample-ship-call\", \"answer\": \"ship it\"\n}",section#call > form,choice,"Ship call: ship it"
+feedback[1]{text}:
+  ship it'
 else
-  printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
+  printf '%s\n' 'session:
+  file: /review.html
+  status: ended
+  ended_by: user'
 fi
 SH
 chmod +x "$LAVISH_BIN/lavish-axi"
@@ -600,24 +615,42 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
-for _ in $(seq 1 6); do
+for _ in $(seq 1 8); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
   sleep 0.3
 done
-[ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
-  || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
-[ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
+[ "$(cat "$LAVISH_POLL_COUNT")" = 2 ] \
+  || fail "an ended review was not polled exactly twice (feedback, then its receipt): $(cat "$LAVISH_POLL_COUNT") polls"
+[ "$(count_results "$HLT" "$lavish_id")" = 2 ] \
   || fail "one Send & End produced $(count_results "$HLT" "$lavish_id") captured results"
 [ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
   || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
-assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
+assert_not_contains "$(wake_payloads "$HLT")" "lavish $lavish_id 2" "the pure receipt-delivery capture wakes no handler"
+assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires only after its receipt was displayed"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
 LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
 assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
+assert_grep 'sample-ship-call' "$LAVISH_RESULT" "the queued card is retained for the keyed-answer intake"
+assert_grep '--agent-reply' "$LAVISH_ARGV_LOG" "the second poll presented an agent reply"
+receipt_argv=$(grep -- '--agent-reply' "$LAVISH_ARGV_LOG" | tail -1)
+assert_contains "$receipt_argv" "received 1 answer" "the presented receipt states the received answer count"
+assert_grep "UTC" "$LAVISH_ARGV_LOG" "the presented receipt states a timestamp"
+assert_not_contains "$receipt_argv" 'ship it' "the presented receipt exposes no decision payload"
+assert_not_contains "$receipt_argv" 'sample-ship-call' "the presented receipt exposes no decision key"
+journal=$HLT/state/procevent/$lavish_id.receipts
+grep -q "^received" "$journal" || fail "the receipts record never journaled the received submission"
+grep -q "^delivered" "$journal" || fail "the receipts record never journaled the displayed receipt"
+assert_present "$HLT/state/procevent-inbox/$lavish_id.2.handled" "the pure delivery capture was acknowledged, never announced"
+# The record deliberately outlives the automatic retirement above, so the last
+# round of an ended review can still state Applying and Complete durably. This
+# home's teardown is the boundary that retires it.
+out=$(pe "$HLT" sweep-home)
+assert_contains "$out" "swept: attempted=1" "home sweep never reached the auto-retired source's receipts record"
+assert_absent "$journal" "home sweep left the receipts record of an auto-retired source behind"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
-pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+pass "one Send & End captures the feedback, displays its receipt, then retires without recurring polls"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
@@ -1151,6 +1184,61 @@ wait_for "$DEAD_LOG" || fail "the replacement source never started for a truly d
 pe "$HG2" retire dead-gen-src >/dev/null
 pass "a truly dead generation with no surviving group is still safely reclaimed"
 
+# --- a runner killed inside the intake keeps its claim with its staged set ---
+# The receipt staging an abnormal exit leaves behind is reaped only through the
+# claim record that names its generation, and the staged verdict can carry the
+# intake's own task-id rows. A runner that released that claim on its way out
+# would strand both: nothing would ever drop the private verdict, and
+# publish_result would decline the captured generation for as long as it lay
+# there. The signal here is the real one a stop sends, delivered while the
+# runner sits in the keyed-answer intake that deliberately holds no source lock.
+HFEED="$TMP_ROOT/hfeed"; new_home "$HFEED"
+cat > "$ADAPTER_ROOT/bin/fm-procevent-slowfeed.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter whose answer extraction blocks, so the runner can be signalled
+# inside the unlocked intake window rather than around it.
+case "${1-}" in
+  answers) while [ ! -e "$FM_HOME/state/feed-go" ]; do sleep 0.05; done ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-slowfeed.sh"
+FEED_TRIGGER="$TMP_ROOT/feed-trigger"
+PE_TRACKED+=("$HFEED|feed-src")
+pe_adapter "$HFEED" register slowfeed feed-src -- "$BLOCKER" "$FEED_TRIGGER" "feed payload" >/dev/null
+FM_HOME="$HFEED" "$ROOT/bin/fm-captain-hold.sh" bind feed-src >/dev/null \
+  || fail "could not bind the intake's destination"
+pe_adapter "$HFEED" start feed-src > "$TMP_ROOT/feed-start.out" 2>&1 &
+feed_runner=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" || fail "the intake fixture never claimed its source"
+feed_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim")
+feed_token=$(sed -n '3p' "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim")
+case "$feed_leader" in ''|*[!0-9]*) fail "could not read the intake runner's leader pid: $feed_leader" ;; esac
+[ -n "$feed_token" ] || fail "could not read the intake runner's claim token"
+FEED_OUTCOME="$HFEED/state/procevent/.feed-src.$feed_token.rcpt.output"
+: > "$FEED_TRIGGER"
+wait_for "$FEED_OUTCOME.gen" || fail "the runner never staged its generation note before the intake"
+kill -TERM -"$feed_leader" 2>/dev/null || fail "could not signal the intake runner's group"
+wait "$feed_runner" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$feed_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$feed_leader" 2>/dev/null && fail "the signalled intake runner survived"
+assert_present "$FEED_OUTCOME.gen" "the killed runner dropped the generation note recovery reads"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" \
+  "the killed runner released the claim that owns its staged verdict"
+pe_adapter "$HFEED" retire feed-src >/dev/null
+assert_absent "$FEED_OUTCOME.body" "retirement left the staged intake body behind"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" "retirement left the reaped claim behind"
+# The verdict and the note pinning it to one round are the only proof of a
+# submission whose answers the intake may already have applied, so reaping the
+# claim does not take them while their seam is still owed - recovery consumes
+# them, and only then is the pair dropped.
+assert_present "$FEED_OUTCOME.gen" "retirement destroyed a generation note whose seam never ran"
+assert_present "$FEED_OUTCOME" "retirement destroyed a verdict whose seam never ran"
+pe_adapter "$HFEED" reconcile >/dev/null
+assert_absent "$FEED_OUTCOME.gen" "recovery left the generation note it consumed behind"
+assert_absent "$FEED_OUTCOME" "recovery left the verdict it consumed behind"
+pass "a runner killed inside the intake leaves its claim and staged set to the reaper"
+
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
 TORN_TRIGGER="$TMP_ROOT/torn-trigger"
 pe_register "$HJ" lavish torn-src -- "$BLOCKER" "$TORN_TRIGGER" "torn" >/dev/null
@@ -1455,6 +1543,15 @@ printf 'garbage that is not a session block\n' > "$TRM"
 printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  session_ended: true\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
   && fail "prompt payload text was read as a session-level terminal marker"
+# A completely parsed block that declares no rows is positive evidence of
+# nothing said, not indeterminate content: an ended session carrying one, with
+# no round journaled for it, retires rather than being polled again forever.
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  || fail "an ended session carrying a declared-empty block was kept armed forever"
+printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  || fail "a Send & End close carrying a declared-empty block was kept armed forever"
 pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
 
 # The adapter, not the runner, decides which Lavish results are routine no-ops

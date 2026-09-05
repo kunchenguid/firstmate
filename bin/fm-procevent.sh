@@ -144,6 +144,40 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# Receipt state is adapter-owned through one more seam of the same kind, and
+# this runner presents nothing anywhere. The per-source boundary orders the
+# capture against publication: the runner holds it across the durable capture
+# and the staging of the receipt outcome and its generation note, releases it
+# for the potentially slow external keyed-answer feed, and re-acquires a fresh
+# hold for the seam, where it hands the adapter the outcome:
+# `bin/fm-procevent-<adapter>.sh receipt <source-id> <sequence> <result-file>
+# <outcome-file>`, where the outcome file states exactly what the intake
+# returned - `not-fed`, `fed <exit>` plus its bounded output, or that verdict
+# with an incomplete quality when the adapter's own extraction failed - so an
+# adapter that acknowledges a capture toward its own audience can record what
+# was received and what was saved, never more than that. A missing command, an
+# error, or any other exit changes nothing: publication and handling proceed
+# exactly as before. This runner never reads or presents a receipt.
+#
+# The unlocked feed never lets a capture publish early: while the outcome and
+# its generation note are staged, publish_result declines the generation, and
+# reconcile's recovery reclaims the seam once the runner's claim is gone, so a
+# concurrent reconcile can neither observe a capture before the adapter
+# acknowledged it nor run the seam twice.
+#
+# A runner killed between its durable capture and that seam leaves a generation
+# the adapter never saw, and reconcile would otherwise republish it with its
+# acknowledgement silently skipped. So the runner records, under the same hold,
+# that the seam had its one chance at a generation, and reconcile gives that
+# chance to any captured generation still missing it - before it publishes
+# anything or starts a replacement - over whatever that generation can still
+# prove. A runner killed after its intake returned left that verdict staged
+# beside a note naming the exact source and sequence it speaks for, and the
+# seam is handed it; a runner killed before the intake returned recorded no
+# verdict, so the seam is handed an empty outcome rather than a guess. The
+# intake is never re-fed, and the recorded note is what keeps a seam that
+# already ran from running twice.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -175,6 +209,10 @@ case "${1-}" in ''|-h|--help|help) usage ;; esac
 
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+# Retirement's bounded wait for the adapter's receipts lock, in 0.1s tries. The
+# bound is a property of the seam it waits on - one journal append - not an
+# operator choice, so only a test overrides it.
+RECEIPTS_RETIRE_LOCK_TRIES=${FM_PROCEVENT_RECEIPTS_RETIRE_LOCK_TRIES:-50}
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 
@@ -193,6 +231,32 @@ state_root_bind() {  # [create]
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   state_root_bind || die "process-event state root is not a private directory"
 fi
+
+# Shared by the two bounded-capture sites: copy stdin to stdout up to $1 bytes,
+# drain the rest, and exit 3 exactly when truncation was needed.
+# shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
+FM_PROCEVENT_BOUNDER='use strict;
+    use warnings;
+    my $limit = shift;
+    my ($written, $truncated) = (0, 0);
+    while (1) {
+      my $count = sysread(STDIN, my $buffer, 65536);
+      exit 2 unless defined $count;
+      last if $count == 0;
+      my $take = $written < $limit ? $limit - $written : 0;
+      $take = $count if $take > $count;
+      if ($take > 0) {
+        my $offset = 0;
+        while ($offset < $take) {
+          my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+          exit 2 unless defined $count_written;
+          $offset += $count_written;
+        }
+        $written += $take;
+      }
+      $truncated = 1 if $take < $count;
+    }
+    exit($truncated ? 3 : 0);'
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -322,6 +386,32 @@ source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 
+# Every private file one claim generation can leave staged: the capture's own
+# bounded output, the receipt outcome, the generation note that pins that
+# outcome to one sequence, the intake body staged beside it, and the outcome's
+# atomic-rename staging name. A runner killed mid-generation leaves any of
+# them, so reaping a claim drops them rather than the one name the caller
+# happened to know about - with one exception. The outcome and its note are a
+# verdict the receipt seam is still owed: while that seam has not run they are
+# the only proof of a round whose answers the intake may already have applied,
+# and recover_receipt_seams consumes them even after the source is retired. So
+# they go only once the seam has had its chance, exactly as the claim reclaim
+# in fm-procevent-lib.sh treats them.
+remove_staged_generation() {  # <source-id> <claim-token>
+  local outcome gen_id gen_seq
+  outcome=$(staging_file "$1" "$2.rcpt")
+  rm -f -- "$(staging_file "$1" "$2")" "$outcome.body" "$outcome.tmp"
+  gen_seq=
+  if [ -f "$outcome.gen" ] && [ ! -L "$outcome.gen" ]; then
+    IFS=$'\t' read -r gen_id gen_seq < "$outcome.gen" || gen_seq=
+    [ "$gen_id" = "$1" ] || gen_seq=
+    case "$gen_seq" in ''|*[!0-9]*) gen_seq= ;; esac
+  fi
+  if [ -z "$gen_seq" ] || fm_procevent_receipt_seam_ran "$STATE" "$1" "$gen_seq"; then
+    rm -f -- "$outcome" "$outcome.gen"
+  fi
+}
+
 # Let the source's own adapter apply and acknowledge one captured result. See
 # the header for why this exists and what each exit means. An already
 # acknowledged result is skipped, so this is safe to call more than once for the
@@ -348,16 +438,78 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # source, an adapter with no `answers` command, and a failure on either side all
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
-feed_keyed_answers() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq
+#
+# Whatever the intake returned is written to the outcome file for the receipt
+# seam: `not-fed`, or `fed <exit>` plus the bounded stdout of the intake. A
+# truncated or unreadable capture is stated as such rather than silently
+# presented as a complete verdict.
+feed_keyed_answers() {  # <adapter> <source-id> <result-file> <outcome-file>
+  local adapter=$1 id=$2 result=$3 outcome=$4 script origin seq
+  local intake_rc bound_rc answers_rc body pipe_status
+  body="$outcome.body"
   script=$(adapter_script "$adapter")
-  [ -f "$script" ] && [ ! -L "$script" ] || return 1
-  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
-  [ -n "$origin" ] || return 1
-  seq=$(fm_procevent_result_sequence "$result") || return 1
+  if [ ! -f "$script" ] || [ -L "$script" ] \
+    || ! origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) \
+    || [ -z "$origin" ] \
+    || ! seq=$(fm_procevent_result_sequence "$result"); then
+    printf 'not-fed\n' > "$outcome"
+    return 1
+  fi
+  # Both staged files can carry task-id rows, so neither may depend on the
+  # caller's umask for its privacy, and neither may be written through anything
+  # already standing at its path.
+  [ ! -e "$body" ] && [ ! -L "$body" ] || { printf 'not-fed\n' > "$outcome"; return 1; }
+  (umask 077; : > "$body") || { printf 'not-fed\n' > "$outcome"; return 1; }
   "$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source "the captured result $id sequence $seq" 2>/dev/null \
+    | perl -e "$FM_PROCEVENT_BOUNDER" "$MAX_OUTPUT_BYTES" > "$body"
+  pipe_status=("${PIPESTATUS[@]}")
+  answers_rc=${pipe_status[0]}
+  intake_rc=${pipe_status[1]}
+  bound_rc=${pipe_status[2]}
+  # The completed outcome is staged beside its final path and renamed into
+  # place, so a reader - the seam, or recovery after a runner died mid-write -
+  # never sees a half-written verdict as a whole one.
+  [ ! -e "$outcome.tmp" ] && [ ! -L "$outcome.tmp" ] \
+    || { printf 'not-fed\n' > "$outcome"; rm -f -- "$body"; return 1; }
+  (umask 077; : > "$outcome.tmp") \
+    || { printf 'not-fed\n' > "$outcome"; rm -f -- "$body"; return 1; }
+  {
+    if [ "$answers_rc" -ne 0 ]; then
+      # The adapter failed to extract its own answers. The intake above may
+      # still have consumed and applied part of what came through, so the
+      # outcome states fed with an incomplete quality rather than not-fed:
+      # the receipt says its saving report was incomplete instead of
+      # presenting a verified save over rows this runner cannot vouch for.
+      printf 'fed %s\nincomplete\n' "$intake_rc"
+    elif [ "$bound_rc" -eq 0 ]; then
+      printf 'fed %s\n' "$intake_rc"
+    elif [ "$bound_rc" -eq 3 ]; then
+      printf 'fed %s\ntruncated\n' "$intake_rc"
+    else
+      printf 'fed %s\nunreadable\n' "$intake_rc"
+    fi
+    cat "$body"
+  } > "$outcome.tmp"
+  if mv -f -- "$outcome.tmp" "$outcome"; then
+    rm -f -- "$body"
+    return "$intake_rc"
+  fi
+  rm -f -- "$outcome.tmp" "$body"
+  return 1
+}
+
+# Let the source's own adapter record receipt state for one captured result and
+# prepare whatever acknowledgement it presents to its own audience (see the
+# receipt-state note in the header). Silenced and best-effort exactly like the
+# seams above: an adapter with no such command, and any failure on its side,
+# leaves the capture untouched and still announced.
+adapter_receipt() {  # <adapter> <source-id> <sequence> <result-file> <outcome-file>
+  local adapter=$1 script
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 0
+  "$script" receipt "$2" "$3" "$4" "$5" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -529,6 +681,17 @@ publish_result() {  # <result-file>
   [ -n "$adapter" ] || return 1
   line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
   fm_procevent_source_lock_acquire "$id" || return 1
+  # A generation whose receipt seam is still owed - its staged outcome and
+  # generation note exist but no seam-ran marker proves the seam saw it - is
+  # never published here. The live runner that captured it publishes it after
+  # the seam, and recovery runs the seam for a dead one before this loop, so
+  # declining here only ever delays a wake until its acknowledgement is
+  # ordered, which is the boundary's whole point.
+  if ! fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq" \
+    && [ -n "$(staged_receipt_outcome "$id" "$seq" 2>/dev/null || true)" ]; then
+    fm_procevent_source_lock_release "$id"
+    return 1
+  fi
   if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then
     # A result its own adapter declares a routine no-op is recorded as handled
     # and never announced, so it neither wakes a handler now nor comes back on
@@ -679,9 +842,21 @@ cmd_start() {
   CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
   CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
   STAGED_OUTPUT=
+  RECEIPT_OUTCOME=
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
+    # The receipt staging is deliberately left where it lies. An abnormal exit
+    # is exactly when the generation note has to keep publication waiting and
+    # the staged verdict has to survive for the seam recovery owes this round;
+    # the reaping paths that drop a claim's staging set own its cleanup. The
+    # claim is deliberately left with it, for that same reason: every one of
+    # those paths is keyed on the claim record, so releasing it here would
+    # orphan the staged set from the only owner that can reap it. A generation
+    # still mid-flight keeps both, and the stale-claim recovery takes them
+    # together. Only an exit with nothing staged - before the capture, or after
+    # the normal cleanup - releases the claim.
+    [ -z "$RECEIPT_OUTCOME" ] || return 0
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
@@ -756,30 +931,7 @@ EOF
     [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
     (umask 077; : > "$out") || die "cannot stage output"
     STAGED_OUTPUT=$out
-    "${ARGV[@]}" 2>/dev/null | perl -e '
-      use strict;
-      use warnings;
-      my $limit = shift;
-      my ($written, $truncated) = (0, 0);
-      while (1) {
-        my $count = sysread(STDIN, my $buffer, 65536);
-        exit 2 unless defined $count;
-        last if $count == 0;
-        my $take = $written < $limit ? $limit - $written : 0;
-        $take = $count if $take > $count;
-        if ($take > 0) {
-          my $offset = 0;
-          while ($offset < $take) {
-            my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
-            exit 2 unless defined $count_written;
-            $offset += $count_written;
-          }
-          $written += $take;
-        }
-        $truncated = 1 if $take < $count;
-      }
-      exit($truncated ? 3 : 0);
-    ' "$MAX_OUTPUT_BYTES" > "$out"
+    "${ARGV[@]}" 2>/dev/null | perl -e "$FM_PROCEVENT_BOUNDER" "$MAX_OUTPUT_BYTES" > "$out"
     local pipe_status=("${PIPESTATUS[@]}")
     rc=${pipe_status[0]}
     bound_rc=${pipe_status[1]}
@@ -789,6 +941,7 @@ EOF
       *) die "cannot bound source output" ;;
     esac
   fi
+
 
   if [ "$capture_state" = no-result ] || { [ "$extension_owner" -eq 0 ] && [ "$rc" -ne 0 ] && [ ! -s "$out" ]; }; then
     # No usable result. Leave the registration armed; the adapter decides
@@ -800,26 +953,69 @@ EOF
     exit 0
   fi
 
+  # The per-source boundary orders capture against publication, but the
+  # external keyed-answer intake no longer runs under it: a slow or hung
+  # backlog would otherwise wedge every reconcile, publication, and retirement
+  # that needs this source's lock. The ordering the boundary exists for - a
+  # concurrent reconcile must never publish a capture whose receipt seam has
+  # not spoken - is preserved by the staged outcome and its generation note:
+  # publish_result declines a generation whose seam is still owed (marker
+  # present, seam-ran marker absent), and recover_receipt_seams leaves a
+  # generation staged under this runner's own claim token to this runner. The
+  # feed writes its verdict atomically, so recovery after a death here reads a
+  # whole outcome or none.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$extension_owner" -eq 1 ]; then
     durable="./$durable"
-  fi
-
-  if [ "$extension_owner" -eq 1 ]; then
-    :
   else
     durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") \
-      || { rm -f -- "$out"; die "cannot durably capture the result"; }
+      || { fm_procevent_source_lock_release "$id"; rm -f -- "$out"; die "cannot durably capture the result"; }
   fi
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
 
   # Independent of publication and acknowledgement, so it runs once per capture
-  # for every adapter and cannot change what the handler receives.
+  # for every adapter and cannot change what the handler receives. The receipt
+  # seam runs after the feed so a receipt can state the intake's verdict, and
+  # before publication so recording a receipt can never delay a capture's wake.
+  local durable_seq
+  durable_seq=$(fm_procevent_result_sequence "$durable")
+  RECEIPT_OUTCOME=$(staging_file "$id" "$CLAIM_TOKEN.rcpt")
+  [ ! -e "$RECEIPT_OUTCOME" ] && [ ! -L "$RECEIPT_OUTCOME" ] \
+    && [ ! -e "$RECEIPT_OUTCOME.gen" ] && [ ! -L "$RECEIPT_OUTCOME.gen" ] \
+    || { fm_procevent_source_lock_release "$id"; die "cannot safely stage the receipt outcome"; }
+  (umask 077; : > "$RECEIPT_OUTCOME") || { fm_procevent_source_lock_release "$id"; die "cannot stage the receipt outcome"; }
+  # The generation note beside the outcome names the one source and sequence
+  # that outcome speaks for. A runner killed after the intake returned but
+  # before the seam ran leaves both behind, and this is what lets recovery read
+  # that verdict as this round's, never as another round's or another source's
+  # (see recover_receipt_seams). Staged under the hold, it is also the
+  # publication marker the unlocked feed below relies on.
+  (umask 077; printf '%s\t%s\n' "$id" "$durable_seq" > "$RECEIPT_OUTCOME.gen") \
+    || { fm_procevent_source_lock_release "$id"; die "cannot stage the receipt outcome"; }
+  fm_procevent_source_lock_release "$id"
   if [ "$extension_owner" -eq 0 ] \
-    && feed_keyed_answers "$adapter" "$id" "$durable"; then
+    && feed_keyed_answers "$adapter" "$id" "$durable" "$RECEIPT_OUTCOME"; then
     printf 'answers-fed: %s\n' "$id"
   fi
+  # The seam runs under a fresh acquisition: the feed above ran unlocked, and
+  # everything after this point - seam, its handled generations, the seam-ran
+  # marker - is again ordered against every concurrent reconcile exactly as
+  # when the hold spanned the whole capture.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
+    adapter_receipt "$adapter" "$id" "$durable_seq" \
+      "$durable" "$RECEIPT_OUTCOME" || true
+  # Still under the same hold: the seam has had its one chance at this
+  # generation, whatever it did with it. Recording that is what lets reconcile
+  # tell a generation captured by a runner that died before the seam from one
+  # the seam already saw (see recover_receipt_seams).
+  fm_procevent_mark_receipt_seam "$STATE" "$id" "$durable_seq" >/dev/null 2>&1 || true
+  fm_procevent_source_lock_release "$id"
+  rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body" \
+    "$RECEIPT_OUTCOME.tmp"
+  RECEIPT_OUTCOME=
 
   # A self-announcing adapter's autohandle announces through its own durable
   # downstream channel, so publication waits until after application and covers
@@ -909,8 +1105,165 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# What a dead generation's own keyed-answer intake actually returned, when its
+# runner got far enough to write it down. A staged outcome is claimed by nothing
+# but the generation note beside it, which names the exact source and sequence
+# the outcome speaks for, so a recovered seam can only ever read the verdict of
+# the round it is recovering; the staging file names themselves are never
+# matched, because a source id may itself contain the separator. One generation
+# is staged by exactly one runner, so two notes can never name it - and if two
+# somehow do, nothing here is proven and none is used. Only ever called while
+# holding the source's lock, where no live runner can be staging one.
+staged_receipt_outcome() {  # <source-id> <sequence>
+  local gen f want found=''
+  want=$(printf '%s\t%s' "$1" "$2")
+  for gen in "$REG"/.*.rcpt.output.gen; do
+    [ -f "$gen" ] && [ ! -L "$gen" ] || continue
+    [ "$(sed -n '1p' "$gen" 2>/dev/null)" = "$want" ] || continue
+    f=${gen%.gen}
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ -z "$found" ] || return 1
+    found=$f
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# Give the receipt seam the one chance a dead runner owed it. A runner killed
+# after its durable capture but before the seam ran leaves a captured generation
+# its adapter never saw: reconcile republishes that capture, so without this the
+# handler would be woken for a submission whose acknowledgement lifecycle
+# silently skipped a round, and a later terminal capture could retire the source
+# before that round was ever acknowledged. Recovery reruns the same seam the
+# same way - under the same per-source hold, taken in the same order, before
+# publication - over whatever the dead generation can still prove: its own
+# staged intake outcome when the runner died after that intake returned, and an
+# empty outcome when it died before, because the durable capture is a fact this
+# can always prove and a verdict nobody recorded is not. The intake is never
+# re-fed here, so nothing can be applied twice. A generation whose seam already
+# ran is left alone, re-checked under the hold so a live runner mid-seam is
+# never doubled. A retired source is still recovered from what its dead runner
+# actually recorded: a staged verdict is an obligation that outlived the poll,
+# and it is that verdict - never the presence of a receipts record, which does
+# not exist until some round journals one - that says the obligation is live.
+# It runs before this cycle publishes anything or starts any replacement
+# runner, so the seam still speaks for the poll that produced the capture,
+# never for one a replacement has since armed. A replacement already running
+# does not hold it back either: a live claim owns only the generation it staged
+# under its own token, so an older generation's owed verdict is recovered while
+# that replacement polls rather than waiting on a poll that may never end.
+recover_receipt_seams() {
+  local result id adapter seq outcome staged claim_state live_token registered
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    id=$(fm_procevent_result_source_id "$result")
+    fm_procevent_source_id_valid "$id" || continue
+    seq=$(fm_procevent_result_sequence "$result")
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq" && continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+    [ -n "$adapter" ] || continue
+    fm_procevent_source_lock_acquire "$id" || continue
+    # Read under the hold, like every other fact this decides on: retirement
+    # runs under the same lock, so a check taken outside it could describe a
+    # source that has since been retired or re-registered.
+    registered=0
+    if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+      registered=1
+    fi
+    if ! fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq"; then
+      # A generation whose runner can still reach its own seam owns it: that
+      # runner runs it between its capture and its publication, and recovery
+      # stepping in now would present a half-kept verdict. The claim is the
+      # liveness fact, and a claim whose LEADER is gone is always recoverable
+      # here: a gone claim (1), and equally the crash cut (3), where the leader
+      # is dead and only its owned group survives. That leader can never run
+      # its seam, and the reap that stops its group drops the whole staging
+      # set, so deferring 3 would destroy the verdict it had already recorded.
+      # The seam-ran re-check above stays, so a runner that completed its seam
+      # while this reconcile waited on the lock is still respected.
+      fm_procevent_claim_state_locked "$id"
+      claim_state=$?
+      live_token=
+      case "$claim_state" in 0|4) live_token=$FM_PROCEVENT_CLAIM_TOKEN ;; esac
+      # The dead generation's own outcome belongs to that claim's staging set
+      # and is dropped with the rest of it when the claim is reaped. A set the
+      # live claim no longer names - a runner that released its own claim on
+      # the way out, or a generation a reclaim has already replaced - has no
+      # reaper left, so once the seam it owed has spoken this drops that set
+      # itself rather than leaking a private verdict nothing will ever clean.
+      # It is also what says whether a live claim owns this generation at all:
+      # a runner stages its verdict under its OWN claim token, so a verdict
+      # named for another token is one no live runner can ever consume.
+      outcome=$(staged_receipt_outcome "$id" "$seq") || outcome=
+      case "$claim_state" in
+        1|3) ;;
+        0|4)
+          # A held or terminal-marked claim is left to its runner only for the
+          # generation that runner itself staged. A replacement that reclaimed
+          # a dead claim inherits the source, never the older generation's
+          # owed seam: deferring to it would leave that round unacknowledged
+          # and its capture undeliverable for as long as the replacement polls,
+          # which a managed poll can do indefinitely.
+          if [ -z "$outcome" ] || [ -z "$live_token" ] \
+            || [ "$outcome" = "$(staging_file "$id" "$live_token.rcpt")" ]; then
+            fm_procevent_source_lock_release "$id"
+            continue
+          fi
+          ;;
+        # An unreadable claim (2) proves nothing about who owns what, so the
+        # generation is left to its runner exactly as before.
+        *) fm_procevent_source_lock_release "$id"; continue ;;
+      esac
+      staged=
+      if [ "$registered" -eq 0 ]; then
+        # A retired source has no poll left to prove anything new, so the only
+        # thing recoverable here is the verdict its dead runner already staged.
+        # That staged pair IS the obligation: a receipts record does not exist
+        # until some round journals one, so its absence proves nothing, and the
+        # seam creates it. An unconsumed verdict is never deleted here.
+        if [ -z "$outcome" ]; then
+          fm_procevent_source_lock_release "$id"
+          continue
+        fi
+      elif [ -z "$outcome" ]; then
+        staged=$(staging_file "$id" "reconcile.$$.rcpt")
+        # A reconcile killed before its trailing removal leaves this exact name
+        # behind, and no reaper knows it: the claim reap and the sweep key on a
+        # claim token this name can never be. A later reconcile that reuses the
+        # dead PID would otherwise refuse to stage, skip the seam entirely, and
+        # strand the generation - so drop the leftover and its notes first.
+        rm -f -- "$staged" "$staged.gen" "$staged.body" "$staged.tmp"
+        if [ ! -e "$staged" ] && [ ! -L "$staged" ] && (umask 077; : > "$staged"); then
+          outcome=$staged
+        else
+          staged=
+        fi
+      fi
+      if [ -n "$outcome" ]; then
+        FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
+          adapter_receipt "$adapter" "$id" "$seq" "$result" "$outcome" || true
+        fm_procevent_mark_receipt_seam "$STATE" "$id" "$seq" >/dev/null 2>&1 || true
+        if [ -z "$staged" ]; then
+          live_token=
+          if { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; } \
+            && fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+            live_token=$FM_PROCEVENT_CLAIM_TOKEN
+          fi
+          if [ -z "$live_token" ] || [ "$outcome" != "$(staging_file "$id" "$live_token.rcpt")" ]; then
+            rm -f -- "$outcome" "$outcome.gen" "$outcome.body" "$outcome.tmp"
+          fi
+        fi
+      fi
+      [ -z "$staged" ] || rm -f -- "$staged"
+    fi
+    fm_procevent_source_lock_release "$id"
+  done < <(fm_procevent_pending "$STATE")
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  recover_receipt_seams
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -943,7 +1296,7 @@ cmd_reconcile() {
     case "$stop_state" in
       0|1)
         if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-          rm -f -- "$(staging_file "$id" "$token")"
+          remove_staged_generation "$id" "$token"
           rm -f -- "$(runner_file "$id")"
           stopped=$((stopped + 1))
         else
@@ -1005,7 +1358,7 @@ cmd_reconcile() {
           if [ "$stop_state" -eq 0 ] \
             && cleanup_extension_registration_invocations_locked "$id" \
             && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-            rm -f -- "$(staging_file "$id" "$token")"
+            remove_staged_generation "$id" "$token"
             rm -f -- "$(runner_file "$id")"
             fm_procevent_source_lock_release "$id"
             detach_runner "$id"
@@ -1108,7 +1461,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest=''
+  local extension_binding_digest='' receipts_lock_taken=1 receipts_wait=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
@@ -1197,7 +1550,7 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "cannot release source ownership: $id"
       fi
-      rm -f -- "$(staging_file "$id" "$token")"
+      remove_staged_generation "$id" "$token"
     fi
   elif [ -n "$extension_binding_digest" ] \
     && ! cleanup_extension_binding_invocations "$extension_binding_digest"; then
@@ -1206,11 +1559,41 @@ cmd_retire() {
   fi
   rm -f -- "$(source_file "$id")"
   rm -f -- "$(runner_file "$id")"
+  # The receipts record is part of this runner's per-source layout (its bytes
+  # belong to the source's adapter), so it is cleaned with the registration.
+  # The removal takes the adapter's receipts lock so a writer already holding
+  # it cannot append the record back into existence after the unlink. The wait
+  # is BOUNDED: the adapter's own receipt seam takes the receipts lock before
+  # the source lock, so waiting unboundedly here, under the source lock, would
+  # be a lock-order inversion that could never resolve. A seam holds that lock
+  # only for the length of one journal append, so a short retry covers every
+  # ordinary contention while still failing rather than hanging.
+  if [ -e "$(fm_procevent_receipts_path "$STATE" "$id")" ] \
+    || [ -L "$(fm_procevent_receipts_path "$STATE" "$id")" ]; then
+    receipts_lock_taken=0
+    while [ "$receipts_wait" -lt "$RECEIPTS_RETIRE_LOCK_TRIES" ]; do
+      if fm_lock_try_acquire "$(fm_procevent_receipts_lock_path "$STATE" "$id")"; then
+        receipts_lock_taken=1
+        break
+      fi
+      receipts_wait=$((receipts_wait + 1))
+      sleep 0.1
+    done
+    if [ "$receipts_lock_taken" -eq 1 ]; then
+      rm -f -- "$(fm_procevent_receipts_path "$STATE" "$id")"
+      fm_lock_release "$(fm_procevent_receipts_lock_path "$STATE" "$id")"
+    fi
+  fi
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this
   # source id, and an unbound source is unaffected.
   "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  # The registration and the binding are gone either way, so the source really
+  # is retired; a record this call could not lock is reported rather than
+  # covered by a clean retirement line, and a later sweep reclaims it.
+  [ "$receipts_lock_taken" -ne 0 ] \
+    || die "retired the source but could not lock its receipts record: $id"
   printf 'retired: %s\n' "$id"
 }
 
@@ -1227,7 +1610,7 @@ sweep_relevant_state() {
   for path in "$STATE/extension-invocations"/*.owner.json; do
     [ -e "$path" ] && return 0
   done
-  for path in "$REG"/*.source "$REG"/*.runner; do
+  for path in "$REG"/*.source "$REG"/*.runner "$REG"/*.receipts; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       return 0
     fi
@@ -1326,6 +1709,21 @@ cmd_sweep_home() {
       sweep_add_id "$id"
     fi
     fm_procevent_source_lock_release "$id"
+  done
+  # A receipts record deliberately outlives the automatic retirement of its own
+  # source, so the last round of an ended review can still state Applying and
+  # Complete durably. This home's teardown is where that record is retired: it
+  # is the only enumeration that still sees a source with no registration and no
+  # claim, and retiring the id removes the record whether or not either remains.
+  for path in "$REG"/*.receipts; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      id=${path##*/}; id=${id%.receipts}
+      if fm_procevent_source_id_valid "$id"; then
+        sweep_add_id "$id"
+      else
+        failed=$((failed + 1))
+      fi
+    fi
   done
   for path in "$REG"/*.runner; do
     if [ -e "$path" ] || [ -L "$path" ]; then
