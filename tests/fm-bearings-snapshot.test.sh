@@ -1613,10 +1613,8 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
-# These retained rows reproduce the historical approval-time close: tasks-axi
-# preserves captain hold annotations on Done rows that also carry merged pull
-# requests. Without the shared artifact-aware selector, both approved deliveries
-# disappear. Answered captain questions are the negative boundary.
+# Approved rows pass through the release contract before their merged pull
+# requests are recorded. Answered captain questions are the negative boundary.
 test_captain_approved_deliveries_stay_in_landed() {
   local home mate fakebin json main_pr mate_pr main_backlog mate_backlog report_path
   local created_kind failures=''
@@ -1636,8 +1634,10 @@ test_captain_approved_deliveries_stay_in_landed() {
   "$TASKS_AXI_BIN" hold approved-main --reason "captain merge approval pending" \
     --kind captain --file "$main_backlog" >/dev/null \
     || fail "could not hold the main approved delivery"
+  "$TASKS_AXI_BIN" unhold approved-main --file "$main_backlog" >/dev/null \
+    || fail "could not release the main approved delivery"
   "$TASKS_AXI_BIN" 'done' approved-main --pr "$main_pr" --file "$main_backlog" >/dev/null \
-    || fail "could not reproduce the main approval-time close"
+    || fail "could not close the released main delivery"
 
   "$TASKS_AXI_BIN" add approved-mate "Ship the approved secondmate change" --kind ship \
     --repo firstmate --start --file "$mate_backlog" >/dev/null \
@@ -1645,11 +1645,13 @@ test_captain_approved_deliveries_stay_in_landed() {
   "$TASKS_AXI_BIN" hold approved-mate --reason "captain secondmate merge approval pending" \
     --kind captain --file "$mate_backlog" >/dev/null \
     || fail "could not hold the secondmate approved delivery"
+  "$TASKS_AXI_BIN" unhold approved-mate --file "$mate_backlog" >/dev/null \
+    || fail "could not release the secondmate approved delivery"
   "$TASKS_AXI_BIN" 'done' approved-mate --pr "$mate_pr" --file "$mate_backlog" >/dev/null \
-    || fail "could not reproduce the secondmate approval-time close"
+    || fail "could not close the released secondmate delivery"
 
   "$TASKS_AXI_BIN" add answered-question \
-    "Decide whether https://github.com/o/r/pull/7 may merge" --kind captain \
+    "Decide whether https://github.com/o/r/pull/7 may merge" --kind ship \
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the answered captain question"
   run_captain "$home" "$fakebin" hold answered-question \

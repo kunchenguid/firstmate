@@ -1951,64 +1951,96 @@ test_teardown_never_closes_a_captain_held_task() {
 }
 
 test_retained_row_artifacts_survive_captain_answers() {
-  local home report_id pr_id question_id repo wt pr json
+  local home retained_id rejected_id approved_id released_id repo wt
+  local rejected_pr approved_pr json show
   home=$(make_home retained-row-artifacts)
-  report_id=sample-retained-report
-  mkdir -p "$home/data/$report_id"
-  tasks_in "$home" add "$report_id" "Investigate retained report evidence" --kind scout \
+  retained_id=sample-retained-report
+  mkdir -p "$home/data/$retained_id"
+  tasks_in "$home" add "$retained_id" "Investigate retained report evidence" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the retained report fixture"
-  write_origin_meta "$home" "$report_id"
-  printf 'done: report complete\n' > "$home/state/$report_id.status"
+  write_origin_meta "$home" "$retained_id"
+  printf 'done: report complete\n' > "$home/state/$retained_id.status"
   printf '# Retained report\n\nThe captain must choose the follow-up.\n' \
-    > "$home/data/$report_id/report.md"
-  run_captain "$home" hold "$report_id" --reason "captain must choose the report follow-up" \
+    > "$home/data/$retained_id/report.md"
+  run_captain "$home" hold "$retained_id" --reason "captain must choose the report follow-up" \
     >/dev/null || fail "could not hold the retained report"
-  run_captain "$home" complete "$report_id" "$report_id" >/dev/null \
+  run_captain "$home" complete "$retained_id" "$retained_id" >/dev/null \
     || fail "completion gate failed for the retained report"
-  run_teardown "$home" "$report_id" > "$home/report-teardown.out" \
+  run_teardown "$home" "$retained_id" > "$home/retained-teardown.out" \
     2> "$home/report-teardown.err" \
     || fail "retained report cleanup failed: $(cat "$home/report-teardown.err")"
   printf 'Proceed with the report follow-up.\n' > "$home/report-answer.txt"
-  run_captain "$home" answer "$report_id" --decision-file "$home/report-answer.txt" >/dev/null \
+  run_captain "$home" answer "$retained_id" --decision-file "$home/report-answer.txt" >/dev/null \
     || fail "could not answer the retained report call"
 
-  pr_id=sample-retained-pr
-  repo="$home/projects/sample-pr"
-  wt="$home/projects/$pr_id"
-  pr="https://github.com/sample/sample/pull/23"
-  fm_git_worktree "$repo" "$wt" fm/retained-pr
-  tasks_in "$home" add "$pr_id" "Ship the retained pull request" --kind ship \
-    --repo sample --start >/dev/null || fail "could not create the retained PR fixture"
-  fm_write_meta "$home/state/$pr_id.meta" \
-    "window=firstmate:fm-$pr_id" "endpoint_task_id=$pr_id" "worktree=$wt" \
-    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
-    "pr=$pr" "spawn_gen=fixture-$pr_id"
-  printf 'done: PR %s merged\n' "$pr" > "$home/state/$pr_id.status"
-  run_captain "$home" hold "$pr_id" --reason "captain must choose the PR follow-up" \
-    >/dev/null || fail "could not hold the retained PR"
-  run_teardown "$home" "$pr_id" > "$home/pr-teardown.out" 2> "$home/pr-teardown.err" \
-    || fail "retained PR cleanup failed: $(cat "$home/pr-teardown.err")"
-  printf 'Proceed with the PR follow-up.\n' > "$home/pr-answer.txt"
-  run_captain "$home" answer "$pr_id" --decision-file "$home/pr-answer.txt" >/dev/null \
-    || fail "could not answer the retained PR call"
+  rejected_id=sample-rejected-merge
+  rejected_pr="https://github.com/sample/sample/pull/22"
+  tasks_in "$home" add "$rejected_id" "Decide whether $rejected_pr may merge" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the rejected merge fixture"
+  run_captain "$home" hold "$rejected_id" --reason "captain merge approval pending" \
+    >/dev/null || fail "could not hold the rejected merge"
+  printf 'Do not merge this pull request.\n' > "$home/rejected-answer.txt"
+  run_captain "$home" answer "$rejected_id" --decision-file "$home/rejected-answer.txt" \
+    >/dev/null || fail "could not record the rejected merge"
+  show=$(tasks_in "$home" show "$rejected_id" --full) || fail "the rejected merge disappeared"
+  assert_contains "$show" "state: done" "the rejected merge answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" "the rejected merge lost its non-release evidence"
 
-  question_id=sample-retained-question
-  run_captain "$home" hold "$question_id" --title "Choose the release wording" \
-    --reason "captain must choose the release wording" --repo sample >/dev/null \
-    || fail "could not create the no-delivery captain question"
-  printf 'Use the shorter wording.\n' > "$home/question-answer.txt"
-  run_captain "$home" answer "$question_id" --decision-file "$home/question-answer.txt" \
-    >/dev/null || fail "could not answer the no-delivery captain question"
+  approved_id=sample-approved-merge
+  approved_pr="https://github.com/sample/sample/pull/23"
+  repo="$home/projects/sample-approved"
+  wt="$home/projects/$approved_id"
+  fm_git_worktree "$repo" "$wt" fm/approved-merge
+  tasks_in "$home" add "$approved_id" "Ship the approved pull request $approved_pr" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the approved merge fixture"
+  fm_write_meta "$home/state/$approved_id.meta" \
+    "window=firstmate:fm-$approved_id" "endpoint_task_id=$approved_id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$approved_pr" "spawn_gen=fixture-$approved_id"
+  printf 'done: PR %s merged\n' "$approved_pr" > "$home/state/$approved_id.status"
+  run_captain "$home" hold "$approved_id" --reason "captain merge approval pending" \
+    >/dev/null || fail "could not hold the approved merge"
+  printf 'Merge the approved pull request.\n' > "$home/approved-answer.txt"
+  run_captain "$home" answer "$approved_id" --release \
+    --decision-file "$home/approved-answer.txt" >/dev/null \
+    || fail "could not release the approved merge"
+  show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
+  assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
+    2> "$home/approved-teardown.err" \
+    || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
+
+  released_id=sample-released-report
+  mkdir -p "$home/data/$released_id"
+  tasks_in "$home" add "$released_id" "Investigate released report evidence" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the released report fixture"
+  write_origin_meta "$home" "$released_id"
+  printf 'done: report complete\n' > "$home/state/$released_id.status"
+  printf '# Released report\n' > "$home/data/$released_id/report.md"
+  run_captain "$home" hold "$released_id" --reason "captain report release pending" \
+    >/dev/null || fail "could not hold the released report"
+  run_captain "$home" complete "$released_id" "$released_id" >/dev/null \
+    || fail "completion gate failed for the released report"
+  printf 'Release the completed report.\n' > "$home/released-answer.txt"
+  run_captain "$home" answer "$released_id" --release \
+    --decision-file "$home/released-answer.txt" >/dev/null \
+    || fail "could not release the completed report"
+  run_teardown "$home" "$released_id" > "$home/released-teardown.out" \
+    2> "$home/released-teardown.err" \
+    || fail "released report cleanup failed: $(cat "$home/released-teardown.err")"
 
   json=$(run_bearings "$home") || fail "Bearings failed after retained delivery answers"
   printf '%s' "$json" | jq -e \
-    --arg report_id "$report_id" --arg report "data/$report_id/report.md" \
-    --arg pr_id "$pr_id" --arg pr "$pr" --arg question_id "$question_id" '
-      (.landed | any(.id == $report_id and .artifact == $report))
-        and (.landed | any(.id == $pr_id and .artifact == $pr))
-        and (.landed | any(.id == $question_id) | not)
-    ' >/dev/null || fail "retained deliveries or answered question were misclassified: $json"
-  pass "retained report and PR artifacts survive captain answers"
+    --arg retained_id "$retained_id" --arg retained "data/$retained_id/report.md" \
+    --arg rejected_id "$rejected_id" --arg approved_id "$approved_id" \
+    --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
+    --arg released "data/$released_id/report.md" '
+      (.landed | any(.id == $retained_id and .artifact == $retained))
+        and (.landed | any(.id == $rejected_id) | not)
+        and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
+        and (.landed | any(.id == $released_id and .artifact == $released))
+    ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
+  pass "release and retention distinguish delivered work from rejected merges"
 }
 
 # Retention happens after destructive cleanup, through the same pending record

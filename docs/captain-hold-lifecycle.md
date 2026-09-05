@@ -87,8 +87,11 @@ Three accepted limits remain deliberate:
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
-Recently Landed uses the shared selector in `bin/fm-landed-lib.sh`: a structured Done row is included when its `hold-kind` is not `captain`, or when it carries a merged pull request, completed report, or finished local-only merge artifact.
-A captain-approved delivery therefore remains visible even when tasks-axi preserves its captain hold annotations, while an answered captain question with no delivery artifact stays out.
+Recently Landed uses the shared selector in `bin/fm-landed-lib.sh`: a structured Done row is included when its artifacts and lifecycle state prove that it is delivered rather than merely answered.
+No legitimate merged pull request closes while it still carries `hold-kind: captain`, because merge approval releases the hold before cleanup records the merged artifact.
+A captain's rejection of a merge is therefore no longer recorded as if the merge had happened, even when the task title names that pull request.
+A completed report remains eligible when its row retains `hold-kind: captain`, because retained scout cleanup records the report before the captain answers its follow-up call.
+Released pull requests and reports remain eligible after cleanup closes them, while an answered captain question with no delivery artifact stays out.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
 ## Record divergence
