@@ -53,8 +53,8 @@
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that closes the row
-# first preserves the pending completion before replay retires the record.
+# closes a row that reads as an open captain call. An answer that fails to close
+# keeps the pending completion for its retry.
 
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
@@ -330,9 +330,29 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
+fm_backlog_decode_task_body() {  # <tasks-axi-show-output>
+  printf '%s\n' "$1" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      exit 0 if $shown eq "" || $shown eq "-";
+      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+      print $value unless $value eq "-";
+    '
+}
+
+fm_backlog_body_has_captain_resolution() {  # <decoded-task-body>
+  case "$1" in
+    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
+    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' encoded line latest_line body new_body tmp
+  local arg deliverable='' encoded line latest_line body new_body tmp explicit_none=0
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -340,6 +360,7 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   shift 2
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
+    [ "$arg" != --completion-none ] || explicit_none=1
     case "$previous_arg" in
       --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
       --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
@@ -355,27 +376,26 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
       || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
     return "$command_status"
   fi
-  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-    | LC_ALL=C perl -MJSON::PP -e '
-      local $/;
-      my $shown = <STDIN>;
-      $shown =~ s/\s+\z//;
-      exit 0 if $shown eq "" || $shown eq "-";
-      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-      print $value unless $value eq "-";
-    ') || {
+  body=$(fm_backlog_decode_task_body "$out") || {
     FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
     return 1
   }
-  latest_line=$(printf '%s\n' "$body" | jq -Rrs "$FM_COMPLETION_JQ_DEFS"'
-    split("\n")
-    | [ .[] | completion_record ]
-    | if length > 0 then .[-1].line else "" end
-  ') || {
+  latest_line=$(fm_completion_last_record_field line "$body") || {
     FM_BACKLOG_TRANSITION_ERROR="could not read completion provenance for $id"
     return 1
   }
-  [ -n "$deliverable" ] || deliverable=none
+  if [ -n "$deliverable" ] && [ "$explicit_none" = 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="conflicting completion provenance for $id"
+    return 1
+  fi
+  if [ -z "$deliverable" ]; then
+    if [ "$explicit_none" = 1 ]; then
+      deliverable=none
+    else
+      FM_BACKLOG_TRANSITION_ERROR="completion provenance is unknown for $id"
+      return 1
+    fi
+  fi
   encoded=$(printf '%s' "$deliverable" | LC_ALL=C perl -MJSON::PP -e '
     local $/;
     print encode_json({value => scalar <STDIN>});
@@ -404,10 +424,15 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
+  local data=$1 id=$2 arg
+  local record_args=() done_args=()
   shift 2
-  fm_backlog_record_completion "$data" "$id" "$@" || return 1
-  fm_backlog_mutate "$data" "done" "$id" "$@"
+  for arg in "$@"; do
+    record_args+=("$arg")
+    [ "$arg" = --completion-none ] || done_args+=("$arg")
+  done
+  fm_backlog_record_completion "$data" "$id" "${record_args[@]+"${record_args[@]}"}" || return 1
+  fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
 }
 
 # Keep a captain-held row open across the removal of the work record that
@@ -911,7 +936,7 @@ fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-da
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
   local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
-  local args=() mode_flags=()
+  local show body args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   fm_backlog_directory_present "$state" "state directory" || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
@@ -962,6 +987,19 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
     fi
     row_state=
+  fi
+  if [ "$mode" = retain ] && [ "${row_state%% *}" != done ] && [ -n "$row_state" ]; then
+    show=$(fm_backlog_row_show "$data" "$id" --full) || {
+      FM_BACKLOG_TRANSITION_ERROR="could not read $id before replaying its pending retention"
+      return 1
+    }
+    body=$(fm_backlog_decode_task_body "$show") || {
+      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+      return 1
+    }
+    if fm_backlog_body_has_captain_resolution "$body"; then
+      return 0
+    fi
   fi
   case "$row_state" in
     done\ *)

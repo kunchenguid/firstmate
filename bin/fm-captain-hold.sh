@@ -386,11 +386,7 @@ origin_open_decisions() {  # <origin-id>
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
-  case "$1" in
-    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
-    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
-  esac
-  return 1
+  fm_backlog_body_has_captain_resolution "$1"
 }
 
 # The recorded decision digest of either record format, from the show-escaped
@@ -829,7 +825,7 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   rm -f -- "$tmp"
 }
 
-close_answered() {  # <task-id> <release-0-or-1>
+close_answered() {  # <task-id> <release-0-or-1> <assert-none-0-or-1>
   local completion_args=()
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
@@ -838,6 +834,8 @@ close_answered() {  # <task-id> <release-0-or-1>
       || fail "could not preserve pending completion for $1: $FM_BACKLOG_TRANSITION_ERROR"
     if [ "${FM_BACKLOG_CLOSE_VALIDATED_MODE-}" = retain ]; then
       completion_args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+    elif [ "$3" = 1 ]; then
+      completion_args=(--completion-none)
     fi
     fm_backlog_done "$DATA" "$1" "${completion_args[@]+"${completion_args[@]}"}" \
       || fail "could not close answered captain-held task $1: $FM_BACKLOG_TRANSITION_ERROR"
@@ -867,7 +865,8 @@ remove_interrupted_answer_stamp() {  # <task-id>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local id=${1:-} decision_file='' release=0 show state hold_kind kind body decoded_body
+  local outcome recorded_mode occurrence completion_value completion_none=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -885,7 +884,15 @@ command_answer() {
   show=$(task_show "$id") || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
+  kind=$(show_field_value "$show" kind)
   body=$(show_field "$show" body)
+  decoded_body=$(decode_shown_value "$body") \
+    || fail "could not decode the existing body for $id"
+  completion_value=$(fm_completion_last_record_field value "$decoded_body") \
+    || fail "could not read completion provenance for $id"
+  if [ "$kind" = captain ] || [ -z "$completion_value" ] || [ "$completion_value" = none ]; then
+    completion_none=1
+  fi
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
@@ -941,7 +948,7 @@ command_answer() {
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
-      if ! close_answered "$id" "$release"; then
+      if ! close_answered "$id" "$release" "$completion_none"; then
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
@@ -950,7 +957,7 @@ command_answer() {
       return 0
     fi
     write_resolution_record "$id" "$outcome" "$body"
-    if ! close_answered "$id" "$release"; then
+    if ! close_answered "$id" "$release" "$completion_none"; then
       fail "could not close answered captain-held task $id"
     fi
     remove_interrupted_answer_stamp "$id"

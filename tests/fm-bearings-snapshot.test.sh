@@ -1402,8 +1402,9 @@ EOF
 test_captain_approved_delivery_stays_in_landed() {
   local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
   local spoof_pr spoof_marker spoof_show spoof_body spoof_records none_marker prior_pr
-  local interrupted_pr interrupted_marker interrupted_show interrupted_rc
+  local interrupted_pr interrupted_marker interrupted_show interrupted_rc bootstrap
   local mixed_pr mixed_marker mixed_legacy mixed_body mixed_show mixed_records
+  local argumentless_pr argumentless_show argumentless_rc
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1476,16 +1477,49 @@ SH
     "$TEARDOWN" interrupted-retain >/dev/null 2>&1 || interrupted_rc=$?
   [ "$interrupted_rc" -ne 0 ] \
     || fail "the retained cleanup did not stop at the injected interruption"
-  rm -f "$fakebin/tasks-axi"
   interrupted_marker="$home/state/interrupted-retain.backlog-close"
   [ -f "$interrupted_marker" ] \
     || fail "the interrupted retained cleanup did not preserve its completion"
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = done ] && [ "\${2:-}" = interrupted-retain ] \
+  && [ ! -e "$home/interrupted-close-failed-once" ]; then
+  : > "$home/interrupted-close-failed-once"
+  exit 75
+fi
+exec "$TASKS_AXI_BIN" "\$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
   printf 'Close the shipped work.\n' > "$home/interrupted-answer.txt"
+  interrupted_rc=0
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer interrupted-retain --decision-file "$home/interrupted-answer.txt" \
+    >/dev/null 2>&1 || interrupted_rc=$?
+  [ "$interrupted_rc" -ne 0 ] \
+    || fail "the injected answered-close failure reported success"
+  [ -f "$interrupted_marker" ] \
+    || fail "the failed answered close retired its pending completion"
+  bootstrap=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session replay failed after the interrupted answered close: $bootstrap"
+  [ -f "$interrupted_marker" ] \
+    || fail "session replay retired completion authority before the answer closed"
   PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer interrupted-retain --decision-file "$home/interrupted-answer.txt" >/dev/null \
-    || fail "could not resume the interrupted retained cleanup through its answer"
+    || fail "could not retry the interrupted retained cleanup answer"
+  bootstrap=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session replay failed after the answered close landed: $bootstrap"
+  [ ! -e "$interrupted_marker" ] \
+    || fail "session replay kept completion authority after the answer closed"
   interrupted_show=$("$TASKS_AXI_BIN" show interrupted-retain --full --file "$backlog") \
     || fail "could not read the resumed retained-cleanup completion"
   assert_contains "$interrupted_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $interrupted_pr\\\"} -->" \
@@ -1527,6 +1561,47 @@ SH
     -e '/^Deliverable of the finished work: /p')
   [ "$mixed_records" = "$(printf '%s\n%s\n%s' "$mixed_marker" "$mixed_legacy" "$mixed_marker")" ] \
     || fail "the writer did not append its verdict after the trailing legacy record: $mixed_body"
+  argumentless_pr="https://github.com/kunchenguid/firstmate/pull/1362"
+  "$TASKS_AXI_BIN" add argumentless-delivery "Preserve unknown close provenance" \
+    --kind ship --repo firstmate --start --file "$backlog" >/dev/null \
+    || fail "could not create the argument-less close fixture"
+  fm_write_meta "$home/state/argumentless-delivery.meta" \
+    "window=firstmate:fm-argumentless-delivery" "endpoint_task_id=argumentless-delivery" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$argumentless_pr" "spawn_gen=argumentless-fixture"
+  record_claude_state "$home/state" argumentless-delivery idle
+  printf 'done: delivery waits on a final question\n' \
+    > "$home/state/argumentless-delivery.status"
+  "$TASKS_AXI_BIN" hold argumentless-delivery --reason "captain close choice pending" \
+    --kind captain --file "$backlog" >/dev/null \
+    || fail "could not hold the argument-less close fixture"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" argumentless-delivery >/dev/null \
+    || fail "could not retain the argument-less delivery fixture"
+  [ ! -e "$home/state/argumentless-delivery.backlog-close" ] \
+    || fail "successful retention left a pending transition in the argument-less fixture"
+  printf 'Close only if the delivered artifact remains known.\n' \
+    > "$home/argumentless-answer.txt"
+  argumentless_rc=0
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer argumentless-delivery --decision-file "$home/argumentless-answer.txt" \
+    >/dev/null 2>&1 || argumentless_rc=$?
+  [ "$argumentless_rc" -ne 0 ] \
+    || fail "an argument-less close silently asserted no deliverable"
+  argumentless_show=$("$TASKS_AXI_BIN" show argumentless-delivery --full --file "$backlog") \
+    || fail "could not read the refused argument-less close"
+  assert_not_contains "$argumentless_show" "state: done" \
+    "an unknown completion closed the delivered row"
+  assert_contains "$argumentless_show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $argumentless_pr\\\"} -->" \
+    "the argument-less close lost the still-true artifact"
+  assert_not_contains "$argumentless_show" \
+    '<!-- firstmate-completion.v1 {\"value\":\"none\"} -->' \
+    "the argument-less close replaced the still-true artifact with none"
   "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
     --start --file "$backlog" >/dev/null \
     || fail "could not create the local delivery fixture"
