@@ -3178,6 +3178,14 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Same daemon-environment gap for Pi: PI_CODING_AGENT_DIR selects the agent
+# profile (settings, packages, extensions, auth). A primary running under an
+# alternate profile would otherwise spawn crewmates on the default ~/.pi/agent,
+# which can carry a different model, packages, and extensions than the primary
+# was launched with. Forward it the same way, only when set.
+if { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; } && [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
+  LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$PI_CODING_AGENT_DIR") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")

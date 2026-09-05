@@ -90,8 +90,10 @@ run_spawn() {
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR. Same for
+  # PI_CODING_AGENT_DIR on pi launches via FM_TEST_PI_CODING_AGENT_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    PI_CODING_AGENT_DIR="${FM_TEST_PI_CODING_AGENT_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -167,7 +169,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      CLAUDE_CONFIG_DIR='' PI_CODING_AGENT_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
   )
@@ -196,7 +198,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      CLAUDE_CONFIG_DIR='' PI_CODING_AGENT_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
   )
@@ -216,7 +218,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      CLAUDE_CONFIG_DIR='' PI_CODING_AGENT_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
   )
@@ -244,7 +246,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
       FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      CLAUDE_CONFIG_DIR='' PI_CODING_AGENT_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
   )
@@ -777,6 +779,55 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_pi_forwards_firstmate_coding_agent_dir_when_set() {
+  local rec id out status launch
+  id=profile-pi-agentdir-z20
+  rec=$(make_spawn_case profile-pi-agentdir pi "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_PI_CODING_AGENT_DIR="/opt/test/pi-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "pi spawn with PI_CODING_AGENT_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='/opt/test/pi-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular" \
+    "pi launch did not forward firstmate's PI_CODING_AGENT_DIR to the crewmate pane"
+  pass "pi forwards firstmate's PI_CODING_AGENT_DIR so the crewmate uses the same agent profile"
+}
+
+test_pi_omits_coding_agent_dir_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-pi-noagentdir-z21
+  rec=$(make_spawn_case profile-pi-noagentdir pi "$id")
+  read_case_record "$rec"
+
+  # run_spawn pins PI_CODING_AGENT_DIR empty by default, exercising the default
+  # ~/.pi/agent path where fm-spawn adds no prefix.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "pi spawn without PI_CODING_AGENT_DIR should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
+    "pi launch must not add a profile prefix when firstmate has no PI_CODING_AGENT_DIR set"
+  pass "pi omits the profile prefix when firstmate runs with the default agent directory"
+}
+
+test_non_pi_harness_ignores_coding_agent_dir() {
+  local rec id out status launch
+  id=profile-claude-noagentdir-z22
+  rec=$(make_spawn_case profile-claude-noagentdir claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_PI_CODING_AGENT_DIR="/opt/test/pi-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with PI_CODING_AGENT_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "PI_CODING_AGENT_DIR=" \
+    "non-pi harness launch must not receive the pi-specific profile prefix"
+  pass "non-pi harnesses do not receive the PI_CODING_AGENT_DIR prefix"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -825,6 +876,9 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_pi_forwards_firstmate_coding_agent_dir_when_set
+test_pi_omits_coding_agent_dir_prefix_when_unset
+test_non_pi_harness_ignores_coding_agent_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
