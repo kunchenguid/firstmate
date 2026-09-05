@@ -32,14 +32,13 @@
 #
 # Deployment - credentials and endpoints live ONLY in the gitignored
 # $FM_HOME/.env (same convention as the Relay/FMX token). Add these four
-# required values, plus the optional ports and reply target:
+# required values, plus the optional ports:
 #   FM_MAIL_USER=<imap/smtp account>
 #   FM_MAIL_PASS=<password>
 #   FM_IMAP_HOST=<imap host>
 #   FM_IMAP_PORT=<imap port>     (default 993)
 #   FM_SMTP_HOST=<smtp host>
 #   FM_SMTP_PORT=<smtp port>     (default 465)
-#   FM_MAIL_TO=<reply target>    (optional; the address you answer mail to)
 # FM_HOME falls back to the repo root when unset. This script carries no secret
 # and no default endpoint that could resolve against a wrong home; the four
 # FM_MAIL_* credential and endpoint values are always required, and
@@ -75,7 +74,6 @@ IMAP_HOST="$FM_IMAP_HOST"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
 SMTP_HOST="$FM_SMTP_HOST"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
-MAIL_TO="${FM_MAIL_TO:-}"
 
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then
@@ -369,9 +367,6 @@ case "${1:-}" in
   status)
     echo "mail account: $FM_MAIL_USER"
     echo "imap: $IMAP_HOST:$IMAP_PORT smtp: $SMTP_HOST:$SMTP_PORT"
-    if [ -n "$MAIL_TO" ]; then
-      echo "reply target: $MAIL_TO"
-    fi
     run_py seen "$CURSOR" || true
     ;;
   poll)
