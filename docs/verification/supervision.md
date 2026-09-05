@@ -613,3 +613,51 @@ fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
 
 The Python elapsed clock is monotonic; the budget regression moves wall time backward during deliberately slow selection and still requires a budget failure.
 The queued-expiry fixture holds its lane until the queued deadline is durably in the past, then checks timeout publication and absence of command side effects.
+
+The eight timing-sensitive suites passed three consecutive loaded runs on 2026-09-05 with the same Bash and kernel versions.
+Eight Python busy loops were individually pinned to CPUs 0 through 7 of the host's 12 available CPUs throughout all three rounds.
+Each loop executed this command with its assigned CPU as the final argument:
+
+```sh
+python3 -c 'import os,sys; os.sched_setaffinity(0, {int(sys.argv[1])}); exec("while True: pass")' "$cpu"
+```
+
+Each round used the following runner invocation, with `result_json` naming a separate result file.
+The runner scheduled the watcher family first and then up to four secondmate suites concurrently.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=3 bin/fm-test-run.sh \
+  --check-herdr-leaks --per-script-timeout-secs 2700 --json "$result_json" \
+  tests/fm-watch-triage.test.sh \
+  tests/fm-remote-secondmate-trace-context.test.sh \
+  tests/fm-remote-transport-lanes.test.sh \
+  tests/fm-remote-reply.test.sh \
+  tests/fm-secondmate-reconcile.test.sh \
+  tests/fm-remote-secondmate-lifecycle-e2e.test.sh \
+  tests/fm-secondmate-harness.test.sh \
+  tests/fm-remote-job.test.sh
+```
+
+Scale 3 reflects the reduction from 12 available CPUs to four nominally unoccupied CPUs and the measured slowdown of these fixtures under that load.
+For example, the default-scale remote-job run above took 56,911 ms, while the loaded rounds took 77,354, 81,216, and 73,718 ms.
+The explicit 2,700-second script limit was not reached; all condition assertions and timeout-specific deadlines remained enforced.
+
+Observed summary output, in round order:
+
+```text
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=755756
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=805272
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=769137
+```
+
+Every round also reported:
+
+```text
+fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+All 24 suite executions passed without gate skips.
+After the third round, all eight load processes were terminated and reaped, and a procfs inventory found no surviving remote-job worker or test Herdr server.
+The fresh-turn watcher cases pin their clock and marker age together while retaining the companion over-age assertions.
+The quarantine fixture holds its command through replacement refusal, verifies that its explicitly killed process group has no live members, then releases the barrier and checks that no side effect occurred.
+These runs exercise fake backend fixtures and process cleanup; they do not claim live harness coverage or upstream CI validation.
