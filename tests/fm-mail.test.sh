@@ -372,6 +372,56 @@ SH
   pass "fm-mail: a missing wake library fails the poll instead of suppressing mail"
 }
 
+test_poll_rolls_back_wake_without_durable_record() {
+  local fakebin homedir_bin roll_home
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  roll_home="$TMP_ROOT/rollback-home"
+  mkdir -p "$roll_home"
+  homedir_bin="$roll_home/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '66\t2026-09-05T00:00:00Z\nalice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  # Make both durable evidence writes fail. The wake append still succeeds (the
+  # queue is a different, writable file), but the journal and cursor cannot be
+  # recorded. The rollback must remove the queued wake so nothing ackable
+  # survives without a durable record.
+  mkdir -p "$roll_home/state"
+  printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
+  : > "$roll_home/state/.mail-woken"
+  chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
+  [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when no durable record can be written"
+  assert_contains "$out" "rolled back" "poll reports the wake was rolled back"
+  local wakeq
+  wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 0 "$wakeq" "rolled-back wake must not stay queued without a durable record"
+
+  # Restore write access: the next poll must surface the mail fresh, exactly
+  # once, as if the interrupted attempt never happened.
+  chmod 0600 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "retry poll must succeed"
+  assert_contains "$out" "woke for 66" "retry poll surfaces the mail exactly once"
+  wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "retry poll appends exactly one wake for uid 66"
+  pass "fm-mail: a wake with no durable record is rolled back, not left ackable"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -386,3 +436,4 @@ test_poll_serializes_overlapping_invocations
 test_poll_recovers_journaled_wake_after_ack
 test_poll_legacy_wake_does_not_leak_into_generation
 test_poll_missing_wake_lib_does_not_suppress
+test_poll_rolls_back_wake_without_durable_record
