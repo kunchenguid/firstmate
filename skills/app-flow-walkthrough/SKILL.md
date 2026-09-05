@@ -1,6 +1,6 @@
 ---
 name: app-flow-walkthrough
-description: 'Build a single self-contained HTML walkthrough that explains an application to a non-user - a partner, a client, a reviewer, an exec - by driving one simulated app window through its screens with an explanation beside it. Screens are hand-built HTML/CSS mockups from the renderer source, never real captures, so no client data can leak and nothing needs redacting. Use when asked for an app walkthrough, application flow, click-through, product tour, screen-by-screen explainer, demo document, or a "show them how it works" document, and when redoing one that has drifted into a long scrolling page.'
+description: 'Build a single self-contained HTML walkthrough that explains an application to a non-user - a partner, a client, a reviewer, an exec - by driving one simulated app window through its screens with an explanation beside it. Screens are hand-built HTML/CSS mockups drawn from the application''s own source, never real captures, so no client data can leak and nothing needs redacting. Use when asked for an app walkthrough, application flow, click-through, product tour, screen-by-screen explainer, demo document, or a "show them how it works" document, and when redoing one that has drifted into a long scrolling page.'
 user-invocable: true
 ---
 
@@ -40,7 +40,7 @@ Rules that make it work:
 
 ## Simulated screens, never captures
 
-Hand-build each screen as HTML/CSS from the renderer source, matching real layout, labels and wording. Do not screenshot the running app.
+Hand-build each screen as HTML/CSS from the application's own source - view templates, component markup, design mockups, whatever the app actually has - matching real layout, labels and wording. Do not screenshot the running app.
 
 This is a confidentiality decision, not an aesthetic one. A capture taken over real data has to be cropped or painted over afterwards, and a document meant to leave the building should contain nothing that needs catching. Simulations have nothing to redact.
 
