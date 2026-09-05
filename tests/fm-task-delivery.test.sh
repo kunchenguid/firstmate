@@ -161,7 +161,7 @@ EOF
   {
     printf '#!/bin/sh\n'
     printf 'for arg in "$@"; do\n'
-    printf '  [ "$arg" = fetch ] && printf "fetch\\n" >> "%s"\n' "$fetch_log"
+    printf "  [ \"\$arg\" = fetch ] && printf \"fetch\\\\n\" >> \"%s\"\n" "$fetch_log"
     printf 'done\n'
     printf 'exec "%s" "$@"\n' "$real_git"
   } > "$fakebin/git"
