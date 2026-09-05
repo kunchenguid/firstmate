@@ -9,11 +9,21 @@
 #
 # The procedure is the one deploy/PROVISIONING.md and the recorded cutover
 # already establish: fetch the new version, prove the start-time requirements it
-# makes of the machine, set the current version aside, stop the app, check out
-# the exact commit, put the sealed front-end bundle in place, reinstall that one
-# unit, verify the bundle, prove the user the app runs as can read it, restart,
-# and prove it answers. It never touches the sign-in or TLS units, never reads
-# or writes a secrets file, and never forces, stashes, or discards anything.
+# makes of the machine, put its sealed front end on the machine beside the live
+# one and prove the user the app runs as can read it, set the current version
+# aside, stop the app, check out the exact commit, swap the proved front end
+# into place, reinstall that one unit, verify the bundle, restart, and prove it
+# answers. It never touches the sign-in or TLS units, never reads or writes a
+# secrets file, and never forces, stashes, or discards anything.
+#
+# Everything about the NEW version that this home can answer from the machine is
+# answered while the OLD one is still serving, and every one of those answers is
+# a refusal that changed nothing rather than a failure with the app already
+# down. That order is the whole point: a readability check that ran after the
+# stop and the checkout once took a live site down over a bundle that was
+# perfectly readable. The project's own bundle verifier is the one check that
+# still runs after the swap, because it is the new version's own script reading
+# the new version's own front end and neither exists in place until then.
 #
 # It refuses, rather than proceeds, when:
 #   - the range from what is live to <sha> touches a path the project's deploy
@@ -31,7 +41,12 @@
 #   - a start-time requirement <sha>'s own units make of a host-owned file does
 #     not hold yet. Those validators run read-only, from <sha>'s own copy, as
 #     the user the unit runs as, BEFORE anything is stopped, and the refusal
-#     names the validator and the unit that would have refused to start.
+#     names the validator and the unit that would have refused to start;
+#   - the user the app runs as cannot read the front end obtained for <sha>.
+#     That is asked of the staged copy, before anything is stopped, and it
+#     refuses on the paths that user cannot read and on nothing else: a check
+#     that cannot answer at all is a separate refusal, never reported as an
+#     unreadable release.
 #
 # The fetch happens before the stop for the same reason: a version the machine
 # cannot even obtain must not be discovered after the app is already down.
@@ -42,6 +57,13 @@
 # actually wanted - and only one whose front end is still set aside under
 # rollback_root, so a rollback still works long after the build that produced
 # it stopped being downloadable.
+#
+# It re-runs none of the start-time checks a deploy runs, and says so as it
+# goes. Those checks ask whether a version the machine has never run can start;
+# a rollback restores the exact tree and front end this machine already served,
+# and a check that answered no would only keep that version off a site that is
+# already down. The fetch is attempted and not required, for the same reason:
+# the commit being restored is already on the machine.
 #
 # --record-live records that <sha> is already live because it was put there by
 # hand. It changes nothing on the machine: it refuses unless the machine really
@@ -270,12 +292,18 @@ PRECHECK_MADE=0
 BUNDLE_DIR=''
 BUNDLE_NEEDED=0
 SAVED_BUNDLE=0
+STAGE_DIR=''
+READABLE_ERR=''
 
-# Both scratch copies go away on every exit, refusals included, so a refused
-# deploy leaves nothing of its own behind on either side.
+# Every scratch copy goes away on every exit, refusals included, so a refused
+# deploy leaves nothing of its own behind on either side. The staged front end
+# is one of them: it is put on the machine before anything stops precisely so
+# that refusing after it is free.
 cleanup() {
   [ -z "$BUNDLE_DIR" ] || rm -rf "$BUNDLE_DIR"
   [ "$PRECHECK_MADE" -eq 0 ] || fm_deploy_ssh "sudo rm -rf '$PRECHECK_DIR'" </dev/null >/dev/null 2>&1 || true
+  [ -z "$STAGE_DIR" ] || fm_deploy_ssh "sudo rm -rf '$STAGE_DIR'" </dev/null >/dev/null 2>&1 || true
+  [ -z "$READABLE_ERR" ] || rm -f "$READABLE_ERR"
 }
 trap cleanup EXIT
 
@@ -345,12 +373,27 @@ fi
 # extraction: a symlink planted at that name is removed rather than followed,
 # so nothing is written through it. rollback_root itself is trusted exactly as
 # far as the set-aside step already trusts it, and no further.
-fm_deploy_ssh "sudo git -C '$CO' fetch origin" \
-  || refuse "could not fetch $TARGET_SHA onto the machine, so nothing was changed"
+if [ "$ROLLBACK" -eq 1 ]; then
+  # The commit being restored is already on the machine, which is what makes a
+  # rollback possible at all, so this is worth attempting and not worth
+  # refusing over.
+  fm_deploy_ssh "sudo git -C '$CO' fetch origin" \
+    || printf 'The machine could not reach the source, but %s is a version it already ran, so its commit is already there.\n' "$TARGET_SHA" >&2
+else
+  fm_deploy_ssh "sudo git -C '$CO' fetch origin" \
+    || refuse "could not fetch $TARGET_SHA onto the machine, so nothing was changed"
+fi
 
-PRECONDITIONS=$(fm_deploy_preconditions "$REPO" "$TARGET_SHA" "$CO" "$PRECHECK_DIR")
-mapfile -t PRECHECKS < <(printf '%s\n' "$PRECONDITIONS" | grep "^check	" || true)
-PRECHECK_SKIPPED=$(printf '%s\n' "$PRECONDITIONS" | grep -c "^skip	" || true)
+PRECHECKS=()
+PRECHECK_SKIPPED=0
+if [ "$ROLLBACK" -eq 1 ]; then
+  printf 'Rolling back re-runs none of the start-time checks: %s is the version this machine already served, and a check that refused would only keep it off a site that is already down.\n' \
+    "$TARGET_SHA"
+else
+  PRECONDITIONS=$(fm_deploy_preconditions "$REPO" "$TARGET_SHA" "$CO" "$PRECHECK_DIR")
+  mapfile -t PRECHECKS < <(printf '%s\n' "$PRECONDITIONS" | grep "^check	" || true)
+  PRECHECK_SKIPPED=$(printf '%s\n' "$PRECONDITIONS" | grep -c "^skip	" || true)
+fi
 if [ "${#PRECHECKS[@]}" -gt 0 ]; then
   archive_dirs=$(printf '%s\n' "${PRECHECKS[@]}" | tr '[:blank:]' '\n' \
     | sed -n "s#^$PRECHECK_DIR/\([^/]*\)/.*#\1#p" | sort -u | tr '\n' ' ')
@@ -370,7 +413,7 @@ if [ "${#PRECHECKS[@]}" -gt 0 ]; then
     # ran and said no, so it must not be reported as one.
     fm_deploy_ssh "sudo id -u '$pc_user'" </dev/null >/dev/null 2>&1 \
       || refuse "$TARGET_SHA starts ${pc_unit##*/} as the user $pc_user, and the machine has no such user; nothing was changed"
-    pc_err=$(fm_deploy_ssh "sudo -u '$pc_user' $pc_cmd" </dev/null 2>&1) \
+    pc_err=$(fm_deploy_ssh "$(fm_deploy_as_user "$pc_user" "$pc_cmd")" </dev/null 2>&1) \
       || refuse "${pc_unit##*/} will not start until $pc_what passes on this machine, and it does not yet: ${pc_err:-it gave no reason}. Nothing was changed"
   done
   printf 'Checked %d start-time requirement(s) of %s against files this machine owns; all hold.\n' \
@@ -380,6 +423,76 @@ fi
 # holds" when it means "the rest can only be answered once it is running".
 [ "$PRECHECK_SKIPPED" -eq 0 ] || printf '%d further start-time requirement(s) of %s can only be answered once it is running, and were not checked first.\n' \
   "$PRECHECK_SKIPPED" "$TARGET_SHA"
+
+# --- put the new front end on the machine and prove it readable ----------------
+# The bundle verifier this deploy runs later runs as root, and root reads a
+# bundle no service user can: a 0700 directory passed a root-run check and then
+# the unit's own start-time verifier could not open the seal inside it. Ask from
+# the only perspective that decides whether the app starts, and ask it of a copy
+# staged beside the live one, while the live one is still serving.
+UNIT_USER=$(fm_deploy_unit_user "$REPO" "$TARGET_SHA" "$FM_DEPLOY_UNIT_DIR/$UNIT.service")
+
+# prove_readable <path>
+# Answers exactly one question - can $UNIT_USER read every file under <path> -
+# and returns 0 for yes, 1 for no, 2 for "the question could not be answered".
+# READABLE_WHY carries the evidence for the two failures.
+#
+# The three are kept apart deliberately. `find` writes the paths it was asked
+# for on stdout and its own troubles on stderr, and merging the two turned a
+# find that could not return to the directory it started in into a report that
+# the release was unreadable - a refusal on a condition the check does not
+# name, after the app had already been stopped. A check refuses on its own
+# condition or it says it could not answer; it never borrows one for the other.
+READABLE_WHY=''
+prove_readable() {
+  local path=$1 out rc=0
+  READABLE_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-deploy-readable.XXXXXX") \
+    || { READABLE_WHY='this home could not make room to read what the check said'; return 2; }
+  out=$(fm_deploy_ssh "$(fm_deploy_as_user "$UNIT_USER" "find '$path' '!' -readable -print")" \
+    </dev/null 2>"$READABLE_ERR") || rc=$?
+  READABLE_WHY=$(head -3 "$READABLE_ERR" | tr '\n' ' ')
+  rm -f "$READABLE_ERR"
+  READABLE_ERR=''
+  if [ -n "$out" ]; then
+    READABLE_WHY=$(printf '%s' "$out" | head -3 | tr '\n' ' ')
+    return 1
+  fi
+  [ "$rc" -eq 0 ] || {
+    READABLE_WHY=${READABLE_WHY:-it gave no reason}
+    return 2
+  }
+  READABLE_WHY=''
+  return 0
+}
+
+FRONT_END_UNPROVED=''
+if [ "$BUNDLE_NEEDED" -eq 1 ]; then
+  # Staged beside the live front end rather than over it: same filesystem, so
+  # the swap after the stop is a rename, and until that rename the machine is
+  # exactly as it was found.
+  STAGE_DIR="$CO/$FM_DEPLOY_TGT_bundle_path.incoming"
+  tar -C "$BUNDLE_DIR" -czf - . \
+    | fm_deploy_ssh "sudo sh -c 'rm -rf \"$STAGE_DIR\" && install -d -o root -g root -m 0755 \"$STAGE_DIR\" && tar -C \"$STAGE_DIR\" -xzf - && chown -R root:root \"$STAGE_DIR\" && chmod -R a+rX \"$STAGE_DIR\"'" \
+    || refuse "could not put the front-end bundle for $TARGET_SHA on the machine, so nothing was changed"
+elif [ "$SAVED_BUNDLE" -eq 1 ]; then
+  FRONT_END_UNPROVED='it is the copy this machine already served, put back exactly as it was set aside'
+elif [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
+  FRONT_END_UNPROVED="it is carried by $TARGET_SHA itself and arrives with the checkout"
+fi
+
+if [ -n "$STAGE_DIR" ] && [ -n "$UNIT_USER" ]; then
+  prove_readable "$STAGE_DIR" || case "$?" in
+    1) refuse "the front end for $TARGET_SHA is on the machine, but $UNIT_USER, the user $UNIT runs as, cannot read all of it: $READABLE_WHY" ;;
+    *) refuse "could not tell whether $UNIT_USER, the user $UNIT runs as, can read the front end for $TARGET_SHA: $READABLE_WHY. Nothing was changed" ;;
+  esac
+  printf 'The front end for %s is on the machine, and %s, the user %s runs as, can read all of it.\n' \
+    "$TARGET_SHA" "$UNIT_USER" "$UNIT"
+elif [ -n "$FRONT_END_UNPROVED" ] && [ -n "$UNIT_USER" ]; then
+  # Same discipline as the skipped start-time requirements above: not proved and
+  # proved good must not look the same.
+  printf 'Whether %s can read the front end for %s is not proved first: %s.\n' \
+    "$UNIT_USER" "$TARGET_SHA" "$FRONT_END_UNPROVED"
+fi
 
 # --- perform the update -------------------------------------------------------
 ROLLBACK_DIR="$FM_DEPLOY_TGT_rollback_root/$DEPLOYED_SHA"
@@ -407,25 +520,17 @@ step_failed() {
 
 fm_deploy_ssh "sudo git -C '$CO' checkout --detach '$TARGET_SHA'" || step_failed "could not switch the machine to $TARGET_SHA"
 
-if [ "$BUNDLE_NEEDED" -eq 1 ]; then
-  tar -C "$BUNDLE_DIR" -czf - . \
-    | fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && install -d -o root -g root -m 0755 \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && tar -C \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" -xzf - && chmod -R a+rX \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" && rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && mv \"$CO/$FM_DEPLOY_TGT_bundle_path.incoming\" \"$CO/$FM_DEPLOY_TGT_bundle_path\" && chown -R root:root \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
+if [ -n "$STAGE_DIR" ]; then
+  # A rename of the copy already proved readable, not a fresh install: whatever
+  # goes live is the exact tree the check above passed. STAGE_DIR is cleared by
+  # the rename that consumes it, so one variable answers both "is there a staged
+  # copy to swap in" and "is there one left for cleanup to remove".
+  fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && mv \"$STAGE_DIR\" \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
     || step_failed "could not install the front-end bundle for $TARGET_SHA"
+  STAGE_DIR=''
 elif [ "$SAVED_BUNDLE" -eq 1 ]; then
   fm_deploy_ssh "sudo sh -c 'rm -rf \"$CO/$FM_DEPLOY_TGT_bundle_path\" && cp -a \"$FM_DEPLOY_TGT_rollback_root/$TARGET_SHA/bundle\" \"$CO/$FM_DEPLOY_TGT_bundle_path\" && chmod -R a+rX \"$CO/$FM_DEPLOY_TGT_bundle_path\"'" \
     || step_failed "could not put the previous front-end bundle back"
-fi
-
-# The bundle verifier below runs as root, and root reads a bundle no service
-# user can. That gap is the whole of it: a 0700 bundle directory passed the
-# root-run check and then the unit's own start-time verifier could not open the
-# seal inside it. Ask the question from the only perspective that decides
-# whether the app starts.
-UNIT_USER=$(fm_deploy_unit_user "$REPO" "$TARGET_SHA" "$FM_DEPLOY_UNIT_DIR/$UNIT.service")
-if [ -n "$FM_DEPLOY_TGT_bundle_path" ] && [ -n "$UNIT_USER" ]; then
-  unreadable=$(fm_deploy_ssh "sudo -u '$UNIT_USER' find '$CO/$FM_DEPLOY_TGT_bundle_path' '!' -readable -print" </dev/null 2>&1) || unreadable=${unreadable:-the front end could not be listed at all}
-  [ -z "$unreadable" ] \
-    || step_failed "the front end for $TARGET_SHA is on the machine, but $UNIT_USER, the user $UNIT runs as, cannot read all of it: $(printf '%s' "$unreadable" | head -3 | tr '\n' ' ')"
 fi
 
 fm_deploy_ssh "sudo install -o root -g root -m 0644 '$CO/$FM_DEPLOY_UNIT_DIR/$UNIT.service' '/etc/systemd/system/$UNIT.service' && sudo systemctl daemon-reload" \

@@ -239,6 +239,24 @@ EOF
   return 0
 }
 
+# fm_deploy_as_user <user> <command>
+# The remote command that runs <command> as <user>.
+#
+# `cd /` first, and not as decoration. A command run under `sudo -u` inherits
+# the working directory of the shell that invoked it, which on a host whose
+# login user has a private home is a directory the service user cannot read.
+# `find` walks by changing directory and then fails to return to the one it
+# started in, so a front-end readability check run from there reported the
+# release unreadable when the release was fine, and left the site down. `/` is
+# readable by every user on the machine, and every path this home hands a
+# validator is absolute, so nothing depends on the directory it starts in.
+#
+# One helper rather than a prefix repeated at each call site, so a third
+# service-user command cannot be added without the fix.
+fm_deploy_as_user() {
+  printf "cd / && sudo -u '%s' %s" "$1" "$2"
+}
+
 # fm_deploy_preconditions <repo> <sha> <checkout> <precheck-dir>
 #
 # Prints one tab-separated record per ExecStartPre found in <sha>'s unit files:

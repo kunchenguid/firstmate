@@ -18,6 +18,11 @@
 #       never falls back to a bundle built for another commit
 #   (e2) a start-time requirement the new version's own units make of a file the
 #       MACHINE owns is checked, and refuses by name, before stopping anything
+#   (e3) a command run as the service user starts somewhere that user can read,
+#       so a refusal names the requirement it checked and never that command's
+#       own working directory
+#   (e4) a front end the user the app runs as cannot read refuses before
+#       stopping anything, so the app is still serving the old version
 #   (f) a deploy target that is missing a key, that names an unknown key, or
 #       that carries shell metacharacters is refused rather than partly used
 #   (g) every refusal is recorded in the durable ledger
@@ -120,6 +125,22 @@ TGT
 set -u
 cmd=\${!#}
 printf '%s\n' "\$cmd" >> '$SSH_LOG'
+# The login user's home is private, and a command run under \`sudo -u\` inherits
+# the working directory of the shell that started it: \`find\` walks away from
+# that directory and cannot get back. Any service-user command that does not
+# start somewhere that user can read fails here as it did on the real machine,
+# so a refusal built on one of them is refusing about the wrong thing.
+case "\$cmd" in
+  *'sudo -u '*)
+    case "\$cmd" in
+      'cd / && '*) ;;
+      *)
+        printf 'find: Failed to restore initial working directory: /home/ubuntu: Permission denied\n' >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 case "\$cmd" in
   *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
   *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
@@ -130,6 +151,10 @@ case "\$cmd" in
   # A start-time requirement this machine does not meet yet.
   *'sudo -u '*'validate_allowed_emails.py'*)
     [ -z "\${FMTEST_PRECHECK_FAILS:-}" ] || { printf 'operator allow-list refused\n' >&2; exit 1; } ;;
+  # The service user's own view of the front end: FMTEST_BUNDLE_UNREADABLE names
+  # the paths it cannot read, which is what find puts on stdout.
+  *'-readable'*)
+    [ -z "\${FMTEST_BUNDLE_UNREADABLE:-}" ] || { printf '/opt/demo/dashboard/v2/dist\n'; exit 1; } ;;
 esac
 exit \${FMTEST_SSH_RC:-0}
 SH
@@ -263,10 +288,31 @@ test_an_unmet_host_requirement_refuses_before_touching_the_machine() {
   [ "$rc" -ne 0 ] || fail "unmet-host-requirement: deployed although the machine did not meet the new version's requirements"
   assert_contains "$out" "validate_allowed_emails.py" "unmet-host-requirement"
   assert_contains "$out" "demo-proxy.service" "unmet-host-requirement"
+  # It refuses on the requirement it checked. The machine makes every
+  # service-user command run from a directory that user cannot read, so a check
+  # that answered from there would refuse about its own working directory
+  # instead, and name a problem the release does not have.
+  assert_not_contains "$out" "Failed to restore initial working directory" \
+    "unmet-host-requirement"
   assert_machine_untouched unmet-host-requirement
   assert_grep '"result":"refused"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
     "unmet-host-requirement: the refusal was not recorded in the ledger"
   pass "a start-time requirement the machine does not meet refuses by name, before anything on the machine changes"
+}
+
+test_a_front_end_the_service_user_cannot_read_refuses_before_touching_the_machine() {
+  local out rc=0
+  make_case unreadable-front-end
+  # The bundle is on the machine but landed in a mode the app's own user cannot
+  # open. Discovering that after the stop and the checkout is how a site stayed
+  # down over a front end that only needed its modes fixed.
+  out=$(FMTEST_GH_RC=0 FMTEST_BUNDLE_UNREADABLE=1 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "unreadable-front-end: deployed a front end the app cannot read"
+  assert_contains "$out" "cannot read all of it" "unreadable-front-end"
+  assert_machine_untouched unreadable-front-end
+  assert_grep '"result":"refused"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "unreadable-front-end: the refusal was not recorded in the ledger"
+  pass "a front end the app's own user cannot read refuses before anything on the machine changes"
 }
 
 test_a_broken_deploy_target_is_refused_rather_than_partly_used() {
@@ -420,6 +466,7 @@ test_a_run_in_progress_refuses_before_touching_the_machine
 test_an_unreadable_run_state_refuses
 test_an_unobtainable_bundle_refuses_before_touching_the_machine
 test_an_unmet_host_requirement_refuses_before_touching_the_machine
+test_a_front_end_the_service_user_cannot_read_refuses_before_touching_the_machine
 test_a_broken_deploy_target_is_refused_rather_than_partly_used
 test_the_merge_trigger_is_inert_without_a_policy
 test_the_merge_trigger_never_deploys_a_reserved_range

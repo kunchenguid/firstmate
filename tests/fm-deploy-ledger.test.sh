@@ -25,6 +25,11 @@
 #       set aside for it rather than a download that is no longer available
 #   (e) a restart that comes up unhealthy is reported as a failed deploy, with
 #       the rollback command, rather than reported as live
+#   (f) a command run as the service user starts somewhere that user can read,
+#       so a check answers its own question instead of the login shell's
+#       working directory
+#   (g) a rollback after a failed deploy ends with the previous version running
+#       and answering, and re-runs none of the start-time checks
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -116,6 +121,23 @@ TGT
 set -u
 cmd=\${!#}
 printf '%s\n' "\$cmd" >> '$SSH_LOG'
+# This machine's login user has a private home, and a command run under
+# \`sudo -u\` inherits the working directory of the shell that started it.
+# \`find\` walks by changing directory and then cannot get back, which is the
+# failure that took a live site down over a bundle that was perfectly readable.
+# Any service-user command that does not start somewhere that user can read
+# fails here exactly as it did on the real machine.
+case "\$cmd" in
+  *'sudo -u '*)
+    case "\$cmd" in
+      'cd / && '*) ;;
+      *)
+        printf 'find: Failed to restore initial working directory: /home/ubuntu: Permission denied\n' >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 case "\$cmd" in
   *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
   *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
@@ -125,8 +147,12 @@ case "\$cmd" in
   *'sudo -u '*'validate_allowed_emails.py'*)
     [ -z "\${FMTEST_PRECHECK_FAILS:-}" ] || { printf 'operator allow-list refused\n' >&2; exit 1; } ;;
   # The service user's own view of the front end. FMTEST_BUNDLE_UNREADABLE is how
-  # a test says the bundle landed in a mode that user cannot read.
+  # a test says the bundle landed in a mode that user cannot read - the paths go
+  # to stdout, because that is where find puts what it was asked for.
+  # FMTEST_READABLE_BROKEN is the other outcome: the check could not answer at
+  # all, and said so on stderr.
   *'-readable'*)
+    [ -z "\${FMTEST_READABLE_BROKEN:-}" ] || { printf 'find: /opt/demo: Permission denied\n' >&2; exit 1; }
     [ -z "\${FMTEST_BUNDLE_UNREADABLE:-}" ] || { printf '/opt/demo/dashboard/v2/dist\n'; exit 1; } ;;
   # The set-aside copy of a version's front end is real state on this fake
   # machine: only a version whose front end was actually copied aside answers
@@ -190,25 +216,33 @@ run_deploy() {
 step_line() { grep -n -- "$1" "$SSH_LOG" | head -1 | cut -d: -f1; }
 
 test_a_clean_range_deploys_in_the_documented_order() {
-  local out rc=0 aside stop checkout bundle unit verify restart
+  local out rc=0 stage readable aside stop checkout swap unit verify restart
   make_case clean-deploy
   out=$(run_deploy demo "$PLAIN") || rc=$?
   [ "$rc" -eq 0 ] || fail "clean-deploy: an auto-deployable range failed: $out"
   assert_contains "$out" "is live at $PLAIN" "clean-deploy"
 
-  aside=$(step_line 'rollback')
+  stage=$(step_line 'install -d .*dashboard/v2/dist.incoming')
+  readable=$(step_line "'!' -readable")
+  # The copy aside is the one command that copies INTO rollback_root; the
+  # precheck extraction mentions that directory too, so matching the directory
+  # name alone would silently assert about the wrong step.
+  aside=$(step_line 'cp -a')
   stop=$(step_line 'systemctl stop')
   checkout=$(step_line 'checkout --detach')
-  bundle=$(step_line 'dashboard/v2/dist.incoming')
+  swap=$(step_line 'mv .*dashboard/v2/dist.incoming')
   unit=$(step_line '/etc/systemd/system/demo-app.service')
   verify=$(step_line 'deploy/verify_bundle.py')
   restart=$(step_line 'systemctl restart')
-  for step in aside stop checkout bundle unit verify restart; do
+  for step in stage readable aside stop checkout swap unit verify restart; do
     [ -n "${!step}" ] || fail "clean-deploy: the $step step never reached the machine: $(tr '\n' '|' < "$SSH_LOG")"
   done
-  [ "$aside" -lt "$stop" ] \
-    || fail "clean-deploy: the old version was set aside only after the app was stopped"
-  [ "$stop" -lt "$checkout" ] && [ "$checkout" -lt "$bundle" ] && [ "$bundle" -lt "$unit" ] \
+  # Everything the machine can answer about the new version is answered while
+  # the old one is still serving: the front end is staged and proved readable,
+  # and only then is anything set aside, stopped, or swapped.
+  [ "$stage" -lt "$readable" ] && [ "$readable" -lt "$aside" ] && [ "$aside" -lt "$stop" ] \
+    || fail "clean-deploy: the new front end was not staged and proved readable before the app was stopped: $(tr '\n' '|' < "$SSH_LOG")"
+  [ "$stop" -lt "$checkout" ] && [ "$checkout" -lt "$swap" ] && [ "$swap" -lt "$unit" ] \
     && [ "$unit" -lt "$verify" ] && [ "$verify" -lt "$restart" ] \
     || fail "clean-deploy: steps ran out of order: $(tr '\n' '|' < "$SSH_LOG")"
 
@@ -314,14 +348,50 @@ test_a_bundle_the_service_user_cannot_read_never_restarts() {
   out=$(FMTEST_BUNDLE_UNREADABLE=1 run_deploy demo "$PLAIN") || rc=$?
   [ "$rc" -ne 0 ] || fail "unreadable-bundle: a front end the app could not read was reported as live"
   assert_not_contains "$out" "is live at" "unreadable-bundle"
-  assert_contains "$out" "demo" "unreadable-bundle"
+  assert_contains "$out" "cannot read all of it" "unreadable-bundle"
+  # The whole point of asking while the old version is still serving: this is a
+  # refusal that changed nothing, not a failure with the app already down.
+  assert_no_grep 'systemctl stop' "$SSH_LOG" \
+    "unreadable-bundle: the app was stopped over a front end that never passed its check"
+  assert_no_grep 'checkout --detach' "$SSH_LOG" \
+    "unreadable-bundle: the machine was moved to the new version anyway"
   assert_no_grep 'systemctl restart' "$SSH_LOG" \
     "unreadable-bundle: the app was restarted onto a front end it cannot read"
   assert_grep 'chmod -R a+rX' "$SSH_LOG" \
-    "unreadable-bundle: the installed front end was never made readable at all"
-  assert_grep '"result":"failed"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
-    "unreadable-bundle: the failure was not recorded"
-  pass "a front end the service user cannot read fails the deploy instead of restarting into it"
+    "unreadable-bundle: the staged front end was never made readable at all"
+  assert_grep '"result":"refused"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "unreadable-bundle: the refusal was not recorded"
+  pass "a front end the service user cannot read refuses the deploy with the app still serving"
+}
+
+test_a_service_user_check_answers_from_a_directory_it_can_read() {
+  local out rc=0
+  make_case service-user-cwd
+  # The fake machine fails every service-user command that starts in the login
+  # user's private home, exactly as the real one did. A deploy that completes
+  # here is one whose checks ran from somewhere the service user can read.
+  out=$(run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -eq 0 ] || fail "service-user-cwd: a check failed on its own working directory rather than its question: $out"
+  assert_contains "$out" "is live at $PLAIN" "service-user-cwd"
+  assert_grep "sudo -u 'demo-proxy'" "$SSH_LOG" \
+    "service-user-cwd: no command ran as a service user at all, so this proves nothing"
+  assert_grep "sudo -u 'demo'" "$SSH_LOG" \
+    "service-user-cwd: the front end was never checked as the user the app runs as"
+  assert_not_contains "$out" 'Failed to restore initial working directory' \
+    "service-user-cwd: the working-directory failure reached the deploy's own report"
+  pass "a check run as the service user starts where that user can read, and answers its own question"
+}
+
+test_a_readability_check_that_cannot_answer_says_so() {
+  local out rc=0
+  make_case readable-unanswerable
+  out=$(FMTEST_READABLE_BROKEN=1 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "readable-unanswerable: deployed without knowing whether the app could read its front end"
+  assert_contains "$out" "could not tell" "readable-unanswerable"
+  assert_not_contains "$out" "cannot read all of it" "readable-unanswerable"
+  assert_no_grep 'systemctl stop' "$SSH_LOG" \
+    "readable-unanswerable: the app was stopped on a check that never answered"
+  pass "a readability check that cannot answer refuses as itself, not as an unreadable release"
 }
 
 test_rollback_works_after_a_failed_deploy() {
@@ -347,7 +417,19 @@ test_rollback_works_after_a_failed_deploy() {
     "rollback-after-failure: the front end the previous version ran with was never put back"
   assert_grep '"result":"rolled-back"' "$ledger" \
     "rollback-after-failure: the recovery was not recorded"
-  pass "--rollback undoes a deploy that failed, not only one that completed"
+  # Undoing the deploy is only half of it: the previous version has to be
+  # running and answering when this returns, or the site is still down.
+  assert_contains "$out" "is live at $DEPLOYED" "rollback-after-failure"
+  assert_grep "systemctl restart 'demo-app'" "$SSH_LOG" \
+    "rollback-after-failure: the previous version was put back but never started"
+  # A rollback restores a version this machine already served, so it re-runs
+  # none of the start-time checks: one that refused would only keep that version
+  # off a site that is already down.
+  assert_no_grep 'validate_allowed_emails.py' "$SSH_LOG" \
+    "rollback-after-failure: a start-time check was re-run for a version that was already live"
+  assert_no_grep "'!' -readable" "$SSH_LOG" \
+    "rollback-after-failure: the front end this machine already served was re-checked before it could go back"
+  pass "--rollback undoes a deploy that failed and ends with the previous version running"
 }
 
 test_record_live_catches_the_record_up_without_touching_the_machine() {
@@ -383,6 +465,8 @@ test_a_clean_range_deploys_in_the_documented_order
 test_the_completed_deploy_is_recorded
 test_the_precheck_runs_before_the_stop_and_only_on_host_owned_files
 test_a_bundle_the_service_user_cannot_read_never_restarts
+test_a_service_user_check_answers_from_a_directory_it_can_read
+test_a_readability_check_that_cannot_answer_says_so
 test_rollback_works_after_a_failed_deploy
 test_record_live_catches_the_record_up_without_touching_the_machine
 test_rollback_targets_the_version_the_last_deploy_came_from
