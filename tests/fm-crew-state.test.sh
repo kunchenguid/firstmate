@@ -2173,6 +2173,137 @@ test_bound_crew_ignores_a_run_that_is_not_its_own() {
   pass "a bound crew is never credited a run that is not its binding"
 }
 
+# The bound crew's own run is fetched by id when the repo's current run is
+# another crew's on ANOTHER branch: before, a foreign-branch answer that failed
+# the id rule was dropped outright, and the compliant owner fell to its idle
+# pane and read as a possible wedge.
+test_bound_crew_finds_its_own_run_by_id_when_axi_answers_another_branch() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case bound-by-id fm/shared-byid)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01BOUNDRUN0000000000000004"
+  arm_idle_record "$d/state" owner
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01OTHERRUN0000000000000010)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running_id fm/shared-byid 01BOUNDRUN0000000000000004)"
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "state: working" \
+    "a bound crew must still be credited its own run when the repo's current run is another branch's"
+  assert_contains "$out" "source: run-step" "the bound crew reads it from the run step"
+  assert_contains "$out" "validating (running)" \
+    "the run fetched by id carries the crew's own full step detail, not coarse ledger detail"
+  pass "a bound crew's own run is found by id when axi answers another branch"
+}
+
+# The coarse ledger route names no run id, so it is gated by the branch: while
+# a sibling binds a run from a worktree on this branch, an unbound co-branch
+# crew is withheld branch-level credit entirely - even when the repo's current
+# run is an UNBOUND run on another branch, which the id rule alone would let
+# through to the ledger. The bound sibling itself keeps its run, by id.
+test_unbound_cobranch_crew_is_withheld_coarse_credit_while_a_sibling_is_bound() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case coarse-gate fm/shared-coarse)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01BOUNDRUN0000000000000005"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'paused: waiting on the captain\n' > "$d/state/other.status"
+  arm_idle_record "$d/state" owner
+  arm_idle_record "$d/state" other
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01NOBODYSRUN00000000000011)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running_id fm/shared-coarse 01BOUNDRUN0000000000000005)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-09-04 10:10
+  running    fm/shared-coarse $(git -C "$d/wt-owner" rev-parse --short=7 HEAD)  2026-09-04 10:05
+EOF
+)"
+  out=$(run_crew_state "$d" other)
+  assert_not_contains "$out" "state: working" \
+    "an unbound co-branch crew must not take the ledger's branch credit while a sibling binds a run there"
+  assert_contains "$out" "state: paused" "the unbound crew falls to its own declared wait"
+
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "state: working" "the bound sibling still reads its own run"
+  assert_contains "$out" "source: run-step" "the bound sibling reads it from the run step"
+  pass "the coarse ledger route is withheld from an unbound co-branch crew while a sibling is bound"
+}
+
+# With no binding anywhere on the branch, the ledger route keeps crediting
+# co-branch crews exactly as before, so a home whose crews predate bindings
+# regresses in no way.
+test_unbound_cobranch_crews_keep_coarse_credit_with_no_binding_on_the_branch() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case coarse-legacy fm/shared-coarse-legacy)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01NOBODYSRUN00000000000012)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-09-04 10:10
+  running    fm/shared-coarse-legacy $(git -C "$d/wt-owner" rev-parse --short=7 HEAD)  2026-09-04 10:05
+EOF
+)"
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "validating (background run)" "an unbound crew still takes the ledger's branch credit"
+  out=$(run_crew_state "$d" other)
+  assert_contains "$out" "validating (background run)" \
+    "with no binding on the branch the coarse route is unchanged for every co-branch crew"
+  pass "no binding on the branch keeps the coarse ledger credit for co-branch crews"
+}
+
+# A same-branch run another task has bound is never this crew's, even when the
+# ledger would otherwise let the head rule's rejection fall through to branch
+# credit: the direct route requires ownership by id, and the coarse route is
+# withheld because the claimant's worktree sits on this branch.
+test_unbound_crew_never_takes_coarse_credit_for_a_same_branch_run_bound_elsewhere() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case coarse-claimed fm/shared-claimed)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000006"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-claimed 01BOUNDRUN0000000000000006)"
+  FM_FAKE_RUNS_LIST="  running    fm/shared-claimed $(git -C "$d/wt-owner" rev-parse --short=7 HEAD)  2026-09-04 10:05"
+  out=$(run_crew_state "$d" other)
+  assert_not_contains "$out" "state: working" \
+    "a same-branch run bound by a sibling must not reach the unbound crew through the ledger either"
+  pass "a bound sibling's same-branch run is withheld from an unbound crew on every route"
+}
+
+# bin/fm-fleet-snapshot.sh reads a task's record through a captured COPY
+# (FM_CREW_STATE_META_OVERRIDE). The live record under state/ is then the same
+# task, not a rival claimant: a crew that bound its run between the copy and the
+# read must still be credited it.
+test_captured_record_copy_does_not_make_the_live_record_a_rival_claimant() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case snapshot-self fm/shared-snapshot)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000007"
+  mkdir -p "$d/snapshot"
+  fm_write_meta "$d/snapshot/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-snapshot 01BOUNDRUN0000000000000007)"
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/snapshot/owner.meta" run_crew_state "$d" owner)
+  assert_contains "$out" "state: working" \
+    "the crew's own live record must not be read as another task claiming its run"
+  pass "a captured record copy never turns the task's own live record into a rival claimant"
+}
+
 test_direct_pr_crew_is_never_credited_a_run() {
   reset_fakes
   local d out
@@ -2298,6 +2429,11 @@ test_bound_owner_keeps_the_run_its_neighbour_loses_it
 test_unbound_neighbour_without_a_status_line_is_not_working
 test_no_bindings_on_the_branch_preserves_legacy_behaviour
 test_bound_crew_ignores_a_run_that_is_not_its_own
+test_bound_crew_finds_its_own_run_by_id_when_axi_answers_another_branch
+test_unbound_cobranch_crew_is_withheld_coarse_credit_while_a_sibling_is_bound
+test_unbound_cobranch_crews_keep_coarse_credit_with_no_binding_on_the_branch
+test_unbound_crew_never_takes_coarse_credit_for_a_same_branch_run_bound_elsewhere
+test_captured_record_copy_does_not_make_the_live_record_a_rival_claimant
 test_direct_pr_crew_is_never_credited_a_run
 test_local_only_crew_is_never_credited_a_run
 test_absent_mode_keeps_the_run_lookup

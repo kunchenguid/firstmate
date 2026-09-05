@@ -39,13 +39,22 @@
 #      pipeline's OWN internal checkout under ~/.no-mistakes/worktrees/, never
 #      the caller's. So when a one-PR-per-repo posture puts several crews'
 #      worktrees on one long-lived feature branch, every one of them satisfies
-#      the head rule for whichever run is current. Two guards settle ownership
-#      before either attribution route runs, both below at nm_run_is_ours:
+#      the head rule for whichever run is current. Two guards settle ownership,
+#      applied to each attribution route below:
 #        - the RUN BINDING: `nm_run=<run-id>` in this task's own record, written
-#          by bin/fm-run-bind.sh when the crew's `axi run` reports its id. A
-#          bound crew is credited only its own run id; an unbound crew is
-#          credited a run no OTHER task has bound. With no binding anywhere the
+#          by bin/fm-run-bind.sh when the crew's `axi run` reports its id. The
+#          rule is bin/fm-nm-run-lib.sh's, shared with bin/fm-teardown.sh. On
+#          the `axi status` route (a run named by id): a bound crew is credited
+#          only its own run id, and when the repo's current run is another id
+#          its own run is fetched by `axi status --run <id>` instead; an unbound
+#          crew is credited a run no OTHER task has bound. On the coarse `runs`
+#          ledger route (branch-level credit, no id column): a bound crew keeps
+#          the route, since its own id was asked for first; an unbound crew is
+#          withheld the credit entirely while another task binds a run from a
+#          worktree on this branch. With no binding anywhere on the branch the
 #          branch behaviour is unchanged, so existing homes do not regress.
+#          KNOWN LIMIT: two BOUND crews on one branch whose own runs the head
+#          rule rejects both fall to the ledger, which cannot tell them apart.
 #        - the DELIVERY-MODE gate: a direct-PR or local-only crew never drives a
 #          pipeline, so it is never credited a run at all.
 #      bin/fm-watch.sh's pause_state_class independently declines this proof for
@@ -496,9 +505,11 @@ COARSE_STATUS=""
 # --- run ownership: the binding, and the delivery-mode gate ------------------
 #
 # Both guards exist because branch attribution alone cannot tell concurrent
-# crews on ONE branch apart (see the KNOWN LIMIT in the header). They are checked
-# before either attribution route, so a run this crew provably does not own is
-# never credited to it by any path.
+# crews on ONE branch apart (see the header). The rule itself is owned by
+# bin/fm-nm-run-lib.sh (fm_nm_run_owned_by_task for a run named by id,
+# fm_nm_branch_credit_owned_by_task for branch-level ledger credit), shared with
+# bin/fm-teardown.sh so the read path and the abort path never disagree about
+# whose run a run is.
 #
 # The binding is `nm_run=<run-id>` in state/<id>.meta, written by
 # bin/fm-run-bind.sh when the crew's own `no-mistakes axi run` reports its id.
@@ -506,43 +517,17 @@ COARSE_STATUS=""
 # crew that started a run knows which id is its own.
 NM_BOUND_RUN=$(meta_value nm_run)
 
-# 0 if some OTHER task in this home has bound run id $1. One grep over the home's
-# task records - no git, no branch resolution, and nothing read from another
-# crew's worktree, so the cost does not scale with how healthy the fleet is.
-nm_run_claimed_elsewhere() {  # <run-id>
-  local run_id=$1 meta other
-  [ -n "$run_id" ] || return 1
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    [ "$meta" != "$META" ] || continue
-    other=$(grep '^nm_run=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ "$other" = "$run_id" ] && return 0
-  done
-  return 1
+# 0 if the run in $RUN_OUT may be credited to THIS crew by id.
+nm_run_is_ours() {
+  fm_nm_run_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$(strip_quotes "$(nm_field id)")"
 }
 
-# 0 if the run in $RUN_OUT may be credited to THIS crew.
-#   - this crew is bound and the ids match: yes, whatever the branch says
-#   - this crew is bound and they differ: no - the run the repo is currently
-#     reporting is someone else's, and the coarse ledger cannot overrule that
-#     because `no-mistakes runs` carries no run id column to check against
-#   - this crew is unbound and another task binds this run: no - it is spoken for
-#   - this crew is unbound and nobody binds this run: unchanged branch behaviour,
-#     so a home whose crews predate bindings regresses in no way
-#
-# This is narrower than "withhold from every unbound task once ANY task on the
-# branch is bound": a task left bound to an old terminal run does not strip
-# attribution from a neighbour that genuinely owns the current one. It withholds
-# on the evidence that a specific run is claimed, rather than on the branch
-# carrying any binding at all.
-nm_run_is_ours() {
-  local run_id
-  run_id=$(strip_quotes "$(nm_field id)")
-  if [ -n "$NM_BOUND_RUN" ]; then
-    [ -n "$run_id" ] && [ "$run_id" = "$NM_BOUND_RUN" ]
-    return
-  fi
-  ! nm_run_claimed_elsewhere "$run_id"
+# 0 if THIS crew may take the coarse ledger's branch-level credit, which names
+# no run id: always for a bound crew (its own id was asked for first, below),
+# and for an unbound crew only while no other task binds a run from a worktree
+# on this branch. With no binding anywhere the branch behaviour is unchanged.
+nm_branch_credit_is_ours() {
+  fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$CREW_BRANCH"
 }
 
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -558,34 +543,51 @@ esac
 if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
   && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ] && ! nm_run_is_ours; then
-    RUN_OUT=""
+  if [ -n "$RUN_OUT" ] && [ -n "$NM_BOUND_RUN" ] \
+    && [ "$(strip_quotes "$(nm_field id)")" != "$NM_BOUND_RUN" ]; then
+    # The repo's current run is another crew's (routine once several crews'
+    # worktrees sit on one branch, or on one repo). A bound crew's own run is
+    # still addressable by the one identifier that is unambiguous, so ask for
+    # it by id instead of guessing from the branch: the answer then carries
+    # the crew's own step and gate detail, and the head rule below still
+    # applies to it. Nested inside `[ -n "$RUN_OUT" ]` for the same reason as
+    # the ledger fallback: an empty primary answer means the CLI itself did not
+    # respond, and a second bounded call would only double the wait.
+    RUN_OUT=$(nm_run axi status --run "$NM_BOUND_RUN")
   fi
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the
     # pipeline owns this branch, the daemon's own branch attribution is
     # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh). Ownership
+    # by id is required on top of both: a same-branch run that another task
+    # has bound is never this crew's, whatever its head says.
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_is_ours \
       && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
-    else
+    elif nm_branch_credit_is_ours; then
       # The active-or-most-recent run is for another branch, or it names this
       # branch with a head this copy cannot verify (a pipeline-advanced fix
       # round, or a rewritten tip). Deliberately nested inside
       # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
       # itself did not respond, so retrying it immediately with a second
-      # bounded call would just double the wait for no better answer.
+      # bounded call would just double the wait for no better answer. The
+      # ledger names no run id, so this branch-level credit is taken only when
+      # nm_branch_credit_is_ours says the branch's runs are not spoken for by
+      # a bound sibling.
       COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         # A branch-matching answer the strict rule rejected is this branch's
         # own current run once the ledger proves the pipeline-owned
         # continuation, so its axi TOON is the authoritative run detail
-        # (RUN_SOURCE stays full); only a foreign-branch answer leaves
-        # coarse status-word detail.
-        [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
+        # (RUN_SOURCE stays full); only a foreign-branch answer, or a
+        # same-branch answer that is not this crew's by id, leaves coarse
+        # status-word detail.
+        if [ "$run_branch" != "$CREW_BRANCH" ] || ! nm_run_is_ours; then
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi

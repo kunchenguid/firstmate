@@ -145,6 +145,14 @@
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
 #     strict fm_nm_head_matches_worktree rule) both match this worktree, then
 #     runs `no-mistakes axi abort --run <id>` for that verified run instance.
+#     Branch and head cannot separate concurrent crews whose worktrees sit on
+#     ONE branch, so the abort is additionally gated by bin/fm-nm-run-lib.sh's
+#     shared run-ownership rule (the `nm_run=<run-id>` binding each crew
+#     records through bin/fm-run-bind.sh, the same rule bin/fm-crew-state.sh
+#     credits a run by): a run another task binds, or any run on a branch
+#     where another task binds one while this task binds none, is left alone
+#     and its owner is named; a bound task whose own run is not the repo's
+#     current one asks for it by id so its own parked run is still concluded.
 #     When the run head is absent from this copy's object store - the pipeline
 #     committed its fix round in its own repo and the task copy never fetched
 #     it - attribution falls to the same lib's shared
@@ -1617,6 +1625,38 @@ case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
 NM_TEARDOWN_RUNS_LIMIT=${FM_TEARDOWN_NM_RUNS_LIMIT:-200}
 case "$NM_TEARDOWN_RUNS_LIMIT" in ''|*[!0-9]*) NM_TEARDOWN_RUNS_LIMIT=200 ;; esac
 TASK_RUN_ID=
+# The run binding this task recorded through bin/fm-run-bind.sh (empty when it
+# never bound one). The ownership rule that reads it is bin/fm-nm-run-lib.sh's,
+# shared with bin/fm-crew-state.sh, so the read path and this abort path never
+# disagree about whose run a run is.
+task_bound_run() {
+  fm_nm_task_bound_run "$META"
+}
+
+# 0 if run $1 is this task's to abort. Concurrent crews' worktrees can sit on
+# ONE branch at ONE head, so branch-and-head identity alone would attribute a
+# sibling's parked run to this task and destroy its in-flight validation. A run
+# another task has bound, or any run on a branch where another task binds one
+# while this task binds none, is left completely alone and the owner is named.
+task_owns_run() {  # <run-id> <branch>
+  local run_id=$1 branch=$2 own owner
+  own=$(task_bound_run)
+  if ! fm_nm_run_owned_by_task "$STATE" "$ID" "$own" "$run_id"; then
+    if owner=$(fm_nm_run_bound_by_other_task "$STATE" "$ID" "$run_id"); then
+      echo "teardown: no-mistakes run $run_id is bound to task $owner, not $ID; leaving it alone" >&2
+    else
+      echo "teardown: no-mistakes run $run_id is not the run $ID bound ($own); leaving it alone" >&2
+    fi
+    return 1
+  fi
+  if ! fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$own" "$branch"; then
+    owner=$(fm_nm_branch_bound_sibling "$STATE" "$ID" "$branch" || true)
+    echo "teardown: no-mistakes run $run_id on $branch may belong to task $owner, which binds a run there while $ID binds none; leaving it alone" >&2
+    return 1
+  fi
+  return 0
+}
+
 task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate ledger
   TASK_RUN_ID=
@@ -1656,20 +1696,28 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
   case "$status" in
-    awaiting_approval|fix_review) TASK_RUN_ID=$run_id; return 0 ;;
+    awaiting_approval|fix_review) ;;
+    *) [ -n "$awaiting" ] || [ "$has_gate" = 1 ] || return 1 ;;
   esac
-  if [ -n "$awaiting" ] || [ "$has_gate" = 1 ]; then
-    TASK_RUN_ID=$run_id
-    return 0
-  fi
-  return 1
+  task_owns_run "$run_id" "$branch" || return 1
+  TASK_RUN_ID=$run_id
+  return 0
 }
 
 task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 out
+  local wt=$1 out own
   # Accepted best-effort residual: query failures stay fail-open because making
   # no-mistakes availability a prerequisite would block ship tasks with no run.
   out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
+  own=$(task_bound_run)
+  if [ -n "$out" ] && [ -n "$own" ] \
+    && [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")" != "$own" ]; then
+    # The repo's current run is another crew's (several crews' worktrees on one
+    # branch, or one repo). This task's own run is still addressable by the one
+    # unambiguous identifier, so ask for it by id: a parked run of this task's
+    # own is concluded even when a sibling's run is the current one.
+    out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$own")
+  fi
   task_status_is_own_parked_run "$wt" "$out"
 }
 
