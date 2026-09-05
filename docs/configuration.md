@@ -689,6 +689,16 @@ The (condition, action) spec is stored privately under `state/when/` and hash-bo
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
 
+The `periodic` adapter (`bin/fm-procevent-periodic.sh`) turns this channel into a standing scheduled check: it registers one read-only command and a cadence, its blocking child sleeps until the run is due, runs the check bounded by its own timeout, and captures exactly one outcome document per run.
+A run is report-worthy when the check exits NONZERO, and only a report, a timeout, or a refusal becomes a wake; a clean run is captured with its evidence and silenced through the adapter-owned no-op seam, so a check that prints progress on its clean path costs no wake noise at all.
+Exit status rather than output is the signal precisely because the runner already captures stdout as the evidence a handler reads, so a useful check prints on both paths and emptiness cannot mean "nothing to report".
+The spec is stored privately under `state/periodic/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved check executable's bytes; a mutated or unregistered spec or a changed executable is refused before the check runs, and that refusal wakes firstmate rather than retrying silently.
+The next due time is durable state under the same directory, recorded before each outcome is emitted, so a crash or restart resumes the existing cadence instead of re-running the check immediately, and an unreadable schedule is re-established rather than read as due now.
+Recording that next due time retries a transient write failure a bounded number of times (`FM_PERIODIC_WRITE_DUE_RETRIES`, `FM_PERIODIC_WRITE_DUE_RETRY_DELAY`) before giving up, so a momentary write failure self-heals within the run instead of leaving the marker in the past and forcing a refusal on every following reconcile cycle; a failure that outlasts the retries is still announced exactly as before.
+Each run's child exits after its outcome, leaving the source armed, so the watcher's ordinary `reconcile` is what starts the next cycle: the cadence survives a watcher restart, a reboot, and a crashed runner without this adapter owning any timer of its own, and no second scheduling control plane exists.
+The adapter carries no judgment: the check must be read-only and safe to run unattended on every cadence, and anything that changes state belongs on the condition->action path above or the ordinary wake-and-decide flow.
+Its header and `--help` own the commands, flags, and outcome document.
+
 This section is the single owner of the runner's operating contract.
 Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling while an unsafe target directory remains refused.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
@@ -838,6 +848,10 @@ FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sw
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
+FM_PERIODIC_OUTPUT_TAIL_BYTES=8192      # bound on the check-output tail inside one periodic outcome document
+FM_PERIODIC_SLEEP_SLICE=60              # seconds per sleep slice while a periodic check waits for its next due time
+FM_PERIODIC_WRITE_DUE_RETRIES=5         # attempts to persist a periodic check's next-due time before announcing a refusal
+FM_PERIODIC_WRITE_DUE_RETRY_DELAY=1     # seconds between those attempts
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh

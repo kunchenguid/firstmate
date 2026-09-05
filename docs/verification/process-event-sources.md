@@ -9,6 +9,7 @@ Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 install
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
+The periodic-check adapter was observed on 2026-08-29 by the task crew in the task worktree, not the pipeline environment, on macOS 26.6.2 (Darwin 25.6.0) with GNU bash 3.2.57(1)-release (arm64-apple-darwin25), at commit `342133e8427795b41262a337c77c994adf534036`.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -130,6 +131,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | condition->action single-fire and trust | `tests/fm-procevent-when.test.sh` drives the public `when` adapter and generic runner with real commands, proving stable true fires once, a claimed fire restarts as ambiguous without a second action, concurrent arms publish one complete watch, and mutated specs or action executables are refused before execution |
 | condition->action terminal outcomes | the same suite proves flapping true polls do not fire, action failure, condition error budget, deadline expiry, and a true poll completing after its deadline each produce the expected terminal captured result without an unsafe action |
 | condition->action process bounds | the same suite proves action timeout terminates descendants and command-output staging remains within `FM_WHEN_OUTPUT_TAIL_BYTES` while the command runs |
+| periodic-check cadence and silence | `tests/fm-procevent-periodic.test.sh` drives the public periodic adapter and generic runner with real commands, proving arm binds the check, refuses duplicate arming, and retire cleans up; arm refuses a cadence-breaking timeout and a missing executable; a clean run is captured with its evidence and never announced; a nonzero exit always announces and keeps its evidence out of the event line; the cadence continues across restarts through the watcher's ordinary reconcile; a mutated check executable or spec is refused without running and still wakes firstmate; a check that overruns its bound is stopped, reported, and left armed; `--first` wait defers the first run by a full interval; an unreadable schedule is re-established instead of read as due now; stored argv is executed directly without re-splitting; and retire leaves an unhandled result behind and blocks re-arming until it is handled |
 | silent failure handling | a nonzero exit with no output publishes nothing and leaves the source registered for retry |
 | inertness | a home with no registered source generates no state, starts no process, and does not need supervision |
 | absent extension registry parity | `tests/fm-extension-binding.test.sh` drives `list` and `verify` in a fresh home while the current directory contains project files and Pi packages and an environment variable names fake package data; both commands report no bindings, create no home path, and discover nothing outside `config/extensions.d` |
@@ -153,6 +155,16 @@ FM_EXTENSION_BINDING_SEGMENT=lifecycle-invocation-cleanup bin/fm-test-run.sh tes
 bin/fm-test-run.sh tests/fm-procevent.test.sh
 bin/fm-doc-audience-check.sh
 ```
+
+Run the focused periodic-check adapter evidence with:
+
+```sh
+bin/fm-test-run.sh tests/fm-procevent-periodic.test.sh
+```
+
+The task crew observed this suite pass all 16 scenarios (final line `all periodic-check adapter tests passed`), the baseline `tests/fm-procevent.test.sh` pass unmodified (final line `all procevent tests passed`), and `bin/fm-lint.sh` report ShellCheck 0.11.0 and actionlint 1.7.12 clean with 3 workflow files valid.
+These suites require a state root whose resolved physical path equals its literal path, because `fm_procevent_claim_state_root_identity` compares the two, so on macOS a test home under a symlinked temp path - including `/tmp` (-> `/private/tmp`) and the default `TMPDIR` `/var/folders/...` (-> `/private/var/folders/...`) - refuses claim acquisition with "cannot claim source".
+This is pre-existing and independent of this branch: the same check is present at commit `1fbc7bb`, before this branch.
 
 ## Harness and session-provider review
 
