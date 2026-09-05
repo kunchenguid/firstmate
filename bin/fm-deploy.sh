@@ -5,6 +5,7 @@
 # Usage:
 #   fm-deploy.sh <project> <sha> [--with-captain-permission "<the captain's words>"]
 #   fm-deploy.sh <project> --rollback
+#   fm-deploy.sh <project> <sha> --record-live --with-captain-permission "<his words>"
 #
 # The procedure is the one deploy/PROVISIONING.md and the recorded cutover
 # already establish: fetch the new version, prove the start-time requirements it
@@ -31,11 +32,19 @@
 # The fetch happens before the stop for the same reason: a version the machine
 # cannot even obtain must not be discovered after the app is already down.
 #
-# --rollback needs no captain permission: it restores the exact version that was
-# live before the last deploy, which the captain already had. It uses the copy
-# of that version's front end set aside on the machine before the deploy, so a
-# rollback still works long after the build that produced it stopped being
-# downloadable.
+# --rollback needs no captain permission: it restores a version the captain
+# already had. Its target is the version the last attempt that REACHED the
+# machine came from - a failed deploy included, which is when a rollback is
+# actually wanted - and only one whose front end is still set aside under
+# rollback_root, so a rollback still works long after the build that produced
+# it stopped being downloadable.
+#
+# --record-live records that <sha> is already live because it was put there by
+# hand. It changes nothing on the machine: it refuses unless the machine really
+# reports <sha>, and it needs the captain's own words, because it asserts an
+# authority this home did not exercise. Its only effect is that the durable
+# record stops disagreeing with the machine, so a later rollback aims at the
+# version this one actually replaced.
 #
 # Every attempt, refusal included, is appended to
 # state/deploy-ledger/<project>.jsonl.
@@ -57,6 +66,7 @@ PROJECT=''
 TARGET_SHA=''
 PERMISSION=''
 ROLLBACK=0
+RECORD_LIVE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --with-captain-permission)
@@ -64,6 +74,7 @@ while [ "$#" -gt 0 ]; do
       PERMISSION="${1:-}"
       ;;
     --rollback) ROLLBACK=1 ;;
+    --record-live) RECORD_LIVE=1 ;;
     -h | --help)
       sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"
       exit 0
@@ -87,9 +98,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$PROJECT" ] || { printf 'error: usage: fm-deploy.sh <project> <sha> [--with-captain-permission "<reason>"]\n' >&2; exit 2; }
+if [ "$ROLLBACK" -eq 1 ] && [ "$RECORD_LIVE" -eq 1 ]; then
+  printf 'error: --rollback puts a version back; --record-live only records one that is already there\n' >&2
+  exit 2
+fi
 if [ "$ROLLBACK" -eq 1 ]; then
-  [ -z "$TARGET_SHA" ] || { printf 'error: --rollback takes no sha; it restores the version that was live before the last deploy\n' >&2; exit 2; }
+  [ -z "$TARGET_SHA" ] || { printf 'error: --rollback takes no sha; it restores the version the last attempt came from\n' >&2; exit 2; }
   [ -z "$PERMISSION" ] || { printf 'error: --rollback needs no captain permission\n' >&2; exit 2; }
+elif [ "$RECORD_LIVE" -eq 1 ]; then
+  [ -n "$TARGET_SHA" ] || { printf 'error: --record-live needs the commit that is already live\n' >&2; exit 2; }
+  [ -n "$PERMISSION" ] || { printf 'error: --record-live records an authority this home did not exercise, so it needs the captain\x27s own words in --with-captain-permission\n' >&2; exit 2; }
 else
   [ -n "$TARGET_SHA" ] || { printf 'error: a commit to deploy is required\n' >&2; exit 2; }
 fi
@@ -120,6 +138,15 @@ refuse() {
   exit 1
 }
 
+# The flag alone is not permission; it must carry what the captain actually
+# said, so the ledger records a decision rather than a checkbox.
+require_captains_words() {
+  case "$PERMISSION" in
+    -* | '') refuse "--with-captain-permission needs the captain's own words as its reason" ;;
+  esac
+  [ "${#PERMISSION}" -ge 8 ] || refuse "--with-captain-permission needs the captain's own words as its reason"
+}
+
 POLICY=$(fm_deploy_policy_file "$FM_HOME" "$PROJECT")
 fm_deploy_policy_readable "$POLICY" || {
   printf 'error: %s has no deploy policy at %s, so it is not deployable from here\n' "$PROJECT" "$POLICY" >&2
@@ -139,13 +166,51 @@ fm_deploy_sha_valid "$DEPLOYED_SHA" || {
 AUTHORITY=auto
 if [ "$ROLLBACK" -eq 1 ]; then
   [ -f "$LEDGER" ] || { printf 'error: no deploy has been recorded for %s, so there is nothing to roll back to\n' "$PROJECT" >&2; exit 2; }
-  TARGET_SHA=$(grep '"result":"deployed"' "$LEDGER" | tail -1 | sed -n 's/.*"from":"\([0-9a-f]\{40\}\)".*/\1/p')
-  [ -n "$TARGET_SHA" ] || { printf 'error: no completed deploy is recorded for %s, so there is nothing to roll back to\n' "$PROJECT" >&2; exit 2; }
+  # A rollback is wanted most after a deploy that FAILED, and that attempt set
+  # the outgoing version aside before it stopped anything just as a completed
+  # one does. Take the newest attempt that reached the machine and whose copy is
+  # still there, rather than only a completed deploy: requiring a completed one
+  # made the tool useless in exactly the case it exists for.
+  probed=''
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    probed="$probed $candidate"
+    fm_deploy_ssh "sudo test -d '$FM_DEPLOY_TGT_rollback_root/$candidate'" </dev/null 2>/dev/null \
+      || continue
+    if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
+      fm_deploy_ssh "sudo test -d '$FM_DEPLOY_TGT_rollback_root/$candidate/bundle'" </dev/null 2>/dev/null \
+        || continue
+    fi
+    TARGET_SHA=$candidate
+    break
+  done < <(fm_deploy_ledger_rollback_candidates "$LEDGER")
+  if [ -z "$TARGET_SHA" ]; then
+    if [ -n "$probed" ]; then
+      printf 'error: %s has recorded attempts, but the machine no longer holds a set-aside copy of any version they came from (%s), so there is nothing to roll back to\n' \
+        "$PROJECT" "${probed# }" >&2
+    else
+      printf 'error: no attempt that reached the machine is recorded for %s, so there is nothing to roll back to\n' "$PROJECT" >&2
+    fi
+    exit 2
+  fi
   AUTHORITY=rollback
-  printf 'Rolling %s back to the version that was live before the last deploy: %s\n' "$PROJECT" "$TARGET_SHA"
+  printf 'Rolling %s back to %s, the version the last attempt that reached the machine came from.\n' "$PROJECT" "$TARGET_SHA"
 else
   TARGET_SHA=$(git -C "$REPO" rev-parse --verify --quiet "$TARGET_SHA^{commit}" 2>/dev/null) \
     || { printf 'error: %s is not a commit in the local copy of %s\n' "$TARGET_SHA" "$PROJECT" >&2; exit 2; }
+fi
+
+# Catching up the record on a version restored by hand. This is settled before
+# the already-live comparison below, because being already live is the whole
+# precondition it asserts, not a reason to do nothing.
+if [ "$RECORD_LIVE" -eq 1 ]; then
+  AUTHORITY=captain
+  require_captains_words
+  [ "$DEPLOYED_SHA" = "$TARGET_SHA" ] \
+    || refuse "the machine serving $PROJECT reports $DEPLOYED_SHA, not $TARGET_SHA, so that version is not what is live"
+  ledger_append recorded-live '' "$TARGET_SHA" captain "$PERMISSION"
+  printf '%s is recorded as live at %s. Nothing on the machine was changed.\n' "$PROJECT" "$TARGET_SHA"
+  exit 0
 fi
 
 if [ "$DEPLOYED_SHA" = "$TARGET_SHA" ]; then
@@ -175,12 +240,7 @@ if [ "$ROLLBACK" -eq 0 ]; then
   fi
 fi
 if [ -n "$PERMISSION" ]; then
-  # The flag alone is not permission; it must carry what the captain actually
-  # said, so the ledger records a decision rather than a checkbox.
-  case "$PERMISSION" in
-    -* | '') refuse "--with-captain-permission needs the captain's own words as its reason" ;;
-  esac
-  [ "${#PERMISSION}" -ge 8 ] || refuse "--with-captain-permission needs the captain's own words as its reason"
+  require_captains_words
   AUTHORITY=captain
 fi
 
@@ -365,6 +425,10 @@ health=$(fm_deploy_ssh "curl -s -o /dev/null -w '%{http_code}' --max-time 20 '$F
 public=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "$FM_DEPLOY_TGT_public_url" 2>/dev/null || true)
 [ "$public" = "$FM_DEPLOY_TGT_public_expect" ] || step_failed "the sign-in protected address answered $public instead of $FM_DEPLOY_TGT_public_expect"
 
-ledger_append deployed "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" "${PERMISSION:-}"
+if [ "$ROLLBACK" -eq 1 ]; then
+  ledger_append rolled-back "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" 'restored the version the last attempt came from'
+else
+  ledger_append deployed "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" "${PERMISSION:-}"
+fi
 printf '%s is live at %s. Health check and the sign-in protected address both answered as expected.\n' "$PROJECT" "$TARGET_SHA"
 printf 'To put the previous version back: bin/fm-deploy.sh %s --rollback\n' "$PROJECT"

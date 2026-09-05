@@ -324,9 +324,66 @@ test_a_bundle_the_service_user_cannot_read_never_restarts() {
   pass "a front end the service user cannot read fails the deploy instead of restarting into it"
 }
 
+test_rollback_works_after_a_failed_deploy() {
+  local out rc=0 ledger
+  make_case rollback-after-failure
+  # The deploy that just failed is exactly when a rollback is wanted, and it set
+  # the outgoing version aside before it stopped anything, same as a completed
+  # one does. The ledger therefore holds only a `failed` record here.
+  out=$(FMTEST_HEALTH=503 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "rollback-after-failure: the unhealthy deploy did not fail"
+  ledger="$HOME_DIR/state/deploy-ledger/demo.jsonl"
+  assert_no_grep '"result":"deployed"' "$ledger" \
+    "rollback-after-failure: the fixture recorded a completed deploy, so this proves nothing"
+
+  : > "$SSH_LOG"
+  rc=0
+  out=$(FMTEST_HOST_SHA="$PLAIN" FMTEST_GH_DOWNLOAD_FAILS=1 run_deploy demo --rollback) || rc=$?
+  [ "$rc" -eq 0 ] || fail "rollback-after-failure: --rollback refused after a failed deploy: $out"
+  assert_contains "$out" "$DEPLOYED" "rollback-after-failure"
+  assert_grep "checkout --detach '$DEPLOYED'" "$SSH_LOG" \
+    "rollback-after-failure: the machine was not returned to the version the failed deploy came from"
+  assert_grep "cp -a \"$rollback_root_for_test/$DEPLOYED/bundle\" \"/opt/demo/dashboard/v2/dist\"" "$SSH_LOG" \
+    "rollback-after-failure: the front end the previous version ran with was never put back"
+  assert_grep '"result":"rolled-back"' "$ledger" \
+    "rollback-after-failure: the recovery was not recorded"
+  pass "--rollback undoes a deploy that failed, not only one that completed"
+}
+
+test_record_live_catches_the_record_up_without_touching_the_machine() {
+  local out rc=0 ledger
+  make_case record-live
+  # What is live was restored by hand after a failed deploy, so the record and
+  # the machine disagree until someone says so.
+  out=$(FMTEST_HEALTH=503 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "record-live: the unhealthy deploy did not fail"
+  : > "$SSH_LOG"
+
+  rc=0
+  out=$(FMTEST_HOST_SHA="$PLAIN" run_deploy demo "$PLAIN" --record-live \
+    --with-captain-permission "deploy all, I fixed it by hand") || rc=$?
+  [ "$rc" -eq 0 ] || fail "record-live: recording what is already live failed: $out"
+  ledger="$HOME_DIR/state/deploy-ledger/demo.jsonl"
+  assert_grep '"result":"recorded-live"' "$ledger" "record-live: nothing was recorded"
+  assert_grep "\"to\":\"$PLAIN\"" "$ledger" "record-live: the live version was not recorded"
+  if grep -q -E 'systemctl|checkout --detach|cp -a' "$SSH_LOG" 2>/dev/null; then
+    fail "record-live: the machine was changed: $(tr '\n' '|' < "$SSH_LOG")"
+  fi
+
+  # It asserts what is live, so it refuses when the machine says otherwise.
+  rc=0
+  out=$(FMTEST_HOST_SHA="$DEPLOYED" run_deploy demo "$PLAIN" --record-live \
+    --with-captain-permission "deploy all, I fixed it by hand") || rc=$?
+  [ "$rc" -ne 0 ] || fail "record-live: a version the machine does not run was recorded as live"
+  assert_contains "$out" "not what is live" "record-live"
+  pass "--record-live catches the record up on a hand-restored version, and refuses to record one that is not live"
+}
+
 test_a_clean_range_deploys_in_the_documented_order
 test_the_completed_deploy_is_recorded
 test_the_precheck_runs_before_the_stop_and_only_on_host_owned_files
 test_a_bundle_the_service_user_cannot_read_never_restarts
+test_rollback_works_after_a_failed_deploy
+test_record_live_catches_the_record_up_without_touching_the_machine
 test_rollback_targets_the_version_the_last_deploy_came_from
 test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one

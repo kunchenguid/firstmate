@@ -279,8 +279,10 @@ Optional keys are `python` (default `<checkout>/.venv/bin/python`), `ssh_options
 `data/ops-facts.md` stays the narrative operational record a deploy or operations brief carries; `config/deploy-target/<project>` is the machine-read form the deploy path actually acts on, so a host that moves must be corrected in both.
 
 `state/deploy-ledger/<project>.jsonl` is the durable append-only record of every attempt, refusals included, with the commit it came from, the commit it went to, and the authority it acted under.
-`bin/fm-deploy.sh --rollback` reads it to find the version that was live before the last deploy.
-A rollback restores that version's front end from the copy set aside under `rollback_root` before the deploy, not from a build artifact, because artifact retention is short and a rollback is usually wanted long after it lapses.
+`bin/fm-deploy.sh --rollback` reads it to find the version to put back: the one the newest attempt that actually reached the machine came from, a deploy that FAILED included, because a failed deploy is when a rollback is wanted and it set that version aside before it stopped anything.
+A rollback restores that version's front end from the copy set aside under `rollback_root` before the attempt, not from a build artifact, because artifact retention is short and a rollback is usually wanted long after it lapses.
+A completed rollback, and a version someone restored by hand, are each recorded distinctly from a deploy, so neither becomes the target of the next rollback.
+`bin/fm-deploy.sh --help` owns the exact results, flags, and the order the procedure runs in.
 
 [`bin/fm-deploy-status.sh`](../bin/fm-deploy-status.sh), [`bin/fm-deploy.sh`](../bin/fm-deploy.sh), and [`bin/fm-deploy-trigger.sh`](../bin/fm-deploy-trigger.sh) own their exact commands, flags, and refusals in their own headers and `--help`.
 

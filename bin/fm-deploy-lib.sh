@@ -150,6 +150,52 @@ fm_deploy_json_escape() {
   printf '%s' "$s"
 }
 
+# --- the ledger ---------------------------------------------------------------
+
+# fm_deploy_ledger_rollback_candidates <ledger-file> [max]
+# Prints the commits a rollback could return to, newest attempt first, deduped.
+#
+# A candidate is the `from` of an attempt that actually reached the machine -
+# `deployed` or `failed` - because both set the outgoing version aside under
+# rollback_root before stopping anything. A deploy that FAILED is exactly when a
+# rollback is wanted, so restricting this to completed deploys (as it once was)
+# left the tool unable to undo the only case it exists for.
+#
+# `refused` never appears: a refusal happens before anything is set aside.
+# `rolled-back` and `recorded-live` never appear either: rolling back to the
+# version a rollback just replaced would walk back into the broken release, and
+# a hand-restored version was never deployed from here at all.
+#
+# The caller decides which candidate is usable, by asking the machine whether
+# that version's set-aside copy is still there.
+fm_deploy_ledger_rollback_candidates() {
+  local ledger=${1:-} max=${2:-20}
+  local -a lines=()
+  local line result from seen=' ' found=0 i
+  [ -n "$ledger" ] && [ -f "$ledger" ] && [ ! -L "$ledger" ] && [ -r "$ledger" ] || return 0
+  mapfile -t lines <"$ledger"
+  for ((i = ${#lines[@]} - 1; i >= 0; i--)); do
+    line=${lines[i]}
+    result=''
+    from=''
+    [[ $line =~ \"result\":\"([a-z-]+)\" ]] && result=${BASH_REMATCH[1]}
+    case "$result" in
+      deployed | failed) ;;
+      *) continue ;;
+    esac
+    [[ $line =~ \"from\":\"([0-9a-f]{40})\" ]] && from=${BASH_REMATCH[1]}
+    [ -n "$from" ] || continue
+    case "$seen" in
+      *" $from "*) continue ;;
+    esac
+    seen="$seen$from "
+    printf '%s\n' "$from"
+    found=$((found + 1))
+    [ "$found" -lt "$max" ] || return 0
+  done
+  return 0
+}
+
 # --- host preconditions the units enforce at start ----------------------------
 
 # Where a project keeps its unit files. bin/fm-deploy.sh already installs
