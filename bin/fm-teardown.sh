@@ -156,8 +156,8 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
+#     root via bin/fm-worktree-proc-lib.sh (cheap: bounded by process count,
+#     not by walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
@@ -205,6 +205,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-proc-lib.sh
+. "$SCRIPT_DIR/fm-worktree-proc-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -773,6 +777,10 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+# The allocation token this task's spawn minted and stamped into both recorded
+# roots. Absent on a record written before that binding existed, in which case
+# nothing can prove either root is this task's and the reap validation refuses.
+OWNER_TOKEN=$(fm_meta_get "$META" owner_token)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -1632,39 +1640,14 @@ conclude_task_no_mistakes_run() {  # <worktree>
 }
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
+# DIRECTORY is exactly $1 or under it. bin/fm-worktree-proc-lib.sh owns that
+# question for every caller - /proc where the kernel exposes it, one bounded
+# `lsof -a -d cwd` scan otherwise - so teardown and the paths that reap a copy
+# without destroying it can never disagree about which processes are its own.
+# Empty output when nothing matches; failure means the scan could not establish
+# a safe result.
 pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
+  fm_wtproc_pids_under "$1"
 }
 
 task_process_identity() {  # <pid>
@@ -1697,10 +1680,40 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+# The invoker's own ancestor chain is never a leftover. A teardown typed from a
+# shell whose working directory is inside the worktree finds that shell in its
+# own scan, and signalling it would close the session running the teardown. The
+# two sibling paths on this branch spare it inside fm_wtproc_select; teardown
+# does its own signalling, so it has to spare it here. It matters on this host
+# in particular: the scan above used to be gated on lsof, which is absent, so
+# this reap only became live when that gate moved to the shared resolver.
+TASK_PIDS_SPARED_ANCESTORS=0
+
+# True when <pid> is part of THIS teardown's own process tree: either one of the
+# shells it was started from, or one of the short-lived helpers it spawns itself.
+# Both are in the scan whenever the teardown runs from inside the worktree, and
+# neither is a leftover of the gone worker - the helpers in particular are born
+# and die inside each reap pass, so treating them as leftovers makes the reap
+# refuse after its retries rather than finish. The descendant test walks up from
+# the candidate to THIS process only, never to the shells above it: a server the
+# operator's own shell started earlier is a genuine leftover and must stay in.
+task_pid_is_own_process_tree() {  # <pid> <ancestry>
+  local pid=$1 ancestry=$2 cur=$1 hops=0 self=$$
+  task_pid_list_contains "$ancestry" "$pid" && return 0
+  while [ "$hops" -lt 64 ]; do
+    cur=$(fm_wtproc_ppid "$cur") || return 1
+    case "$cur" in 0|1) return 1 ;; esac
+    [ "$cur" = "$self" ] && return 0
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
+  TASK_PIDS_SPARED_ANCESTORS=0
+  local dir dir_pids pids="" ancestry pid kept=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -1710,36 +1723,51 @@ task_pids_under_roots() {  # <dir>...
     pids="$pids
 $dir_pids"
   done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$pids" ] || { TASK_PIDS=; return 0; }
+  # Read once, outside the loop: the chain is the same for every candidate.
+  ancestry=$(fm_wtproc_ancestry)
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if task_pid_is_own_process_tree "$pid" "$ancestry"; then
+      TASK_PIDS_SPARED_ANCESTORS=$((TASK_PIDS_SPARED_ANCESTORS + 1))
+      continue
+    fi
+    kept="$kept$pid
+"
+  done <<EOF
+$pids
+EOF
+  TASK_PIDS=${kept%$'\n'}
 }
 
 reap_task_backend_process_group() {  # <label>
   local label=$1 leader leader_start pgid current_pgid own_pgid
   if [ "$BACKEND" != tmux ]; then
-    echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
+    echo "warning: no working-directory source is available on this host; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
     return 0
   fi
   leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
   case "$leader" in ''|*[!0-9]*)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    echo "warning: no working-directory source is available on this host; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
   esac
   leader_start=$(task_process_identity "$leader") || {
-    echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
+    echo "warning: no working-directory source is available on this host; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
   pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
   pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
   case "$pgid" in ''|*[!0-9]*|0|1)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
+    echo "warning: no working-directory source is available on this host; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
   esac
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
   own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
   if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+    echo "warning: no working-directory source is available on this host; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
   task_process_identity_matches "$leader" "$leader_start" || return 0
@@ -1761,22 +1789,137 @@ reap_task_backend_process_group() {  # <label>
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
-# the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# the recheck. A host with no working-directory source at all uses the backend
+# process-group fallback; a scan error refuses before destructive teardown.
+# validate_recorded_reap_roots: prove the recorded paths are what the record
+# claims BEFORE anything is signalled inside them.
+#
+# The two sibling paths on this branch each run their recorded values through a
+# validator - a task's copy has to prove itself a linked worktree that is not a
+# primary checkout, and a temp root has to resolve to the exact path fm-spawn
+# builds - and both refuse the shapes that are never a task's own: the
+# filesystem root, a path sitting directly in the home, anything under
+# projects/. Teardown passed `worktree=` and `tasktmp=` off the record straight
+# into its signalling loop with none of that behind them.
+#
+# That gap predates this branch, but this branch is what made it REACHABLE: the
+# scan was gated on lsof, absent on the host where this matters, so the loop
+# never ran. Moving it onto the shared resolver switched it on. A stale or
+# hand-edited record naming the operator's own stack under projects/ - ports
+# 3001, 3002, 3003, 3103 - would then be signalled into, which is the one
+# outcome this whole mechanism exists to make impossible.
+#
+# A recorded root that fails those refusals REFUSES the teardown rather than
+# narrowing it. Signalling nothing and removing the worktree anyway would be
+# worse than refusing: the destructive half would run against a record the safe
+# half just rejected. A root that is merely ABSENT is not a refusal - nothing is
+# there to examine - and it is dropped, exactly as the report path drops it.
+#
+# The shape refusals are still not fm_wtproc_disposable_worktree's linked-worktree
+# proof, and for the original reason: this command supports a task copy that is an
+# ordinary clone, which its own suite pins, so that proof would refuse a shape
+# teardown is required to handle.
+#
+# Ownership is a different question from shape, and this path is now held to it
+# like the other two. Shape says a path COULD be a task's copy; it cannot say
+# WHOSE. A pool copy handed back and given out again is a valid copy for whoever
+# holds it now, and every shape refusal passes on it identically - so a stale
+# record naming a reassigned copy reached this loop with nothing left to stop it.
+# That is not a hypothetical: on 2026-08-27 a forced teardown on exactly such a
+# record stopped a live agent and reset its work.
+#
+# The guarantee has to be uniform, because this is the path where the damage
+# happens. Requiring the marker at allocation and at the two reporting paths,
+# while the destructive path alone accepts shape, would leave the mechanism
+# exactly as strong as its weakest link and that link is the one that kills.
+#
+# The clone shape is included rather than exempted: bin/fm-spawn.sh stamps every
+# copy it allocates whatever its shape, and a clone keeps its marker in its own
+# .git directory just as a linked worktree keeps it in its per-worktree git
+# directory. So the supported shape stays supported and gains the same proof.
+#
+# An unowned root refuses the teardown, for the same reason a misshapen one does:
+# signalling nothing and then running the destructive half against a record the
+# safe half just rejected is the worse outcome. --force does NOT reach past this.
+# Forcing past an ownership refusal is precisely the action that stopped the live
+# agent, so the one thing an operator must not be able to do here is insist.
+REAP_ROOTS=()
+validate_recorded_reap_roots() {
+  local real rc pair label dir marker_kind own own_rc
+  REAP_ROOTS=()
+  for pair in "worktree:$WT" "tasktmp:$TASK_TMP"; do
+    label=${pair%%:*}
+    dir=${pair#*:}
+    [ -n "$dir" ] || continue
+    # The two roots keep their markers in different places, so the ownership
+    # check has to be told which kind of root it is looking at.
+    case "$label" in
+      worktree) marker_kind=worktree ;;
+      *) marker_kind=tmp ;;
+    esac
+    rc=0
+    real=$(fm_wtproc_signalling_root "$dir" "task $ID's recorded $label" "$FM_HOME" 2>&1) || rc=$?
+    case "$rc" in
+      0)
+        own_rc=0
+        own=$(fm_wtproc_owns_root "$real" "$marker_kind" "$ID" "$OWNER_TOKEN" 2>&1) || own_rc=$?
+        if [ "$own_rc" != 0 ]; then
+          echo "REFUSED: task $ID's recorded $label '$real' could not be shown to be this task's own copy, so nothing was signalled and nothing was removed. ${own:-The ownership check refused it without stating a reason; inspect that path by hand.}" >&2
+          exit 1
+        fi
+        REAP_ROOTS+=("$real")
+        ;;
+      # Absent: nothing is there to signal into, and teardown's own handling
+      # below already covers a copy that is gone. Not a refusal, and not an
+      # alarm.
+      2) ;;
+      *)
+        echo "REFUSED: task $ID's recorded $label '$dir' is not a path this may ever signal into (${real:-the check refused it without stating a reason}); nothing was signalled and nothing was removed. Correct the record, or inspect that path by hand." >&2
+        exit 1
+        ;;
+    esac
+  done
+}
+
+# The reap runs from OUTSIDE the roots it is about to scan. Every helper it
+# spawns - the /proc walk, each identity read - inherits this shell's working
+# directory, so a teardown started from inside the worktree would list its own
+# short-lived helpers as leftovers, and a fresh set of them on each pass would
+# make the reap refuse instead of converging. Those are the scanner, not the
+# gone worker's work. The shell the operator actually typed in is a different
+# case and is spared by name in task_pids_under_roots. The previous directory is
+# restored, so nothing after this call sees a moved cwd.
 reap_task_worktree_processes() {  # <label> <dir>...
+  local prev rc=0
+  prev=$(pwd -P 2>/dev/null) || prev=/
+  CDPATH='' cd -- / 2>/dev/null || true
+  _reap_task_worktree_processes "$@" || rc=$?
+  CDPATH='' cd -- "$prev" 2>/dev/null || true
+  return "$rc"
+}
+
+_reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  if ! command -v lsof >/dev/null 2>&1; then
+  # Bare, so the answer is settled in THIS shell and inherited by every
+  # per-root scan below, which all run inside command substitutions. Resolving
+  # from inside one would retake a whole machine listing on each of the three
+  # passes, per root, on a host this reap is often cleaning up after.
+  _fm_wtproc_resolve
+  if [ "$_FM_WTPROC_RESOLVER" = none ]; then
     reap_task_backend_process_group "$label"
     return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     pids=$TASK_PIDS
+    if [ "$pass" = 1 ] && [ "$TASK_PIDS_SPARED_ANCESTORS" -gt 0 ]; then
+      echo "warning: $TASK_PIDS_SPARED_ANCESTORS process(es) in task $ID's worktree/tasktmp belong to this teardown itself - the shell it was started from, inside the copy, and its own helpers - and were left alone" >&2
+    fi
     [ -n "$pids" ] || return 0
     tracked_pids=()
     tracked_identities=()
@@ -1784,7 +1927,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
       [ -n "$pid" ] || continue
       if ! identity=$(task_process_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
-          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
         fi
         if task_pid_list_contains "$TASK_PIDS" "$pid"; then
@@ -1803,7 +1946,7 @@ EOF
       continue
     fi
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1818,7 +1961,7 @@ EOF
     done
     sleep 1
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1836,7 +1979,7 @@ EOF
     if [ "${#remaining_pids[@]}" -gt 0 ]; then
       echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
       if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
         return 1
       fi
       current_pids=$TASK_PIDS
@@ -1852,7 +1995,7 @@ EOF
     pass=$((pass + 1))
   done
   if ! task_pids_under_roots "$@"; then
-    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (the working-directory scan failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1
   fi
   [ -z "$TASK_PIDS" ] && return 0
@@ -2747,6 +2890,30 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  validate_recorded_reap_roots
+  # Always called, even with no roots left to scan. Its FIRST act, before any
+  # root is looked at, is to route to the backend process-group reap on a host
+  # that can answer the working-directory question from neither /proc nor lsof -
+  # and that fallback is the only cleanup such a host has. Skipping the call
+  # when both recorded roots turned out to be absent made it unreachable in
+  # exactly that case. With no roots and a working source, the scan simply finds
+  # nothing and returns.
+  reap_task_worktree_processes worktree ${REAP_ROOTS[@]+"${REAP_ROOTS[@]}"}
+fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)

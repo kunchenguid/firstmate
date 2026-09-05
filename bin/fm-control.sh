@@ -47,11 +47,26 @@
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
-#              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              stops what that agent left running in the task's local copy, then
+#              delegates the launch to its single owner, bin/fm-spawn.sh
+#              --relaunch. A failure before publication keeps the prior durable
+#              record in place and reports the concrete state; it never leaves a
+#              half-transitioned task claiming to be running.
+#
+#              That cleanup is the reason relaunch is not just "exit then
+#              spawn": a dev server, watcher, or queue worker the previous
+#              incarnation started keeps running in the same copy the
+#              replacement is about to work in, and nothing else would ever stop
+#              it. Processes are attributed by their real working directory
+#              alone (bin/fm-worktree-proc-lib.sh), never by command name; the
+#              shell of this task's OWN endpoint is spared because relaunch
+#              reuses it, identified from the record rather than inferred from
+#              a process's shape; a secondmate is skipped because its
+#              "worktree" is its firstmate home, an agent that was only READ as
+#              already stopped has that reading corroborated by an independent
+#              current-state source first, and a cleanup that cannot be
+#              completed warns and lets the relaunch finish rather than
+#              stranding the task with no agent.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -136,6 +151,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-proc-lib.sh
+. "$SCRIPT_DIR/fm-worktree-proc-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -304,6 +321,11 @@ LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
+TASK_TMP=$(fm_meta_get "$META" tasktmp)
+# The token this task's spawn stamped into both roots. Absent on a record made
+# before that binding existed, in which case neither root can be shown to be
+# this task's and the cleanup below refuses rather than guesses.
+OWNER_TOKEN=$(fm_meta_get "$META" owner_token)
 [ -n "$KIND" ] || KIND=ship
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
@@ -783,6 +805,156 @@ record_note() {
   esac
 }
 
+# reap_previous_incarnation: stop what the agent just replaced left running in
+# this task's own local copy, before its replacement is launched into the same
+# copy. This is the case where "ownerless" needs the least judgement: the copy
+# has a known owner and that owner is being replaced, and when this run actually
+# delivered the exit and watched the agent go, nothing still running there has a
+# live owner. Attribution is by working directory alone
+# (bin/fm-worktree-proc-lib.sh); no command name is ever matched.
+#
+# Three things are deliberately spared. This invocation's own ancestor chain,
+# because `cd <home>/worktrees/fm-x1 && fm-control.sh x1 relaunch` is exactly how
+# the stuck-crewmate recovery reaches a wedged copy, and the interactive shell it
+# is typed into has its working directory inside that copy like any leftover
+# does; losing the operator's terminal mid-relaunch is not a cleanup. The shell
+# of this task's OWN endpoint,
+# because that endpoint sits in this worktree and the relaunch reuses it - asked
+# of the backend for the recorded target, never inferred from a process's own
+# shape, so a daemon that made itself a session leader inside the copy is still
+# an ordinary leftover. When the backend cannot name that shell nothing is
+# guessed: every session leader is left alone and the count is warned about, on
+# the rule that missing a leftover is inconvenient while closing a working
+# agent's shell is an incident. A secondmate is skipped entirely: its recorded
+# "worktree" is its firstmate home, its crewmates live in their own copies, and
+# reconciling them is the relaunched mate's own job (bin/fm-control.sh's
+# safe_checkpoint).
+#
+# A reap that cannot be completed WARNS and lets the relaunch continue. This
+# path exists to stop leftover processes, not to gate the worker's return: a
+# task left with no agent because a `sleep` could not be identified would be a
+# worse outcome than a surviving leftover, and nothing here destroys work. The
+# warning still distinguishes the three ways it can fail, because "nothing was
+# signalled" and "N processes were signalled and may or may not have died" send
+# an operator to different places.
+REAP_RESULT=none
+reap_previous_incarnation() {
+  local wt_real tmp_real tmp_rc spare agent_now rc=0 tmp_refused=0
+  local -a roots=()
+  REAP_RESULT=none
+  case "$KIND" in
+    ship|scout) ;;
+    *) REAP_RESULT="skipped-kind"; return 0 ;;
+  esac
+  # TWO independent sources must agree the worker is gone before anything in its
+  # copy is signalled, on this path exactly as on the detection path.
+  #
+  # This gate was briefly narrowed to the endpoint alone, on the reasoning that
+  # relaunch is different in kind: firstmate is deliberately replacing this
+  # worker, so the copy has a known owner and that owner is being retired by the
+  # caller. The reasoning was that a stale `working` verb is not a worker to
+  # defend, and that requiring it closed the cleanup in precisely the case this
+  # batch was written for - a worker killed mid-run by quota exhaustion leaves
+  # the endpoint reading `dead` while the current state still reads `working`.
+  #
+  # It is restored because the premise does not survive the failure it has to
+  # withstand. "The worker is being replaced" is not an independent fact here;
+  # it is the SAME classifier reading, re-used as its own justification. When
+  # the backend misclassifies a live worker as dead, `do_exit` returns
+  # `already-stopped` without ever sending an exit command, and the recheck
+  # below asks that same classifier again and gets the same wrong answer. Two
+  # readings from one source are one reading. The endpoint alone therefore
+  # licensed stopping a live worker's processes, which is the one outcome worse
+  # than the leak this whole mechanism exists to stop - and on 2026-08-27 a live
+  # agent was in fact killed on a stale reading of exactly this shape.
+  #
+  # The cost is real and is not hidden: the quota-exhaustion case that motivated
+  # this batch is no longer cleaned up automatically on relaunch. It is
+  # REPORTED, and an operator decides. Saturation costs hours of nuisance;
+  # stopping a live worker costs work and trust. They do not weigh the same.
+  #
+  # `stopped` is not exempt. It means this run delivered the exit command and
+  # watched the agent go - but "watched it go" is that same classifier reporting
+  # a transition, so it is not a second source either.
+  agent_now=$(agent_state)
+  case "$agent_now" in
+    dead|missing) ;;
+    *)
+      echo "warning: task $ID's agent was recorded as stopped, but its endpoint now reads '$agent_now' rather than gone; leaving every process in its local copy alone" >&2
+      REAP_RESULT="unconfirmed-stop"
+      return 0
+      ;;
+  esac
+  if ! fm_wtproc_worker_is_gone "$ID" "$agent_now"; then
+    echo "warning: task $ID's endpoint reads '$agent_now', but its current state reads '${FM_WTPROC_CREW_STATE:-unread}', which does not confirm the worker has finished; leaving every process in its local copy alone for an operator to judge" >&2
+    REAP_RESULT="uncorroborated-stop"
+    return 0
+  fi
+  if ! wt_real=$(fm_wtproc_disposable_worktree "$WT" "$FM_HOME" "$ID" "$OWNER_TOKEN"); then
+    echo "warning: task $ID's local copy $WT could not be confirmed disposable; leaving every process in it alone" >&2
+    REAP_RESULT="unconfirmed-copy"
+    return 0
+  fi
+  roots+=("$wt_real")
+  # A recorded temp root that validation turns away is NOT the same as a record
+  # naming no temp root at all: the cleanup below then covers strictly less than
+  # the record claims, and dropping it in silence would let a copy one of whose
+  # roots was never examined be reported as cleaned. On success
+  # fm_wtproc_task_tmp prints the resolved path and nothing else; on refusal it
+  # prints only its reason, so one capture carries both.
+  if [ -n "$TASK_TMP" ]; then
+    tmp_rc=0
+    tmp_real=$(fm_wtproc_task_tmp "$ID" "$TASK_TMP" "$FM_HOME" "$OWNER_TOKEN" 2>&1) || tmp_rc=$?
+    case "$tmp_rc" in
+      0) roots+=("$tmp_real") ;;
+      # Absent: there is nothing at that path to examine or stop, so the
+      # cleanup below does not cover less than the record claims and there is
+      # nothing to warn about.
+      2) ;;
+      *)
+        tmp_refused=1
+        echo "warning: task $ID's recorded temp root $TASK_TMP was refused, so nothing in it was examined or stopped: ${tmp_real:-the temp-root check refused it without stating a reason; inspect that path by hand}" >&2
+        ;;
+    esac
+  fi
+  spare=$(fm_wtproc_endpoint_shell_pid "$BACKEND" "$T" 2>/dev/null) || spare=unknown
+  fm_wtproc_reap "task $ID leftover" "$spare" "${roots[@]}" >/dev/null || rc=$?
+  case "$rc" in
+    0)
+      if [ -n "$FM_WTPROC_REAPED" ]; then
+        REAP_RESULT="stopped:$(printf '%s' "$FM_WTPROC_REAPED" | tr ' ' ',')"
+      else
+        REAP_RESULT=clean
+      fi
+      ;;
+    2)
+      echo "warning: leftover processes in task $ID's local copy were signalled but could not be re-checked afterwards; the relaunch continues and their state is unknown" >&2
+      REAP_RESULT="indeterminate:$(printf '%s' "$FM_WTPROC_REAPED" | tr ' ' ',')"
+      ;;
+    3)
+      echo "warning: leftover processes in task $ID's local copy did not stop even when force-stopped; the relaunch continues and they are still running" >&2
+      REAP_RESULT="survived:$(printf '%s' "$FM_WTPROC_SURVIVORS" | tr ' ' ',')"
+      ;;
+    *)
+      echo "warning: leftover processes in task $ID's local copy could not be accounted for; nothing was signalled, the relaunch continues and they are left running" >&2
+      REAP_RESULT=unresolved
+      ;;
+  esac
+  # fm_wtproc_reap already warned about these on stderr; the journal has to
+  # carry them too, so a copy read as clean is never confused with one whose
+  # session leaders were never classified at all - and a cleanup that ALSO
+  # failed has to say both, so this is appended on every outcome rather than on
+  # the one that succeeded.
+  [ "$FM_WTPROC_SPARED_LEADERS" -gt 0 ] \
+    && REAP_RESULT="$REAP_RESULT+leaders-unclassified:$FM_WTPROC_SPARED_LEADERS"
+  # Same rule for a recorded root the validation refused: the journal has to say
+  # the cleanup covered less than the record names, or a copy with an unexamined
+  # root reads afterwards exactly like one that was fully cleaned.
+  [ "$tmp_refused" = 1 ] \
+    && REAP_RESULT="$REAP_RESULT+tmp-root-refused:$TASK_TMP"
+  return 0
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -823,7 +995,9 @@ do_relaunch() {
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  reap_previous_incarnation
+  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "exit_result=$exit_result" "reap=$REAP_RESULT"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
@@ -846,7 +1020,8 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "exit_result=$exit_result" "reap=$REAP_RESULT"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }

@@ -5,7 +5,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-proc-lib.sh"
+
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+EPS_FIXTURE_TOKEN=00112233445566778899aabbccddeeff
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 REAL_TMUX=$(command -v tmux || true)
 
@@ -15,6 +19,11 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
+  # A real repository: teardown looks for a worktree's allocation marker in that
+  # worktree's own git directory, and a bare directory could carry none. The
+  # cases that actually reach the signalling loop stamp it with their own task
+  # id; the rest refuse upstream of it and never look.
+  git init -q "$TMP_ROOT/$dir/worktree"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -142,7 +151,13 @@ test_metadata_lock_serializes_destructive_cleanup() {
   dir=$(make_case metadata-lock)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "owner_token=$EPS_FIXTURE_TOKEN"
+  # This is the one case here that runs the destructive path through to the end,
+  # so it is the one whose copy has to carry the marker its spawn would have
+  # written.
+  fm_wtproc_write_owner "$dir/worktree" worktree "$id" "$EPS_FIXTURE_TOKEN" \
+    || fail "fixture: could not stamp the task copy"
   lock="$dir/home/state/.meta-$id.lock"
   ready="$dir/meta-lock-ready"
   release="$dir/meta-lock-release"

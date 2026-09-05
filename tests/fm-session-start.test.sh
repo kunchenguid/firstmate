@@ -21,6 +21,8 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - the leftover-process digest: a copy whose worker is gone and whose
+#     processes are still running is named, and a fleet with none says so
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -35,6 +37,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# Sourced here rather than inside the fixture: a subshell around the marker
+# write leaves every later reference to the fixture's own variables looking like
+# a read of something a subshell changed.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-proc-lib.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -2613,5 +2620,90 @@ test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
+
+# --- leftover processes in a gone worker's local copy ------------------------
+#
+# The case no live supervision cycle was watching: the agent died on its own and
+# whatever it started is still running in its copy. The digest reads that off
+# disk at session start, which is the only moment anyone comes back for it.
+test_the_digest_names_a_copy_a_gone_worker_left_processes_in() {
+  local rec root home fakebin out wt pid
+  rec=$(new_world orphan-leftovers)
+  root=${rec%%|*}
+  home=$(printf '%s' "$rec" | cut -d'|' -f2)
+  fakebin=${rec##*|}
+  make_fake_toolchain "$fakebin"
+
+  # A fleet with nothing left behind has to say so, so the positive case below
+  # is not just this section printing whatever it is given.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Processes left in a gone worker's local copy" \
+    "the leftover-process section is missing from the digest"
+  assert_not_contains "$out" "LEFTOVER:" \
+    "an empty fleet was reported as having leftover processes"
+  assert_not_contains "$out" "not checked" \
+    "the leftover scan did not complete on an empty fleet"
+
+  wt="$TMP_ROOT/orphan-leftovers/wt"
+  LEFTOVER_TOKEN=fedcba9876543210fedcba9876543210
+  git -C "$root" worktree add --quiet -b task-lo1 "$wt"
+  {
+    printf 'window=fmses:fm-lo1\n'
+    printf 'endpoint_task_id=lo1\n'
+    printf 'worktree=%s\n' "$wt"
+    printf 'backend=tmux\nharness=claude\nkind=ship\nmode=no-mistakes\n'
+    printf 'owner_token=%s\n' "$LEFTOVER_TOKEN"
+  } > "$home/state/lo1.meta"
+  # The copy carries the marker its spawn would have stamped into it. Without
+  # one nothing can show it is this task's, and the scan refuses it rather than
+  # reporting on it - so an unstamped fixture would prove nothing about
+  # attribution.
+  fm_wtproc_write_owner "$wt" worktree lo1 "$LEFTOVER_TOKEN" \
+    || fail "fixture: could not stamp lo1's copy"
+  # A `sleep` is witness enough; the incident this section exists for came out
+  # of a saturated host and nothing here needs a server to prove attribution.
+  ( cd "$wt" && exec /bin/sleep 600 ) </dev/null >/dev/null 2>&1 &
+  pid=$!
+  disown
+  sleep 0.3
+
+  # A current-state reader that answers from a file, so the digest can be shown
+  # both readings of the same copy. `done` is a positive reading of a finished
+  # worker; `unknown` is the reader saying it could not determine the state at
+  # all, which is what a stale record pointing at a reassigned copy also
+  # produces and is never evidence the worker is gone.
+  cat > "$fakebin/crew-state-stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: %s · source: pane · stub\n' "$(cat "$FAKE_CREW_STATE_FILE" 2>/dev/null || echo unknown)"
+SH
+  chmod +x "$fakebin/crew-state-stub"
+  printf 'done' > "$TMP_ROOT/orphan-leftovers/crew"
+
+  out=$(FM_WTPROC_CREW_STATE_BIN="$fakebin/crew-state-stub" \
+    FAKE_CREW_STATE_FILE="$TMP_ROOT/orphan-leftovers/crew" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEFTOVER: lo1" \
+    "the digest did not name the copy whose gone worker left a process running"
+  assert_contains "$out" "$pid" \
+    "the digest named the copy but not the process still running in it"
+
+  # Same copy, same process, only the current-state reading changes: it is
+  # still reported, but never as a copy whose worker is known to be gone.
+  printf 'unknown' > "$TMP_ROOT/orphan-leftovers/crew"
+  out=$(FM_WTPROC_CREW_STATE_BIN="$fakebin/crew-state-stub" \
+    FAKE_CREW_STATE_FILE="$TMP_ROOT/orphan-leftovers/crew" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_not_contains "$out" "LEFTOVER: lo1" \
+    "a copy was called ownerless although its current state could not be determined"
+  assert_contains "$out" "UNDETERMINED: lo1" \
+    "the digest dropped a copy whose current state could not be determined instead of reporting it"
+  assert_contains "$out" "$pid" \
+    "the digest reported the copy but not the process still running in it"
+
+  pass "the digest names a copy whose gone worker left processes running, separates one whose owner could not be determined, and says so when none did"
+}
+
+test_the_digest_names_a_copy_a_gone_worker_left_processes_in
 
 echo "# fm-session-start.test.sh: all assertions passed"

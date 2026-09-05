@@ -45,8 +45,9 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       the processes still running in the local copy of any task
+#                       whose worker is gone: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -839,6 +840,43 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+
+# A worker that dies without a cleanup - quota exhausted, harness crash, terminal
+# closed - leaves whatever it started running in its local copy, with nothing
+# left to stop it. Surfaced from disk here because that is precisely the case no
+# live supervision cycle was watching. Read-only: bin/fm-orphan-reap.sh's header
+# owns why nothing is stopped automatically, and why a copy whose owner could
+# not be established is reported under its own label rather than folded in.
+subsection "Processes left in a gone worker's local copy"
+# Bounded: this section reports, and a reader that cannot answer in time must
+# not hold up a session start. The per-task corroboration read is bounded well
+# inside the whole-fleet budget on purpose - its own 20s default is sized for an
+# operator running one task by hand, and at that size two slow tasks would spend
+# the entire digest budget and degrade this section to "not checked" in exactly
+# the multi-orphan case it exists for.
+LEFTOVER_RC=0
+LEFTOVER_ERR=$(mktemp 2>/dev/null) || LEFTOVER_ERR=/dev/null
+LEFTOVER=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  FM_WTPROC_CREW_STATE_TIMEOUT="${FM_WTPROC_CREW_STATE_TIMEOUT:-5}" \
+  timeout 60 "$SCRIPT_DIR/fm-orphan-reap.sh" scan 2>"$LEFTOVER_ERR") || LEFTOVER_RC=$?
+if [ "$LEFTOVER_RC" = 124 ]; then
+  printf 'not checked (the scan did not finish within 60s; run bin/fm-orphan-reap.sh scan)\n'
+elif [ "$LEFTOVER_RC" = 3 ] && [ -n "$LEFTOVER" ]; then
+  # The scan ran and reported; some copy could not be listed at all and says so
+  # on its own UNSCANNABLE line. Printing "not checked" over the top of that
+  # would throw away the copies it DID establish something about.
+  printf '%s\n' "$LEFTOVER"
+elif [ "$LEFTOVER_RC" != 0 ]; then
+  # Any other failure is a real fault, not a slow host, and saying "timed out"
+  # about it would send the reader looking for the wrong thing.
+  printf 'not checked (the scan failed with status %s: %s)\n' \
+    "$LEFTOVER_RC" "$(tr '\n' ' ' < "$LEFTOVER_ERR" | cut -c1-300)"
+elif [ -n "$LEFTOVER" ]; then
+  printf '%s\n' "$LEFTOVER"
+else
+  printf '(none)\n'
+fi
+[ "$LEFTOVER_ERR" = /dev/null ] || rm -f "$LEFTOVER_ERR"
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
