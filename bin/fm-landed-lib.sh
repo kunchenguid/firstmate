@@ -18,17 +18,25 @@
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
-# that carries one of those artifacts is a delivery whoever approved it. A
-# captain question closes with an answer and no artifact of its own, and that
-# is what stays out, so an answered question is never rendered as shipped work.
+# whose artifact matches its merged, reported, or done completion verb is a
+# delivery whoever approved it. A captain question remains kind captain when it
+# closes, so it is never rendered as shipped work even when its text names an
+# artifact.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
   def landed_delivery:
-    ((.pr_url // null) != null)
-    or ((.report_path // null) != null)
-    or ((.local_note // null) != null);
+    if .kind == "captain" then false
+    elif (.pr_url // null) != null then .completion.verb == "merged"
+    elif (.report_path // null) != null then .completion.verb == "reported"
+    elif (.local_note // null) != null then .completion.verb == "done"
+    else false
+    end;
   def landed_record:
     .state == "done" and .structured
-    and (.hold_kind != "captain" or landed_delivery);
+    and (landed_delivery
+      or (.hold_kind != "captain"
+        and (.pr_url // null) == null
+        and (.report_path // null) == null
+        and (.local_note // null) == null));
 '

@@ -136,10 +136,10 @@
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. It prints nothing on
 # 0 or 1 and mutates nothing. bin/fm-teardown.sh asks it before its automatic
-# backlog close and, on 0, returns the row to Queued instead
-# (bin/fm-backlog-transition-lib.sh owns that transition), so holding the very
-# work item a question gates is safe; `answer` remains the only act that closes
-# a captain call.
+# backlog close and, on 0, returns the row to Queued with its deliverable
+# recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
+# holding the very work item a question gates is safe; `answer` remains the
+# only act that closes a captain call.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
