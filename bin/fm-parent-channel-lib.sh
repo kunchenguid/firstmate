@@ -131,8 +131,8 @@ fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Emit <line> once, using fm-classify-lib.sh's event-time and retry contract.
-fm_parent_channel_append_once() {  # <path> <line>
+# Append <line> once, using fm-classify-lib.sh's retry contract.
+fm_parent_channel_append_once() {  # <path> <line> [relay]
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -142,7 +142,10 @@ fm_parent_channel_append_once() {  # <path> <line>
   if status_event_recorded "$path" "$line"; then
     return 0
   fi
-  printf '%s\n' "$(status_stamp_line "$line")" >> "$path"
+  if [ "${3:-}" != relay ]; then
+    line=$(status_stamp_line "$line")
+  fi
+  printf '%s\n' "$line" >> "$path"
 }
 
 # Publish one parent-facing line from <home>. See the return codes above.

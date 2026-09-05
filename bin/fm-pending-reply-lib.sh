@@ -1333,7 +1333,7 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   [ -n "$line" ] || return 1
   # shellcheck source=bin/fm-parent-channel-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
-  fm_parent_channel_append_once "$parent_status" "$line"
+  fm_parent_channel_append_once "$parent_status" "$line" relay
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.

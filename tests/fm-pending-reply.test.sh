@@ -1257,7 +1257,7 @@ test_mirrored_remote_reply_never_triggers_a_repost() {
 }
 
 test_same_basename_self_home_corr_resolves_on_tick() {
-  local home state sm_home corr rec parent_status hook_log
+  local home state sm_home corr rec parent_status hook_log fb out
   home=$(setup_parent same-basename-repair)
   state="$home/state"
   sm_home=$(bind_local_mate "$home" mate)
@@ -1305,6 +1305,33 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     "$(fm_pending_reply_get "$rec" wrong_home_first_sighting)")" = \
     "$sm_home/state/mate.status:1" ] \
     || fail "first wrong-home sighting must display the readable mate-home path and line"
+  fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" \
+    || fail "repeated restatement copy should succeed"
+  fm_parent_channel_report "$sm_home" "$sm_home/state" "$(cat "$sm_home/state/mate.status")" \
+    || fail "publication retry of a recovered reply should succeed"
+  cmp -s "$sm_home/state/mate.status" "$parent_status" \
+    || fail "recovery and retries must preserve the legacy reply bytes without duplicates"
+  fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
+  fb=$(make_stubs "$home")
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "snapshot of the recovered reply should succeed"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "mate") | .paths.status_log.last_event
+    | has("emitted_at_epoch") and .emitted_at_epoch == null
+      and has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "recovered legacy reply must retain unknown emission time and age"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[] | select(.id == "mate") | .parent_event
+    | has("emitted_at_epoch") and .emitted_at_epoch == null
+      and has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "secondmate summary must retain the recovered reply's unknown time and age"
+  fm_parent_channel_report "$sm_home" "$sm_home/state" 'done: new report' \
+    || fail "new publication should succeed"
+  status_line_at_epoch "$(tail -1 "$parent_status")" >/dev/null \
+    || fail "new publication must still receive an emission time"
+  fm_parent_channel_report "$sm_home" "$sm_home/state" 'done: new report' \
+    || fail "new publication retry should succeed"
+  [ "$(wc -l < "$parent_status")" -eq 2 ] || fail "new publication retry must not duplicate the event"
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "same-basename self-home corr= is restated onto the parent channel and resolves"
 }
@@ -1328,7 +1355,7 @@ test_same_basename_reply_resolves_after_recovery_failure() {
   rec=$(fm_pending_reply_path "$state" "$corr")
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
-  printf 'done [corr=%s]: answer landed after recovery failure\n' "$corr" \
+  printf 'done [corr=%s] [at=11000]: answer landed after recovery failure\n' "$corr" \
     > "$sm_home/state/mate.status"
 
   fm_pending_reply_tick "$state"
@@ -1336,6 +1363,8 @@ test_same_basename_reply_resolves_after_recovery_failure() {
     || fail "late same-basename reply must resolve before recovery failure escalation"
   grep -Fq "corr=$corr" "$parent_status" \
     || fail "late reply must be restated onto the parent channel"
+  cmp -s "$sm_home/state/mate.status" "$parent_status" \
+    || fail "recovery must preserve the reply's original emission time"
   if grep -Fq pending-reply-recovery-delivery "$parent_status"; then
     fail "authorized late reply must prevent recovery delivery escalation"
   fi
