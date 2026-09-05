@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Focused rendering, lifecycle, persistence, and interactive TUI checks for /calm.
+# Pass --pending-notifications to run only the independent pending-row checks.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -3966,6 +3967,133 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
+
+# --pending-notifications runs only the independent pending-row regression.
+test_pending_notifications() {
+  local fixture="$TMP_ROOT/pending" config="$TMP_ROOT/pending-config" label
+  if ! command -v node >/dev/null 2>&1 || ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: node, pi, and tmux required for native pending-notification checks"
+    return
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return
+  fi
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works" "$config" "$fixture/home"
+  cp "$ROOT/tests/assets/pi-pending-notifications.ts" "$fixture/probe.ts"
+  cp "$ROOT/.pi/extensions/fm-pending-notifications.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-pending-notification-layout.ts" "$fixture/.pi/extensions/lib/"
+  cp "$VISIBILITY" "$PI_OPERATIONAL_INPUT" "$fixture/.pi/extensions/lib/"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  for label in pi-tui pi-ai pi-agent-core; do
+    ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/$label" "$fixture/node_modules/@earendil-works/$label"
+  done
+  printf '%s\n' '{"type":"module"}' > "$fixture/package.json"
+  printf '%s\n' '{"followUpMode":"one-at-a-time","quietStartup":true,"terminal":{"clearOnShrink":false}}' > "$config/settings.json"
+  printf '%s\n' '{"tui.input.submit":"alt+s"}' > "$config/keybindings.json"
+  (cd "$fixture" && FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" PI_CODING_AGENT_DIR="$config" \
+    node --input-type=module -e 'const p = await import("./probe.ts"); p.componentChecks();') \
+    || fail "native pending component contract failed"
+
+  pending_send() {
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "$1"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  }
+  pending_wait() {
+    local name=$1 n=0
+    while [ "$n" -lt 200 ]; do
+      [ ! -f "$fixture/$label/failure" ] || fail "native pending fixture: $(cat "$fixture/$label/failure")"
+      [ ! -f "$fixture/$label/$name" ] || return 0
+      sleep 0.1
+      n=$((n + 1))
+    done
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -100 >&2 || true
+    fail "Pi pending $label did not produce $name"
+  }
+  for label in stock fixed; do
+    mkdir -p "$fixture/$label"
+    local extension=""
+    [ "$label" = stock ] || extension='-e ./.pi/extensions/fm-pending-notifications.ts'
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 36 \
+      "cd '$fixture' && env FM_HOME='$fixture/home' PENDING_TEST_DIR='$fixture/$label' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extension -e ./probe.ts --session-dir '$fixture/$label/sessions'"
+    pending_wait ready
+    pending_send '/pending-test start'
+    pending_wait streaming
+    pending_send '/pending-test seed mixed'
+    pending_send '/pending-test inspect mixed'
+    pending_wait mixed.json
+    node --input-type=module - "$fixture/$label/mixed.json" "$label" <<'JS' || fail "native pending viewport shape failed"
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const record = JSON.parse(readFileSync(process.argv[2]));
+assert.equal(record.queue.followUp.length, 41);
+assert.equal(record.lines.length, process.argv[3] === "stock" ? 43 : 3);
+assert(record.lines.join("\n").includes("GENUINE_QUEUED_MESSAGE"));
+assert.equal(record.lines.join("\n").includes("PENDING_INTERNAL_"), process.argv[3] === "stock");
+JS
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" > "$fixture/$label/viewport.txt"
+    if [ "$label" = fixed ]; then
+      assert_not_contains "$(cat "$fixture/$label/viewport.txt")" 'PENDING_INTERNAL_' "pending notifications still occupy the real viewport"
+      assert_contains "$(cat "$fixture/$label/viewport.txt")" 'GENUINE_QUEUED_MESSAGE' "genuine pending message missing in real viewport"
+      tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 64 -y 28
+      pending_send '/pending-test inspect resized'
+      pending_wait resized.json
+      tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" > "$fixture/$label/resized.txt"
+      assert_not_contains "$(cat "$fixture/$label/resized.txt")" 'PENDING_INTERNAL_' "resize restored hidden pending rows"
+    fi
+    pending_send '/pending-test release'
+    pending_wait settled.json
+    pending_send '/pending-test check'
+    pending_wait checked
+    pending_send "/export $fixture/$label/export.html"
+    pending_wait export.html
+    node --input-type=module - "$fixture/$label/export.html" "$fixture/$label/settled.json" <<'JS' || fail "pending adapter changed exported user messages"
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const html = readFileSync(process.argv[2], "utf8");
+const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
+assert(match);
+const exported = JSON.parse(Buffer.from(match[1], "base64").toString("utf8"));
+const entries = exported.session?.entries ?? exported.entries;
+const users = entries.filter(e => e.type === "message" && e.message.role === "user").map(e =>
+  typeof e.message.content === "string" ? e.message.content : e.message.content.filter(b => b.type === "text").map(b => b.text).join("\n"));
+assert.deepEqual(users, JSON.parse(readFileSync(process.argv[3])));
+JS
+    # Reload is permitted only while Pi is idle. It must load the same adapter
+    # once and hide a new queue without retaining the old session's row state.
+    if [ "$label" = fixed ]; then
+      rm "$fixture/$label/ready" "$fixture/$label/streaming" "$fixture/$label/settled.json"
+      pending_send /reload
+      pending_wait ready
+      wait_for_text "$fixture/$label/reloaded.txt" "Reloaded keybindings" || fail "Pi reload did not restore editor"
+      assert_contains "$(cat "$fixture/$label/ready")" reload 'Pi did not reload the extension runtime'
+      pending_send '/pending-test start'
+      pending_wait streaming
+      pending_send '/pending-test seed internal'
+      pending_send '/pending-test inspect hidden'
+      pending_wait hidden.json
+      node --input-type=module - "$fixture/$label/hidden.json" <<'JS' || fail "internal-only pending rows retained spacing"
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const record = JSON.parse(readFileSync(process.argv[2]));
+assert.equal(record.queue.followUp.length, 40);
+assert.deepEqual(record.lines, []);
+JS
+      # Exercise Pi's actual dequeue key, then use a registered shortcut to
+      # inspect the editor without submitting its recovered contents.
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-Up
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-e
+      pending_wait edited
+      pending_send '/pending-test release'
+      pending_wait settled.json
+    fi
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION"
+  done
+  pass "Pi native pending UI hides 40 internal notifications with mixed and empty spacing, preserves actual queue consumption/order/context/session data, resize, reload, and dequeue"
+}
+
+test_pending_notifications
+if [ "${1:-}" = --pending-notifications ]; then exit 0; fi
 
 test_home_resolution
 test_pi_compat_no_upper_bound

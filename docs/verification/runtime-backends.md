@@ -1428,3 +1428,23 @@ It names the installed version and the floor rather than degrading quietly, and 
 The same guard against the pre-change extension in the same lab measured a 676.9 ms worst keystroke echo while delivering two outcomes and a 295.3 ms worst echo with nothing to deliver, against a 49.2 ms extension-free floor, and failed as designed.
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
+
+## Pi pending-notification presentation
+
+Verified on 2026-09-05 with Pi 0.85.1, Node 22.22.2, and a deterministic provider in an isolated native Pi TUI on a private tmux socket.
+The pending adapter's mechanism and supported limits are owned by [calm-mode-feasibility.md](../calm-mode-feasibility.md#pending-notification-presentation).
+
+```sh
+bash tests/fm-calm-pi-extension.test.sh --pending-notifications
+tests/fm-pi-primary-types.test.sh
+```
+
+```text
+native pending components: 43 stock rows -> 3 mixed rows -> 0 internal-only rows; queues unchanged
+ok - Pi native pending UI hides 40 internal notifications with mixed and empty spacing, preserves actual queue consumption/order/context/session data, resize, reload, and dequeue
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+The native stock and adapted runs each persisted and consumed the forty internal follow-ups plus one genuine queued message exactly once in order, retained matching user-role provider context and HTML export entries, and left queue and session snapshots unchanged by rendering.
+The native viewport was checked at 100 by 36 and after resizing to 64 by 28; the component comparison also covered widths 40 and 180, Calm on/off, image-bearing duplicate-text ambiguity, steering previews, pending bash rows, and missing metadata or presentation APIs.
+The complete Calm suite on this installed Pi fails its separate `read collapsed rendering changed while calm mode was off` assertion even with the unchanged baseline test and extensions; the focused pending result is not a claim that all Calm rendering is verified on 0.85.1.
