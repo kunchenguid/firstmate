@@ -254,10 +254,11 @@ wake_for() {
   # The wake append, the emission journal, and the cursor record commit under a
   # single held FM_WAKE_QUEUE_LOCK: the drain acknowledges and deletes consumed
   # rows only under the same lock, so it can never remove our wake between the
-  # surface and the uid record. The cursor entry is the durable proof the mail
-  # was surfaced - a poll interrupted mid-commit is healed from the journal or
-  # the queued key on the next poll - and a journal write failure can never
-  # leave the uid uncommitted, because the cursor is what marks it surfaced.
+  # surface and the uid record. At least one of the journal or the cursor must
+  # land with the row - if both evidence writes fail, the queued wake would be
+  # ackable with no durable record and the next poll could not tell the mail
+  # already surfaced, so it is rolled back under the same lock before the drain
+  # can ever see it and the mail retries cleanly on the next poll.
   local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
@@ -271,20 +272,61 @@ wake_for() {
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
-    # The cursor record is the durable surfaced marker and is the only write a
-    # failure here can block on. The journal is a best-effort supplement for the
-    # interrupt-window heal: if it fails, the cursor still commits under the
-    # same lock, so a subsequent ack of this wake is never the only evidence.
-    printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" 2>/dev/null || {
-      # shellcheck disable=SC2034
-      printf 'fm-mail: journal write failed for %s (recorder still commits)\n' "$id" >&2
-    }
-    printf '%s\n' "$id" >> "$CURSOR" || status=$?
+    local journal_ok=0 cursor_ok=0
+    printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" && journal_ok=1 || true
+    printf '%s\n' "$id" >> "$CURSOR" && cursor_ok=1 || true
+    if [ "$journal_ok" -eq 0 ] && [ "$cursor_ok" -eq 0 ]; then
+      # No durable record landed. Remove the wake row and any partial evidence
+      # under the held lock so nothing ackable survives without a record; the
+      # next poll retries the mail from a clean slate.
+      fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" || {
+        echo "fm-mail: wake for $id could not be rolled back after both evidence writes failed" >&2
+      }
+      echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
+      status=1
+    fi
   else
     status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
+}
+
+fm_mail_rollback_wake_locked() {
+  # Remove a just-appended wake row plus any partial journal/cursor evidence.
+  # Runs under the held FM_WAKE_QUEUE_LOCK, so the rewrite cannot race an
+  # acknowledgement; failure means the poll already fails closed so the next
+  # poll's queue heal still reconciles any residual row.
+  local wake_key=$1 generation=$2 id=$3 clean_key tmp queue_status=0
+  clean_key=$(printf '%s' "$wake_key" | fm_wake_clean_field)
+  tmp=$(mktemp "$FM_WAKE_QUEUE.rollback.XXXXXX") || return 1
+  awk -F '\t' -v key="$clean_key" '
+    NF >= 5 && $3 == "check" && $4 == key { next }
+    { print }
+  ' "$FM_WAKE_QUEUE" > "$tmp" || queue_status=$?
+  if [ -n "$queue_status" ] && [ "$queue_status" -ne 0 ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$FM_WAKE_QUEUE" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if awk -F '\t' -v g="$generation" -v i="$id" \
+      '!($1 == g && $2 == i)' "$WOKEN" > "$WOKEN.tmp.$$" 2>/dev/null; then
+    if mv -f -- "$WOKEN.tmp.$$" "$WOKEN" 2>/dev/null; then
+      :
+    fi
+  fi
+  rm -f -- "$WOKEN.tmp.$$"
+  if grep -vx -e "$id" "$CURSOR" > "$CURSOR.tmp.$$" 2>/dev/null; then
+    if mv -f -- "$CURSOR.tmp.$$" "$CURSOR" 2>/dev/null; then
+      :
+    fi
+  fi
+  rm -f -- "$CURSOR.tmp.$$"
+  return 0
 }
 
 case "${1:-}" in
