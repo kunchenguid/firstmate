@@ -14,9 +14,8 @@ set -u
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
-TMP_ROOT=$(fm_test_tmproot fm-bearings)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
+TMP_ROOT=$(fm_test_tmproot fm-bearings)
 # Keep disposable homes outside the snapshot's fixture repo boundary even when
 # TMPDIR is inside an isolated source worktree.
 FM_ROOT_OVERRIDE="$TMP_ROOT/fixture-root"
@@ -75,7 +74,6 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  fm_fake_exit0 "$fb" treehouse
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
   printf '%s\n' "$fb"
 }
@@ -213,6 +211,14 @@ run() {  # <home> <fakebin> <args...>
     *) PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home" ;;
   esac
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+run_captain() {  # <home> <fakebin> <command args...>
+  local home=$1 fakebin=$2
+  shift 2
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
 write_remote_home_summary() {  # <remote-home> <generated-epoch>
@@ -392,7 +398,6 @@ test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution() {
   mate="$TMP_ROOT/gnu-stat-home"
   write_domain_alpha_fixture "$home" "$mate"
   fakebin=$(make_fakebin "$home")
-  : > "$home/net.log"
   stat_log="$home/stat.log"
   cat > "$fakebin/uname" <<'SH'
 #!/usr/bin/env bash
@@ -1393,450 +1398,6 @@ EOF
   pass "revealed deferred holds display their deferral reason while live calls stay unannotated"
 }
 
-# A merge the captain personally approved keeps its hold record on the closed row:
-# tasks-axi clears the held flag on close but retains hold-kind/hold reason as the
-# history of that call, and the recorded answer stays as an indented block under the
-# entry. Recently Landed is delivered work, so a captain-approved merge belongs in it
-# in every home. A rejected captain-held work item never becomes a delivery merely
-# because its title names a PR. Local, deterministic, no GitHub call.
-test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
-  local spoof_pr spoof_marker spoof_show spoof_body spoof_records none_marker prior_pr
-  local interrupted_pr interrupted_marker interrupted_show interrupted_rc bootstrap
-  local mixed_pr mixed_marker mixed_legacy mixed_body mixed_show mixed_records
-  local argumentless_pr argumentless_show argumentless_rc
-  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
-  home=$(make_home captain-approved); write_fixture "$home"
-  mate=$(fixture_mate_home "$home")
-  fakebin=$(make_fakebin "$home")
-  backlog="$home/data/backlog.md"
-  repo="$home/projects/delivery-repo"
-  wt="$home/projects/delivery-wt"
-  pr="https://github.com/kunchenguid/firstmate/pull/1365"
-  fm_git_worktree "$repo" "$wt" fm/approved-delivery
-  touch "$home/state/.last-watcher-beat"
-  "$TASKS_AXI_BIN" add approved-merge "Fix the anchor $pr" --kind ship --repo firstmate \
-    --start --file "$backlog" >/dev/null || fail "could not create the approved merge fixture"
-  fm_write_meta "$home/state/approved-merge.meta" \
-    "window=firstmate:fm-approved-merge" "endpoint_task_id=approved-merge" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$pr" "spawn_gen=approved-merge-fixture"
-  record_claude_state "$home/state" approved-merge idle
-  printf 'done: merge ready\n' > "$home/state/approved-merge.status"
-  "$TASKS_AXI_BIN" hold approved-merge --reason "PR 1365 is ready; awaiting your merge word" \
-    --kind captain --file "$backlog" >/dev/null || fail "could not hold the approved merge fixture"
-  printf 'Merge now.\n' > "$home/merge-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer approved-merge --release --decision-file "$home/merge-answer.txt" >/dev/null \
-    || fail "could not record the approved merge answer"
-  show=$("$TASKS_AXI_BIN" show approved-merge --full --file "$backlog") \
-    || fail "could not read the released approved merge"
-  assert_contains "$show" "state: in_flight" \
-    "merge approval completed the work before the merge landed"
-  assert_contains "$show" "Resolution mode: released" \
-    "merge approval did not use the existing work-release path"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" approved-merge >/dev/null \
-    || fail "could not backfill the approved merge completion"
-  show=$("$TASKS_AXI_BIN" show approved-merge --full --file "$backlog") \
-    || fail "could not read the approved merge completion"
-  assert_contains "$show" "Merge now." \
-    "approved merge backfill lost the recorded captain decision"
-  assert_contains "$show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $pr\\\"} -->" \
-    "approved merge backfill did not record completion provenance"
-  interrupted_pr="https://github.com/kunchenguid/firstmate/pull/1363"
-  "$TASKS_AXI_BIN" add interrupted-retain "Resume the shipped cleanup" --kind ship \
-    --repo firstmate --start --file "$backlog" >/dev/null \
-    || fail "could not create the interrupted retained-cleanup fixture"
-  fm_write_meta "$home/state/interrupted-retain.meta" \
-    "window=firstmate:fm-interrupted-retain" "endpoint_task_id=interrupted-retain" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$interrupted_pr" "spawn_gen=interrupted-retain-fixture"
-  record_claude_state "$home/state" interrupted-retain idle
-  printf 'done: shipped cleanup interrupted\n' > "$home/state/interrupted-retain.status"
-  "$TASKS_AXI_BIN" hold interrupted-retain --reason "shipped work awaits the captain answer" \
-    --kind captain --file "$backlog" >/dev/null \
-    || fail "could not hold the interrupted retained-cleanup fixture"
-  cat > "$fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = reopen ]; then
-  printf '%s\n' 'error: retained cleanup interrupted' >&2
-  exit 1
-fi
-exec "$TASKS_AXI_BIN" "\$@"
-SH
-  chmod +x "$fakebin/tasks-axi"
-  interrupted_rc=0
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" interrupted-retain >/dev/null 2>&1 || interrupted_rc=$?
-  [ "$interrupted_rc" -ne 0 ] \
-    || fail "the retained cleanup did not stop at the injected interruption"
-  interrupted_marker="$home/state/interrupted-retain.backlog-close"
-  [ -f "$interrupted_marker" ] \
-    || fail "the interrupted retained cleanup did not preserve its completion"
-  cat > "$fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = done ] && [ "\${2:-}" = interrupted-retain ] \
-  && [ ! -e "$home/interrupted-close-failed-once" ]; then
-  : > "$home/interrupted-close-failed-once"
-  exit 75
-fi
-exec "$TASKS_AXI_BIN" "\$@"
-SH
-  chmod +x "$fakebin/tasks-axi"
-  printf 'Close the shipped work.\n' > "$home/interrupted-answer.txt"
-  interrupted_rc=0
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer interrupted-retain --decision-file "$home/interrupted-answer.txt" \
-    >/dev/null 2>&1 || interrupted_rc=$?
-  [ "$interrupted_rc" -ne 0 ] \
-    || fail "the injected answered-close failure reported success"
-  [ -f "$interrupted_marker" ] \
-    || fail "the failed answered close retired its pending completion"
-  bootstrap=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip NET_LOG="$home/net.log" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
-    || fail "session replay failed after the interrupted answered close: $bootstrap"
-  [ -f "$interrupted_marker" ] \
-    || fail "session replay retired completion authority before the answer closed"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer interrupted-retain --decision-file "$home/interrupted-answer.txt" >/dev/null \
-    || fail "could not retry the interrupted retained cleanup answer"
-  bootstrap=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip NET_LOG="$home/net.log" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
-    || fail "session replay failed after the answered close landed: $bootstrap"
-  [ ! -e "$interrupted_marker" ] \
-    || fail "session replay kept completion authority after the answer closed"
-  interrupted_show=$("$TASKS_AXI_BIN" show interrupted-retain --full --file "$backlog") \
-    || fail "could not read the resumed retained-cleanup completion"
-  assert_contains "$interrupted_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $interrupted_pr\\\"} -->" \
-    "the resumed close lost the retained cleanup's shipped artifact"
-  mixed_pr="https://github.com/kunchenguid/firstmate/pull/1364"
-  mixed_marker="<!-- firstmate-completion.v1 {\"value\":\"PR $mixed_pr\"} -->"
-  mixed_legacy="Deliverable of the finished work: none"
-  mixed_body=$(printf '%s\n\n%s' "$mixed_marker" "$mixed_legacy")
-  "$TASKS_AXI_BIN" add mixed-provenance-delivery "Complete reused delivery provenance" \
-    --kind ship --repo firstmate --start --file "$backlog" >/dev/null \
-    || fail "could not create the mixed-provenance delivery fixture"
-  "$TASKS_AXI_BIN" update mixed-provenance-delivery --body "$mixed_body" \
-    --file "$backlog" >/dev/null \
-    || fail "could not create the mixed-provenance body"
-  fm_write_meta "$home/state/mixed-provenance-delivery.meta" \
-    "window=firstmate:fm-mixed-provenance-delivery" \
-    "endpoint_task_id=mixed-provenance-delivery" "worktree=$wt" "project=$repo" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$mixed_pr" \
-    "spawn_gen=mixed-provenance-fixture"
-  record_claude_state "$home/state" mixed-provenance-delivery idle
-  printf 'done: reused delivery shipped\n' > "$home/state/mixed-provenance-delivery.status"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" mixed-provenance-delivery >/dev/null \
-    || fail "could not complete the mixed-provenance delivery"
-  mixed_show=$("$TASKS_AXI_BIN" show mixed-provenance-delivery --full --file "$backlog") \
-    || fail "could not read the mixed-provenance completion"
-  mixed_body=$(printf '%s\n' "$mixed_show" | sed -n 's/^  body: //p' | head -1 \
-    | LC_ALL=C perl -MJSON::PP -e '
-      local $/;
-      my $shown = <STDIN>;
-      $shown =~ s/\s+\z//;
-      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-      print $value unless $value eq "-";
-    ') || fail "could not decode the mixed-provenance completion body"
-  mixed_records=$(printf '%s\n' "$mixed_body" | sed -n \
-    -e '/^<!-- firstmate-completion\.v1 /p' \
-    -e '/^Deliverable of the finished work: /p')
-  [ "$mixed_records" = "$(printf '%s\n%s\n%s' "$mixed_marker" "$mixed_legacy" "$mixed_marker")" ] \
-    || fail "the writer did not append its verdict after the trailing legacy record: $mixed_body"
-  argumentless_pr="https://github.com/kunchenguid/firstmate/pull/1362"
-  "$TASKS_AXI_BIN" add argumentless-delivery "Preserve unknown close provenance" \
-    --kind ship --repo firstmate --start --file "$backlog" >/dev/null \
-    || fail "could not create the argument-less close fixture"
-  fm_write_meta "$home/state/argumentless-delivery.meta" \
-    "window=firstmate:fm-argumentless-delivery" "endpoint_task_id=argumentless-delivery" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$argumentless_pr" "spawn_gen=argumentless-fixture"
-  record_claude_state "$home/state" argumentless-delivery idle
-  printf 'done: delivery waits on a final question\n' \
-    > "$home/state/argumentless-delivery.status"
-  "$TASKS_AXI_BIN" hold argumentless-delivery --reason "captain close choice pending" \
-    --kind captain --file "$backlog" >/dev/null \
-    || fail "could not hold the argument-less close fixture"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" argumentless-delivery >/dev/null \
-    || fail "could not retain the argument-less delivery fixture"
-  [ ! -e "$home/state/argumentless-delivery.backlog-close" ] \
-    || fail "successful retention left a pending transition in the argument-less fixture"
-  printf 'Close only if the delivered artifact remains known.\n' \
-    > "$home/argumentless-answer.txt"
-  argumentless_rc=0
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer argumentless-delivery --decision-file "$home/argumentless-answer.txt" \
-    >/dev/null 2>&1 || argumentless_rc=$?
-  [ "$argumentless_rc" -ne 0 ] \
-    || fail "an argument-less close silently asserted no deliverable"
-  argumentless_show=$("$TASKS_AXI_BIN" show argumentless-delivery --full --file "$backlog") \
-    || fail "could not read the refused argument-less close"
-  assert_not_contains "$argumentless_show" "state: done" \
-    "an unknown completion closed the delivered row"
-  assert_contains "$argumentless_show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $argumentless_pr\\\"} -->" \
-    "the argument-less close lost the still-true artifact"
-  assert_not_contains "$argumentless_show" \
-    '<!-- firstmate-completion.v1 {\"value\":\"none\"} -->' \
-    "the argument-less close replaced the still-true artifact with none"
-  "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
-    --start --file "$backlog" >/dev/null \
-    || fail "could not create the local delivery fixture"
-  fm_write_meta "$home/state/approved-local.meta" \
-    "window=firstmate:fm-approved-local" "endpoint_task_id=approved-local" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=local-only" "spawn_gen=approved-local-fixture"
-  record_claude_state "$home/state" approved-local idle
-  printf 'done: local landing ready\n' > "$home/state/approved-local.status"
-  "$TASKS_AXI_BIN" hold approved-local --reason "ready on the local branch; awaiting your word" \
-    --kind captain --file "$backlog" >/dev/null || fail "could not hold the local delivery fixture"
-  printf 'Land the local branch.\n' > "$home/local-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer approved-local --release --decision-file "$home/local-answer.txt" >/dev/null \
-    || fail "could not record the local delivery answer"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" approved-local >/dev/null \
-    || fail "could not backfill the local delivery completion"
-  forced_pr="https://github.com/kunchenguid/firstmate/pull/404"
-  "$TASKS_AXI_BIN" add forced-rejected "Discard an unlanded candidate" --kind ship \
-    --repo firstmate --start --file "$backlog" >/dev/null \
-    || fail "could not create the forced rejection fixture"
-  fm_write_meta "$home/state/forced-rejected.meta" \
-    "window=firstmate:fm-forced-rejected" "endpoint_task_id=forced-rejected" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$forced_pr" "spawn_gen=forced-rejected-fixture"
-  record_claude_state "$home/state" forced-rejected idle
-  printf 'done: discard approved\n' > "$home/state/forced-rejected.status"
-  "$TASKS_AXI_BIN" hold forced-rejected --reason "captain discard choice pending" \
-    --kind captain --file "$backlog" >/dev/null \
-    || fail "could not hold the forced rejection fixture"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" forced-rejected --force >/dev/null \
-    || fail "could not discard the forced rejection fixture"
-  forced_show=$("$TASKS_AXI_BIN" show forced-rejected --full --file "$backlog") \
-    || fail "could not read the retained forced rejection fixture"
-  assert_contains "$forced_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"none\\\"} -->" \
-    "forced cleanup did not record the discarded work as a non-delivery"
-  assert_not_contains "$forced_show" "Deliverable of the finished work: PR $forced_pr" \
-    "forced cleanup recorded discarded work as a delivered PR"
-  printf 'Do not merge the discarded candidate.\n' > "$home/forced-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer forced-rejected --decision-file "$home/forced-answer.txt" >/dev/null \
-    || fail "could not record the forced rejection answer"
-  reused_pr="https://github.com/kunchenguid/firstmate/pull/405"
-  "$TASKS_AXI_BIN" add reused-discard "Reuse one delivery row" --kind ship \
-    --repo firstmate --start --file "$backlog" >/dev/null \
-    || fail "could not create the reused delivery fixture"
-  fm_write_meta "$home/state/reused-discard.meta" \
-    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-one"
-  record_claude_state "$home/state" reused-discard idle
-  printf 'done: first attempt discarded\n' > "$home/state/reused-discard.status"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" reused-discard --force >/dev/null \
-    || fail "could not discard the first reused delivery attempt"
-  "$TASKS_AXI_BIN" reopen reused-discard --file "$backlog" >/dev/null \
-    || fail "could not reopen the reused delivery fixture"
-  "$TASKS_AXI_BIN" start reused-discard --file "$backlog" >/dev/null \
-    || fail "could not start the delivered reused attempt"
-  fm_write_meta "$home/state/reused-discard.meta" \
-    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-two"
-  record_claude_state "$home/state" reused-discard idle
-  printf 'done: second attempt delivered\n' > "$home/state/reused-discard.status"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" reused-discard >/dev/null \
-    || fail "could not complete the delivered reused attempt"
-  "$TASKS_AXI_BIN" reopen reused-discard --file "$backlog" >/dev/null \
-    || fail "could not reopen the delivered reused fixture"
-  "$TASKS_AXI_BIN" start reused-discard --file "$backlog" >/dev/null \
-    || fail "could not start the final discarded attempt"
-  fm_write_meta "$home/state/reused-discard.meta" \
-    "window=firstmate:fm-reused-discard" "endpoint_task_id=reused-discard" \
-    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
-    "mode=no-mistakes" "pr=$reused_pr" "spawn_gen=reused-discard-three"
-  record_claude_state "$home/state" reused-discard idle
-  printf 'done: final attempt discarded\n' > "$home/state/reused-discard.status"
-  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
-    "$TEARDOWN" reused-discard --force >/dev/null \
-    || fail "could not discard the final reused delivery attempt"
-  "$TASKS_AXI_BIN" add rejected-merge \
-    "Should we merge https://github.com/kunchenguid/firstmate/pull/42?" \
-    --kind ship --repo firstmate --file "$backlog" >/dev/null \
-    || fail "could not create the rejected merge fixture"
-  "$TASKS_AXI_BIN" hold rejected-merge --reason "captain choice pending" \
-    --kind captain --file "$backlog" >/dev/null || fail "could not hold the rejected merge fixture"
-  printf 'Do not merge it.\n' > "$home/question-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer rejected-merge --decision-file "$home/question-answer.txt" >/dev/null \
-    || fail "could not record the rejected merge answer"
-  spoof_pr="https://github.com/acme/repo/pull/7"
-  spoof_marker="<!-- firstmate-completion.v1 {\"value\":\"PR $spoof_pr\"} -->"
-  none_marker='<!-- firstmate-completion.v1 {"value":"none"} -->'
-  "$TASKS_AXI_BIN" add spoofed-question "Should we approve the quoted example?" \
-    --kind captain --repo firstmate --file "$backlog" >/dev/null \
-    || fail "could not create the provenance-spoof question"
-  "$TASKS_AXI_BIN" update spoofed-question \
-    --body "$spoof_marker" --file "$backlog" >/dev/null \
-    || fail "could not record the quoted provenance marker"
-  "$TASKS_AXI_BIN" hold spoofed-question --reason "captain choice pending" \
-    --kind captain --file "$backlog" >/dev/null \
-    || fail "could not hold the provenance-spoof question"
-  printf 'No, that line is only a quoted example.\n' > "$home/spoof-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer spoofed-question --decision-file "$home/spoof-answer.txt" >/dev/null \
-    || fail "could not record the provenance-spoof answer"
-  spoof_show=$("$TASKS_AXI_BIN" show spoofed-question --full --file "$backlog") \
-    || fail "could not read the closed provenance-spoof question"
-  spoof_body=$(printf '%s\n' "$spoof_show" | sed -n 's/^  body: //p' | head -1 \
-    | LC_ALL=C perl -MJSON::PP -e '
-      local $/;
-      my $shown = <STDIN>;
-      $shown =~ s/\s+\z//;
-      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-      print $value unless $value eq "-";
-    ') || fail "could not decode the closed provenance-spoof body"
-  spoof_records=$(printf '%s\n' "$spoof_body" \
-    | sed -n '/^<!-- firstmate-completion\.v1 /p')
-  [ "$spoof_records" = "$(printf '%s\n%s' "$spoof_marker" "$none_marker")" ] \
-    || fail "the close did not append its none verdict after the quoted marker: $spoof_body"
-  "$TASKS_AXI_BIN" add legacy-approved "Legacy approved merge" --kind ship --repo firstmate \
-    --file "$backlog" >/dev/null || fail "could not create the legacy merge fixture"
-  "$TASKS_AXI_BIN" hold legacy-approved --reason "legacy captain merge word" \
-    --kind captain --file "$backlog" >/dev/null || fail "could not hold the legacy merge fixture"
-  "$TASKS_AXI_BIN" 'done' legacy-approved \
-    --pr "https://github.com/kunchenguid/firstmate/pull/1368" --file "$backlog" >/dev/null \
-    || fail "could not create the legacy completed merge shape"
-  prior_pr="https://github.com/kunchenguid/firstmate/pull/1364"
-  "$TASKS_AXI_BIN" add prior-provenance-approved "Earlier branch completion" \
-    --kind ship --repo firstmate --file "$backlog" >/dev/null \
-    || fail "could not create the earlier provenance fixture"
-  "$TASKS_AXI_BIN" 'done' prior-provenance-approved --pr "$prior_pr" \
-    --file "$backlog" >/dev/null || fail "could not complete the earlier provenance fixture"
-  "$TASKS_AXI_BIN" update prior-provenance-approved \
-    --body "Deliverable of the finished work: PR $prior_pr" --file "$backlog" >/dev/null \
-    || fail "could not preserve the earlier branch provenance shape"
-  "$TASKS_AXI_BIN" add mate-approved-merge "Secondmate fix" --kind ship --repo firstmate \
-    --file "$mate/data/backlog.md" >/dev/null || fail "could not create the secondmate merge fixture"
-  "$TASKS_AXI_BIN" hold mate-approved-merge --reason "PR 1361 is ready; awaiting your merge word" \
-    --kind captain --file "$mate/data/backlog.md" >/dev/null \
-    || fail "could not hold the secondmate merge fixture"
-  printf 'Merge the secondmate fix.\n' > "$mate/merge-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$mate" \
-    FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
-    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer mate-approved-merge --release --decision-file "$mate/merge-answer.txt" >/dev/null \
-    || fail "could not release the secondmate merge fixture"
-  "$TASKS_AXI_BIN" 'done' mate-approved-merge \
-    --pr "https://github.com/kunchenguid/firstmate/pull/1361" \
-    --file "$mate/data/backlog.md" >/dev/null || fail "could not complete the secondmate merge fixture"
-  "$TASKS_AXI_BIN" add mate-spoofed-question "Should the quoted example count?" \
-    --kind captain --repo firstmate --file "$mate/data/backlog.md" >/dev/null \
-    || fail "could not create the secondmate provenance-spoof question"
-  "$TASKS_AXI_BIN" update mate-spoofed-question \
-    --body "$spoof_marker" \
-    --file "$mate/data/backlog.md" >/dev/null \
-    || fail "could not record the secondmate quoted provenance marker"
-  "$TASKS_AXI_BIN" hold mate-spoofed-question --reason "captain choice pending" \
-    --kind captain --file "$mate/data/backlog.md" >/dev/null \
-    || fail "could not hold the secondmate provenance-spoof question"
-  printf 'No, that line is only a quoted example.\n' > "$mate/spoof-answer.txt"
-  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$mate" \
-    FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
-    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" \
-    answer mate-spoofed-question --decision-file "$mate/spoof-answer.txt" >/dev/null \
-    || fail "could not record the secondmate provenance-spoof answer"
-  : > "$home/net.log"
-  snap=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed for completion provenance"
-  printf '%s' "$snap" | jq -e '
-    ([.backlog.records[] | select(.id == "approved-merge")][0]) as $approved
-    | ([.backlog.records[] | select(.id == "approved-local")][0]) as $local
-    | ([.backlog.records[] | select(.id == "forced-rejected")][0]) as $forced
-    | ([.backlog.records[] | select(.id == "reused-discard")][0]) as $reused
-    | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
-    | ([.backlog.records[] | select(.id == "spoofed-question")][0]) as $spoofed
-    | ([.backlog.records[] | select(.id == "interrupted-retain")][0]) as $interrupted
-    | ([.backlog.records[] | select(.id == "mixed-provenance-delivery")][0]) as $mixed
-    | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
-    | ([.backlog.records[] | select(.id == "prior-provenance-approved")][0]) as $prior
-    | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
-      and $local.delivery_provenance == true and $local.local_note == "local main"
-      and $forced.delivery_provenance == true and $forced.pr_url == null
-      and $forced.report_path == null and $forced.local_note == null
-      and $reused.delivery_provenance == true and $reused.pr_url == null
-      and $reused.report_path == null and $reused.local_note == null
-      and $rejected.delivery_provenance == true and $rejected.pr_url == null
-      and $rejected.report_path == null and $rejected.local_note == null
-      and $spoofed.delivery_provenance == true and $spoofed.pr_url == null
-      and $spoofed.report_path == null and $spoofed.local_note == null
-      and $interrupted.delivery_provenance == true and ($interrupted.pr_url | test("/pull/1363"))
-      and $mixed.delivery_provenance == true and ($mixed.pr_url | test("/pull/1364"))
-      and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
-      and $prior.delivery_provenance == true and ($prior.pr_url | test("/pull/1364"))
-  ' >/dev/null || fail "completion provenance did not distinguish delivered, rejected, and legacy rows: $snap"
-  json=$(run "$home" "$fakebin" --json --all-landed)
-  printf '%s' "$json" | jq -e '
-    (.landed | any(.[]; .id == "approved-merge" and (.artifact | test("/pull/1365"))))
-      and (.landed | any(.[]; .id == "approved-local"))
-      and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
-      and (.landed | any(.[]; .id == "prior-provenance-approved" and (.artifact | test("/pull/1364"))))
-      and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
-      and (.landed | any(.[]; .id == "interrupted-retain" and (.artifact | test("/pull/1363"))))
-      and (.landed | any(.[]; .id == "mixed-provenance-delivery" and (.artifact | test("/pull/1364"))))
-      and (.landed | any(.[]; .id == "forced-rejected") | not)
-      and (.landed | any(.[]; .id == "reused-discard") | not)
-      and (.landed | any(.[]; .id == "rejected-merge") | not)
-      and (.landed | any(.[]; .id == "spoofed-question") | not)
-      and (.landed | any(.[]; .id == "mate-spoofed-question") | not)
-  ' >/dev/null || fail "captain-approved deliveries must stay in landed in every home: $json"
-  [ ! -s "$home/net.log" ] || fail "landed must make no gh/gh-axi call, got: $(cat "$home/net.log")"
-  pass "captain-approved deliveries stay in landed while a rejected merge does not"
-}
-
 test_include_prs_is_the_only_fetch_path() {
   local home fakebin json
   home=$(make_home prs); write_fixture "$home"
@@ -2050,6 +1611,64 @@ test_landed_includes_secondmate_home_merges() {
   # Still zero network on this default path.
   [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
   pass "landed includes secondmate-managed merges alongside main-home merges"
+}
+
+# These retained rows reproduce the historical approval-time close: tasks-axi
+# preserves captain hold annotations on Done rows that also carry merged pull
+# requests. Without the shared artifact-aware selector, both approved deliveries
+# disappear. The no-artifact answered question is the negative boundary.
+test_captain_approved_deliveries_stay_in_landed() {
+  local home mate fakebin json main_pr mate_pr main_backlog mate_backlog
+  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
+  home=$(make_home captain-approved-landed)
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  fakebin=$(make_fakebin "$home")
+  main_backlog="$home/data/backlog.md"
+  mate_backlog="$mate/data/backlog.md"
+  main_pr="https://github.com/kunchenguid/firstmate/pull/1365"
+  mate_pr="https://github.com/kunchenguid/firstmate/pull/1361"
+
+  "$TASKS_AXI_BIN" add approved-main "Ship the approved main change" --kind ship \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the main approved delivery"
+  "$TASKS_AXI_BIN" hold approved-main --reason "captain merge approval pending" \
+    --kind captain --file "$main_backlog" >/dev/null \
+    || fail "could not hold the main approved delivery"
+  "$TASKS_AXI_BIN" 'done' approved-main --pr "$main_pr" --file "$main_backlog" >/dev/null \
+    || fail "could not reproduce the main approval-time close"
+
+  "$TASKS_AXI_BIN" add approved-mate "Ship the approved secondmate change" --kind ship \
+    --repo firstmate --start --file "$mate_backlog" >/dev/null \
+    || fail "could not create the secondmate approved delivery"
+  "$TASKS_AXI_BIN" hold approved-mate --reason "captain secondmate merge approval pending" \
+    --kind captain --file "$mate_backlog" >/dev/null \
+    || fail "could not hold the secondmate approved delivery"
+  "$TASKS_AXI_BIN" 'done' approved-mate --pr "$mate_pr" --file "$mate_backlog" >/dev/null \
+    || fail "could not reproduce the secondmate approval-time close"
+
+  "$TASKS_AXI_BIN" add answered-question "Choose the sample route" --kind captain \
+    --repo firstmate --file "$main_backlog" >/dev/null \
+    || fail "could not create the answered captain question"
+  run_captain "$home" "$fakebin" hold answered-question \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "could not hold the answered captain question"
+  printf 'Choose route north.\n' > "$home/question-answer.txt"
+  run_captain "$home" "$fakebin" answer answered-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the answered captain question"
+
+  : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --json --all-landed) \
+    || fail "Bearings failed for captain-approved deliveries"
+  printf '%s' "$json" | jq -e --arg main_pr "$main_pr" --arg mate_pr "$mate_pr" '
+    (.landed | any(.id == "approved-main" and .artifact == $main_pr))
+      and (.landed | any(.id == "approved-mate" and .artifact == $mate_pr))
+      and (.landed | any(.id == "answered-question") | not)
+  ' >/dev/null || fail "captain-approved deliveries must stay in landed: $json"
+  [ ! -s "$home/net.log" ] \
+    || fail "captain-approved landed selection made a network call: $(cat "$home/net.log")"
+  pass "captain-approved deliveries stay landed while answered questions stay out"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -3391,6 +3010,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_captain_approved_deliveries_stay_in_landed
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
@@ -3419,7 +3039,6 @@ test_collapsed_captain_call_deferral_and_landed
 test_undated_hold_phrasing_and_aging_projection
 test_blocked_deferred_hold_has_concrete_disclosure
 test_revealed_deferred_holds_show_their_deferral_reason
-test_captain_approved_delivery_stays_in_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed

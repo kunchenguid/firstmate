@@ -1858,9 +1858,8 @@ EOF
 
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
-# work must never be the act that closes the captain's own row: the deliverable
-# is recorded on the still-held row, the call keeps reading as open on the
-# board, and only a recorded answer closes it. An ordinary finished task in the
+# work must never be the act that closes the captain's own row: the call keeps
+# reading as open on the board, and only a recorded answer closes it. An ordinary finished task in the
 # same home must still close exactly as before, and discard authority covers
 # unlanded work, never the captain's question.
 test_teardown_never_closes_a_captain_held_task() {
@@ -1888,9 +1887,6 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_contains "$show" "state: queued" "the finished work's row still reads as worked on"
   assert_contains "$show" "held: yes" "cleanup lifted the captain hold"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
-  assert_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
-    "the deliverable was not recorded on the still-open row"
   assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
   assert_absent "$home/state/$id.backlog-close" \
     "successful cleanup left its pending transition record behind"
@@ -1939,24 +1935,22 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_contains "$show" "state: queued" "forced cleanup left the captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "forced cleanup dropped the captain hold"
 
-  # Only a recorded answer closes the captain call, and the deliverable survives it.
+  # Only a recorded answer closes the captain call.
   printf 'Ship attachments by reference.\n' > "$home/answer.txt"
   run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
     || fail "the surviving captain call could not be answered"
   show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
   assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
   assert_contains "$show" "Ship attachments by reference." "the captain's words were not recorded"
-  assert_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
-    "the answer lost the recorded deliverable"
-  pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
+  pass "cleanup leaves a captain-held work item open, and its answer closes successfully"
 }
 
 # Retention happens after destructive cleanup, through the same pending record
-# an ordinary close stages first. A cleanup that fails part-way leaves that
-# record available to an answer and the next session replay.
+# an ordinary close stages first. A cleanup that fails part-way therefore leaves
+# the row exactly as it was, and the next session start finishes the retention
+# instead of closing the captain's question.
 test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
-  local home id wt show rc bootstrap json
+  local home id wt show rc bootstrap
   home=$(make_home teardown-held-interrupted)
   id=sample-held-cleanup-failure
   wt="$home/projects/$id"
@@ -1981,7 +1975,7 @@ SH
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
     > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
   set -e
@@ -1992,20 +1986,6 @@ SH
   show=$(tasks_in "$home" show "$id" --full) || fail "a failed cleanup erased the captain call"
   assert_contains "$show" "state: in_flight" "a failed cleanup changed the row before cleanup succeeded"
   assert_contains "$show" "hold_kind: captain" "a failed cleanup dropped the captain hold"
-  assert_not_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
-    "the deliverable was recorded before destructive cleanup succeeded"
-
-  printf 'Accept the completed report.\n' > "$home/interrupted-answer.txt"
-  run_captain "$home" answer "$id" --decision-file "$home/interrupted-answer.txt" >/dev/null \
-    || fail "the interrupted captain call could not be answered"
-  assert_present "$home/state/$id.backlog-close" \
-    "the answer discarded the pending cleanup record before replay"
-  show=$(tasks_in "$home" show "$id" --full) || fail "the answer erased the interrupted row"
-  assert_contains "$show" "state: done" "the answer did not close the captain call"
-  assert_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
-    "the answer lost the completion carried by the pending cleanup record"
 
   fm_fake_exit0 "$home/fakebin" treehouse
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -2013,30 +1993,23 @@ SH
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
     || fail "session start could not replay the interrupted retention: $bootstrap"
-  assert_contains "$bootstrap" "the captain had already answered its call" \
-    "session start did not reconcile the answered interrupted call"
+  assert_contains "$bootstrap" "kept the captain call for $id open" \
+    "session start did not report the retained captain call"
   assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
   assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
   show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
-  assert_contains "$show" "state: done" "session start reopened the answered captain call"
+  assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
   assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
-  assert_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
-    "session start did not preserve the pending completed report"
-  json=$(run_bearings "$home") || fail "Bearings failed after interrupted cleanup replay"
-  printf '%s' "$json" | jq -e --arg id "$id" \
-    --arg report "data/$id/report.md" '
-      .landed | any(.id == $id and .artifact == $report)
-    ' >/dev/null || fail "Bearings omitted the report preserved across interrupted cleanup: $json"
-  pass "an answered interrupted cleanup preserves its completed delivery through replay"
+  pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
 }
 
 # A home whose data directory is relocated keeps one backlog; the predicate and
 # the retention must address it the way teardown does, not FM_HOME/data.
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
-  local home data id show json
+  local home data id show
   home=$(make_home teardown-relocated-hold)
-  data="$home/ team; records"
+  data="$home/records"
   mv "$home/data" "$data"
   id=sample-relocated-hold
   mkdir -p "$home/data" "$data/$id"
@@ -2075,25 +2048,10 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
-  assert_contains "$show" \
-    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report  team; records/$id/report.md\\\"} -->" \
-    "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
   assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
-  printf 'Accept the relocated report.\n' > "$home/relocated-answer.txt"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" answer "$id" \
-    --decision-file "$home/relocated-answer.txt" >/dev/null \
-    || fail "could not answer the relocated captain hold"
-  json=$(FM_DATA_OVERRIDE="$data" run_bearings "$home") \
-    || fail "Bearings failed for the relocated completed report"
-  printf '%s' "$json" | jq -e --arg id "$id" \
-    --arg report " team; records/$id/report.md" '
-      .landed | any(.id == $id and .artifact == $report)
-    ' >/dev/null || fail "Bearings omitted the relocated completed report: $json"
-  pass "cleanup retains and Bearings lands captain calls in relocated data"
+  pass "cleanup retains captain calls in the configured backlog"
 }
 
 test_merge_approval_releases_before_zero_done_retention() {
@@ -2131,8 +2089,7 @@ test_merge_approval_releases_before_zero_done_retention() {
   assert_no_grep "$id" "$home/data/backlog.md" \
     "zero-retention cleanup kept the completed row in the active backlog"
   assert_grep "$id" "$archive" "zero-retention cleanup did not archive the completed row"
-  assert_grep "<!-- firstmate-completion.v1 {\"value\":\"PR $pr\"} -->" "$archive" \
-    "zero-retention archival lost completion provenance"
+  assert_grep "$pr" "$archive" "zero-retention archival lost the merged pull request"
   assert_grep "Merge the approved change." "$archive" \
     "zero-retention archival lost the recorded merge approval"
   assert_absent "$home/state/$id.meta" "zero-retention cleanup retained task metadata"

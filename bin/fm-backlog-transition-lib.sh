@@ -13,9 +13,9 @@
 # load-bearing for the pairing.
 #   bin/fm-spawn.sh      meta published => `tasks-axi start`
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
-#                        with completion provenance recorded on either path, so
-#                        cleanup never retires the captain's own question and a
-#                        new completion never makes readers infer whether it shipped
+#                        when the row is still an open captain call
+#                        (bin/fm-captain-hold.sh `open`), so cleanup never
+#                        retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
 # cross-home nudge stay defense in depth, not the primary mechanism.
@@ -52,13 +52,9 @@
 # it publishes the meta first, so a crash
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
-# records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that fails to close
-# keeps the pending completion for its retry.
-
-# shellcheck source=bin/fm-landed-lib.sh
-# shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-landed-lib.sh"
+# reopens the row instead of closing it, and never closes a row that reads as an
+# open captain call. An answer that closed the row first simply retires the
+# record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -330,123 +326,21 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-fm_backlog_decode_task_body() {  # <tasks-axi-show-output>
-  printf '%s\n' "$1" | sed -n 's/^  body: //p' | head -1 \
-    | LC_ALL=C perl -MJSON::PP -e '
-      local $/;
-      my $shown = <STDIN>;
-      $shown =~ s/\s+\z//;
-      exit 0 if $shown eq "" || $shown eq "-";
-      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-      print $value unless $value eq "-";
-    '
+fm_backlog_done() {  # <data-dir> <id> [flag...]
+  local data=$1 id=$2
+  shift 2
+  fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
-fm_backlog_body_has_captain_resolution() {  # <decoded-task-body>
-  case "$1" in
-    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
-    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
-  esac
-  return 1
-}
-
-fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' encoded line latest_line body new_body tmp explicit_none=0
+# Keep a captain-held row open across the removal of the work record that
+# discovered it by returning the row to Queued, the conventional post-cleanup
+# shape for an open captain call.
+fm_backlog_retain() {  # <data-dir> <id> [flag...]
+  local data=$1 id=$2
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
-  shift 2
-  FM_BACKLOG_TRANSITION_ERROR=
-  for arg in "$@"; do
-    [ "$arg" != --completion-none ] || explicit_none=1
-    case "$previous_arg" in
-      --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
-      --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
-      --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
-    esac
-    previous_arg=$arg
-  done
-  out=$(fm_backlog_row_show "$data" "$id" --full)
-  command_status=$?
-  if [ "$command_status" -ne 0 ]; then
-    FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-      || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-    return "$command_status"
-  fi
-  body=$(fm_backlog_decode_task_body "$out") || {
-    FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-    return 1
-  }
-  latest_line=$(fm_completion_last_record_field line "$body") || {
-    FM_BACKLOG_TRANSITION_ERROR="could not read completion provenance for $id"
-    return 1
-  }
-  if [ -n "$deliverable" ] && [ "$explicit_none" = 1 ]; then
-    FM_BACKLOG_TRANSITION_ERROR="conflicting completion provenance for $id"
-    return 1
-  fi
-  if [ -z "$deliverable" ]; then
-    if [ "$explicit_none" = 1 ]; then
-      deliverable=none
-    else
-      FM_BACKLOG_TRANSITION_ERROR="completion provenance is unknown for $id"
-      return 1
-    fi
-  fi
-  encoded=$(printf '%s' "$deliverable" | LC_ALL=C perl -MJSON::PP -e '
-    local $/;
-    print encode_json({value => scalar <STDIN>});
-  ') || {
-    FM_BACKLOG_TRANSITION_ERROR="could not encode completion provenance for $id"
-    return 1
-  }
-  line="<!-- firstmate-completion.v1 $encoded -->"
-  [ "$latest_line" != "$line" ] || return 0
-  new_body=$line
-  [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-completion-body.XXXXXX") || {
-    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
-    return 1
-  }
-  if ! printf '%s\n' "$new_body" > "$tmp"; then
-    rm -f -- "$tmp"
-    FM_BACKLOG_TRANSITION_ERROR="cannot stage the completion provenance for $id"
-    return 1
-  fi
-  if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  rm -f -- "$tmp"
-}
-
-fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg
-  local record_args=() done_args=()
-  shift 2
-  for arg in "$@"; do
-    record_args+=("$arg")
-    [ "$arg" = --completion-none ] || done_args+=("$arg")
-  done
-  fm_backlog_record_completion "$data" "$id" "${record_args[@]+"${record_args[@]}"}" || return 1
-  fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
-}
-
-# Keep a captain-held row open across the removal of the work record that
-# discovered it: record the finished work's completion as one line at the end
-# of the task body (a line already present is left alone) and return the row to
-# Queued, the conventional post-cleanup shape for an open captain call.
-# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only bin/fm-captain-hold.sh answer closes the call. Completion is
-# written into the body rather than through `tasks-axi update --report`,
-# because that flag rewrites the title of a row that is not Done.
-fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
-  shift 2
-  fm_backlog_record_completion "$data" "$id" "$@" || return 1
   fm_backlog_mutate "$data" reopen "$id"
 }
 
@@ -635,8 +529,8 @@ fm_backlog_close_transition() {
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
-# The captain-held twin of the close transition: same record, same ordering,
-# `reopen` with the deliverable recorded instead of `done`.
+# The captain-held twin of the close transition: same record and ordering, with
+# `reopen` instead of `done`.
 fm_backlog_retain_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
@@ -762,7 +656,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) case "${args[1]}" in local%20main|none) true ;; *) false ;; esac ;;
+        --note) [ "${args[1]}" = "local%20main" ] ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -836,8 +730,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
 }
 
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
-# instead of a close; the remaining flags are the same completion links either
-# transition records.
+# instead of a close; the remaining flags preserve the ordinary close arguments
+# if replay later establishes that the row should close.
 fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
   local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
   local mode=close serialized_args=()
@@ -912,23 +806,6 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
   fm_backlog_close_marker_remove "$marker" "$1"
 }
 
-fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-data-dir>
-  local state=$1 id=$2 data=$3 marker args=()
-  FM_BACKLOG_CLOSE_VALIDATED_MODE=
-  FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
-  marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
-  [ -e "$marker" ] || [ -L "$marker" ] || return 0
-  fm_backlog_close_marker_validate "$marker" "$data" "$id" "$state" || return 1
-  [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
-  args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
-    args[1]="local main"
-  fi
-  FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
-  fm_backlog_record_completion "$FM_BACKLOG_CLOSE_VALIDATED_DATA" "$id" \
-    "${args[@]+"${args[@]}"}"
-}
-
 # Replay one recorded close or retention. Returns 0 when the row is closed (or
 # retained), the marker is stale, or an answer already closed a retained row,
 # and 1 when marker validation or recovery fails. Validation completes before
@@ -936,7 +813,7 @@ fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-da
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
   local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
-  local show body args=() mode_flags=()
+  local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   fm_backlog_directory_present "$state" "state directory" || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
@@ -953,7 +830,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
+  if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
@@ -987,19 +864,6 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 1
     fi
     row_state=
-  fi
-  if [ "$mode" = retain ] && [ "${row_state%% *}" != done ] && [ -n "$row_state" ]; then
-    show=$(fm_backlog_row_show "$data" "$id" --full) || {
-      FM_BACKLOG_TRANSITION_ERROR="could not read $id before replaying its pending retention"
-      return 1
-    }
-    body=$(fm_backlog_decode_task_body "$show") || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
-    if fm_backlog_body_has_captain_resolution "$body"; then
-      return 0
-    fi
   fi
   case "$row_state" in
     done\ *)
