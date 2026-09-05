@@ -139,6 +139,15 @@ export FM_REMOTE_JOB_TIMEOUT=$((5 * FM_TEST_TIMEOUT_SCALE))
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
+case "$(/usr/bin/uname -s)" in
+  Darwin) EXPECTED_HOST_PLATFORM=darwin ;;
+  Linux) EXPECTED_HOST_PLATFORM=linux ;;
+  *) EXPECTED_HOST_PLATFORM=$(/usr/bin/uname -s) ;;
+esac
+[ "$(fm_remote_job_host_platform)" = "$EXPECTED_HOST_PLATFORM" ] \
+  || fail "the logical worker platform override changed host identity semantics"
+pass "the worker platform override leaves host identity semantics unchanged"
+
 LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
 LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
 mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"

@@ -148,6 +148,19 @@ fm_remote_job_platform() {
   esac
 }
 
+fm_remote_job_host_platform() {
+  local raw
+  if [ -x /usr/bin/uname ]; then raw=$(/usr/bin/uname -s 2>/dev/null || true)
+  elif [ -x /bin/uname ]; then raw=$(/bin/uname -s 2>/dev/null || true)
+  else raw=; fi
+  case "$raw" in
+    Darwin|darwin) printf 'darwin\n' ;;
+    Linux|linux) printf 'linux\n' ;;
+    '') printf 'unknown\n' ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+
 fm_remote_job_path_append() { # <directory>
   case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in *":$1:"*) return 0 ;; esac
   FM_REMOTE_JOB_OPERATOR_PATH="${FM_REMOTE_JOB_OPERATOR_PATH:+$FM_REMOTE_JOB_OPERATOR_PATH:}$1"
@@ -1179,7 +1192,7 @@ fm_remote_job_report_missing_stop_identity() { # <pid>
 }
 
 fm_remote_job_stop_identity_supported() { # <identity>
-  if [ "$(fm_remote_job_platform)" = darwin ]; then
+  if [ "$(fm_remote_job_host_platform)" = darwin ]; then
     case "$1" in ''|linux:*) return 1 ;; *) return 0 ;; esac
   fi
   case "$1" in linux:*:*) return 0 ;; *) return 1 ;; esac
@@ -1350,7 +1363,7 @@ fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal> [ex
 
 fm_remote_job_stop_guard_process() { # <pid> <start>
   local pid=$1 start=$2 signal i actual_start platform
-  platform=$(fm_remote_job_platform)
+  platform=$(fm_remote_job_host_platform)
   for signal in TERM KILL; do
     [ "$platform" = darwin ] || fm_remote_job_process_non_zombie "$pid" || return 0
     actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
