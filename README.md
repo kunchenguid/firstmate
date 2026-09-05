@@ -75,8 +75,8 @@ Pick whichever one matches your subscription and workflow.
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
-Google Antigravity CLI 1.1.26+ is verified as a primary and worker harness with native Gemini model and low/medium/high effort selection.
-It uses a foreground terminal-tool supervision wait because Antigravity exposes no verified asynchronous process-to-model wake, and `fm-spawn.sh` supplies the exact isolated project, autonomous permission mode, and Firstmate-owned task hooks.
+Google Antigravity CLI 1.1.26+ supports interactive primary sessions.
+It uses a foreground terminal-tool supervision wait because Antigravity exposes no verified asynchronous process-to-model wake.
 
 ### Install and launch
 
@@ -119,6 +119,7 @@ Run `agy update` when `agy --version` is older than 1.1.26.
 Always include `--add-dir "$PWD"`: Antigravity otherwise defaults its workspace to `~/.gemini/antigravity-cli` and will not discover `AGENTS.md` or `.agents/hooks.json`.
 Omitting `--add-dir` leaves the session conversational but suppresses the session-start reminder and foreground supervision wait (`bin/fm-watch.sh`), leaving fleet background events unmonitored and requiring repeated manual wakes.
 The tracked `.agents/hooks.json` loads startup and primary safety hooks from this repository; use the interactive TUI rather than headless `--print` for a primary session.
+Set `config/crew-harness` to an existing supported worker adapter before dispatching from an Antigravity primary; Antigravity worker and secondmate dispatch are not supported.
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.

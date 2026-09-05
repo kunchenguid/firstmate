@@ -1202,16 +1202,13 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
   done
 }
 
-# fm_backend_herdr_idle_shell_from_process_info: the single structural owner
-# for proving that a pane process snapshot contains one childless idle shell.
-# It prints the foreground shell pid. With <root-only>=1, that shell must also
-# be Herdr's pane root shell; presentation cleanup depends on that stronger
-# identity because it signals the returned pid to remove the pane. With
-# <root-only>=0, the only accepted subtree is root shell -> treehouse -> task
-# shell, with no sibling or descendant process anywhere under the pane root.
-fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only>
-  local info=$1 pane=$2 root_only=$3 shell_pid foreground_pgid count
+# fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
+# observation for fm_backend_herdr_pane_idle_shell_pid, which owns the proof
+# contract and the settle retry.
+fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
@@ -1220,13 +1217,13 @@ fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only
     '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  [ "$foreground_pgid" = "$shell_pid" ] || return 1
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
   [ "$count" -eq 1 ] || return 1
   process_pid=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$process_pid" = "$foreground_pgid" ] || return 1
-  [ "$root_only" != 1 ] || [ "$process_pid" = "$shell_pid" ] || return 1
+    '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
+  [ "$process_pid" = "$shell_pid" ] || return 1
   name=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
   argv0=$(printf '%s' "$info" | jq -er '
@@ -1235,7 +1232,6 @@ fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only
     | select(type == "string" and length > 0)
   ' 2>/dev/null) || return 1
   shell_name=${name##*/}
-  shell_name=${shell_name#-}
   argv0=${argv0#-}
   argv0=${argv0##*/}
   [ "$argv0" = "$shell_name" ] || return 1
@@ -1243,89 +1239,15 @@ fm_backend_herdr_idle_shell_from_process_info() {  # <json> <pane-id> <root-only
 
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  if [ "$process_pid" != "$shell_pid" ]; then
-    fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
-    fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$process_pid" || return 1
-  fi
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v root="$shell_pid" -v foreground="$process_pid" '
-    {
-      pid[NR] = $1
-      parent[$1] = $2
-      command[$1] = $3
-      present[$1]++
-    }
-    END {
-      if (present[root] != 1 || present[foreground] != 1) exit 1
-      current = foreground
-      while (current != root) {
-        if (current == "" || seen[current]++ || !(current in parent)) exit 1
-        path[current] = 1
-        current = parent[current]
-      }
-      path[root] = 1
-      if (foreground != root) {
-        wrapper = parent[foreground]
-        if (wrapper == root || parent[wrapper] != root) exit 1
-        sub(/^.*\//, "", command[wrapper])
-        if (command[wrapper] != "treehouse") exit 1
-      }
-      for (i = 1; i <= NR; i++) {
-        current = pid[i]
-        walk++
-        while (current != "" && current != 0 && walked[current] != walk) {
-          walked[current] = walk
-          if (current == root) {
-            if (!(pid[i] in path)) exit 1
-            break
-          }
-          current = parent[current]
-        }
-      }
-    }
+  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+    $1 == shell { found++ }
+    $2 == shell { child++ }
+    END { exit(found == 1 && child == 0 ? 0 : 1) }
   ' || return 1
-  stat=$(LC_ALL=C "$ps_bin" -p "$process_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
+  stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
-  printf '%s\n' "$process_pid"
-}
-
-# fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
-# observation for fm_backend_herdr_pane_idle_shell_pid, which owns the proof
-# contract and the settle retry.
-fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
-  local session=$1 pane=$2 info
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
-  fm_backend_herdr_idle_shell_from_process_info "$info" "$pane" 1
-}
-
-# fm_backend_herdr_pane_process_state: classify the live foreground process
-# evidence as idle-shell|active|unknown. A stale native registration can be
-# overridden only by the complete root-to-foreground idle-shell proof above.
-# Every other well-formed nonempty foreground shape stays active, regardless
-# of harness executable names; malformed or contradictory evidence is unknown.
-fm_backend_herdr_pane_process_state() {  # <session> <pane-id>
-  local session=$1 pane=$2 info
-  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
-  if fm_backend_herdr_idle_shell_from_process_info "$info" "$pane" 0 >/dev/null; then
-    printf 'idle-shell'
-    return 0
-  fi
-  if printf '%s' "$info" | jq -e --arg pane "$pane" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and (.result.process_info.shell_pid | type == "number" and . > 1)
-    and (.result.process_info.foreground_process_group_id | type == "number" and . > 1)
-    and (.result.process_info.foreground_processes | type == "array" and length > 0)
-    and all(.result.process_info.foreground_processes[];
-      (.pid | type == "number" and . > 1)
-      and (.name | type == "string" and length > 0)
-      and ((.argv0 // .argv[0]) | type == "string" and length > 0))
-  ' >/dev/null 2>&1; then
-    printf 'active'
-  else
-    printf 'unknown'
-  fi
+  printf '%s\n' "$shell_pid"
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -1941,11 +1863,11 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown from pane presence, native agent registration,
-# and live process evidence. Business-logic "not found" responses are normal,
-# expected outcomes rather than process failures (real herdr 0.7.1 exits 1 for
-# them; canned-response tests may fake exit 0), so their JSON bodies remain the
-# authority.
+# dead|no-agent|live|unknown, purely from the JSON body of two read-only
+# calls - never from process exit status, since a business-logic "not found"
+# response is a normal, expected outcome here, not a call failure (real herdr
+# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
+# the JSON keeps this function correct against either).
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
@@ -1961,22 +1883,18 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent).
-#   live     - `agent get` reports a registered agent and process-info reports
-#              a well-formed nonempty foreground process shape. This does not
-#              depend on a harness executable name, so every supported worker
-#              runtime shares the same proof.
-#   unknown  - anything else: an unparseable/unexpected response, contradictory
-#              process evidence, or a `pane get` success whose echoed pane_id
-#              does not round-trip. The caller must fail safe toward refusal,
-#              never toward closing.
-#
-# Herdr 0.8.2 leaves Pi's last `idle` registration behind after `/quit`. The
-# task endpoint has already returned to its real root-shell -> treehouse ->
-# childless task-shell chain at that point. That complete process proof is the
-# only condition allowed to override a stale registration to no-agent; a
-# missing, branching, busy, or malformed process tree remains live or unknown.
+#   live     - `agent get` succeeds and reports a real agent_status (working,
+#              idle, done, or blocked - any registered value). An idle or
+#              blocked agent is still a genuine, still-registered agent, not
+#              a restored husk, so it is never a close-and-replace candidate.
+#   unknown  - anything else: an unparseable/unexpected response from either
+#              call, or a `pane get` success whose own echoed pane_id does not
+#              round-trip (guards against misreading a herdr response shape
+#              change as "the pane exists"). The caller must fail safe toward
+#              refusal here, never toward closing - this is the conservative
+#              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status process_state
+  local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -1993,13 +1911,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
-  process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane_id")
-  case "$process_state" in
-    idle-shell) printf 'no-agent' ;;
-    active) printf 'live' ;;
+    working|idle|done|blocked) printf 'live' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -2019,9 +1931,8 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less or stale-registration idle-shell pane is `dead`, a
-# registered agent with active process evidence is `alive`, and an unexpected
-# or failed read is `unreadable`.
+# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
+# unexpected or failed API read is `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -2709,7 +2620,7 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 # ANSI pane capture (with its small-N workaround), the native `agent get`
 # identity probe, and the capability descriptor. Every shape - the bordered
 # box, the bare agent-glyph row, opencode's left-bar, and pi's
-# identity-gated separated pair (Pi and Antigravity) - now lives in
+# identity-gated separated pair (which this adapter pioneered) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
 # a new harness shape is taught there once and every backend learns it in the
 # same commit. The muse `⟩` glyph this adapter's local bare-prompt pattern
@@ -2722,7 +2633,7 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
-# backing the shared classifier's separated shape - the genuine herdr
+# backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_parse_target "$1" || return 1
@@ -2734,7 +2645,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # shared classifier strip ghost/placeholder text); when it fails on an older
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
 # letting ghost text be misread as typed input. Identity is fetched lazily,
-# only when the classifier reports the verdict depends on it (a separated
+# only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown

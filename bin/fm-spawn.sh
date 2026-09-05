@@ -504,7 +504,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|antigravity) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1204,7 +1204,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|antigravity)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1352,21 +1352,6 @@ launch_template() {
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
     gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Google Antigravity CLI (`agy`). --prompt-interactive submits the brief and
-    # remains in the TUI; a bare positional prompt is not a documented launch
-    # interface. --dangerously-skip-permissions is Antigravity's always-proceed
-    # mode and, unlike --mode accept-edits, permits unattended terminal tools.
-    # The exact isolated worktree is the first --add-dir because Antigravity
-    # otherwise starts in ~/.gemini/antigravity-cli. The second is a
-    # Firstmate-owned hook overlay, keeping project .agents/hooks.json untouched.
-    # Every foreign marker is cleared at the boundary: Antigravity preserves
-    # inherited AI_AGENT and Pi identity, while its own tool processes publish
-    # ANTIGRAVITY_AGENT=1. Model and effort are both native verified flags.
-    antigravity)
-      printf '%s' 'env -u AI_AGENT -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS __AGYBIN__ --dangerously-skip-permissions --add-dir __WORKTREE__ '
-      [ "$kind" = secondmate ] || printf '%s' '--add-dir __ANTIGRAVITYHOOKS__ '
-      printf '%s' '__MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1531,42 +1516,6 @@ resolve_kimi_binary() {
   return 1
 }
 
-resolve_antigravity_binary() {
-  local candidate dir version major minor patch
-  candidate=$(command -v agy 2>/dev/null || true)
-  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
-    echo "error: Antigravity executable 'agy' not found on PATH; install or update Google Antigravity CLI" >&2
-    return 1
-  fi
-  case "$candidate" in
-    /*) ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-      [ -n "$dir" ] || return 1
-      candidate="$dir/$(basename "$candidate")"
-      ;;
-  esac
-  version=$("$candidate" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-  IFS=. read -r major minor patch <<EOF
-$version
-EOF
-  case "$major:$minor:$patch" in
-    *[!0-9:]*|:*|*::*|*:) version= ;;
-  esac
-  if [ -z "$version" ] || [ "$major" -lt 1 ] \
-    || { [ "$major" -eq 1 ] && [ "$minor" -lt 1 ]; } \
-    || { [ "$major" -eq 1 ] && [ "$minor" -eq 1 ] && [ "$patch" -lt 26 ]; }; then
-    echo "error: Antigravity CLI 1.1.26 or newer is required for reliable always-proceed subagent approvals; found '${version:-unknown}'. Run 'agy update'." >&2
-    return 1
-  fi
-  printf '%s\n' "$candidate"
-}
-
-antigravity_catalog_has_model() {  # <catalog-output> <model-id>
-  local catalog=$1 model=$2
-  printf '%s\n' "$catalog" | awk -F '\t' -v wanted="$model" '$1 == wanted { found=1 } END { exit !found }'
-}
-
 resolve_muse_binary() {
   local candidate dir
   candidate=$(command -v muse 2>/dev/null || true)
@@ -1620,7 +1569,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|antigravity)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1659,13 +1608,6 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    antigravity)
-      # agy 1.1.26 exposes the shared low|medium|high vocabulary directly.
-      # xhigh/max are omitted rather than translated to an invented setting.
-      case "$effort" in
-        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
     muse)
       # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
       # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
@@ -1689,39 +1631,6 @@ effort_flag_for_harness() {
     # effort flag.
   esac
 }
-
-case "$LAUNCH" in
-  *__AGYBIN__*)
-    AGY_BIN=$(resolve_antigravity_binary) || exit 1
-    ANTIGRAVITY_MODELS=$("$AGY_BIN" models 2>/dev/null) || {
-      echo "error: Antigravity model catalog could not be read from '$AGY_BIN models'" >&2
-      exit 1
-    }
-    if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
-      MODEL=$(printf '%s\n' "$ANTIGRAVITY_MODELS" | awk -F '\t' -v effort="$EFFORT" '
-        $1 ~ /^gemini-/ && effort ~ /^(low|medium|high)$/ && $1 ~ ("-" effort "$") { print $1; printed=1; exit }
-        $1 ~ /^gemini-/ && fallback == "" { fallback=$1 }
-        END { if (NR > 0 && !printed && fallback != "") print fallback }
-      ' | head -1)
-      [ -n "$MODEL" ] || {
-        echo "error: Antigravity's live catalog contains no Gemini model; refusing to select another provider family" >&2
-        exit 1
-      }
-    fi
-    case "$MODEL" in
-      gemini-*) ;;
-      *)
-        echo "error: Firstmate's Antigravity adapter is Gemini-only; model '$MODEL' is outside the verified Gemini family" >&2
-        exit 1
-        ;;
-    esac
-    if ! antigravity_catalog_has_model "$ANTIGRAVITY_MODELS" "$MODEL"; then
-      echo "error: Antigravity model '$MODEL' is not available from '$AGY_BIN models'; choose a Gemini id listed by that command or omit --model" >&2
-      exit 1
-    fi
-    LAUNCH=${LAUNCH//__AGYBIN__/$(shell_quote "$AGY_BIN")}
-    ;;
-esac
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -2787,7 +2696,7 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
-    gemini|antigravity)
+    gemini)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -2829,25 +2738,6 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
-      ;;
-    antigravity)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-        # Antigravity discovers hooks from added roots, so task lifecycle wiring
-        # lives in a Firstmate-owned overlay rather than the project's own
-        # .agents/hooks.json. PreInvocation opens each model invocation and Stop
-        # settles it, publishes the ordinary turn-end edge, and permits the
-        # completed turn. The canonical state path, safe id, and fresh busy
-        # generation are baked into the commands rather than accepted from hook
-        # input. Antigravity 1.1.26 loads this overlay independently of --add-dir
-        # argument order.
-        ANTIGRAVITY_HOOK_ROOT="$STATE_REAL/$ID.antigravity-hooks"
-        mkdir -p "$ANTIGRAVITY_HOOK_ROOT/.agents"
-        a_busy=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-antigravity-hook.sh") task-busy $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN")")
-        a_stop=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-antigravity-hook.sh") task-stop $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") $(shell_quote "$TURNEND")")
-        cat > "$ANTIGRAVITY_HOOK_ROOT/.agents/hooks.json" <<EOF
-{"firstmate-task-lifecycle":{"PreInvocation":[{"type":"command","command":"$a_busy"}],"Stop":[{"type":"command","command":"$a_stop"}]}}
-EOF
-      fi
       ;;
     gemini)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -3269,7 +3159,6 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-sq_antigravity_hooks=$(shell_quote "$STATE_REAL/$ID.antigravity-hooks")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -3284,12 +3173,11 @@ case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
-  antigravity) LAUNCH=${LAUNCH//__ANTIGRAVITYHOOKS__/$sq_antigravity_hooks} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|antigravity)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT $LAUNCH"
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

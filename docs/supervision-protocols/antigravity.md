@@ -11,7 +11,7 @@ When this session owns supervision and away mode is not active:
    Antigravity 1.1.26 exposes no verified background-task-to-model wake interface, so `bin/fm-watch-arm.sh` is not a valid substitute here.
 6. A failed foreground tool call means supervision is down.
    Inspect the failure and restore the same foreground wait shape before ending a turn with work under way.
-7. The tracked `.agents/hooks.json` injects the startup reminder through Antigravity's `PreInvocation` hook in a primary or second-mate home.
+7. The tracked `.agents/hooks.json` injects the startup reminder through Antigravity's `PreInvocation` hook in the primary home.
    It is a backstop, not a second supervision owner.
 
 Interactive `agy` TUI sessions launched with `--add-dir "$PWD"` are the supported primary host.

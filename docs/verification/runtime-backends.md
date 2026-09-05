@@ -169,7 +169,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
-Herdr composes native registered-agent state with structural foreground-process evidence and needs no worker-runtime process-name branch.
+Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
@@ -581,36 +581,6 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
-### Post-exit agent registration
-
-Measured 2026-09-04 against Herdr 0.8.2 and Pi 0.84.4 using OpenAI `gpt-5.6-sol` in a guarded named lab.
-The public exit command delivered Pi's `/quit`, after which `herdr agent get` still reported the old Pi registration as idle while `pane process-info` reported one foreground `/bin/zsh` and the real process table showed the pane root shell, `treehouse get`, and that childless sleeping task shell as one unbranched chain.
-The old registry-only classifier therefore returned alive and made the public relaunch deliver a second exit command into the shell before refusing that Pi had not stopped.
-The process-backed classifier returned dead for the same stale registration, while a registered non-shell foreground process remained alive and malformed process evidence became unreadable.
-The public relaunch then reused the exact endpoint and launched a new Pi agent successfully.
-
-Portable public-interface coverage uses real shell processes and a scripted Herdr protocol surface:
-
-```sh
-tests/fm-control-herdr-agent-state.test.sh
-```
-
-Refresh the credentialed real-harness proof without invoking Claude or Anthropic models:
-
-```sh
-FM_HERDR_PI_EXIT_LIVE=1 \
-  FM_HERDR_PI_EXIT_MODEL=gpt-5.6-sol \
-  tests/fm-control-herdr-pi-exit-live-e2e.test.sh
-```
-
-Observed output:
-
-```text
-ok - live Herdr/Pi: stale idle registration over the post-exit shell no longer blocks public relaunch (gpt-5.6-sol)
-```
-
-The classifier remains runtime-neutral: every supported worker runtime reaches the same native-registration plus process-shape composition, while tmux retains its independent process-name classifier and Zellij, Orca, and cmux remain without recovery-grade agent-state authority.
-
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
@@ -963,9 +933,8 @@ ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-The smoke test composes `herdr pane report-agent` with a real foreground command so a registered agent has independent active process evidence, and leaves the no-registration pane at its real shell.
-No provider-backed agent is launched.
-That command is the uncredentialed guard that refreshes the base lifecycle record; use the GPT-only live guard under [Post-exit agent registration](#post-exit-agent-registration) to refresh the stale-registration boundary after a Herdr or Pi upgrade.
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
+That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
 

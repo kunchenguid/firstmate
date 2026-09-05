@@ -9,10 +9,9 @@
 # an agent is running, and therefore whether a lifecycle verb may act at all,
 # comes from herdr's own agent registry.
 #
-# No real agent is launched. herdr's `pane report-agent` supplies the native
-# registration while a real foreground command supplies independent active
-# process evidence, so the control plane sees the same two-signal composition
-# without spending a provider-backed harness turn.
+# No real agent is launched. herdr's `pane report-agent` is the same registry
+# the adapter reads, so registering and not registering an agent on a plain
+# shell pane exercises exactly the classification the control plane gates on.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -31,16 +30,15 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
 
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-SESSION=$("$HERDR_LAB_HELPER" name control-smoke)
+SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  "$HERDR_LAB_HELPER" teardown "$SESSION" >/dev/null 2>&1 || true
+  herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
-"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -115,16 +113,14 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
 
-# --- a registered agent with active process evidence: verbs follow ----------
+# --- a registered agent: classification flips, and the verbs follow ---------
 
-"$HERDR_LAB_HELPER" run "$SESSION" pane run "$PANE_ID" 'sleep 120' >/dev/null 2>&1 \
-  || fail "could not start active foreground work on the task pane"
-"$HERDR_LAB_HELPER" run "$SESSION" pane report-agent "$PANE_ID" \
-  --source fm-control-smoke --agent fm-control-smoke-agent --state idle >/dev/null 2>&1 \
+herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+  --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the task pane"
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-[ "$STATE" = alive ] || fail "herdr should classify a registered agent with active process evidence as alive, got '$STATE'"
+[ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
 
 OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
 case "$OUT" in
@@ -133,7 +129,7 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
 
-"$HERDR_LAB_HELPER" run "$SESSION" pane get "$PANE_ID" >/dev/null 2>&1 \
+herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   || fail "the control plane must never remove the endpoint it was operating on"
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
@@ -149,3 +145,5 @@ case "$OUT" in
   *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
 esac
 pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+
+fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

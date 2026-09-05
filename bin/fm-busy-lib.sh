@@ -194,7 +194,6 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
-    antigravity*|agy*) adapter=antigravity-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
