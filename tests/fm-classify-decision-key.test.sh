@@ -381,7 +381,7 @@ test_closing_verb_filter_preserves_terminal_chronology() {
     for want in access default; do
       tag="[key=$want]"
       [ "$want" != default ] || tag=''
-      for terminal in done failed; do
+      for terminal in 'done' failed; do
         printf 'blocked %s: waiting\n' "$tag" > "$f"
         case "$terminal" in
           done) printf 'done: report saved\n' >> "$f" ;;
