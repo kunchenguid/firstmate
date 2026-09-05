@@ -332,6 +332,15 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
+fm_backlog_row_artifact_supported() {
+  local id=$1 flag=${2:-} value=${3:-}
+  case "$flag" in
+    --pr) return 0 ;;
+    --report) [ "$value" = "data/$id/report.md" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone), preserve supported
@@ -353,9 +362,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     case "$previous_arg" in
       --report)
         deliverable="${deliverable:+$deliverable; }report $arg"
-        case "$arg" in
-          data/"$id"/report.md) row_args=(--report "$arg") ;;
-        esac
+        if fm_backlog_row_artifact_supported "$id" --report "$arg"; then
+          row_args=(--report "$arg")
+        fi
         ;;
       --pr)
         deliverable="${deliverable:+$deliverable; }PR $arg"

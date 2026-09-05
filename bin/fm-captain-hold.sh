@@ -837,7 +837,10 @@ apply_pending_retained_artifact() {  # <task-id>
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
-    --pr|--report) fm_backlog_mutate "$DATA" update "$id" "${args[@]}" ;;
+    --pr|--report)
+      fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
+      fm_backlog_mutate "$DATA" update "$id" "${args[@]}"
+      ;;
   esac
 }
 

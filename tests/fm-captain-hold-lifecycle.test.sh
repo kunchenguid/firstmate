@@ -2127,6 +2127,82 @@ SH
   pass "an answer before cleanup replay preserves the retained report"
 }
 
+test_relocated_report_does_not_wedge_an_answer_before_replay() {
+  local home data id wt rc show bootstrap json
+  home=$(make_home relocated-answer-before-replay)
+  data="$home/données"
+  mv "$home/data" "$data"
+  id=sample-relocated-answer-before-replay
+  wt="$home/projects/$id"
+  mkdir -p "$home/data" "$data/$id" "$wt" "$home/projects/sample"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$home" && tasks-axi add "$id" "Investigate relocated answer replay" --kind scout \
+    --repo sample --start --file "$data/backlog.md" >/dev/null) \
+    || fail "could not create the relocated answer-before-replay fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Relocated interrupted cleanup\n\nThe captain call remains open.\n' > "$data/$id/report.md"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+    --reason "captain must choose after relocated interrupted cleanup" >/dev/null \
+    || fail "could not hold the relocated answer-before-replay fixture"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the relocated answer-before-replay fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "relocated cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted relocated cleanup lost its pending record"
+
+  printf 'Proceed despite the reporting limitation.\n' > "$home/answer.txt"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$home/answer.txt" \
+    >/dev/null || fail "the unsupported relocated report wedged the captain's answer"
+  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+    || fail "the answered relocated row disappeared"
+  assert_contains "$show" "state: done" "the relocated report kept the answered call open"
+  assert_contains "$show" "held: no" "the relocated report kept the answered call held"
+
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay relocated cleanup after the answer: $bootstrap"
+  assert_absent "$home/state/$id.meta" "session start left the relocated task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the relocated pending record behind"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
+    || fail "Bearings failed after the relocated answer-before-replay lifecycle"
+  printf '%s' "$json" | jq -e --arg id "$id" \
+    '.landed | any(.id == $id) | not' >/dev/null \
+    || fail "the unsupported relocated report was published as a landed delivery: $json"
+  pass "an unsupported relocated report does not wedge the captain's answer"
+}
+
 # A home whose data directory is relocated keeps one backlog; the predicate and
 # the retention must address it the way teardown does, not FM_HOME/data.
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
@@ -2293,6 +2369,7 @@ test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
+test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
