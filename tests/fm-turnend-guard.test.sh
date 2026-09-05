@@ -119,6 +119,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1914,6 +1916,98 @@ test_hook_daemon_lock_is_ignored_without_away_mode() {
   pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
 }
 
+# --- foreign session-lock owner: defer instead of looping on a banner this ---
+# --- session cannot fix (docs/turnend-guard.md "Guard predicates";          ---
+# --- 2026-09-04 review finding G1)                                         ---
+#
+# A live process whose comm name matches the harness regex (bin/fm-session-
+# lock-lib.sh's fm_harness_pid_alive) - not merely any live pid - is what makes
+# a lock owner "verified". This test file never wraps itself in a fake harness
+# ancestor, so the invoking test process itself never satisfies
+# fm_session_lock_owned_by_self regardless of state/.lock's contents; a
+# self-owned lock in production is exercised by the --claude cooperative-mode
+# tests above through the separate auto-arm ledger, not through state/.lock
+# directly. These tests only need the OTHER half: a verifiably live pid that is
+# not this session.
+FOREIGN_LOCK_FAKEBIN=$(fm_fakebin "$TMP_ROOT/foreign-lock-fakebin")
+ln -s /bin/bash "$FOREIGN_LOCK_FAKEBIN/claude"
+FOREIGN_LOCK_FAKE_CLAUDE="$FOREIGN_LOCK_FAKEBIN/claude"
+
+test_hook_defers_to_live_foreign_lock_owner_default_mode() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-lock-default")
+  : > "$dir/state/task1.meta"
+  # A plain `-c 'sleep 60'` lets bash tail-call-exec into sleep, replacing the
+  # process image (and its reported comm) before `ps` ever observes "claude".
+  # Backgrounding sleep and waiting on it keeps the "claude"-named bash process
+  # itself alive and resident as what `ps -o comm=` reports; the trap ensures a
+  # plain `kill` (SIGTERM) also reaps the backgrounded sleep instead of leaking
+  # it as an orphan. This must run inline (not via command substitution, which
+  # forks a subshell that kills its own background jobs on exit).
+  "$FOREIGN_LOCK_FAKE_CLAUDE" -c "trap 'kill %1 2>/dev/null; exit 0' TERM; sleep 60 & wait" &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must defer, not block, when a different live session holds the session lock"
+  assert_contains "$out" "session lock is held by a different live session" "diagnostic must name the foreign-lock condition"
+  assert_contains "$out" "$pid" "diagnostic must name the foreign owner's pid"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "hook must not print the block banner when deferring to a foreign lock owner"
+  pass "fm-turnend-guard: defers instead of blocking when a verified live foreign session holds the session lock (default/Codex mode)"
+}
+
+test_hook_defers_to_live_foreign_lock_owner_claude_mode() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-lock-claude")
+  : > "$dir/state/task1.meta"
+  "$FOREIGN_LOCK_FAKE_CLAUDE" -c "trap 'kill %1 2>/dev/null; exit 0' TERM; sleep 60 & wait" &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must defer, not block, when a different live session holds the session lock"
+  assert_contains "$out" "session lock is held by a different live session" "diagnostic must name the foreign-lock condition"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "--claude mode must not print the block banner when deferring to a foreign lock owner"
+  pass "fm-turnend-guard: defers instead of blocking on a foreign live lock owner in --claude mode, without engaging the auto-arm cooperation dance"
+}
+
+# Negative control: a CRASHED previous owner (dead pid) is not a "verified live"
+# foreign owner, so the guard must fall through to its ordinary predicate and
+# still block a genuinely unhealthy primary - the foreign-lock defer must never
+# become a way to silently swallow a real supervision failure.
+test_hook_still_blocks_on_dead_lock_owner() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-dead-session-lock-owner")
+  : > "$dir/state/task1.meta"
+  dead=$(nonexistent_pid)
+  printf '%s\n' "$dead" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a dead session-lock owner must not be treated as a foreign owner to defer to"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_not_contains "$out" "session lock is held by a different live session" "a dead lock owner must not trigger the foreign-owner diagnostic"
+  pass "fm-turnend-guard: a crashed (dead) session-lock owner is not a foreign owner and does not suppress ordinary blocking"
+}
+
+# The foreign-lock diagnostic must only replace what would otherwise be a
+# block. An idle home (no task in flight) already exits silently before that
+# check runs, so a foreign lock owner there must never make an idle home start
+# printing a diagnostic on every turn end.
+test_hook_silent_on_idle_home_with_foreign_lock_owner() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-lock-idle")
+  "$FOREIGN_LOCK_FAKE_CLAUDE" -c "trap 'kill %1 2>/dev/null; exit 0' TERM; sleep 60 & wait" &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "an idle home must stay silent regardless of who holds the session lock"
+  [ -z "$out" ] || fail "an idle home with a foreign lock owner must print nothing, got: $out"
+  pass "fm-turnend-guard: stays silent on an idle home even when a foreign live session holds the session lock"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1991,3 +2085,7 @@ test_hook_away_mode_blocks_on_dead_daemon
 test_hook_away_mode_blocks_on_pid_reused_daemon
 test_hook_away_mode_blocks_on_stale_beacon
 test_hook_daemon_lock_is_ignored_without_away_mode
+test_hook_defers_to_live_foreign_lock_owner_default_mode
+test_hook_defers_to_live_foreign_lock_owner_claude_mode
+test_hook_still_blocks_on_dead_lock_owner
+test_hook_silent_on_idle_home_with_foreign_lock_owner

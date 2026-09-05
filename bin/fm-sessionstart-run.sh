@@ -8,8 +8,11 @@
 # to take the helm, and an agent can defer that, including when a first-command
 # skill has its own read-only path. When the native adapter injects this
 # command's stdout into model context, running the digest here removes that
-# discretion - the helm is taken before the model's first turn, whatever the
-# first turn is.
+# discretion for every ordinary primary session: the helm is taken before the
+# model's first turn, whatever the first turn is. An explicit advisor launch
+# (FM_SESSION_ROLE=advisor) is the one deliberate exception - it never takes the
+# helm at all, so it can never win the session lock out from under a crashed or
+# concurrent primary sharing the same directory (see the advisor check below).
 #
 # Usage: fm-sessionstart-run.sh [--source <source>] [--pi-prerequisite]
 #   --source  The harness's own session-open source. When omitted, the source is
@@ -22,6 +25,12 @@
 #             exits 3 so provider preflight can distinguish it from an eligible
 #             native attempt that settled without output. Every ordinary hook
 #             invocation retains the always-zero compatibility contract below.
+#
+# FM_SESSION_ROLE=advisor (environment variable, set before launching the
+# session so it is ambient for every hook the harness spawns): an explicit
+# launch-time marker for a read-only advisor/review session. Checked first,
+# ahead of every other eligibility test - see fm_session_role_is_advisor in
+# bin/fm-primary-scope-lib.sh and docs/configuration.md "Advisor session role".
 #
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
@@ -81,6 +90,17 @@ stand_down() {
   fi
   exit 0
 }
+
+# An explicit advisor launch takes the read-only digest path unconditionally,
+# ahead of every other eligibility test below: it must never acquire the
+# session lock, run bootstrap, or drain the wake queue, regardless of whether
+# this root would otherwise be eligible to take the helm. Unlike stand_down's
+# other callers this prints one line, because an advisor session silently
+# doing nothing looks identical to a bug; this session is not eligible.
+if fm_session_role_is_advisor; then
+  printf 'FIRSTMATE ADVISOR SESSION (FM_SESSION_ROLE=advisor): read-only digest only - this session will not acquire the primary session lock, run bootstrap, or drain the wake queue.\n'
+  stand_down
+fi
 
 # The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home

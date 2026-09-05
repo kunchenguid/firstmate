@@ -105,6 +105,8 @@ done
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -229,6 +231,34 @@ block_stop() {
   } >&2
   exit 2
 }
+
+# --- foreign lock owner: defer instead of looping on a banner we cannot fix -
+# This session's own Stop-owned auto-arm and watcher-repair authority are keyed
+# to owning this home's session lock (bin/fm-claude-stop-autoarm.sh stands down
+# the same way). When a DIFFERENT, verifiably live session holds that lock -
+# for example an advisor/review session opened in the same primary checkout
+# after the real primary crashed, or any other session-identity mismatch - this
+# session has no authority to arm or repair supervision here. Blocking anyway
+# produced an endless "TURN WOULD END BLIND" loop this session could never
+# resolve (2026-09-04 review finding G1; subsumes backlog item
+# firstmate-turnend-guard-foreign-lock-loop). Checked here, after the
+# FM_SUP_NEEDED and watcher-healthy exits above already let an idle or
+# healthily-supervised home end its turn exactly as before, and right before
+# every remaining path below would otherwise block: print one diagnostic and
+# let the turn end instead. A missing, malformed, or dead-owner lock is NOT
+# this case - it falls through to the ordinary blocking predicate unchanged.
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  FOREIGN_LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$FOREIGN_LOCK_PID" in
+    ''|*[!0-9]*) : ;;
+    *)
+      if fm_harness_pid_alive "$FOREIGN_LOCK_PID"; then
+        printf 'firstmate turn-end guard: this home'"'"'s session lock is held by a different live session (pid %s); this session has no authority to arm or repair supervision here, so its turn is allowed to end instead of blocking. Investigate the other session if this is unexpected.\n' "$FOREIGN_LOCK_PID" >&2
+        exit 0
+      fi
+      ;;
+  esac
+fi
 
 if [ "$CLAUDE_MODE" -eq 0 ]; then
   block_stop

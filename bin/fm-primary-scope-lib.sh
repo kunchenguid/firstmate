@@ -3,6 +3,19 @@
 # in a genuine firstmate primary home.
 # This file is sourced by hook entrypoints and has no side effects on source.
 
+# Return 0 when this process was launched with the explicit advisor role marker
+# FM_SESSION_ROLE=advisor (docs/configuration.md "Advisor session role"). An
+# advisor session - e.g. a review or second-opinion session opened in the same
+# primary checkout as a real firstmate session - must never win the primary
+# session lock, drive bootstrap or the wake-queue drain, or be mistaken for the
+# home's supervising session. bin/fm-sessionstart-run.sh checks this ahead of
+# every other eligibility test, before any lock, bootstrap, or drain is
+# attempted (2026-09-04 review finding G1: a crashed primary's lock was left
+# free for an advisor session sharing its directory to acquire).
+fm_session_role_is_advisor() {
+  [ "${FM_SESSION_ROLE:-}" = advisor ]
+}
+
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
   local marker="$1/.fm-secondmate-home" id LC_ALL=C

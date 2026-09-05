@@ -50,6 +50,8 @@ The deferred startup stage deliberately runs in its own process group under its 
 
 ## Shared wrapper and safety
 
+`bin/fm-sessionstart-run.sh` checks one eligibility test ahead of both of the ones below: `FM_SESSION_ROLE=advisor` (`fm_session_role_is_advisor` in `bin/fm-primary-scope-lib.sh`) takes the read-only digest path unconditionally, before any lock, bootstrap, or drain; [`configuration.md`](configuration.md#advisor-session-role-fm_session_role) owns that contract.
+
 `bin/fm-sessionstart-run.sh` and `bin/fm-sessionstart-nudge.sh` share the same two eligibility owners.
 They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.

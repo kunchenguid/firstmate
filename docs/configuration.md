@@ -295,6 +295,18 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Advisor session role (FM_SESSION_ROLE)
+
+`FM_SESSION_ROLE=advisor` is an explicit launch-time marker for a read-only advisor or review session opened against a firstmate checkout - for example a second-opinion or code-review session started in the same primary directory as a real, separately supervised firstmate session.
+Set it as an ordinary environment variable before launching that session, so it is ambient for every hook process the harness spawns from it; the tracked `.claude/settings.json` and `.codex/hooks.json` hook commands need no changes to carry it, because both already `exec`/inherit the parent session's environment into the hook child.
+
+`bin/fm-sessionstart-run.sh` checks `fm_session_role_is_advisor` (`bin/fm-primary-scope-lib.sh`) first, ahead of the no-mistakes gate-agent and primary-scope eligibility tests it shares with `bin/fm-sessionstart-nudge.sh` ([`sessionstart-nudge.md`](sessionstart-nudge.md#shared-wrapper-and-safety)), and ahead of any lock acquisition, bootstrap, or wake-queue drain.
+An advisor session prints one line identifying itself and then takes the read-only digest path unconditionally: it never runs `bin/fm-lock.sh`, so it can never win the primary session lock away from a crashed or concurrent primary sharing the same directory, and never touches bootstrap or the durable wake queue.
+This is the fix for the 2026-09-04 review finding G1, where an advisor session launched in the primary checkout acquired the home's session lock after the real firstmate session had crashed (the startup hook took the helm for the advisor exactly as it would for any other session in that directory), leaving the authorized firstmate session unable to repair supervision once it restarted.
+`bin/fm-turnend-guard.sh`'s foreign-lock-owner check ([`turnend-guard.md`](turnend-guard.md#guard-predicates)) is the independent second half of that fix: it protects any session - not only a genuine advisor - that finds this home's lock verifiably held by a different live session.
+
+The marker affects only session-open eligibility; it grants no additional authority and changes no other command's behavior.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
