@@ -1825,6 +1825,9 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
+    # Session persistence can precede Pi's scheduled terminal render.
+    wait_for_text "$TMP_ROOT/followup-rendered.txt" "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case did not render the monitoring result"
     pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
