@@ -47,8 +47,8 @@ def dec(s):
 def clean(s):
     """Collapse tabs/newlines/CR in a header value to single spaces so a
     crafted Subject/From can never split the tab-separated poll row or inject
-    a fake uid line for the bash layer."""
-    return re.sub(r'[\t\r\n]+', ' ', s or '')
+    a fake uid line for the bash layer; strip surrounding whitespace too."""
+    return re.sub(r'[\t\r\n]+', ' ', s or '').strip()
 
 
 def connect_mailbox():

@@ -607,7 +607,27 @@ SH
 }
 
 test_missing_secret_fails_cleanly
+test_env_overrides_env_file() {
+  local env_home out
+  env_home="$TMP_ROOT/envfile-home"
+  mkdir -p "$env_home"
+  cat > "$env_home/.env" <<'EOF'
+FM_MAIL_USER=fromfile@example.com
+FM_MAIL_PASS=filepass
+FM_IMAP_HOST=imap.file.invalid
+FM_SMTP_HOST=smtp.file.invalid
+EOF
+  # No environment: .env supplies the configuration.
+  out=$(FM_HOME="$env_home" "$MAIL" status 2>&1)
+  assert_contains "$out" "mail account: fromfile@example.com" "status uses .env when environment is unset"
+  # A single environment value wins for that key; the other keys still come
+  # from .env, matching the Relay/FMX "env wins over .env" contract.
+  out=$(FM_MAIL_USER=fromenv@example.com FM_HOME="$env_home" "$MAIL" status 2>&1)
+  assert_contains "$out" "mail account: fromenv@example.com" "environment overrides .env for a direct invocation"
+  pass "fm-mail: environment values override the .env file"
+}
 test_status_without_network
+test_env_overrides_env_file
 test_help_plumbing
 test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status

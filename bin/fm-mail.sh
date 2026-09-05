@@ -61,11 +61,34 @@ if [ -z "$FM_HOME" ]; then
   FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 ENV_FILE="$FM_HOME/.env"
+# Load the home .env for keys not already set, so a direct invocation's
+# environment overrides .env exactly like the Relay/FMX contract (fmx_env_get:
+# "env wins over .env"). Tolerates a leading "export ", surrounding whitespace,
+# one layer of matching quotes, comments, and blank lines.
 if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ''|\#*) continue ;;
+      export\ *) line="${line#export }" ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    val="${line#*=}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    case "$val" in
+      \"*\") val=${val#\"}; val=${val%\"} ;;
+      \'*\') val=${val#\'}; val=${val%\'} ;;
+    esac
+    if [ -n "$key" ] && [ -z "${!key:-}" ]; then
+      export "$key=$val"
+    fi
+  done < "$ENV_FILE"
 fi
 
 for r in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
