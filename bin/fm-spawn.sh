@@ -23,9 +23,9 @@
 #   notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#   Ship/scout launches also supply fm-dod-lib.sh's worker role scope when a
-#   legacy brief lacks it, using the same private launch-brief overlay. This
-#   never rewrites a project's instruction files or a secondmate's charter.
+#   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
+#   using the same private launch-brief overlay. This never rewrites a project's
+#   instruction files or a secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -2044,26 +2044,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
-  if { [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; } ||
-     ! fm_brief_heading_present "$BRIEF" '# Worker role'; then
-    SOURCE_BRIEF=$BRIEF
-    BRIEF="$DATA/$ID/launch-brief.md"
-    BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-    {
-      cat "$SOURCE_BRIEF"
-      if ! fm_brief_heading_present "$SOURCE_BRIEF" '# Worker role'; then
-        printf '\n'
-        fm_brief_worker_role
-      fi
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
-      fi
-    } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
-    if ! mv "$BRIEF_TMP" "$BRIEF"; then
-      rm -f -- "$BRIEF_TMP"
-      echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
-      exit 1
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-brief.md"
+  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  {
+    cat "$SOURCE_BRIEF"
+    printf '\n'
+    fm_brief_worker_role
+    if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+      fm_brief_intent_overlay "$CAPTAIN_INTENT"
     fi
+  } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
+  if ! mv "$BRIEF_TMP" "$BRIEF"; then
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
+    exit 1
   fi
 fi
 

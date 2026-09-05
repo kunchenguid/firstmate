@@ -1023,13 +1023,16 @@ test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt brief_kind brief content
-  for brief_kind in legacy scaffold; do
+  for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
     id="role-launch-$brief_kind-$kind"
     rec=$(make_spawn_case "$id" codex)
     read_case_record "$rec"
-    if [ "$brief_kind" = legacy ]; then
+    if [ "$brief_kind" != scaffold ]; then
       fm_test_spawn_brief "$HOME_DIR" "$id"
+      if [ "$brief_kind" = heading ]; then
+        printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
+      fi
     else
       if [ "$kind" = scout ]; then
         FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --scout >/dev/null || fail "scout scaffold failed"
@@ -1057,9 +1060,10 @@ SH
     launch=$(cat "$LAUNCH_LOG")
     prompt="$CASE_DIR/prompt"
     FM_ROLE_PROMPT="$prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
+    # The final prompt delivered to the harness is the generated interface.
+    # An authored role heading must not suppress the current worker contract.
     assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
     assert_grep 'brief for' "$prompt" "$kind command lost the task"
-    [ "$(grep -c '^# Worker role$' "$prompt")" -eq 1 ] || fail "$brief_kind $kind duplicated the delivered worker contract"
     cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# evidence begin: %s %s worker\n%s\n' "$brief_kind" "$kind" "$out"
