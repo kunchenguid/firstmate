@@ -186,9 +186,13 @@ return_reconcile() {
 
   if [ -e "$STATE/.afk-native-wedge-watch" ]; then
     native_watch=$(head -1 "$STATE/.afk-native-wedge-watch" 2>/dev/null || true)
-    native_watch_fired=no
-    [ -n "${wedge:-}" ] && native_watch_fired=yes
-    append_evidence native-watch "stop it now (${native_watch:-no id recorded}); fired: $native_watch_fired" "$evidence"
+    native_watch_fired="fired: no"
+    # A recorded wedge only proves the daemon detected one, never that the
+    # harness-native watch (Claude Monitor, Codex's background task tool)
+    # actually delivered it - this script has no way to read that tool's own
+    # result. Never claim "fired: yes" from the marker alone.
+    [ -n "${wedge:-}" ] && native_watch_fired="wedge recorded; delivery unverified"
+    append_evidence native-watch "stop it now (${native_watch:-no id recorded}); $native_watch_fired" "$evidence"
   fi
 
   scan_open_blockers > "$blockers"

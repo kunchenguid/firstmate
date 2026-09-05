@@ -659,7 +659,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy() {
 } >> "$log"
 EOF
   chmod +x "$fakebin/grok"
-  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
   [ -z "$out" ] || fail "grok adapter printed output: $out"
   assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
@@ -682,7 +682,7 @@ test_grok_adapter_loop_guard_skips_resume() {
 printf 'called\n' >> "$log"
 EOF
   chmod +x "$fakebin/grok"
-  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" GROK_TURNEND_GUARD_ACTIVE=1 bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" GROK_TURNEND_GUARD_ACTIVE=1 bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "grok adapter must allow its own forced resume turn to end"
   [ -z "$out" ] || fail "grok adapter printed output while loop-guarded: $out"
   [ ! -e "$log" ] || fail "grok adapter spawned another resume while loop-guarded: $(cat "$log")"
@@ -697,7 +697,7 @@ test_grok_adapter_native_false_blocks_without_resume() {
   log="$TMP_ROOT/grok-native-false.log"
   printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
   chmod +x "$fakebin/grok"
-  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false}' | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 2 "$status" "native stopHookActive=false must return the shared blocking status"
   assert_contains "$out" 'TURN WOULD END BLIND' "native block must pass shared guard feedback to Grok"
   [ ! -e "$log" ] || fail "native path started grok --resume"
@@ -712,7 +712,7 @@ test_grok_adapter_native_true_allows_without_resume() {
   log="$TMP_ROOT/grok-native-true.log"
   printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
   chmod +x "$fakebin/grok"
-  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true}' | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "native stopHookActive=true must allow the bounded continuation to stop"
   [ -z "$out" ] || fail "native true produced output: $out"
   [ ! -e "$log" ] || fail "native true started grok --resume"
@@ -723,12 +723,12 @@ test_grok_adapter_snake_case_native_and_camel_precedence() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-native-spellings")
   : > "$dir/state/task1.meta"
-  out=$(printf '%s' '{"sessionId":"native","stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"native","stop_hook_active":false}' | FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 2 "$status" "typed snake_case false must select native blocking"
   assert_contains "$out" 'TURN WOULD END BLIND' "snake_case native block lost feedback"
-  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true,"stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true,"stop_hook_active":false}' | FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "camelCase true must win over snake_case false"
-  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false,"stop_hook_active":true}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false,"stop_hook_active":true}' | FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 2 "$status" "camelCase false must win over snake_case true"
   pass "fm-turnend-guard-grok: both spellings are typed and camelCase has deterministic precedence"
 }
@@ -752,12 +752,12 @@ test_grok_adapter_invalid_inputs_start_neither_path() {
     '{"sessionId":"x","stop_hook_active":false,"stop_hook_active":false}' \
     '{"sessionId":"x","sessionId":"y"}'
   do
-    out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+    out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
     expect_code 0 "$status" "invalid Grok payload must conservatively allow without choosing a path"
     [ -z "$out" ] || fail "invalid Grok payload produced output: $out"
   done
   [ ! -e "$log" ] || fail "invalid Grok payload started a resume process"
-  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$TMP_ROOT/missing-grok-root" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin:$PATH" FM_HOME="$TMP_ROOT/missing-grok-root" GROK_WORKSPACE_ROOT="$TMP_ROOT/missing-grok-root" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "missing shared-guard prerequisite must conservatively allow"
   [ -z "$out" ] || fail "missing prerequisite produced output: $out"
   [ ! -e "$log" ] || fail "missing prerequisite started a resume process"
@@ -776,13 +776,18 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
   done
   printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
   chmod +x "$fakebin/grok"
-  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "missing jq must conservatively allow"
   [ -z "$out" ] || fail "missing jq produced output: $out"
   [ ! -e "$log" ] || fail "missing jq started a resume process"
 
   dir=$(make_primary_dir "$TMP_ROOT/grok-native-no-work")
-  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  # FM_HOME must be pinned to this fixture, or an FM_HOME the ambient shell
+  # already exports (e.g. a real firstmate session's own home) leaks into the
+  # guard's path resolution ahead of GROK_WORKSPACE_ROOT-derived FM_ROOT
+  # (bin/fm-turnend-guard.sh's FM_HOME fallback), pulling in that other home's
+  # backlog and pools instead of this fixture's empty ones.
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "healthy no-supervision-needed native stop must allow"
   [ -z "$out" ] || fail "no-supervision-needed native stop produced output: $out"
   pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"

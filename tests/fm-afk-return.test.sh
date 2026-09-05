@@ -159,11 +159,11 @@ test_native_wedge_watch_reported_and_cleared() {
   printf 'fm away-mode inject WEDGED: 90s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
   : > "$dir/home/state/.fake-drain"
   out=$(run_return "$dir" begin) || fail "clean return with a fired native watch should not gate: $out"
-  assert_contains "$out" 'catch-up native-watch: stop it now (claude-monitor:bg-42); fired: yes' \
-    "return did not report the fired native wedge watch by its recorded id"
+  assert_contains "$out" 'catch-up native-watch: stop it now (claude-monitor:bg-42); wedge recorded; delivery unverified' \
+    "return did not report the recorded wedge as delivery-unverified rather than claiming it fired"
   [ ! -e "$dir/home/state/.afk-native-wedge-watch" ] || fail "successful return left the native watch record behind"
   [ ! -e "$dir/home/state/.subsuper-inject-wedged" ] || fail "successful return left the wedge marker behind"
-  pass "a fired native wedge watch is reported by its recorded id and cleared on successful return"
+  pass "a recorded native wedge is reported as delivery-unverified (never claimed fired) and cleared on successful return"
 }
 
 test_native_wedge_watch_reported_never_fired() {
