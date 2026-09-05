@@ -494,9 +494,11 @@ mail_poll() {
           mail_retry_remove "$uid" || true
         fi
       else
-        if [ "$status" = degraded ]; then
-          mail_retry_remove "$uid" || true
-        fi
+        # Keep a degraded uid's retry record on a failed wake: a rolled-back
+        # wake leaves the uid unseen so the next poll re-emits it degraded,
+        # while a fail-closed wake leaves the row queued for the next poll's
+        # heal to record the uid - either way the retry must survive so the
+        # real metadata can still recover.
         echo "fm-mail: wake failed for $uid; retried on next poll" >&2
         fm_lock_release "$STATE_DIR/.mail-seen.lock"
         return 1

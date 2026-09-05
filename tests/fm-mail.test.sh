@@ -672,6 +672,56 @@ SH
   pass "fm-mail: a failed retry write fails the poll instead of losing recovery"
 }
 
+test_poll_resurfaces_degraded_uid_whose_wake_never_recorded() {
+  local harness out rc=0
+  harness="$TMP_ROOT/retry-not-seen-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '2',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'90'])
+        if cmd == 'fetch':
+            return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # uid 90 is in the retry set (a prior degraded wake) but NOT in the cursor
+  # (that wake failed and was rolled back). It must be re-surfaced as degraded
+  # on this poll - a retry uid the cursor does not record must never be
+  # silently dropped as a pure retry.
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  printf '90\n' > "$HOME_DIR/state/.mail-retry"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed"
+  assert_contains "$out" $'90\t\t(no header)\tunfetchable header - see fm-mail read\tdegraded' "a retry uid the cursor never recorded is re-surfaced degraded"
+  pass "fm-mail: a retry uid whose degraded wake never recorded is re-surfaced, not dropped"
+}
+
 test_poll_fetch_raise_does_not_abort_the_scan() {
   local harness out rc=0
   harness="$TMP_ROOT/fetch-raise-harness.py"
@@ -1322,6 +1372,7 @@ test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
 test_poll_retry_surfaces_under_new_mail_flood
+test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
