@@ -3084,7 +3084,8 @@ test_sibling_bound_parked_run_is_never_aborted() {
 # Same shape, but the repo's current parked run is one nobody has bound. An
 # unbound task on a branch where a sibling binds a run cannot prove that run is
 # its own rather than the sibling's next round, so branch credit is withheld
-# and the run is left alone.
+# and the run is left alone. The sibling is recognised by its recorded
+# worktree's branch alone: no `axi status --run` answer is staged for it.
 test_unbound_task_never_aborts_a_parked_run_on_a_branch_with_a_bound_sibling() {
   local case_dir rc head
   case_dir=$(make_case parked-run-bound-sibling-branch)
@@ -3095,7 +3096,6 @@ test_unbound_task_never_aborts_a_parked_run_on_a_branch_with_a_bound_sibling() {
 
   local rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01NOBODYSRUN00000000000002)" \
-  FM_FAKE_AXI_STATUS_RUN="$(running_axi_status_toon fm/task-x1 "$head" 01SIBLINGRUN00000000000002)" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 

@@ -232,20 +232,32 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
 # predicates are the ONE ownership rule both consumers apply on top of the
 # branch-and-head rules above: fm-crew-state.sh before crediting a run as a
 # crew's working proof, fm-teardown.sh before aborting a parked run. Every
-# record read here is the home's own state/<id>.meta; the only per-record
-# lookup is one bounded `axi status --run <id>` for a BOUND sibling's run, so
-# the cost is bounded by how many crews bind runs, not by fleet size, and
-# nothing is ever read from another crew's worktree.
+# record read here is the home's own state/<id>.meta, and the only per-record
+# lookup is one local `git symbolic-ref` read of a BOUND sibling's recorded
+# worktree. No no-mistakes CLI call is ever issued for a sibling: crew-state
+# runs on bin/fm-watch.sh's per-poll path and bin/fm-fleet-snapshot.sh runs it
+# for every task, so a bounded CLI call per bound sibling would multiply to
+# tasks x bound siblings x timeout per poll and stall supervision. The known
+# limit this buys: a bound sibling whose worktree has since detached, moved to
+# another branch, or been torn down is no longer seen as holding this branch,
+# so it withholds nothing on the branch-level route (it still owns the run it
+# bound on the id route, whatever its worktree does).
+
+# The last value of key $2 in task record $1; empty when the record is absent
+# or never wrote the key.
+fm_nm_task_meta_value() {  # <meta-file> <key>
+  local line value=''
+  [ -f "$1" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$2="*) value=${line#"$2="} ;; esac
+  done < "$1" 2>/dev/null || true
+  printf '%s' "$value"
+}
 
 # The run binding of task record $1 (its last `nm_run=` key); empty when the
 # record is absent or unbound.
 fm_nm_task_bound_run() {  # <meta-file>
-  local line value=''
-  [ -f "$1" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in nm_run=*) value=${line#nm_run=} ;; esac
-  done < "$1" 2>/dev/null || true
-  printf '%s' "$value"
+  fm_nm_task_meta_value "$1" nm_run
 }
 
 # Prints the id of the task OTHER than $2 whose record in state dir $1 binds run
@@ -267,41 +279,36 @@ fm_nm_run_bound_by_other_task() {  # <state-dir> <task-id> <run-id>
   return 1
 }
 
-# Branch of run $3 as no-mistakes itself reports it (`axi status --run <id>`,
-# bounded in dir $1 with timeout $2); empty when the CLI does not answer or the
-# run is unknown. The run's OWN branch is the fact that matters for ownership:
-# a crew whose worktree has since detached, moved, or been torn down still
-# owns the run it bound.
-fm_nm_run_branch() {  # <dir> <timeout_secs> <run-id>
-  local out
-  [ -n "$3" ] || return 0
-  out=$(fm_nm_run "$1" "$2" axi status --run "$3")
-  [ -n "$out" ] || return 0
-  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")" = "$3" ] || return 0
-  fm_nm_strip_quotes "$(fm_nm_field "$out" branch)"
+# Branch the recorded worktree of task record $1 currently sits on, read
+# locally from its git ref; empty when the record names no worktree, the
+# worktree is gone, or it is at detached HEAD.
+fm_nm_task_worktree_branch() {  # <meta-file>
+  local wt
+  wt=$(fm_nm_task_meta_value "$1" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 }
 
 # Prints the id of a task OTHER than $2 whose record in state dir $1 binds a run
-# whose own branch, as no-mistakes reports it, is $3, and returns 0; returns 1
-# (printing nothing) when no bound sibling's run is on the branch. Each bound
-# sibling's run is resolved by id through fm_nm_run_branch in dir $4 with
-# timeout $5, except a run the caller has already resolved: optional $6/$7 name
-# a run id and its branch already in hand, so the answer the caller holds is
-# not fetched twice. A run the CLI cannot answer for is not on the branch.
-fm_nm_branch_bound_sibling() {  # <state-dir> <task-id> <branch> <dir> <timeout_secs> [known-run-id] [known-run-branch]
-  local state=$1 self=$2 branch=$3 dir=$4 timeout_secs=$5 known_id=${6:-} known_branch=${7:-} meta bound run_branch
+# AND whose recorded worktree currently sits on branch $3, and returns 0;
+# returns 1 (printing nothing) when no bound sibling holds the branch. Only
+# records carrying an `nm_run=` binding are examined, and when both this task's
+# `project=` root ($4, optional) and the sibling's are recorded, a sibling of
+# another project is skipped: a run of another repo can never be this branch's.
+# The sibling's branch is one local git ref read, never a CLI call (see the
+# section header for the cost argument and the detached-worktree limit).
+fm_nm_branch_bound_sibling() {  # <state-dir> <task-id> <branch> [project]
+  local state=$1 self=$2 branch=$3 project=${4:-} meta sibling_project
   [ -n "$branch" ] || return 1
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "${meta##*/}" != "$self.meta" ] || continue
-    bound=$(fm_nm_task_bound_run "$meta")
-    [ -n "$bound" ] || continue
-    if [ -n "$known_id" ] && [ "$bound" = "$known_id" ]; then
-      run_branch=$known_branch
-    else
-      run_branch=$(fm_nm_run_branch "$dir" "$timeout_secs" "$bound")
+    [ -n "$(fm_nm_task_bound_run "$meta")" ] || continue
+    if [ -n "$project" ]; then
+      sibling_project=$(fm_nm_task_meta_value "$meta" project)
+      [ -z "$sibling_project" ] || [ "$sibling_project" = "$project" ] || continue
     fi
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ]; then
+    if [ "$(fm_nm_task_worktree_branch "$meta")" = "$branch" ]; then
       printf '%s' "${meta##*/}" | sed 's/\.meta$//'
       return 0
     fi
@@ -329,19 +336,22 @@ fm_nm_run_owned_by_task() {  # <state-dir> <task-id> <own-binding> <run-id>
 # The ownership rule for branch-level credit, where no run id is available (the
 # `runs` ledger carries none). 0 if task $2 with own binding $3 may take credit
 # for whatever the ledger reports as branch $4's current run:
-#   - bound: yes - the ledger is only ever consulted for a run this crew's own
-#     id already named, so the id rule above has settled ownership first
-#   - unbound, some other task binds a run whose own branch is this branch: no -
-#     the branch's runs are spoken for, and branch credit would hand the
-#     sibling's run to a crew that never started one. This holds even when the
-#     sibling's binding is stale (its run already terminal): the ledger cannot
-#     tell the branch's current row from that run, so credit is withheld rather
-#     than guessed
-#   - unbound, no bound sibling's run on the branch: the legacy branch rule
-# $5..$8 are fm_nm_branch_bound_sibling's dir, timeout, and optional known run.
-fm_nm_branch_credit_owned_by_task() {  # <state-dir> <task-id> <own-binding> <branch> <dir> <timeout_secs> [known-run-id] [known-run-branch]
-  local state=$1 self=$2 own=$3 branch=$4
-  shift 4
+#   - bound: yes, but ONLY because a bound caller never reaches this rule with
+#     an unidentified row. fm-crew-state.sh admits a bound crew to the ledger
+#     solely to confirm its OWN run (fetched by id, on this branch) is the
+#     branch's current row, matching that run's head against the row before
+#     parsing the run; fm-teardown.sh has already passed the run through the id
+#     rule above. A bound crew is never handed a row that is not its own run
+#   - unbound, some other task binds a run and its worktree sits on this
+#     branch: no - the branch's runs are spoken for, and branch credit would
+#     hand the sibling's run to a crew that never started one. This holds even
+#     when the sibling's binding is stale (its run already terminal): the
+#     ledger cannot tell the branch's current row from that run, so credit is
+#     withheld rather than guessed, and the cure is the owning crew binding
+#   - unbound, no bound sibling holds the branch: the legacy branch rule
+# $5 is fm_nm_branch_bound_sibling's optional project root for scoping.
+fm_nm_branch_credit_owned_by_task() {  # <state-dir> <task-id> <own-binding> <branch> [project]
+  local state=$1 self=$2 own=$3 branch=$4 project=${5:-}
   [ -z "$own" ] || return 0
-  ! fm_nm_branch_bound_sibling "$state" "$self" "$branch" "$@" >/dev/null
+  ! fm_nm_branch_bound_sibling "$state" "$self" "$branch" "$project" >/dev/null
 }

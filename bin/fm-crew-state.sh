@@ -48,22 +48,29 @@
 #          only its own run id, and when the repo's current run is another id
 #          its own run is fetched by `axi status --run <id>` instead; an unbound
 #          crew is credited a run no OTHER task has bound. On the coarse `runs`
-#          ledger route (branch-level credit, no id column): a bound crew keeps
-#          the route, since its own id was asked for first; an unbound crew is
-#          withheld the credit entirely while another task binds a run whose
-#          OWN branch, as `axi status --run <id>` reports it, is this branch -
-#          the sibling's worktree is never consulted, so a sibling that has
-#          since detached, moved, or been torn down still owns the run it
-#          bound, and a same-branch answer another task has bound settles the
-#          question by itself. With no binding anywhere on the branch the
-#          branch behaviour is unchanged, so existing homes do not regress.
+#          ledger route (branch-level credit, no id column): a bound crew is
+#          never handed a row on the strength of its binding - it enters the
+#          ledger only to confirm that its OWN same-branch run, whose head this
+#          copy cannot resolve, is the branch's current row (the row must carry
+#          that run's head, and the pipeline-continuation anchor must hold),
+#          and its own run's TOON is parsed only once the ledger proves that;
+#          an unbound crew is withheld the credit entirely while another task
+#          binds a run AND that task's recorded worktree currently sits on this
+#          branch (one local git ref read per bound record, never a CLI call:
+#          this read runs per poll for every task), and a same-branch answer
+#          another task has bound settles the question by itself. With no
+#          binding anywhere on the branch the branch behaviour is unchanged, so
+#          existing homes do not regress.
 #          KNOWN LIMITS: two BOUND crews on one branch whose own runs the head
-#          rule rejects both fall to the ledger, which cannot tell them apart;
-#          and a sibling left bound to an OLD terminal run on this branch
-#          withholds the ledger's credit from an unbound crew that genuinely
-#          owns the branch's current run, because the ledger cannot tell that
-#          row from the stale run - the withhold is deliberate, and the cure
-#          is the owning crew binding its run.
+#          rule rejects both fall to pane and log, since neither can tie the
+#          ledger's row to its own run; a sibling left bound to an OLD terminal
+#          run on this branch withholds the ledger's credit from an unbound
+#          crew that genuinely owns the branch's current run, because the
+#          ledger cannot tell that row from the stale run - the withhold is
+#          deliberate, and the cure is the owning crew binding its run; and a
+#          bound sibling whose worktree has since detached, moved to another
+#          branch, or been torn down no longer withholds the ledger's credit on
+#          this branch (it still owns the run it bound on the id route).
 #        - the DELIVERY-MODE gate: a direct-PR or local-only crew never drives a
 #          pipeline, so it is never credited a run at all.
 #      bin/fm-watch.sh's pause_state_class independently declines this proof for
@@ -503,11 +510,12 @@ nm_run_head_matches_worktree() {
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
-# $RUN_OUT is real `axi status` TOON with step/gate detail (including a
-# same-branch run the strict head rule rejected but the ledger proved is this
-# worktree's pipeline-owned continuation); "coarse" means only a bare status
-# word came back from the runs-list fallback, so the run-step block below skips
-# the TOON field parsing entirely for this crew.
+# $RUN_OUT is real `axi status` TOON with step/gate detail (including this
+# crew's own same-branch run the strict head rule rejected but the ledger, by
+# that run's head, proved is this worktree's pipeline-owned continuation);
+# "coarse" means only a bare status word came back from the runs-list fallback
+# for a row $RUN_OUT does not name, so the run-step block below skips the TOON
+# field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
 
@@ -532,14 +540,13 @@ nm_run_is_ours() {
 }
 
 # 0 if THIS crew may take the coarse ledger's branch-level credit, which names
-# no run id: always for a bound crew (its own id was asked for first, below),
-# and for an unbound crew only while no other task binds a run whose own
-# branch, as no-mistakes reports it, is this branch. The run already in
-# $RUN_OUT is handed over so it is not fetched a second time. With no binding
-# anywhere on the branch the branch behaviour is unchanged.
+# no run id: for an unbound crew only while no other task binds a run from a
+# worktree currently on this branch (a local git ref read per bound record,
+# scoped to this task's project). A bound crew answers yes here but is admitted
+# to the ledger below only to confirm its OWN run is the branch's current row.
+# With no binding anywhere on the branch the branch behaviour is unchanged.
 nm_branch_credit_is_ours() {
-  fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$CREW_BRANCH" \
-    "$WT" "$NM_TIMEOUT" "$(strip_quotes "$(nm_field id)")" "$(strip_quotes "$(nm_field branch)")"
+  fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$CREW_BRANCH" "$(meta_value project)"
 }
 
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -589,17 +596,30 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
       # the branch's runs are not spoken for: a same-branch answer another
       # task has bound is already proof that they are, and is never re-derived
       # from anything weaker; otherwise nm_branch_credit_is_ours asks whether
-      # any bound sibling's run is on this branch.
-      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        # A branch-matching answer the strict rule rejected is this branch's
-        # own current run once the ledger proves the pipeline-owned
-        # continuation, so its axi TOON is the authoritative run detail
-        # (RUN_SOURCE stays full); only a foreign-branch answer, or a
-        # same-branch answer that is not this crew's by id, leaves coarse
-        # status-word detail.
-        if [ "$run_branch" != "$CREW_BRANCH" ] || ! nm_run_is_ours; then
+      # any bound sibling's worktree holds this branch.
+      run_head=$(strip_quotes "$(nm_field head)")
+      if [ "$run_branch" = "$CREW_BRANCH" ] && [ -n "$run_head" ] \
+        && [ -z "$(fm_nm_resolve_commit "$WT" "$run_head")" ]; then
+        # This crew's own same-branch run (by id when bound, unclaimed when
+        # not) with a head object this copy never fetched. The ledger may
+        # confirm it is the branch's current row only by that run's own head:
+        # the newest row must carry it and the pipeline-continuation anchor
+        # must hold. Then, and only then, $RUN_OUT really is the run the row
+        # names, so its TOON stays the authoritative detail (RUN_SOURCE full).
+        # A bound crew is admitted to the ledger through this arm alone: a
+        # newest row that is not its own run - a sibling's current run while
+        # this crew's own run is a stale terminal one, say - proves nothing
+        # about this crew and is never credited to it.
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$run_head")
+        [ -n "$COARSE_STATUS" ] && HAVE_RUN=1
+      elif [ -z "$NM_BOUND_RUN" ]; then
+        # A foreign-branch answer, or a same-branch unclaimed run whose head
+        # resolves here but failed the head rule: the ledger's newest row for
+        # this branch is credited as plain branch-level status. $RUN_OUT is
+        # not that row, so only the coarse status word is reported.
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
           RUN_SOURCE=coarse
         fi
       fi

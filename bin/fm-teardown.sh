@@ -1636,11 +1636,12 @@ task_bound_run() {
 # 0 if run $1 is this task's to abort. Concurrent crews' worktrees can sit on
 # ONE branch at ONE head, so branch-and-head identity alone would attribute a
 # sibling's parked run to this task and destroy its in-flight validation. A run
-# another task has bound, or any run on a branch where another task's bound run
-# sits (by the run's own branch, never the sibling's worktree) while this task
-# binds none, is left completely alone and the owner is named.
+# another task has bound, or any run on a branch that another bound task's
+# recorded worktree currently holds (one local git ref read per bound record,
+# never a CLI call) while this task binds none, is left completely alone and
+# the owner is named.
 task_owns_run() {  # <worktree> <run-id> <branch>
-  local wt=$1 run_id=$2 branch=$3 own owner
+  local wt=$1 run_id=$2 branch=$3 own owner project
   own=$(task_bound_run)
   if ! fm_nm_run_owned_by_task "$STATE" "$ID" "$own" "$run_id"; then
     if owner=$(fm_nm_run_bound_by_other_task "$STATE" "$ID" "$run_id"); then
@@ -1650,9 +1651,9 @@ task_owns_run() {  # <worktree> <run-id> <branch>
     fi
     return 1
   fi
-  if ! fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$own" "$branch" \
-      "$wt" "$NM_TEARDOWN_TIMEOUT" "$run_id" "$branch"; then
-    owner=$(fm_nm_branch_bound_sibling "$STATE" "$ID" "$branch" "$wt" "$NM_TEARDOWN_TIMEOUT" "$run_id" "$branch" || true)
+  project=$(fm_nm_task_meta_value "$META" project)
+  if ! fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$own" "$branch" "$project"; then
+    owner=$(fm_nm_branch_bound_sibling "$STATE" "$ID" "$branch" "$project" || true)
     echo "teardown: no-mistakes run $run_id on $branch may belong to task $owner, which binds a run there while $ID binds none; leaving it alone" >&2
     return 1
   fi

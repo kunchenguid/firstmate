@@ -67,6 +67,7 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_NM_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_NM_CALL_LOG"
 case "${1:-}" in
   axi)
     shift
@@ -203,8 +204,9 @@ reset_fakes() {
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_CALL_LOG=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_NM_CALL_LOG
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -2233,14 +2235,15 @@ EOF
   pass "the coarse ledger route is withheld from an unbound co-branch crew while a sibling is bound"
 }
 
-# Ownership follows the RUN's own branch, never the sibling's worktree: crew B
-# bound its run on X and then detached its worktree (mid-rebase, a checkout by
-# sha, a move to another branch) while that run is still X's newest ledger row.
-# Unbound crew A on X must still not be credited it - neither when `axi status`
-# answers B's run directly (bound elsewhere, on this branch: settled on the
-# spot) nor when it answers an unbound run on another branch and A falls to
-# the ledger (B's run is resolved by id and found to be on X).
-test_detached_bound_sibling_still_owns_the_run_it_bound() {
+# A bound sibling holds the branch-level route only through its recorded
+# worktree: crew B bound its run on X and then detached its worktree
+# (mid-rebase, a checkout by sha). When `axi status` answers B's run directly,
+# unbound crew A on X is still refused it by id. When it answers an unbound run
+# on another branch and A falls to the ledger, B's branch is one local git ref
+# read of its worktree - detached, so B no longer withholds and A takes the
+# branch credit. That is the documented limit of never issuing a CLI call per
+# sibling on the per-poll path: the fake CLI must log no `--run` lookup.
+test_detached_bound_sibling_owns_its_run_by_id_but_no_longer_holds_the_branch() {
   reset_fakes
   local d out
   d=$(make_shared_branch_case detached-sibling fm/shared-detached)
@@ -2265,11 +2268,108 @@ test_detached_bound_sibling_still_owns_the_run_it_bound() {
 
   FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01NOBODYSRUN00000000000013)"
   FM_FAKE_AXI_STATUS_RUN="$(run_running_id fm/shared-detached 01BOUNDRUN0000000000000008)"
+  FM_FAKE_NM_CALL_LOG="$d/nm-calls.log"
   out=$(run_crew_state "$d" other)
-  assert_not_contains "$out" "state: working" \
-    "the ledger's branch credit must be withheld while a detached sibling's bound run is on this branch"
-  assert_contains "$out" "state: paused" "the unbound crew falls to its own declared wait"
-  pass "a bound sibling whose worktree detached still owns the run it bound, on both routes"
+  assert_contains "$out" "validating (background run)" \
+    "a detached sibling's worktree no longer holds the branch, so the ledger's branch credit is taken (documented limit)"
+  if [ -f "$FM_FAKE_NM_CALL_LOG" ] && grep -q -- '--run' "$FM_FAKE_NM_CALL_LOG"; then
+    fail "the sibling's run was resolved through a no-mistakes CLI call instead of its worktree's git ref"
+  fi
+  pass "a detached bound sibling keeps its run by id but withholds nothing through its worktree, with no CLI call per sibling"
+}
+
+# A terminal run TOON named by id with an explicit head, as `axi status --run
+# <id>` answers for a run that has already ended.
+run_terminal_id() {  # <branch> <run-id> <head> <outcome>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: completed
+  head: "$3"
+  pr: ""
+  findings: none
+outcome: $4
+EOF
+}
+
+arm_busy_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
+# A bound crew is never credited a ledger row that is not its own run. Crews A
+# and B are both bound on X, both worktrees at h2. A's own run failed at the
+# earlier head h1 and A kept working; B's run is running at h2 and is the
+# repo's current run, so `axi status` answers B and A refetches its own run by
+# id. The head rule rejects A's run (h1 is a strict ancestor of h2), and the
+# ledger's newest row for X is B's running row at h2: before the fix that row
+# credited A while A's own failed TOON was parsed as authoritative, reporting a
+# busy crew as failed on evidence that belongs to B.
+test_bound_crew_with_a_stale_own_run_is_not_credited_a_siblings_current_row() {
+  reset_fakes
+  local d h1 h2 out
+  d=$(make_shared_branch_case stale-own-run fm/shared-stale)
+  h1=$(git -C "$d/wt-owner" rev-parse HEAD)
+  git -C "$d/wt-owner" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'A kept working'
+  h2=$(git -C "$d/wt-owner" rev-parse HEAD)
+  [ "$(git -C "$d/wt-other" rev-parse HEAD)" = "$h2" ] || fail "fixture broke - the shared branch did not advance both worktrees"
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01STALEOWNRUN0000000000001"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01SIBLINGRUN00000000000021"
+  FM_FAKE_BUSY=1
+  arm_busy_record "$d/state" owner
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-stale 01SIBLINGRUN00000000000021)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_terminal_id fm/shared-stale 01STALEOWNRUN0000000000001 "$h1" failed)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/shared-stale $(git -C "$d/wt-owner" rev-parse --short=7 "$h2")  2026-09-04 11:00
+  failed     fm/shared-stale $(git -C "$d/wt-owner" rev-parse --short=7 "$h1")  2026-09-04 10:00
+EOF
+)"
+  out=$(run_crew_state "$d" owner)
+  assert_not_contains "$out" "state: failed" \
+    "a bound crew's stale own run must not be reported as current on a sibling's ledger row"
+  assert_not_contains "$out" "run failed" "the stale own run's TOON must not be parsed as authoritative"
+  assert_not_contains "$out" "state: done" "the bound crew must not read done either"
+  assert_contains "$out" "source: pane" "with no run of its own to credit, the bound crew falls to its pane"
+  assert_contains "$out" "state: working" "the busy pane reports the crew working"
+
+  out=$(run_crew_state "$d" other)
+  assert_contains "$out" "state: working" "the sibling still reads its own current run"
+  assert_contains "$out" "source: run-step" "the sibling reads it from the run step"
+  pass "a bound crew with a stale own run is never credited its sibling's current ledger row"
+}
+
+# The other way a bound crew reached the ledger on its binding alone: its own
+# run, fetched by id, is on ANOTHER branch (started elsewhere before the
+# worktree moved onto the shared branch). The ledger's same-head row on this
+# branch is a sibling's and must not be credited to it.
+test_bound_crew_whose_own_run_is_on_another_branch_takes_no_ledger_credit() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case own-run-elsewhere fm/shared-elsewhere)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01ELSEWHERERUN000000000001"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes" "nm_run=01SIBLINGRUN00000000000022"
+  printf 'paused: waiting on the captain\n' > "$d/state/owner.status"
+  arm_idle_record "$d/state" owner
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-elsewhere 01SIBLINGRUN00000000000022)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running_id fm/earlier-branch 01ELSEWHERERUN000000000001)"
+  FM_FAKE_RUNS_LIST="  running    fm/shared-elsewhere $(git -C "$d/wt-owner" rev-parse --short=7 HEAD)  2026-09-04 11:00"
+  out=$(run_crew_state "$d" owner)
+  assert_not_contains "$out" "validating (background run)" \
+    "a bound crew whose own run is on another branch must not take this branch's ledger row"
+  assert_not_contains "$out" "state: working" "the sibling's run must not read as this crew's work"
+  assert_contains "$out" "state: paused" "the bound crew falls to its own declared wait"
+  pass "a bound crew whose own run is on another branch is never credited the ledger's row here"
 }
 
 # With no binding anywhere on the branch, the ledger route keeps crediting
@@ -2470,7 +2570,9 @@ test_no_bindings_on_the_branch_preserves_legacy_behaviour
 test_bound_crew_ignores_a_run_that_is_not_its_own
 test_bound_crew_finds_its_own_run_by_id_when_axi_answers_another_branch
 test_unbound_cobranch_crew_is_withheld_coarse_credit_while_a_sibling_is_bound
-test_detached_bound_sibling_still_owns_the_run_it_bound
+test_detached_bound_sibling_owns_its_run_by_id_but_no_longer_holds_the_branch
+test_bound_crew_with_a_stale_own_run_is_not_credited_a_siblings_current_row
+test_bound_crew_whose_own_run_is_on_another_branch_takes_no_ledger_credit
 test_unbound_cobranch_crews_keep_coarse_credit_with_no_binding_on_the_branch
 test_unbound_crew_never_takes_coarse_credit_for_a_same_branch_run_bound_elsewhere
 test_captured_record_copy_does_not_make_the_live_record_a_rival_claimant
