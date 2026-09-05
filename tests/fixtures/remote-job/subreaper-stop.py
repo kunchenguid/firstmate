@@ -108,14 +108,21 @@ done
     wait_for(lambda: len(processes()) == 2)
     call(start, queue)
     wait_for(lambda: len(processes()) == 4)
+    queue_snapshot = processes()
+    leader = next(pid for pid, (_, _, serving) in queue_snapshot.items() if not serving)
+    leaderless_child = next(pid for pid, (_, group, serving) in queue_snapshot.items()
+                            if serving and group == leader)
+    os.kill(leader, signal.SIGKILL)
+    wait_for(lambda: not Path(f"/proc/{leader}").exists() and leaderless_child in processes())
+    assert processes()[leaderless_child][1] == leader
     call(start, other)
-    wait_for(lambda: len(processes()) == 6)
+    wait_for(lambda: len(processes()) == 5)
     snapshot = processes()
     assert all(parent == os.getpid() and group == pid
                for pid, (parent, group, serving) in snapshot.items() if not serving)
     other_child = int((other / "worker.pid").read_text())
     other_group = snapshot[other_child][1]
-    call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', queue)
+    call(f'fm_remote_job_stop_worker_tree {leaderless_child}', queue)
     wait_for(lambda: len(processes()) == 2)
     for _ in range(30):
         assert all(group == other_group for _, group, _ in processes().values()), "worker respawned after stop"
@@ -129,7 +136,7 @@ done
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
         shutil.copy2(repo / "bin" / name, root / "bin" / name)
-    call(start, queue)
+    call(start, queue, "EST5")
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     original = set(processes())
     ensure = 'fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ]'
@@ -151,9 +158,9 @@ done
         pid = (lock / "pid").read_text().strip()
         kernel_identity = (lock / "start").read_text()
         legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
-                                         env=dict(os.environ, TZ="UTC0", LC_ALL="C"), text=True)
+                                         env=dict(os.environ, TZ="EST5", LC_ALL="C"), text=True)
         (lock / "start").write_text(legacy)
-        call(ensure, queue, "EST5")
+        call(ensure, queue, "JST-9")
         assert launch_log.read_text() == launches, "legacy identity launched another worker"
         (lock / "start").write_text(kernel_identity)
     print("ok - repeated ensure across timezones and delayed readiness preserves owners without new workers")

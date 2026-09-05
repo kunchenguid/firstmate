@@ -929,7 +929,7 @@ fm_remote_job_process_start() {
 }
 
 fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
-  local pid=$1 recorded=$2 actual=$3 ps_bin value
+  local pid=$1 recorded=$2 actual=$3 ps_bin value entry process_timezone=''
   [ "$recorded" = "$actual" ] && return 0
   # Accept existing lstart records while old workers/jobs drain during an
   # upgrade. New kernel identities never take this compatibility path.
@@ -939,6 +939,16 @@ fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
   [ "$recorded" = "$value" ] && return 0
   value=$(LC_ALL=C TZ=UTC "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ "$recorded" = "$value" ] && return 0
+  if [ -r "/proc/$pid/environ" ]; then
+    while IFS= read -r -d '' entry; do
+      case "$entry" in TZ=*) process_timezone=${entry#*=}; break ;; esac
+    done < "/proc/$pid/environ" 2>/dev/null
+    case "$process_timezone" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    if [ -n "$process_timezone" ]; then
+      value=$(LC_ALL=C TZ="$process_timezone" "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+      [ "$recorded" = "$value" ] && return 0
+    fi
+  fi
   value=$(env -u TZ "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ "$recorded" = "$value" ]
 }
@@ -974,9 +984,9 @@ fm_remote_job_root_is_live() { # <remote-root>
 
 # The isolated process group that owns <pid>'s whole worker tree, echoed only
 # when signalling it is provably safe: the group is not this shell's own, not a
-# reserved id, and its leader is itself a remote job worker. A worker started
-# without group isolation (an older build, or launchd's own session) therefore
-# never yields a group, and callers fall back to signalling the single process.
+# reserved id, and either its leader or a leaderless member is a scoped remote
+# job worker. A worker started without group isolation (an older build, or
+# launchd's own session) never yields a group.
 fm_remote_job_worker_process_group() { # <pid>
   local pid=$1 pgid own_pgid leader_command
   pgid=$(fm_remote_job_process_pgid "$pid") || return 1
@@ -984,7 +994,11 @@ fm_remote_job_worker_process_group() { # <pid>
   own_pgid=$(fm_remote_job_process_pgid "$$") || return 1
   [ "$pgid" != "$own_pgid" ] || return 1
   leader_command=$(fm_remote_job_process_command "$pgid" 2>/dev/null || true)
-  case "$leader_command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
+  case "$leader_command" in
+    *fm-remote-job-worker.sh*) ;;
+    '') fm_remote_job_process_scope "$pid" || return 1 ;;
+    *) return 1 ;;
+  esac
   printf '%s\n' "$pgid"
 }
 
@@ -1027,13 +1041,15 @@ fm_remote_job_group_running() { # <pgid>; zombies cannot execute or respawn
 # still alive afterwards.
 fm_remote_job_stop_worker_tree() { # <pid>
   local pid=$1 pgid i=0 candidate root='' state='' group start index alive signal
-  local groups=() starts=()
+  local groups=() starts=() witnesses=()
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
   if [ -n "$pgid" ]; then
+    start=$(fm_remote_job_process_start "$pid") || return 1
     groups+=("$pgid")
-    starts+=("$(fm_remote_job_process_start "$pgid")")
+    starts+=("$start")
+    witnesses+=("$pid")
   fi
   if fm_remote_job_process_scope "$pid"; then
     root=$FM_REMOTE_JOB_PROCESS_ROOT state=$FM_REMOTE_JOB_PROCESS_STATE
@@ -1047,8 +1063,8 @@ fm_remote_job_stop_worker_tree() { # <pid>
       group=$(fm_remote_job_worker_process_group "$candidate" 2>/dev/null || true)
       [ -n "$group" ] || continue
       case " ${groups[*]:-} " in *" $group "*) continue ;; esac
-      start=$(fm_remote_job_process_start "$group") || return 1
-      groups+=("$group") starts+=("$start")
+      start=$(fm_remote_job_process_start "$candidate") || return 1
+      groups+=("$group") starts+=("$start") witnesses+=("$candidate")
     done
   fi
   if [ "${#groups[@]}" -gt 0 ]; then
@@ -1057,7 +1073,7 @@ fm_remote_job_stop_worker_tree() { # <pid>
     for signal in TERM KILL; do
       index=0
       for group in "${groups[@]}"; do
-        start=$(fm_remote_job_process_start "$group" 2>/dev/null || true)
+        start=$(fm_remote_job_process_start "${witnesses[$index]}" 2>/dev/null || true)
         if [ -n "$start" ]; then
           [ "$start" = "${starts[$index]}" ] || return 1
         fi
