@@ -350,7 +350,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
 test_terminal_supersession_reaches_cached_drains() {
   local dir state status cursor out kind terminal expected closing ident size span pass_number
   for kind in scout ship secondmate; do
-    for terminal in done failed; do
+    for terminal in 'done' failed; do
       dir=$(make_case "terminal-$kind-$terminal")
       state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor"; out="$dir/drain.out"
       printf 'kind=%s\n' "$kind" > "$state/task.meta"

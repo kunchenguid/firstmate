@@ -927,7 +927,7 @@ test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
   mkdir -p "$home/projects/task"
   fakebin=$(make_fakebin "$home")
   for kind in ship scout secondmate; do
-    for terminal in done failed; do
+    for terminal in 'done' failed; do
       id="$kind-$terminal"
       fm_write_meta "$home/state/$id.meta" \
         "window=firstmate:fm-$id" "worktree=$home/projects/task" \
@@ -944,7 +944,7 @@ test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
       resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
     esac
     for kind in ship scout secondmate; do
-      for terminal in done failed; do
+      for terminal in 'done' failed; do
         id="$kind-$terminal"
         case "$phase" in
           reopened) printf 'blocked [key=access]: reopened access\nneeds-decision [key=new-choice]: a new choice\nnote: more cleanup\n' >> "$home/state/$id.status" ;;
