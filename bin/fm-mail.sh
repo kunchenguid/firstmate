@@ -23,10 +23,10 @@
 #                        (UIDVALIDITY) so a recreated mailbox cannot reuse a
 #                        numeric uid and suppress a new wake, and overlapping
 #                        polls are serialized so the same mail is never
-#                        double-surfaced. poll is OPERATOR-INVOKED: it has no
-#                        scheduler or daemon. A captain or an `at`/cron job
-#                        decides when to run it; this home offers no email
-#                        service wiring of its own.
+#                        double-surfaced. poll itself has no scheduler: run it
+#                        manually, from `at`/cron, or via the standing check
+#                        armed by bin/fm-mail-check.sh (docs/configuration.md
+#                        "Mail plane").
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
