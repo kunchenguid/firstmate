@@ -30,18 +30,26 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      KNOWN LIMIT - CONCURRENT crews on ONE branch: attribution here is by
-#      branch plus code identity, and no-mistakes exposes nothing that names the
-#      worktree a run was invoked from. `axi status` is repo-scoped and answers
-#      the identical run from any worktree of that repo (verified 2026-09-04
-#      against two live worktrees of one branch on v1.57.0), the `runs` listing
-#      carries no such column, and the private `runs.worktree_dir` record holds
-#      the pipeline's OWN internal checkout under ~/.no-mistakes/worktrees/,
-#      never the caller's. So when a one-PR-per-repo posture puts several crews'
+#      CONCURRENT crews on ONE branch: branch plus code identity is not enough
+#      on its own, because no-mistakes exposes nothing that names the worktree a
+#      run was invoked from. `axi status` is repo-scoped and answers the
+#      identical run from any worktree of that repo (verified 2026-09-04 against
+#      two live worktrees of one branch on v1.57.0), the `runs` listing carries
+#      no such column, and the private `runs.worktree_dir` record holds the
+#      pipeline's OWN internal checkout under ~/.no-mistakes/worktrees/, never
+#      the caller's. So when a one-PR-per-repo posture puts several crews'
 #      worktrees on one long-lived feature branch, every one of them satisfies
-#      the head rule for whichever run is current and all of them report that
-#      run's state. bin/fm-watch.sh's pause_state_class does not trust this proof
-#      for a crew whose agent the backend confidently reports dead.
+#      the head rule for whichever run is current. Two guards settle ownership
+#      before either attribution route runs, both below at nm_run_is_ours:
+#        - the RUN BINDING: `nm_run=<run-id>` in this task's own record, written
+#          by bin/fm-run-bind.sh when the crew's `axi run` reports its id. A
+#          bound crew is credited only its own run id; an unbound crew is
+#          credited a run no OTHER task has bound. With no binding anywhere the
+#          branch behaviour is unchanged, so existing homes do not regress.
+#        - the DELIVERY-MODE gate: a direct-PR or local-only crew never drives a
+#          pipeline, so it is never credited a run at all.
+#      bin/fm-watch.sh's pause_state_class independently declines this proof for
+#      a crew whose agent the backend confidently reports dead.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
@@ -142,6 +150,7 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
+MODE=$(meta_value mode)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
@@ -483,10 +492,75 @@ HAVE_RUN=0
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+
+# --- run ownership: the binding, and the delivery-mode gate ------------------
+#
+# Both guards exist because branch attribution alone cannot tell concurrent
+# crews on ONE branch apart (see the KNOWN LIMIT in the header). They are checked
+# before either attribution route, so a run this crew provably does not own is
+# never credited to it by any path.
+#
+# The binding is `nm_run=<run-id>` in state/<id>.meta, written by
+# bin/fm-run-bind.sh when the crew's own `no-mistakes axi run` reports its id.
+# The run id is the only unambiguous identifier no-mistakes exposes, and only the
+# crew that started a run knows which id is its own.
+NM_BOUND_RUN=$(meta_value nm_run)
+
+# 0 if some OTHER task in this home has bound run id $1. One grep over the home's
+# task records - no git, no branch resolution, and nothing read from another
+# crew's worktree, so the cost does not scale with how healthy the fleet is.
+nm_run_claimed_elsewhere() {  # <run-id>
+  local run_id=$1 meta other
+  [ -n "$run_id" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$meta" != "$META" ] || continue
+    other=$(grep '^nm_run=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$other" = "$run_id" ] && return 0
+  done
+  return 1
+}
+
+# 0 if the run in $RUN_OUT may be credited to THIS crew.
+#   - this crew is bound and the ids match: yes, whatever the branch says
+#   - this crew is bound and they differ: no - the run the repo is currently
+#     reporting is someone else's, and the coarse ledger cannot overrule that
+#     because `no-mistakes runs` carries no run id column to check against
+#   - this crew is unbound and another task binds this run: no - it is spoken for
+#   - this crew is unbound and nobody binds this run: unchanged branch behaviour,
+#     so a home whose crews predate bindings regresses in no way
+#
+# This is narrower than "withhold from every unbound task once ANY task on the
+# branch is bound": a task left bound to an old terminal run does not strip
+# attribution from a neighbour that genuinely owns the current one. It withholds
+# on the evidence that a specific run is claimed, rather than on the branch
+# carrying any binding at all.
+nm_run_is_ours() {
+  local run_id
+  run_id=$(strip_quotes "$(nm_field id)")
+  if [ -n "$NM_BOUND_RUN" ]; then
+    [ -n "$run_id" ] && [ "$run_id" = "$NM_BOUND_RUN" ]
+    return
+  fi
+  ! nm_run_claimed_elsewhere "$run_id"
+}
+
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+# Neither does a crew shipping direct-PR or local-only: those modes push and open
+# a PR (or stop at a clean branch) with no pipeline of their own, so a run on
+# their branch is always another crew's. An absent mode= (a record predating the
+# field) keeps the lookup, so nothing regresses for existing homes.
+case "$MODE" in
+  direct-PR|local-only) RUN_ELIGIBLE=0 ;;
+  *) RUN_ELIGIBLE=1 ;;
+esac
+if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
+  && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
+  if [ -n "$RUN_OUT" ] && ! nm_run_is_ours; then
+    RUN_OUT=""
+  fi
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the

@@ -2043,6 +2043,184 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
+# ---------------------------------------------------------------------------
+# Run ownership on ONE branch: the binding and the delivery-mode gate.
+#
+# Branch attribution alone cannot separate concurrent crews whose worktrees sit
+# on one long-lived feature branch, and no-mistakes exposes nothing that names
+# the worktree a run was invoked from (bin/fm-crew-state.sh's header records the
+# three surfaces checked). These cases pin the two guards that settle ownership.
+
+# Two ship crews on ONE branch, sharing an object store and the branch ref, so
+# both resolve the same HEAD and both satisfy the head rule for a single run.
+make_shared_branch_case() {  # <name> <branch> -> echoes case dir
+  local d branch=$2
+  d=$(new_case "$1")
+  mkdir -p "$d/repo"
+  git -C "$d/repo" init -q
+  git -C "$d/repo" commit -q --allow-empty -m init
+  git -C "$d/repo" checkout -q -b "$branch"
+  git -C "$d/repo" worktree add -q --force "$d/wt-owner" "$branch" 2>/dev/null
+  git -C "$d/repo" worktree add -q --force "$d/wt-other" "$branch" 2>/dev/null
+  printf '%s\n' "$d"
+}
+
+# The shared HEAD both worktrees resolve, exported for the run fixtures. Set by
+# the caller rather than inside make_shared_branch_case: that helper is read
+# through a command substitution, so an export inside it never reaches the case.
+arm_shared_head() {  # <case-dir>
+  FM_FAKE_RUN_HEAD=$(git -C "$1/wt-owner" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+}
+
+# The active run object both crews' `axi status` answers, since the real CLI is
+# repo-scoped and returns the identical run from either worktree.
+run_running_id() {  # <branch> <run-id>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+EOF
+}
+
+test_bound_owner_keeps_the_run_its_neighbour_loses_it() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case bound-owner fm/shared-bound)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000001"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'paused: waiting on the captain\n' > "$d/state/other.status"
+  arm_idle_record "$d/state" other
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-bound 01BOUNDRUN0000000000000001)"
+
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "state: working" "the bound crew still reads its own run"
+  assert_contains "$out" "source: run-step" "the bound crew reads it from the run step"
+
+  out=$(run_crew_state "$d" other)
+  assert_not_contains "$out" "state: working" \
+    "a crew on the same branch must not inherit a run another task has bound"
+  assert_contains "$out" "state: paused" \
+    "the unbound crew falls to its own declared wait"
+  pass "a bound run stays with its owner and is withheld from its co-branch neighbour"
+}
+
+test_unbound_neighbour_without_a_status_line_is_not_working() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case bound-owner-quiet fm/shared-quiet)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000002"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-quiet 01BOUNDRUN0000000000000002)"
+  out=$(run_crew_state "$d" other)
+  assert_not_contains "$out" "state: working" \
+    "with no status line of its own the unbound crew still must not read working"
+  pass "an unbound co-branch crew with no status line never reads working"
+}
+
+test_no_bindings_on_the_branch_preserves_legacy_behaviour() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case unbound-legacy fm/shared-legacy)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-legacy 01LEGACYRUN000000000000001)"
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "state: working" "an unbound crew still reads the branch's run"
+  out=$(run_crew_state "$d" other)
+  assert_contains "$out" "state: working" \
+    "with no binding anywhere the branch behaviour is unchanged, so no home regresses"
+  pass "no bindings on the branch preserves the existing branch-based behaviour"
+}
+
+test_bound_crew_ignores_a_run_that_is_not_its_own() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case bound-mismatch fm/shared-mismatch)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01BOUNDRUN0000000000000003"
+  printf 'paused: waiting on the captain\n' > "$d/state/owner.status"
+  arm_idle_record "$d/state" owner
+  # The repo's current run is a different id: someone else's, whatever the
+  # branch says. The coarse ledger cannot overrule it either, because the runs
+  # listing carries no run id column to check the binding against.
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-mismatch 01OTHERRUN0000000000000009)"
+  FM_FAKE_RUNS_LIST="  running    fm/shared-mismatch $(git -C "$d/wt-owner" rev-parse --short=7 HEAD)  2026-09-04 10:00"
+  out=$(run_crew_state "$d" owner)
+  assert_not_contains "$out" "state: working" \
+    "a bound crew must not be credited a run whose id is not its own"
+  pass "a bound crew is never credited a run that is not its binding"
+}
+
+test_direct_pr_crew_is_never_credited_a_run() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case mode-gate fm/shared-mode)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/shipper.meta" "window=fm:fm-shipper" "worktree=$d/wt-other" \
+    "kind=ship" "mode=direct-PR" "harness=claude"
+  printf 'paused: waiting on the captain\n' > "$d/state/shipper.status"
+  arm_idle_record "$d/state" shipper
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-mode 01MODERUN00000000000000001)"
+  out=$(run_crew_state "$d" shipper)
+  assert_not_contains "$out" "state: working" \
+    "a direct-PR crew never drives a pipeline, so it is never credited a run"
+  assert_contains "$out" "state: paused" "it falls to its own declared wait instead"
+  pass "a direct-PR crew is never credited a pipeline run"
+}
+
+test_local_only_crew_is_never_credited_a_run() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case mode-gate-local fm/shared-local)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/localer.meta" "window=fm:fm-localer" "worktree=$d/wt-other" \
+    "kind=ship" "mode=local-only"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-local 01MODERUN00000000000000002)"
+  out=$(run_crew_state "$d" localer)
+  assert_not_contains "$out" "state: working" \
+    "a local-only crew never drives a pipeline, so it is never credited a run"
+  pass "a local-only crew is never credited a pipeline run"
+}
+
+test_absent_mode_keeps_the_run_lookup() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case mode-absent fm/shared-absent)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  # A record predating mode=: the lookup must still run, so an existing home
+  # does not lose run-step state the moment this gate lands.
+  fm_write_meta "$d/state/legacy.meta" "window=fm:fm-legacy" "worktree=$d/wt-owner" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-absent 01MODERUN00000000000000003)"
+  out=$(run_crew_state "$d" legacy)
+  assert_contains "$out" "state: working" "an absent mode= keeps today's run lookup"
+  pass "a record with no mode= keeps the run lookup"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2116,5 +2294,12 @@ test_active_fix_round_unfetched_pipeline_head_reports_current
 test_unanchored_unfetched_active_row_does_not_match
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
+test_bound_owner_keeps_the_run_its_neighbour_loses_it
+test_unbound_neighbour_without_a_status_line_is_not_working
+test_no_bindings_on_the_branch_preserves_legacy_behaviour
+test_bound_crew_ignores_a_run_that_is_not_its_own
+test_direct_pr_crew_is_never_credited_a_run
+test_local_only_crew_is_never_credited_a_run
+test_absent_mode_keeps_the_run_lookup
 
 echo "all fm-crew-state tests passed"

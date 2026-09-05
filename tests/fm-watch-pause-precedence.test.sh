@@ -124,8 +124,13 @@ export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_CI_LOGS FM_FAKE_TMUX_MISSING
 
 fm_write_meta "$STATE_DIR/owner.meta" "window=fm:fm-owner" "worktree=$OWNER_WT" \
   "kind=ship" "mode=no-mistakes"
+# Both crews ship no-mistakes and NEITHER is bound to the run, so this file
+# exercises the legacy shape bin/fm-crew-state.sh still serves by branch. The
+# binding and delivery-mode guards that separate two such crews are owned by
+# tests/fm-crew-state.test.sh; what these cases pin is that pause_state_class
+# stops trusting the branch verdict for a crew whose agent is gone.
 fm_write_meta "$STATE_DIR/closed.meta" "window=fm:fm-closed" "worktree=$CLOSED_WT" \
-  "kind=ship" "mode=direct-PR"
+  "kind=ship" "mode=no-mistakes"
 fm_write_meta "$STATE_DIR/mate.meta" "window=fm:fm-mate" "worktree=$TMP/mate-home" \
   "kind=secondmate"
 mkdir -p "$TMP/mate-home"

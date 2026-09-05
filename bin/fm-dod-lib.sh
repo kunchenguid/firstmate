@@ -5,9 +5,12 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <firstmate-root>
+# <firstmate-home> prints the block on stdout with no trailing blank line. The
+# caller validates the mode; an unknown mode is refused rather than silently
+# rendered as the pipeline contract. The root and home render the absolute
+# run-binding command the no-mistakes contract hands the worker, and are required
+# rather than inferred, because a secondmate home's code root and home differ.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -190,8 +193,17 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> <firstmate-root> <firstmate-home>
+  local mode=$1 id=$2 root=${3:-} home=${4:-} bind_cmd
+  if [ -z "$root" ] || [ -z "$home" ]; then
+    echo "error: fm_dod_block: the firstmate root and home are required to render the run-binding command" >&2
+    return 2
+  fi
+  # Rendered absolutely, and with an explicit home, because the worker runs in
+  # its project worktree with neither set - the same reason every other path a
+  # brief hands a worker is absolute. A secondmate home's root and home differ,
+  # so both are named rather than inferred.
+  bind_cmd="FM_HOME=$home $root/bin/fm-run-bind.sh $id <run-id>"
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -224,6 +236,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Immediately after starting or restarting a run, bind it to this task by running \`$bind_cmd\` with the run id that \`axi run\` reports (its \`id:\` field), before you do anything else with the run. Several tasks can share one branch, and this binding is the only thing that tells firstmate which run is yours.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
