@@ -600,7 +600,7 @@ test_captain_override_ignores_event_time() {
   local dir verb line event
   local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
   dir=$(make_case captain-override-time)
-  for verb in done needs-decision blocked failed; do
+  for verb in 'done' needs-decision blocked failed; do
     for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
