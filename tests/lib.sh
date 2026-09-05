@@ -35,6 +35,12 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep fixture permissions hermetic across caller environments. Some tests drive
+# real private-state guards, so an inherited group-writable umask (for example
+# 0002) can make plain `mkdir -p` setup accidentally violate the product's
+# security contract before the behavior under test even starts.
+umask 022
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

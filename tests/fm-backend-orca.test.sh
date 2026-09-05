@@ -54,7 +54,17 @@ fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
-  chmod +x "$fb/orca"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  --version) printf '%s\n' 'tasks-axi 0.2.4'; exit 0 ;;
+  'update --help') printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body'; exit 0 ;;
+  'mv --help') printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'; exit 0 ;;
+  'hold --help') printf '%s\n' 'usage: tasks-axi hold <id> [flags]' '  --kind captain'; exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fb/orca" "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 

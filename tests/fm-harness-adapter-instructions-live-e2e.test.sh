@@ -47,7 +47,7 @@ cat > "$EXPECTED_JSON" <<'JSON'
     {"id":"recovery.replacement-secondmate","common":["references/common/control-and-recovery.md","references/common/dispatch.md","references/common/model-and-effort.md","references/common/primary-hooks.md"],"harness":"references/harness/codex.md"},
     {"id":"primary.default","common":["references/common/primary-hooks.md"],"harness":"references/harness/opencode.md"},
     {"id":"model-effort.default","common":["references/common/model-and-effort.md"],"harness":"references/harness/pi.md"},
-    {"id":"model-effort.configured-profile","common":["references/common/model-and-effort.md","references/common/dispatch.md"],"harness":"references/harness/pi.md"},
+    {"id":"model-effort.configured-profile","common":["references/common/model-and-effort.md","references/common/dispatch.md"],"harness":"references/harness/copilot.md"},
     {"id":"verify.default","common":["references/common/dispatch.md","references/common/control-and-recovery.md","references/common/primary-hooks.md","references/common/model-and-effort.md"],"harness":"references/harness/grok.md"}
   ]
 }
@@ -72,7 +72,7 @@ JSON
     'recovery.replacement-secondmate codex' \
     'primary.default opencode' \
     'model-effort.default pi' \
-    'model-effort.configured-profile pi-signed' \
+    'model-effort.configured-profile copilot' \
     'verify.default grok'
   printf '%s\n' 'Return only one JSON object with a cases array; each item must have id, common, and harness fields.'
   printf '%s\n' 'ROUTER START'
@@ -97,7 +97,7 @@ if ! diff -u \
   <(jq -S . "$TMP_ROOT/normalized-response.json") > "$TMP_ROOT/diff"; then
   fail "local model $MODEL did not follow the routing instructions: $(tr '\n' ' ' < "$TMP_ROOT/diff")"
 fi
-pass "local model $MODEL selected every operation scenario and all nine harness identities"
+pass "local model $MODEL selected every operation scenario and all ten harness identities"
 
 CHECKED=0
 MISSING=
@@ -120,7 +120,7 @@ resolve_native_binary() {
   return 1
 }
 
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex copilot opencode pi pi-signed grok kimi cursor muse; do
   if binary=$(resolve_native_binary "$harness"); then
     version=$("$binary" --version 2>/dev/null | head -1 | tr -d '\r') || version=unknown
     printf '# native loader not claimed: %s %s is installed, but this harness-neutral evaluation does not exercise its provider transport\n' "$harness" "$version"

@@ -161,6 +161,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    copilot)
+      payload=$(jq -cn --arg command "$cmd" '{toolName:"bash",toolArgs:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" --copilot >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
@@ -182,6 +187,14 @@ run_matrix_entry() {
     return
   fi
 
+  if [ "$entry" = copilot ]; then
+    [ "$rc" -eq 0 ] || fail "$id via $entry must deny through Copilot's native stdout object, got exit $rc"
+    [ ! -s "$err_file" ] || fail "$id via $entry deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via copilot deny must carry Copilot's native decision object on stdout: $(cat "$out_file")"
+    return
+  fi
+
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
@@ -196,10 +209,10 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude copilot grok opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all six entry forms"
   done
 }
 
@@ -214,8 +227,16 @@ assert_policy() {
   pass "direct policy $id: $expected"
 }
 
+assert_watcher_arm_policy() {
+  local id=$1 expected=$2 command=$3 output
+  output=$(node "$POLICY" watcher-arm --root "$ROOT" --home "$ROOT" --command "$command") \
+    || fail "$id watcher-arm policy invocation failed"
+  [ "$output" = "$expected" ] || fail "$id watcher-arm policy expected $expected, got: $output"
+  pass "watcher-arm policy $id: $expected"
+}
+
 test_direct_policy_contract() {
-  local heredoc_data heredoc_watcher
+  local heredoc_data heredoc_watcher sibling_root
   assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
@@ -237,6 +258,13 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  sibling_root=$(dirname "$ROOT")/policy-sibling-root
+  mkdir -p "$sibling_root/config"
+  : > "$sibling_root/config/x-mode.env"
+  assert_watcher_arm_policy direct-current-root watch-arm '[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-sibling-root other 'cd ../policy-sibling-root && [ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-fm-home-rebind other 'export FM_HOME=/tmp/other; exec ./bin/fm-watch-arm.sh'
+  assert_watcher_arm_policy direct-state-override-rebind other 'export FM_STATE_OVERRIDE=/tmp/other; exec ./bin/fm-watch-arm.sh'
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -402,6 +430,20 @@ test_failopen_missing_node() {
 
 # --- --claude output shaping ---------------------------------------------------
 
+test_copilot_mode_stdout_has_native_json_on_deny() {
+  local out err rc stderr_file
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-copilot-stderr.XXXXXX")
+  out=$("$CHECK" --copilot --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
+  rc=$?
+  err=$(cat "$stderr_file" 2>/dev/null)
+  rm -f "$stderr_file"
+  [ "$rc" -eq 0 ] || fail "--copilot deny must exit 0, got $rc"
+  [ -z "$err" ] || fail "--copilot deny must leave stderr empty, got: $err"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' >/dev/null 2>&1 \
+    || fail "--copilot deny must put Copilot's native permissionDecision object on stdout: $out"
+  pass "--copilot: stdout carries Copilot deny JSON and exit 0"
+}
+
 test_claude_mode_stdout_empty_on_deny() {
   local out err rc stderr_file
   # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
@@ -468,6 +510,7 @@ test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
 test_failopen_missing_node
+test_copilot_mode_stdout_has_native_json_on_deny
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes

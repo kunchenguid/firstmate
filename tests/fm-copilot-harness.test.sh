@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# Portable behavior tests for Copilot CLI identity and primary hook translation.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+HARNESS="$ROOT/bin/fm-harness.sh"
+LOCK_LIB="$ROOT/bin/fm-session-lock-lib.sh"
+TMUX_LIB="$ROOT/bin/fm-tmux-lib.sh"
+HOOK="$ROOT/bin/fm-copilot-hook.sh"
+OPINPUT="$ROOT/bin/fm-operational-input.sh"
+TMP_ROOT=$(fm_test_tmproot fm-copilot-harness)
+
+make_ps() {
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FM_FAKE_PS_COMM:-MainThread}" ;;
+  *"args="*) printf '%s\n' "${FM_FAKE_PS_ARGS:-copilot}" ;;
+  *"ppid="*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_environment_marker_wins() {
+  local fakebin out
+  fakebin="$TMP_ROOT/env-marker"
+  make_ps "$fakebin"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 CLAUDECODE=1 "$HARNESS")
+  [ "$out" = copilot ] || fail "COPILOT_CLI marker detected as '$out'"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  [ "$out" = copilot ] || fail "COPILOT_CLI marker lost to inherited Cursor markers: '$out'"
+  pass "Copilot's verified environment marker identifies the current harness"
+}
+
+test_process_shapes_are_anchored() {
+  local fakebin out
+  fakebin="$TMP_ROOT/process-shapes"
+  make_ps "$fakebin"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=copilot FM_FAKE_PS_ARGS='copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "native copilot command detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "MainThread with Copilot argv zero detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/runner.js --allow-all' "$HARNESS")
+  [ "$out" = unknown ] || fail "a MainThread decoy under a copilot-named directory detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=/opt/copilot/bin/copilot FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "path-prefixed copilot executable detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "node-bundled copilot script detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/runner.js --allow-all' "$HARNESS")
+  [ "$out" = unknown ] || fail "a node script under a copilot-named directory detected as '$out'"
+
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
+  [ "$out" = unknown ] || fail "an unrelated later copilot argument detected as '$out'"
+  pass "Copilot process detection accepts native, path, MainThread, and node-bundle shapes while rejecting later-argument decoys"
+}
+
+test_real_process_identity_accepts_copilot_shapes_and_rejects_decoy() {
+  command -v node >/dev/null 2>&1 || { pass "node not installed, skipping"; return; }
+  local dir native_pid path_pid bundle_pid path_decoy_pid decoy_pid comm args out
+  dir="$TMP_ROOT/real-copilot-shapes"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/copilot" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  cat > "$dir/runner.js" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  mkdir -p "$dir/copilot/bin"
+  cat > "$dir/copilot/bin/runner.js" <<'JS'
+setTimeout(() => {}, 30000);
+JS
+  bash -c 'exec -a copilot sleep 30' & native_pid=$!
+  bash -c 'exec -a /opt/copilot/bin/copilot sleep 30' & path_pid=$!
+  node "$dir/bin/copilot" --allow-all & bundle_pid=$!
+  node "$dir/copilot/bin/runner.js" --allow-all & path_decoy_pid=$!
+  node "$dir/runner.js" copilot & decoy_pid=$!
+
+  comm=$(LC_ALL=C ps -p "$native_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$native_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "native copilot argv0 was not identified"
+  [ "$out" = copilot ] || fail "native copilot argv0 detected as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$path_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$path_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "path-prefixed copilot argv0 was not identified"
+  [ "$out" = copilot ] || fail "path-prefixed copilot argv0 detected as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$bundle_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$bundle_pid" -o args= 2>/dev/null || true)
+  out=$(bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args") || fail "node-bundled copilot was not identified"
+  [ "$out" = copilot ] || fail "node-bundled copilot detected as '$out'"
+  out=$(bash -c '. "$1"; fm_tmux_harness_process_name "$2" "$3"' -- "$TMUX_LIB" "$comm" "$args") || fail "tmux harness identity did not recognize the node-bundled copilot"
+  [ "$out" = copilot ] || fail "tmux harness identity detected the node-bundled copilot as '$out'"
+
+  comm=$(LC_ALL=C ps -p "$path_decoy_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$path_decoy_pid" -o args= 2>/dev/null || true)
+  if bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args" >/dev/null 2>&1; then
+    fail "a node script under a copilot-named directory was treated as copilot"
+  fi
+
+  comm=$(LC_ALL=C ps -p "$decoy_pid" -o comm= 2>/dev/null || true)
+  args=$(LC_ALL=C ps -p "$decoy_pid" -o args= 2>/dev/null || true)
+  if bash -c '. "$1"; fm_harness_process_name "$2" "$3"' -- "$LOCK_LIB" "$comm" "$args" >/dev/null 2>&1; then
+    fail "a later-argument decoy real node process was treated as copilot"
+  fi
+
+  kill "$native_pid" "$path_pid" "$bundle_pid" "$path_decoy_pid" "$decoy_pid" 2>/dev/null || true
+  wait "$native_pid" "$path_pid" "$bundle_pid" "$path_decoy_pid" "$decoy_pid" 2>/dev/null || true
+  pass "real processes identify native, path, and node-bundled Copilot shapes while rejecting decoys"
+}
+
+test_tmux_identity_and_liveness_recognize_node_bundled_copilot() {
+  local dir fakebin out
+  dir="$TMP_ROOT/tmux-node-bundle"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'-t pts/fm-copilot -o pid=,pgid=,tpgid=,comm='*) printf '%s\n' '111 222 222 node' ;;
+  *'-p 111 -o args='*) printf '%s\n' 'node /opt/copilot/bin/copilot --allow-all' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    case "${*: -1}" in
+      '#{pane_tty}') printf '/dev/pts/fm-copilot\n' ;;
+      '#{pane_current_command}') printf 'node\n' ;;
+      '#{cursor_y}') printf '0\n' ;;
+      '#{pane_id}') printf '%s\n' '%1' ;;
+      *) exit 1 ;;
+    esac ;;
+  list-windows)
+    printf 'fm-copilot\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps" "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" bash -c '. "$1"; fm_tmux_composer_identity s:fm-copilot' -- "$TMUX_LIB") || fail "tmux composer identity did not recognize a node-bundled Copilot pane"
+  [ "$out" = $'copilot	present' ] || fail "tmux composer identity detected a node-bundled Copilot pane as '$out'"
+  out=$(PATH="$fakebin:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c '. "$1"; fm_backend_tmux_agent_state s:fm-copilot' -- "$ROOT/bin/backends/tmux.sh") || fail "tmux agent-state did not evaluate the node-bundled Copilot pane"
+  [ "$out" = alive ] || fail "tmux agent-state detected a node-bundled Copilot pane as '$out'"
+
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'-t pts/fm-copilot -o pid=,pgid=,tpgid=,comm='*) printf '%s\n' '111 222 222 MainThread' ;;
+  *'-p 111 -o args='*) printf '%s\n' '/opt/copilot/bin/runner.js --allow-all' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  if PATH="$fakebin:$PATH" bash -c '. "$1"; fm_tmux_composer_identity s:fm-copilot' -- "$TMUX_LIB" >/dev/null 2>&1; then
+    fail "tmux composer identity treated a MainThread decoy under a copilot-named directory as Copilot"
+  fi
+  out=$(PATH="$fakebin:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c '. "$1"; fm_backend_tmux_agent_state s:fm-copilot' -- "$ROOT/bin/backends/tmux.sh") || fail "tmux agent-state did not evaluate the MainThread decoy pane"
+  [ "$out" = ambiguous ] || fail "tmux agent-state detected a MainThread decoy pane as '$out'"
+  pass "tmux composer identity and liveness recognize node-bundled Copilot and reject MainThread decoys"
+}
+
+test_actual_host_overrides_inherited_markers() {
+  local fakebin out versioned_claude
+  fakebin="$TMP_ROOT/ancestry-over-marker"
+  make_ps "$fakebin"
+
+  out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' "$HARNESS")
+  [ "$out" = claude ] || fail "real Claude ancestry lost to inherited Copilot markers: '$out'"
+
+  versioned_claude='/home/test/.local/share/claude/versions/2.1.220/2.1.220'
+  out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM="$versioned_claude" \
+    FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" "$HARNESS")
+  [ "$out" = claude ] || fail "version-named Claude ancestry lost to inherited Copilot markers: '$out'"
+
+  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "real Copilot ancestry lost to inherited foreign markers: '$out'"
+  pass "Actual Claude and Copilot ancestry outrank inherited foreign markers"
+}
+
+test_session_lock_identity_matches_copilot() {
+  local fakebin out
+  fakebin="$TMP_ROOT/lock-shape"
+  make_ps "$fakebin"
+  # shellcheck disable=SC2016 # Child shell intentionally expands its positional parameter.
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
+  case "$out" in
+    ''|*[!0-9]*) fail "Copilot MainThread lock identity returned '$out'" ;;
+  esac
+  # shellcheck disable=SC2016 # Child shell intentionally expands its positional parameter.
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/copilot --allow-all' \
+    bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
+  case "$out" in
+    ''|*[!0-9]*) fail "Copilot node-bundle lock identity returned '$out'" ;;
+  esac
+  pass "session-lock ancestry recognizes Copilot MainThread and node-bundle process shapes"
+}
+
+make_hook_fixture() {
+  local dir=$1 guard_status=${2:-0}
+  mkdir -p "$dir/bin"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/"
+  chmod +x "$dir/bin/fm-copilot-hook.sh"
+  cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+printf 'digest line one\ndigest line two\n'
+SH
+  cat > "$dir/bin/fm-turnend-guard.sh" <<SH
+#!/usr/bin/env bash
+cat > "\$FM_TEST_PAYLOAD"
+[ -z "\${FM_TEST_ARGS:-}" ] || printf '%s\n' "\$*" > "\$FM_TEST_ARGS"
+printf '%s\n' 'restore Firstmate supervision' >&2
+exit $guard_status
+SH
+  cat > "$dir/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"arm denied"}'
+SH
+  cat > "$dir/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"cd denied"}'
+SH
+  cat > "$dir/bin/fm-subagent-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+jq -cn '{permissionDecision:"deny",permissionDecisionReason:"subagent denied"}'
+SH
+  chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-turnend-guard.sh" \
+    "$dir/bin/fm-arm-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh" \
+    "$dir/bin/fm-subagent-pretool-check.sh"
+}
+
+run_copilot_hook_fixture() {  # <fakebin> <dir> <mode> <payload-file> [extra env...]
+  local fakebin=$1 dir=$2 mode=$3 payload_file=$4
+  shift 4
+  PATH="$fakebin:$PATH" "$@" "$dir/bin/fm-copilot-hook.sh" "$mode" < "$payload_file"
+}
+
+make_claude_compat_fixture() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/.claude"
+  git -C "$dir" init -q
+  : > "$dir/AGENTS.md"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-claude-compat-hook.sh" "$dir/bin/"
+  cp "$ROOT/.claude/settings.json" "$dir/.claude/settings.json"
+  cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'sessionstart\n'
+SH
+  cat > "$dir/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'arm\n'
+SH
+  cat > "$dir/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'cd\n'
+SH
+  cat > "$dir/bin/fm-subagent-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'subagent\n'
+SH
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'turnend\n'
+SH
+  cat > "$dir/bin/fm-claude-stop-autoarm.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+printf 'autoarm\n'
+SH
+  chmod +x "$dir/bin/"*
+}
+
+test_session_start_translates_context() {
+  local dir payload out fakebin
+  dir="$TMP_ROOT/session-start"
+  payload="$dir/payload.json"
+  fakebin="$dir/fakebin"
+  make_hook_fixture "$dir"
+  make_ps "$fakebin"
+  printf '%s' '{"source":"startup"}' > "$dir/in.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" session-start < "$dir/in.json")
+  printf '%s' "$out" | jq -e '.additionalContext == "digest line one\ndigest line two\n"' >/dev/null \
+    || fail "sessionStart adapter returned invalid context: $out"
+  [ "$(cat "$payload")" = '{"source":"startup"}' ] || fail "sessionStart payload was not forwarded"
+  [ "$(cat "$dir/args.txt")" = --copilot ] || fail "Copilot sessionStart did not use the native invocation mode"
+  pass "Copilot sessionStart returns the full digest as additionalContext"
+}
+
+test_agent_stop_translates_block() {
+  local dir payload out fakebin
+  dir="$TMP_ROOT/agent-stop"
+  payload="$dir/payload.json"
+  fakebin="$dir/fakebin"
+  make_hook_fixture "$dir" 2
+  make_ps "$fakebin"
+  printf '%s' '{"sessionId":"s1","stop_hook_active":false}' > "$dir/in.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/in.json")
+  printf '%s' "$out" | jq -e '.decision == "block" and (.reason | contains("restore Firstmate supervision"))' >/dev/null \
+    || fail "agentStop adapter returned invalid block decision: $out"
+  [ "$(cat "$payload")" = '{"sessionId":"s1","stop_hook_active":false}' ] \
+    || fail "agentStop payload was not forwarded"
+  pass "Copilot agentStop translates the shared guard refusal into a native block"
+}
+
+test_copilot_native_policies_bypass_compatibility_stand_down() {
+  local dir fakebin payload out rc args
+  dir="$TMP_ROOT/native-copilot-policies"
+  fakebin="$dir/fakebin"
+  payload="$dir/payload.json"
+  make_hook_fixture "$dir" 2
+  make_ps "$fakebin"
+
+  printf '%s' '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' > "$dir/arm.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-arm < "$dir/arm.json" 2> "$dir/arm.err")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-arm should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/arm.err" ] || fail "Copilot pretool-arm wrote stderr: $(cat "$dir/arm.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "arm denied"' >/dev/null \
+    || fail "Copilot pretool-arm lost the native deny payload: $out"
+  [ "$(cat "$payload")" = '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' ] || fail "Copilot pretool-arm did not forward the payload"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-arm did not use the native invocation mode: $args"
+
+  printf '%s' '{"toolArgs":{"command":"cd projects/demo"}}' > "$dir/cd.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-cd < "$dir/cd.json" 2> "$dir/cd.err")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-cd should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/cd.err" ] || fail "Copilot pretool-cd wrote stderr: $(cat "$dir/cd.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "cd denied"' >/dev/null \
+    || fail "Copilot pretool-cd lost the native deny payload: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-cd did not use the native invocation mode: $args"
+
+  printf '%s' '{"toolName":"task"}' > "$dir/subagent.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-subagent < "$dir/subagent.json" 2> "$dir/subagent.err")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "Copilot pretool-subagent should return Copilot's native deny object with exit 0, got $rc: $out"
+  [ ! -s "$dir/subagent.err" ] || fail "Copilot pretool-subagent wrote stderr: $(cat "$dir/subagent.err")"
+  printf '%s' "$out" | jq -e '.permissionDecision == "deny" and .permissionDecisionReason == "subagent denied"' >/dev/null \
+    || fail "Copilot pretool-subagent lost the native deny payload: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-subagent did not use the native invocation mode: $args"
+
+  printf '%s' '{"sessionId":"s1","stop_hook_active":false}' > "$dir/stop.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/stop.json")
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "Copilot agent-stop lost block translation: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot agent-stop did not use the native invocation mode: $args"
+  pass "Copilot native hooks bypass only the compatibility stand-down"
+}
+
+test_agent_stop_allows_clean_stop() {
+  local dir out fakebin
+  dir="$TMP_ROOT/agent-stop-allow"
+  fakebin="$dir/fakebin"
+  make_hook_fixture "$dir" 0
+  make_ps "$fakebin"
+  printf '%s' '{"sessionId":"s1","stop_hook_active":false}' > "$dir/in.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$dir/payload.json" "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/in.json")
+  [ -z "$out" ] || fail "healthy agentStop must be silent, got: $out"
+  pass "Copilot agentStop leaves a healthy turn end unchanged"
+}
+
+make_notification_fixture() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/state"
+  git -C "$dir" init -q
+  : > "$dir/AGENTS.md"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+     "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+     "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/"
+  chmod +x "$dir/bin/fm-copilot-hook.sh" "$dir/bin/fm-operational-input.sh"
+}
+
+test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
+  local dir fakebin out message body kind
+  dir="$TMP_ROOT/notification-watcher"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir"
+  make_ps "$fakebin"
+  make_notification_fixture "$dir"
+
+  mkdir -p "$dir/config"
+  : > "$dir/config/x-mode.env"
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh"}' > "$dir/in.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
+  message=$(printf '%s' "$out" | jq -r '.additionalContext')
+  kind=$(printf '%s' "$message" | "$OPINPUT" kind)
+  [ "$kind" = watcher ] || fail "Copilot watcher notification must inject watcher operational context, got '$kind' from: $out"
+  body=$(printf '%s' "$message" | "$OPINPUT" body)
+  case "$body" in
+    *'Inspect the completed task result for the reason line when needed.'*'Run bin/fm-wake-drain.sh first'*'open decisions and unread status lines'*'exact WAKE_ACK_REQUIRED --ack-through command printed by the drain.'*'Start the next attached asynchronous arm only if supervision remains required.'*) ;;
+    *) fail "Copilot watcher notification lost the required recovery protocol: $body" ;;
+  esac
+
+  mkdir -p "$TMP_ROOT/notification-watcher-sibling/config"
+  : > "$TMP_ROOT/notification-watcher-sibling/config/x-mode.env"
+  printf '%s' '{"notification_type":"shell_completed","command":"cd ../notification-watcher-sibling && [ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh"}' > "$dir/sibling.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/sibling.json")
+  [ -z "$out" ] || fail "a sibling-root watcher completion must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"export FM_HOME=/tmp/other; exec ./bin/fm-watch-arm.sh"}' > "$dir/home-rebind.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/home-rebind.json")
+  [ -z "$out" ] || fail "an FM_HOME-rebound watcher completion must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"export FM_STATE_OVERRIDE=/tmp/other; exec ./bin/fm-watch-arm.sh"}' > "$dir/state-rebind.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/state-rebind.json")
+  [ -z "$out" ] || fail "an FM_STATE_OVERRIDE-rebound watcher completion must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"sleep 1; printf done > background-result"}' > "$dir/other.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/other.json")
+  [ -z "$out" ] || fail "an unrelated background completion must stay inert, got: $out"
+  pass "Copilot notification injects only current-root watcher-arm completion follow-ups"
+}
+
+test_notification_requires_primary_scope() {
+  local dir fakebin out
+  dir="$TMP_ROOT/notification-nonprimary"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/bin"
+  make_ps "$fakebin"
+  cp "$HOOK" "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+     "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+     "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/"
+  chmod +x "$dir/bin/fm-copilot-hook.sh" "$dir/bin/fm-operational-input.sh"
+  printf '%s' '{"notification_type":"shell_completed","command":"exec bin/fm-watch-arm.sh"}' > "$dir/in.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
+  [ -z "$out" ] || fail "notification hook must stay inert outside a genuine Firstmate primary, got: $out"
+  pass "Copilot notification stands down outside genuine primary scope"
+}
+
+test_primary_hook_registration() {
+  local hooks="$ROOT/.github/hooks/fm-primary.json"
+  jq -e '
+    .version == 1
+    and (.hooks.sessionStart | length) == 1
+    and (.hooks.agentStop | length) == 1
+    and ([.hooks.preToolUse[].matcher] | sort) == [".*","bash","bash"]
+    and (.hooks.notification | length) == 1
+    and .hooks.notification[0].matcher == "shell_completed"
+  ' "$hooks" >/dev/null || fail "tracked Copilot hook registration is incomplete"
+  pass "tracked Copilot hooks register startup, safety policies, turn-end continuation, and watcher notifications"
+}
+
+test_non_cli_hook_surface_stands_down() {
+  local dir out fakebin
+  dir="$TMP_ROOT/non-cli"
+  fakebin="$dir/fakebin"
+  make_hook_fixture "$dir" 2
+  make_ps "$fakebin"
+  printf '%s' '{"source":"startup"}' > "$dir/in.json"
+  out=$(env -u COPILOT_CLI PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' FM_TEST_PAYLOAD="$dir/payload.json" \
+      "$dir/bin/fm-copilot-hook.sh" session-start < "$dir/in.json")
+  [ -z "$out" ] || fail "non-CLI sessionStart hook printed output: $out"
+  assert_absent "$dir/payload.json" "non-CLI hook invoked the Firstmate session-start owner"
+  printf '%s' '{"sessionId":"cloud","stop_hook_active":false}' > "$dir/in-stop.json"
+  out=$(env -u COPILOT_CLI PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' FM_TEST_PAYLOAD="$dir/payload.json" \
+      "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/in-stop.json")
+  [ -z "$out" ] || fail "non-CLI agentStop hook printed output: $out"
+  assert_absent "$dir/payload.json" "non-CLI hook invoked the Firstmate turn-end owner"
+  printf '%s' '{"notification_type":"shell_completed","command":"exec bin/fm-watch-arm.sh"}' > "$dir/in-note.json"
+  out=$(env -u COPILOT_CLI PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' \
+      "$dir/bin/fm-copilot-hook.sh" notification < "$dir/in-note.json")
+  [ -z "$out" ] || fail "non-CLI notification hook printed output: $out"
+  pass "Copilot repository hooks stay inert outside local Copilot CLI"
+}
+
+test_claude_compatibility_hooks_stand_down() {
+  local dir fakebin command out rc count=0
+  dir="$TMP_ROOT/claude-compat-copilot"
+  fakebin="$dir/fakebin"
+  make_ps "$fakebin"
+  make_claude_compat_fixture "$dir"
+  while IFS= read -r command; do
+    count=$((count + 1))
+    out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+      sh -c "$command" <<'EOF' 2>&1
+{"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
+EOF
+)
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "Claude compatibility hook $count failed under native Copilot: $out"
+    [ -z "$out" ] || fail "Claude compatibility hook $count printed under native Copilot: $out"
+  done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
+  [ "$count" -gt 0 ] || fail "no Claude compatibility hooks were exercised"
+  pass "Claude compatibility hooks stay inert under native Copilot hooks"
+}
+
+test_claude_compatibility_hooks_run_under_actual_claude_with_inherited_copilot_markers() {
+  local dir fakebin command out rc count=0 versioned_claude
+  dir="$TMP_ROOT/claude-compat-claude"
+  fakebin="$dir/fakebin"
+  make_ps "$fakebin"
+  make_claude_compat_fixture "$dir"
+  versioned_claude='/home/test/.local/share/claude/versions/2.1.220/2.1.220'
+  while IFS= read -r command; do
+    count=$((count + 1))
+    out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM="$versioned_claude" \
+      FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" \
+      CLAUDE_PROJECT_DIR="$dir" sh -c "$command" <<'EOF' 2>&1
+{"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
+EOF
+)
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "Claude compatibility hook $count failed under real Claude ancestry: $out"
+    [ -n "$out" ] || fail "Claude compatibility hook $count was suppressed by inherited Copilot markers"
+  done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
+  [ "$count" -gt 0 ] || fail "no Claude compatibility hooks were exercised"
+  pass "Claude compatibility hooks still run under actual Claude with inherited Copilot markers"
+}
+
+test_claude_compatibility_hooks_find_worktree_root_from_subdir() {
+  local dir fakebin command out rc count=0
+  dir="$TMP_ROOT/claude-compat-subdir"
+  fakebin="$dir/fakebin"
+  make_ps "$fakebin"
+  make_claude_compat_fixture "$dir"
+  mkdir -p "$dir/subdir/nested"
+  while IFS= read -r command; do
+    count=$((count + 1))
+    out=$(cd "$dir/subdir/nested" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' \
+      sh -c "$command" <<'EOF' 2>&1
+{"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
+EOF
+)
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "Claude compatibility hook $count failed from a repository subdirectory: $out"
+    [ -n "$out" ] || fail "Claude compatibility hook $count did not resolve the worktree root from a repository subdirectory"
+  done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
+  [ "$count" -gt 0 ] || fail "no Claude compatibility hooks were exercised"
+  pass "Claude compatibility hooks resolve their worktree root from repository subdirectories"
+}
+
+test_environment_marker_wins
+test_process_shapes_are_anchored
+test_actual_host_overrides_inherited_markers
+test_session_lock_identity_matches_copilot
+test_real_process_identity_accepts_copilot_shapes_and_rejects_decoy
+test_tmux_identity_and_liveness_recognize_node_bundled_copilot
+test_session_start_translates_context
+test_agent_stop_translates_block
+test_copilot_native_policies_bypass_compatibility_stand_down
+test_agent_stop_allows_clean_stop
+test_notification_injects_watcher_followup_only_for_watcher_arm_completion
+test_notification_requires_primary_scope
+test_primary_hook_registration
+test_non_cli_hook_surface_stands_down
+test_claude_compatibility_hooks_stand_down
+test_claude_compatibility_hooks_run_under_actual_claude_with_inherited_copilot_markers
+test_claude_compatibility_hooks_find_worktree_root_from_subdir
+
+echo "# all fm-copilot-harness tests passed"

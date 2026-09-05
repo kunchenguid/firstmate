@@ -572,6 +572,33 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+test_teardown_removes_only_the_task_specific_copilot_hook() {
+  local case_dir rc owned_hook
+  case_dir=$(make_case copilot-hook-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=copilot' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "copilot hook cleanup"
+  mkdir -p "$case_dir/wt/.github/hooks" "$case_dir/wt/.claude"
+  printf '%s\n' '{"repo":true}' > "$case_dir/wt/.github/hooks/fm-busy-state.json"
+  printf '%s\n' '{"claude":true}' > "$case_dir/wt/.claude/settings.json"
+  git -C "$case_dir/wt" add .github/hooks/fm-busy-state.json .claude/settings.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm fixture
+  add_fork_with_pushed_branch "$case_dir"
+  owned_hook="$case_dir/wt/.github/hooks/fm-busy-state-task-x1.json"
+  printf '%s\n' '{"owned":true}' > "$owned_hook"
+  printf 'gen=teardown-test-task-x1\nsession=parent\n' > "$case_dir/state/task-x1.copilot-session"
+
+  run_teardown "$case_dir" --force >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "teardown should remove the task-specific Copilot hook"
+  assert_absent "$owned_hook" "teardown left the task-specific Copilot hook behind"
+  assert_absent "$case_dir/state/task-x1.copilot-session" "teardown left the Copilot session binding behind"
+  [ "$(cat "$case_dir/wt/.github/hooks/fm-busy-state.json")" = '{"repo":true}' ] \
+    || fail "teardown rewrote the repository-owned Copilot hook file"
+  [ "$(cat "$case_dir/wt/.claude/settings.json")" = '{"claude":true}' ] \
+    || fail "teardown rewrote the repository-owned Claude settings"
+  pass "teardown removes only the task-specific Copilot hook"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -3199,6 +3226,7 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_teardown_removes_only_the_task_specific_copilot_hook
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

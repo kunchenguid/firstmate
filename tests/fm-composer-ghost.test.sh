@@ -347,6 +347,89 @@ test_proven_box_bottom_border_cursor_classifies_content() {
   pass "fm_tmux_composer_state: a proven titled box tolerates a bottom-border cursor"
 }
 
+test_copilot_half_box_requires_complete_rules() {
+  local dir fb capture out
+  dir="$TMP_ROOT/copilot-half-box"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = empty ] || fail "a complete identified Copilot half-box should be empty, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃ fix login\n╹▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = pending ] || fail "Copilot half-box text should be pending, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Plan · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = pending ] || fail "Copilot half-box content beginning with Plan must stay pending, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Build · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = pending ] || fail "Copilot half-box content beginning with Build must stay pending, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 probe-absent)
+  [ "$out" = unknown ] || fail "an unidentified Copilot half-box must stay unknown, got '$out'"
+
+  printf '┃\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] || fail "a lone blank left bar must stay unknown, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = unknown ] || fail "a width-mismatched Copilot half-box must stay unknown, got '$out'"
+  pass "fm_tmux_composer_state: Copilot half-box emptiness requires complete width-matched rules"
+}
+
+test_tmux_copilot_detection_falls_back_to_current_command() (
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_pane_is_copilot.
+  tmux() {
+    case "$*" in
+      *pane_tty*) printf '/dev/pts/9\n' ;;
+      *pane_current_command*) printf 'copilot\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_pane_is_copilot.
+  ps() {
+    case "$*" in
+      *'-t pts/9 -o pid=,pgid=,tpgid=,comm='*) printf '123 10 11 MainThread\n' ;;
+      *'-p 123 -o args='*) printf 'python helper.py\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_tmux_pane_is_copilot fakepane || fail "pane_current_command=copilot must keep the tmux Copilot gate true when ps lacks argv zero"
+  pass "fm_tmux_pane_is_copilot falls back to pane_current_command"
+)
+
+test_copilot_cursorless_fallback_requires_identity() (
+  local dir fb capture out
+  dir="$TMP_ROOT/copilot-cursorless"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf 'menu row\n╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀\nfooter row\n' > "$capture"
+
+  # shellcheck disable=SC2329 # Mocks invoked indirectly by fm_tmux_composer_state.
+  fm_tmux_pane_is_cursor() { return 1; }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_composer_state.
+  fm_tmux_pane_is_copilot() { return 0; }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_composer_state.
+  fm_tmux_composer_identity() { printf 'copilot\tpresent'; }
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "identified Copilot with an external cursor should read empty, got '$out'"
+
+  # shellcheck disable=SC2329 # Replacement mock invoked indirectly.
+  fm_tmux_composer_identity() { return 1; }
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] || fail "Copilot cursorless fallback without live identity should stay unknown, got '$out'"
+  pass "fm_tmux_composer_state: Copilot cursorless fallback is gated on live identity"
+)
+
 test_pi_identity_requires_readable_busy_state() (
   local out
   # Keep the mocks in this subshell so they cannot affect later tests. Defining
@@ -696,6 +779,9 @@ test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_proven_box_bottom_border_cursor_classifies_content
+test_copilot_half_box_requires_complete_rules
+test_tmux_copilot_detection_falls_back_to_current_command
+test_copilot_cursorless_fallback_requires_identity
 test_pi_identity_requires_readable_busy_state
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_is_unknown_strict

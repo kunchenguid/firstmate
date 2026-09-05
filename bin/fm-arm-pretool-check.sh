@@ -14,8 +14,8 @@
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
+# Stdin mode extracts .toolArgs.command for Copilot, .toolInput.command for
+# Grok, or .tool_input.command for Claude and Codex. Cursor delivers the same .tool_input.command shape with
 # tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
 # no new extraction - only --cursor, which selects Cursor's own deny rendering
 # and marks this invocation as the Cursor registration rather than the
@@ -28,7 +28,8 @@
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#          deny object on stdout unless --claude or --copilot was supplied.
+#   DENY, --copilot - exit 0 and Copilot's own decision object on stdout.
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status, and only that
 #          rendering is verified to block the command and surface the reason.
@@ -38,6 +39,7 @@
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Copilot consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
 set -u
@@ -46,17 +48,19 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
+COPILOT_MODE=0
 CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--copilot|--cursor]
 
-With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex/Cursor tool_input.command).
+With no --command, reads a PreToolUse-style JSON payload on stdin (Copilot
+toolArgs.command, Grok toolInput.command, or Claude/Codex/Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+unless --claude or --copilot is supplied.
+With --copilot, a deny is Copilot's own decision object on stdout and exit 0.
 With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
 Malformed transport and an unavailable classifier runtime fail open.
@@ -89,6 +93,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --copilot)
+      COPILOT_MODE=1
+      shift
+      ;;
     --cursor)
       CURSOR_MODE=1
       shift
@@ -114,10 +122,11 @@ if [ "$CMD_SET" -eq 0 ]; then
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CURSOR_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ] \
+     && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolArgs.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034
@@ -195,6 +204,12 @@ if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
   exit 0
 fi
+if [ "$COPILOT_MODE" -eq 1 ]; then
+  printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CLAUDE_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2

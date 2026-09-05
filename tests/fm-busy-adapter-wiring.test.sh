@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini copilot)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -55,7 +55,14 @@ classify() {  # <harness> <id> <state-dir>
 # Node host and fire one lifecycle handler. Modes: agent-start, settle-idle,
 # settle-continuing, turn-end.
 drive_pi_ext() {
-  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+  local ext=$1 mode=$2 loader rc
+  loader=$(mktemp "${TMPDIR:-/tmp}/fm-pi-ext.XXXXXX.mjs") || return 1
+  perl -0pe 's/: string//g; s/: any//g; s/Promise<void>/Promise/g' "$ext" > "$loader" || {
+    rc=$?
+    rm -f "$loader"
+    return "$rc"
+  }
+  EXT_PATH="$loader" MODE="$mode" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
@@ -76,6 +83,9 @@ if (process.env.MODE === "turn-end") {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
+  rc=$?
+  rm -f "$loader"
+  return "$rc"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -280,6 +290,101 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+run_copilot_hook() {  # <hooks.json> <hook-event> [payload]
+  local cmd payload=${3:-'{}'}
+  cmd=$(jq -r ".hooks[\"$2\"][0].bash" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  printf '%s' "$payload" | sh -c "$cmd"
+}
+
+test_copilot_hooks_semantic_lifecycle() {
+  local rec id=busy-copilot-1 out state hooks binding
+  rec=$(make_spawn_case copilot-lifecycle copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  assert_present "$hooks" "copilot spawn did not write hook settings"
+  jq -e . "$hooks" >/dev/null || fail "copilot hook settings are not valid JSON"
+
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  binding="$state/$id.copilot-session"
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "userPromptSubmitted hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "userPromptSubmitted must classify 'busy copilot-hook', got '$out'"
+  assert_grep 'session=parent' "$binding" "userPromptSubmitted did not latch the parent session"
+
+  rm -f "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"parent"}' || fail "agentStop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "agentStop no longer touches the notification marker"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "agentStop must classify 'idle copilot-hook', got '$out'"
+  assert_absent "$binding" "agentStop must clear the bound parent session"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"next-parent"}' || fail "second userPromptSubmitted hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "a later top-level session must re-open busy state, got '$out'"
+  assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after agentStop"
+
+  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"next-parent"}' || fail "sessionEnd hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "sessionEnd must classify idle, got '$out'"
+  assert_absent "$binding" "sessionEnd must clear the bound parent session"
+  pass "copilot hooks latch one parent session, clear it on settle, and rebind later sessions"
+}
+
+test_copilot_hooks_ignore_foreign_sessions() {
+  local rec id=busy-copilot-foreign-1 out state hooks binding
+  rec=$(make_spawn_case copilot-foreign-session copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  binding="$state/$id.copilot-session"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "parent latch hook failed"
+  rm -f "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"child"}' || fail "foreign agentStop hook failed"
+  assert_absent "$state/$id.turn-ended" "a foreign child session touched the notification marker"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "a foreign child stop must leave the parent busy, got '$out'"
+
+  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"child"}' || fail "foreign sessionEnd hook failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "a foreign child sessionEnd must leave the parent busy, got '$out'"
+  assert_grep 'session=parent' "$binding" "a foreign child session replaced the latched parent session"
+  pass "copilot hooks ignore foreign subagent sessions once the parent is latched"
+}
+
+test_copilot_agent_stop_clears_binding_after_turnend_touch_failure() {
+  local rec id=busy-copilot-turnend-fail out state hooks binding
+  rec=$(make_spawn_case copilot-turnend-fail copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  binding="$state/$id.copilot-session"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "parent latch hook failed"
+  rm -f "$state/$id.turn-ended"
+  ln -s "$state/missing/turn-ended" "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"parent"}' || fail "agentStop hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "agentStop must still classify idle when its notification touch fails, got '$out'"
+  assert_absent "$binding" "agentStop must clear the bound parent session even when touch fails"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"next-parent"}' || fail "next parent latch hook failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "the next top-level session must re-open busy state after a failed turn-end touch, got '$out'"
+  assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after a failed turn-end touch"
+  pass "copilot agentStop clears its binding even when turn-end touch fails"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -425,6 +530,9 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
+test_copilot_hooks_semantic_lifecycle
+test_copilot_hooks_ignore_foreign_sessions
+test_copilot_agent_stop_clears_binding_after_turnend_touch_failure
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

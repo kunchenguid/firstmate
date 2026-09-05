@@ -7,7 +7,7 @@
 # backend dispatch, while bin/fm-composer-lib.sh owns the shared verdict.
 #
 # Composer shapes and verdicts are owned by bin/fm-composer-lib.sh.
-# This file owns only tmux's styled capture, cursor and Pi identity primitives,
+# This file owns only tmux's styled capture, cursor and identity primitives,
 # delivery busy read, and submit conversions that consume the shared verdict.
 # Styled captures remain internal; fm-peek and every human-facing capture stay
 # plain.
@@ -37,14 +37,14 @@
 # bin/fm-composer-lib.sh (fm_composer_classify_screen), sourced below and
 # reused by every backend adapter so the decision cannot drift. This file
 # keeps only tmux's genuine capture-side primitives - the styled pane
-# capture, the #{cursor_y} cursor read, the pi foreground-process identity
+# capture, the #{cursor_y} cursor read, the Pi/Copilot foreground-process identity
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -84,9 +84,40 @@ fm_tmux_composer_caps() {
   printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n'
 }
 
+fm_tmux_harness_process_name() {  # <comm> <args>
+  local comm=$1 args=${2:-} name
+  if name=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
+    printf '%s\n' "$name"
+    return 0
+  fi
+  case "${comm##*/}" in
+    pi-launcher|Pi) printf 'pi\n'; return 0 ;;
+    muse|muse-bin-*) printf 'muse\n'; return 0 ;;
+  esac
+  return 1
+}
+
+fm_tmux_foreground_harness_name() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args name
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+    if name=$(fm_tmux_harness_process_name "$comm" "$args" 2>/dev/null); then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
+}
+
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
-# separated (pi) composer shape, tmux's analogue of herdr's native
-# `agent get`. It answers only for pi, from two live signals:
+# separated Pi and half-box Copilot composer shapes, tmux's analogue of herdr's native
+# `agent get`. It answers for Pi and Copilot from live foreground identity:
 #   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
 #     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
 #     process (pi, pi-signed, pi-launcher - docs/verification/
@@ -95,33 +126,33 @@ fm_tmux_composer_caps() {
 #     agent died to a shell has no pi foreground process and gets NO identity,
 #     which is exactly what keeps the strict blank-row rule honest: a blank
 #     row between two stale rules stays unknown.
-#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
+#   - status: Pi's verified busy footer via fm_pane_is_busy, mapped onto the
 #     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+# Copilot needs only a live identity because the complete half-box proves its
+# composer boundary.
+# Prints "pi<TAB>idle", "pi<TAB>working", or "copilot<TAB>present"; exits 1
+# when neither live identity is present.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
-  case "$tty" in
-    /dev/*)
-      while read -r _ pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=1 ;;
-        esac
-      done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-      ;;
-  esac
-  if [ "$found" -ne 1 ]; then
-    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
-    case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=1 ;;
+  local target=$1 comm found='' status
+  if found=$(fm_tmux_foreground_harness_name "$target" 2>/dev/null); then
+    case "$found" in
+      pi|pi-signed) found=pi ;;
+      copilot) ;;
+      *) found='' ;;
     esac
   fi
-  [ "$found" -eq 1 ] || return 1
+  if [ -z "$found" ]; then
+    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+    case "${comm##*/}" in
+      pi|pi-signed|pi-launcher|Pi) found=pi ;;
+      copilot) found=copilot ;;
+    esac
+  fi
+  [ -n "$found" ] || return 1
+  if [ "$found" = copilot ]; then
+    printf 'copilot\tpresent'
+    return 0
+  fi
   status=$(fm_pane_busy_state "$target" pi)
   case "$status" in
     busy) printf 'pi\tworking' ;;
@@ -135,7 +166,7 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor), so the common read never pays
+# it (a Pi separator pair or Copilot half-box), so the common read never pays
 # for the process probe.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
@@ -150,17 +181,20 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  # Cursor Agent CLI parks its terminal cursor OUTSIDE its composer, below the
-  # footer, with #{cursor_flag} 0 - so on a Cursor pane tmux's cursor row is not
-  # a composer locator and the cursor-anchored read can only ever answer
-  # `unknown`. Reclassify that pane the way every cursorless backend already
-  # classifies it, letting the bottom-most shape win, which is the same rule
-  # herdr, zellij, cmux, and orca use for every harness including this one.
-  # Gated on Cursor's own structural process identity, never on the verdict
-  # alone, so the strict blank-row posture that owns `unknown` for every other
-  # harness is untouched.
-  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
+  # Cursor and Copilot park the terminal cursor outside their composers, so the
+  # cursor-anchored read can only answer `unknown`. Reclassify cursorlessly only
+  # after proving one of those exact foreground identities. Copilot's half-box
+  # emptiness still requires the identity on the classifier's second pass.
+  if [ "$verdict" = unknown ] \
+     && { fm_tmux_pane_is_cursor "$target" || fm_tmux_pane_is_copilot "$target"; }; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+    if [ "$verdict" = need-identity ]; then
+      if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
+        identity=probe-absent
+      fi
+      verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+      [ "$verdict" != need-identity ] || verdict=unknown
+    fi
   fi
   printf '%s' "$verdict"
 }
@@ -173,20 +207,14 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # matches fm_tmux_composer_identity, so a pane whose agent exited to a shell has
 # no Cursor foreground process and gets no reclassification.
 fm_tmux_pane_is_cursor() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
-  case "$tty" in /dev/*) ;; *) return 1 ;; esac
-  while read -r pid pgid tpgid comm; do
-    [ -n "$comm" ] || continue
-    [ "$pgid" = "$tpgid" ] || continue
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-    args=${args#"${args%%[![:space:]]*}"}
-    argv0=${args%%[[:space:]]*}
-    fm_cursor_process_matches "$comm" '' "$argv0" && return 0
-  done <<EOF
-$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
-EOF
-  return 1
+  [ "$(fm_tmux_foreground_harness_name "$1" 2>/dev/null || true)" = cursor ]
+}
+
+fm_tmux_pane_is_copilot() {  # <target>
+  local comm
+  [ "$(fm_tmux_foreground_harness_name "$1" 2>/dev/null || true)" = copilot ] && return 0
+  comm=$(tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null) || comm=
+  [ "$(fm_tmux_harness_process_name "$comm" "$comm" 2>/dev/null || true)" = copilot ]
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending

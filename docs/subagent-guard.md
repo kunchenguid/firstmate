@@ -167,6 +167,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 - Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
 - `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.
   This is the same verified quirk recorded in [`arm-pretool-check.md`](arm-pretool-check.md), and the tracked Claude hook therefore passes `--claude`.
+- `--copilot` returns Copilot's native `{"permissionDecision":"deny","permissionDecisionReason":"[subagent-dispatch] ..."}` object on stdout and exits 0.
 - Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with exit 0 and no output.
 
 The deny message names the real dispatch path.
@@ -180,11 +181,19 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
+| GitHub Copilot CLI | Built-in `task` and related agent tools | Scoped native `preToolUse` guard wired; the current `task` tool and future delegation-shaped names reach the shared classifier. |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+### GitHub Copilot CLI
+
+Copilot exposes built-in subagent tools, including the current `task` tool.
+Tracked `.github/hooks/fm-primary.json` matches every `preToolUse` event and forwards the native camelCase `toolName` field to the shared classifier with `--copilot`.
+The classifier remains scoped to a genuine Firstmate primary, so Copilot workers in linked task worktrees may use their own subagents while a primary must dispatch through Firstmate's durable path.
+`tests/fm-copilot-harness.test.sh` and `tests/fm-subagent-pretool-check.test.sh` cover the registration and payload transport.
 
 ### Codex, verified not applicable
 
@@ -347,7 +356,7 @@ Result: the Workflow tool call was NOT blocked by a hook. It launched and ran to
 ### Empty-stdout requirement
 
 A Claude deny is honored only when the hook's stdout is empty.
-`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on every `--claude` deny and that default mode still emits the Grok object on stdout.
+`tests/fm-subagent-pretool-check.test.sh` asserts stdout is empty on every `--claude` deny, that `--copilot` returns Copilot's native stdout deny object and exit 0, and that default mode still emits the Grok object on stdout.
 The live consequence is confirmed by the shipped-guard result above: Claude honored the deny and reported the reason text.
 
 ## Automated validation

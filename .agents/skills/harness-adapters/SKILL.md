@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
+  Contains verified facts for claude, codex, copilot, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -39,7 +39,7 @@ Muse and Gemini are verified only for crewmate and scout work, never a secondmat
 
 ## Detection
 
-`../../../bin/fm-harness.sh` prints firstmate's own harness from verified environment markers, then process ancestry.
+`../../../bin/fm-harness.sh` prints firstmate's own harness from the nearest verified process ancestry first, then falls back to harness markers only when ancestry cannot prove the host.
 Only `FM_PI_HARNESS=pi-signed` at the launch boundary together with `PI_CODING_AGENT=true` selects Pi-signed; shared unmarked launcher ancestry remains Pi.
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
 `../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
@@ -83,6 +83,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
   "harnesses": {
     "claude": "references/harness/claude.md",
     "codex": "references/harness/codex.md",
+    "copilot": "references/harness/copilot.md",
     "opencode": "references/harness/opencode.md",
     "pi": "references/harness/pi.md",
     "pi-signed": "references/harness/pi.md",

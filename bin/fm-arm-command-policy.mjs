@@ -29,7 +29,11 @@ const REASONS = {
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", mode: "decision" };
+  if (argv[0] === "watcher-arm") {
+    result.mode = "watcher-arm";
+    argv = argv.slice(1);
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
     if (name === "--command" || name === "--root" || name === "--home") {
@@ -899,6 +903,29 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
+function resolvedCommandPath(value, cwd) {
+  if (!value) return "";
+  return path.normalize(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+}
+
+export function isBlessedWatcherArmCommand(command, root, home) {
+  if (!command || !root || !home) return false;
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+  const analysis = analyzeProgram(command, context);
+  if (analysis.error || !blessedProgram(analysis, context)) return false;
+  if (analysis.nodeInfos.at(-1)?.protectedKind !== "arm") return false;
+  if (analysis.nodeInfos.at(-1)?.position.wrappers.length !== 1 || analysis.nodeInfos.at(-1)?.position.wrappers[0] !== "exec") return false;
+
+  const setup = analysis.nodeInfos.slice(0, -1).map((info) => setupKind(info, context));
+  if (setup.some((kind) => kind !== "source" && kind !== "test-source")) return false;
+  for (let i = 0; i < setup.length; i += 1) {
+    if (setup[i] !== "test-source") continue;
+    if (setup[i + 1] !== "source" || analysis.program.separators[i] !== "&&") return false;
+    i += 1;
+  }
+  return resolvedCommandPath(analysis.nodeInfos.at(-1)?.position.command?.value, context.root) === path.join(context.root, "bin/fm-watch-arm.sh");
+}
+
 function decision(command, root, home) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
@@ -943,7 +970,9 @@ if (invokedDirectly()) {
   try {
     const args = parseArguments(process.argv.slice(2));
     if (!args.root || !args.home) throw new Error("--root and --home are required");
-    if (!args.command) {
+    if (args.mode === "watcher-arm") {
+      process.stdout.write(isBlessedWatcherArmCommand(args.command, args.root, args.home) ? "watch-arm\n" : "other\n");
+    } else if (!args.command) {
       process.stdout.write("allow\n");
     } else {
       const result = decision(args.command, args.root, args.home);

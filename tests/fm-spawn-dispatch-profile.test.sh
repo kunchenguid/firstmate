@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -150,6 +150,22 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+test_non_copilot_launch_clears_inherited_copilot_markers() {
+  local rec id out status launch
+  id=profile-claude-copilot-markers-z1c
+  rec=$(make_spawn_case profile-claude-copilot-markers claude "$id")
+  read_case_record "$rec"
+
+  out=$(COPILOT_CLI=1 COPILOT_AGENT_SESSION_ID=s1 COPILOT_LOADER_PID=42 COPILOT_CLI_BINARY_VERSION=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn under Copilot markers should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION" \
+    "non-copilot launch must clear inherited Copilot identity markers"
+  pass "non-copilot launches clear inherited Copilot identity markers"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -488,6 +504,208 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
+test_copilot_threads_autonomy_model_and_effort() {
+  local rec id out status launch hooks hook_cmd
+  id=profile-copilot-z6c
+  rec=$(make_spawn_case profile-copilot copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with model and max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "copilot --allow-all --no-ask-user --model 'gpt-5.6-sol' --effort 'max' -i" \
+    "copilot launch did not carry autonomy, model, effort, and interactive prompt flags"
+  assert_contains "$launch" "env -u CLAUDECODE -u CLAUDE_PROJECT_DIR -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
+    "copilot launch did not clear foreign primary markers"
+  assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  assert_present "$hooks" "copilot spawn did not install the worker lifecycle hook"
+  assert_present "$HOME_DIR/state/$id.busy-gen" "copilot crew spawn did not arm the busy-state contract"
+  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "copilot userPromptSubmitted worker hook failed"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
+    "copilot userPromptSubmitted hook did not open semantic busy state"
+  assert_grep 'session=parent' "$HOME_DIR/state/$id.copilot-session" \
+    "copilot hook did not latch the parent session"
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "copilot agentStop worker hook failed"
+  assert_present "$HOME_DIR/state/$id.turn-ended" "copilot agentStop hook did not touch the notification marker"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=idle source=copilot-hook" \
+    "copilot agentStop hook did not settle semantic busy state"
+  pass "copilot launch and generated worker hooks carry the complete adapter contract"
+}
+
+test_copilot_launch_clears_inherited_claude_project_dir() {
+  local rec id out status launch stale_root
+  id=profile-copilot-claude-project-dir-z6h
+  rec=$(make_spawn_case profile-copilot-claude-project-dir copilot "$id")
+  read_case_record "$rec"
+  stale_root="$CASE_DIR/other-worktree"
+  mkdir -p "$stale_root"
+
+  out=$(CLAUDE_PROJECT_DIR="$stale_root" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn under inherited CLAUDE_PROJECT_DIR should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CLAUDECODE -u CLAUDE_PROJECT_DIR" \
+    "copilot launch did not clear the inherited Claude project root"
+  assert_not_contains "$launch" "$stale_root" \
+    "copilot launch leaked the spawning Claude worktree into the worker command"
+  pass "copilot launch clears inherited Claude project roots before entering another worktree"
+}
+
+test_copilot_preserves_repository_owned_hook_files() {
+  local id=profile-copilot-repo-hooks-z6d out status hooks
+  CASE_DIR="$TMP_ROOT/profile-copilot-repo-hooks"
+  HOME_DIR="$CASE_DIR/home"
+  PROJ_DIR="$CASE_DIR/project"
+  WT_DIR="$CASE_DIR/wt"
+  LAUNCH_LOG="$CASE_DIR/launch.log"
+  FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+  fm_test_spawn_home "$HOME_DIR" copilot
+  fm_git_init_commit "$PROJ_DIR"
+  mkdir -p "$PROJ_DIR/.github/hooks" "$PROJ_DIR/.claude"
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[]}}' > "$PROJ_DIR/.github/hooks/fm-busy-state.json"
+  printf '%s\n' '{"hooks":{"Stop":[]}}' > "$PROJ_DIR/.claude/settings.json"
+  git -C "$PROJ_DIR" add .github/hooks/fm-busy-state.json .claude/settings.json
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+  fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-copilot-repo-hooks "$WT_DIR"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn beside repository-owned hook files should succeed"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  assert_present "$hooks" "copilot spawn did not install its task-specific worker hook"
+  [ "$(cat "$WT_DIR/.github/hooks/fm-busy-state.json")" = '{"version":1,"hooks":{"sessionStart":[]}}' ] \
+    || fail "copilot spawn rewrote the repository-owned hook file"
+  [ "$(cat "$WT_DIR/.claude/settings.json")" = '{"hooks":{"Stop":[]}}' ] \
+    || fail "copilot spawn rewrote the repository-owned Claude settings"
+  pass "copilot spawn preserves repository-owned Copilot and Claude config files"
+}
+
+test_copilot_exact_worker_hook_collision_refuses() {
+  local id=profile-copilot-collision-z6e out status hooks
+  CASE_DIR="$TMP_ROOT/profile-copilot-collision"
+  HOME_DIR="$CASE_DIR/home"
+  PROJ_DIR="$CASE_DIR/project"
+  WT_DIR="$CASE_DIR/wt"
+  LAUNCH_LOG="$CASE_DIR/launch.log"
+  FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+  fm_test_spawn_home "$HOME_DIR" copilot
+  fm_git_init_commit "$PROJ_DIR"
+  mkdir -p "$PROJ_DIR/.github/hooks"
+  hooks="$PROJ_DIR/.github/hooks/fm-busy-state-$id.json"
+  printf '%s\n' '{"preexisting":true}' > "$hooks"
+  git -C "$PROJ_DIR" add .github/hooks
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+  fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-copilot-collision "$WT_DIR"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "copilot spawn should refuse an exact owned-hook collision"
+  assert_contains "$out" "refusing to overwrite existing Firstmate Copilot worker hook" \
+    "copilot collision refusal lost its explanation"
+  [ "$(cat "$hooks")" = '{"preexisting":true}' ] || fail "copilot collision refusal rewrote the existing hook"
+  [ ! -s "$LAUNCH_LOG" ] || fail "copilot collision refusal still launched the worker"
+  pass "copilot spawn refuses only its exact owned hook filename"
+}
+
+test_copilot_worker_hook_rejects_symlink_paths() {
+  local case_name id out status hooks target
+  for case_name in github-symlink hooks-symlink hook-symlink; do
+    id="profile-copilot-$case_name-z6g"
+    CASE_DIR="$TMP_ROOT/$case_name"
+    HOME_DIR="$CASE_DIR/home"
+    PROJ_DIR="$CASE_DIR/project"
+    WT_DIR="$CASE_DIR/wt"
+    LAUNCH_LOG="$CASE_DIR/launch.log"
+    FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+    fm_test_spawn_home "$HOME_DIR" copilot
+    fm_git_init_commit "$PROJ_DIR"
+    target="$CASE_DIR/foreign-target"
+    case "$case_name" in
+      github-symlink)
+        mkdir -p "$CASE_DIR"
+        ln -s "$target" "$PROJ_DIR/.github"
+        ;;
+      hooks-symlink)
+        mkdir -p "$PROJ_DIR/.github"
+        ln -s "$target" "$PROJ_DIR/.github/hooks"
+        ;;
+      hook-symlink)
+        mkdir -p "$PROJ_DIR/.github/hooks"
+        ln -s "$target" "$PROJ_DIR/.github/hooks/fm-busy-state-$id.json"
+        ;;
+    esac
+    git -C "$PROJ_DIR" add .github
+    git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+    fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+    git -C "$PROJ_DIR" worktree add --quiet -b "wt-$case_name" "$WT_DIR"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    [ "$status" -ne 0 ] || fail "copilot spawn should refuse $case_name"
+    assert_contains "$out" "Copilot worker hook" "symlink refusal for $case_name lost its hook-path explanation"
+    [ ! -s "$LAUNCH_LOG" ] || fail "copilot symlink refusal for $case_name still launched the worker"
+    [ -L "$hooks" ] || [ "$case_name" != hook-symlink ] || fail "hook symlink refusal rewrote the broken symlink"
+  done
+  pass "copilot spawn rejects symlinked hook paths before writing"
+}
+
+test_copilot_worker_hooks_ignore_foreign_sessions() {
+  local rec id out status hooks hook_cmd
+  id=profile-copilot-child-z6f
+  rec=$(make_spawn_case profile-copilot-child copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn with child-session regression fixture should succeed"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "parent userPromptSubmitted hook failed"
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"child"}' | sh -c "$hook_cmd" || fail "child agentStop hook failed"
+  assert_absent "$HOME_DIR/state/$id.turn-ended" "child agentStop should not touch the notification marker"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
+    "child agentStop should not settle the parent's busy state"
+  pass "copilot worker hooks ignore foreign child sessions"
+}
+
+test_copilot_secondmate_skips_task_worker_hook_and_busy_gen() {
+  local rec id sm out status hooks
+  id=profile-copilot-secondmate-z6i
+  rec=$(make_spawn_case profile-copilot-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' copilot > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "copilot secondmate spawn should succeed without task-specific worker hooks"
+  assert_contains "$out" "spawned $id harness=copilot kind=secondmate" \
+    "copilot secondmate spawn did not preserve the resolved harness and kind"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot default default
+  hooks="$sm/.github/hooks/fm-busy-state-$id.json"
+  assert_absent "$hooks" "copilot secondmate spawn must not install a task-specific worker hook"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "copilot secondmate spawn must not arm a task busy generation"
+  pass "copilot secondmate skips task-specific worker hooks while crew spawns keep them"
+}
+
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
   local rec id out status launch
   id=profile-cursor-z6c
@@ -739,7 +957,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -797,6 +1015,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_non_copilot_launch_clears_inherited_copilot_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
@@ -812,6 +1031,13 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_copilot_threads_autonomy_model_and_effort
+test_copilot_launch_clears_inherited_claude_project_dir
+test_copilot_preserves_repository_owned_hook_files
+test_copilot_exact_worker_hook_collision_refuses
+test_copilot_worker_hook_rejects_symlink_paths
+test_copilot_worker_hooks_ignore_foreign_sessions
+test_copilot_secondmate_skips_task_worker_hook_and_busy_gen
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

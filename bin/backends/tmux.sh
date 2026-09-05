@@ -172,7 +172,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|copilot|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -320,6 +320,11 @@ fm_backend_tmux_agent_state() {  # <target>
   fi
   if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
     printf 'missing'
+    return 0
+  fi
+
+  if fm_tmux_foreground_harness_name "$target" >/dev/null 2>&1; then
+    printf 'alive'
     return 0
   fi
 

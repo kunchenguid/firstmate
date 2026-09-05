@@ -318,6 +318,16 @@ test_codex_unverified_gate() {
   pass "codex classifies unknown until a semantic source passes its verification gate"
 }
 
+test_copilot_lifecycle_source_is_trusted() {
+  local state gen out
+  state=$(new_state_dir copilot-source)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source copilot-hook --event agent-stop
+  out=$(fm_busy_classify tmux w1 copilot t1 "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "copilot lifecycle record classified as '$out'"
+  pass "copilot lifecycle hooks provide trusted semantic busy state"
+}
+
 test_kimi_unverified_gate() {
   local state gen out
   state=$(new_state_dir kimi-gate)
@@ -455,6 +465,7 @@ test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
+test_copilot_lifecycle_source_is_trusted
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
