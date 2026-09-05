@@ -908,22 +908,24 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     # happens to be running from. The guard also reports a tangled primary
     # checkout, so without this the branch a contributor is working on decides
     # whether this assertion passes.
+    # fm-guard no longer prints anything about watcher liveness, so the model a
+    # secondmate resolves for itself is read from the predicate that owns it
+    # rather than inferred from banner text.
     cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
-FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
+FM_ROOT_OVERRIDE="$sm" FM_STATE_OVERRIDE="$sm/state" bash -c '. "\$1"; fm_supervision_model' _ "$ROOT/bin/fm-wake-lib.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
-        expected='WATCHER DOWN - SUPERVISION IS OFF'
-        assert_contains "$out" "$expected" \
+        assert_contains "$out" "persistent" \
           "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
         ;;
       claude)
-        [ -z "$out" ] \
-          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+        assert_contains "$out" "autoarm" \
+          "Claude secondmate did not resolve the Stop auto-arm supervision model"
         ;;
     esac
   done

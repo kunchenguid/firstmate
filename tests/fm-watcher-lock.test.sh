@@ -117,53 +117,35 @@ test_live_stale_watch_lock_is_actionable() {
 }
 
 test_guard_warnings() {
-  # The guard's two operator-visible states, with resilient substrings instead of
-  # four copy-coupled tests:
-  #   (1) watcher DOWN + queued wakes: a prominent no-watcher banner leads (alarm
-  #       title, in-flight count, beacon age, fix command), the queued-wakes
-  #       warning follows it, and the guidance is repair-after-drain (never the
-  #       old conflicting "restart NOW first").
-  #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line pid identity
+  # The guard no longer reports watcher liveness at all: the passive
+  # "WATCHER DOWN - SUPERVISION IS OFF" banner was removed for every supervision
+  # model after the 2026-09-04 investigation showed it could not tell a working
+  # watcher from a stopped one. What this case pins now is that the removal was
+  # complete and did not take the independent queued-wakes warning with it:
+  #   (1) watcher down + queued wakes: the queue warning is the ONLY output, and
+  #       nothing describes watcher liveness, beacon age or supervision repair.
+  #   (2) a fresh watcher and an empty queue: total silence, as before.
+  local dir state err pid identity
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
 
   # (1) watcher down (no beacon) + two in-flight tasks + a queued wake.
   # FM_ROOT_OVERRIDE points the worktree-tangle check at a non-git dir so it stays
-  # inert here; this case is about the watcher-down banner, not the tangle guard.
-  # Pin Claude so the host test runner's harness ancestry cannot change this fixture.
+  # inert here. Pin Claude so the host runner's harness ancestry cannot change it.
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
-  case "$first" in
-    '●'*) ;;
-    *) fail "no-watcher banner is not the first thing the guard prints (got '$first')" ;;
-  esac
-  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
-  grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
-  grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
-  grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
-  ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard banner missing neutral automatic-recovery guidance"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard did not order neutral automatic recovery after drain"
-  ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
-  ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
-  banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
-  queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
-  [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
-
-  dir=$(make_case guard-xmode)
-  state="$dir/state"
-  err="$dir/guard.err"
-  mkdir -p "$dir/config"
-  printf 'project=x\n' > "$state/task.meta"
-  : > "$dir/config/x-mode.env"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "the removed watcher banner is back"
+  ! grep -F 'SUPERVISION IS OFF' "$err" >/dev/null || fail "the removed supervision-off text is back"
+  ! grep -F 'task(s) in flight' "$err" >/dev/null || fail "guard still reports an in-flight count for watcher liveness"
+  ! grep -F 'last beat' "$err" >/dev/null || fail "guard still reports beacon age"
+  ! grep -F 'watcher still down' "$err" >/dev/null || fail "the removed episode reminder is back"
+  # The queue warning must be the whole of it: one non-blank line.
+  [ "$(grep -c -v '^[[:space:]]*$' "$err")" -eq 1 ] \
+    || fail "guard printed more than the queued-wakes warning: $(cat "$err")"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)
@@ -179,13 +161,13 @@ test_guard_warnings() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
-  # total silence" stays a pure assertion about watcher state.
+  # Non-git FM_ROOT keeps the worktree-tangle check inert so this stays a pure
+  # assertion about guard output.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
+  pass "guard reports no watcher liveness, keeps the queued-wakes warning, and stays silent when live and fresh"
 }
 
 test_lock_single_winner_under_concurrency() {

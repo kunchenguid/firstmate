@@ -5,49 +5,43 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and supervision is not
-# healthy, prints a loud, clearly delimited banner so the agent cannot skim past
-# it in the tool output of whatever it was doing - the one channel every harness
-# has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
-# bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under the Pi
-# extension model the extension tears the watcher down and respawns it on every
-# actionable wake, so a fresh beacon with a genuinely unheld lock is healthy
-# while that live Pi session provably owns continuity; any held but unhealthy
-# lock is down; under every
-# persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
-# per distinct down-episode in this FM_HOME (keyed to the failing condition, not
-# the beacon mtime, which a healthy between-turns watcher advances every poll);
-# later guarded commands in the same episode print a one-line reminder instead.
-# Episode state lives only under state/.guard-watcher-stale-banner (volatile,
-# bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
-# wake and the next supervision resume) stays inside the grace window and stays
-# silent. The queued-wakes warning stays silent for the supervision branch
-# actor (FM_SUPERVISION_ACTOR=branch), because that actor runs guarded commands
-# while handling exactly the queued rows its grant covers and can drain nothing
-# else. Always exits 0: the guard warns, it never blocks.
+# This guard does NOT report watcher liveness. It used to print a bordered
+# "WATCHER DOWN - SUPERVISION IS OFF" banner whenever supervision looked
+# unhealthy while work was in flight, and that output was removed outright
+# rather than made smarter, because it could not tell a working watcher from a
+# stopped one. Under the Claude Stop auto-arm model the watcher runs only
+# BETWEEN turns, so mid-turn there is legitimately no live watcher and the
+# beacon legitimately ages: the banner was a false alarm in essentially every
+# printing. The 2026-09-04 supervision investigation measured one session in
+# which it printed 21 times, was correct none of those times, and had led to 72
+# of that session's 179 commands being wrapped in a filter to hide it - which
+# also hid the independent queued-wakes and worktree-tangle alarms below.
+# Nothing replaces it here: no conditional banner, no ledger tripwire, and no
+# mid-turn repair. The cost is accepted deliberately - if supervision genuinely
+# stops, this guard stays silent about it.
+#
+# What still protects supervision is unchanged and lives elsewhere:
+# bin/fm-turnend-guard.sh refuses to let a turn end blind, the auto-arm emits
+# its own once-per-episode failure notice, and the /afk daemon supervises
+# independently while away. Those are turn-boundary safeguards, not passive
+# warnings, and this change does not touch them.
+#
+# What this guard still does: the worktree-tangle alarm above, and the
+# queued-wakes warning below. Both are independent of watcher liveness and were
+# never part of the banner. The queued-wakes warning stays silent for the
+# supervision branch actor (FM_SUPERVISION_ACTOR=branch), because that actor
+# runs guarded commands while handling exactly the queued rows its grant covers
+# and can drain nothing else. Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-WATCH="$SCRIPT_DIR/fm-watch.sh"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
-CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
-
-# Volatile, home-scoped episode marker: one line = the current stale-episode key.
-# Cleared when the home leaves the unhealthy state so a later episode re-arms.
-STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -61,74 +55,6 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 # The current actor (fm_lease_actor is the one owner of that identity); a
 # malformed value is a wiring bug elsewhere, so the guard just warns as main.
 GUARD_ACTOR=$(fm_lease_actor 2>/dev/null) || GUARD_ACTOR=main
-
-# Deterministic episode key from the qualitative down-state (the failing
-# condition), NOT the beacon mtime: under the auto-arm model a healthy
-# between-turns watcher advances that mtime every poll, which made the "same
-# episode" key change every turn and re-print the full banner. Keying on the
-# failing condition keeps one continuous down-episode stable, while positive
-# recovery clears the marker (below) and re-arms the next episode.
-fm_guard_stale_episode_key() {
-  printf '%s\n' "$1"
-}
-
-# Claim the full banner for this episode. Exit 0 = print full banner (this call
-# owns the first announcement). Exit 1 = same episode already announced (print
-# reminder). The shared wake lock helper owns the race-safety mechanics; the
-# re-check under the lock makes concurrent claims idempotent.
-fm_guard_claim_stale_banner() {
-  local state=$1 key=$2
-  local marker="$state/.guard-watcher-stale-banner"
-  local lock="$state/.guard-watcher-stale-banner.lock"
-  local seen i
-
-  seen=$(cat "$marker" 2>/dev/null || true)
-  # Strip a single trailing newline so key comparison is line-content based.
-  seen=${seen%$'\n'}
-  if [ "$seen" = "$key" ]; then
-    return 1
-  fi
-
-  i=0
-  while [ "$i" -lt 50 ]; do
-    if fm_lock_try_acquire "$lock"; then
-      seen=$(cat "$marker" 2>/dev/null || true)
-      seen=${seen%$'\n'}
-      if [ "$seen" = "$key" ]; then
-        fm_lock_release "$lock" 2>/dev/null || true
-        return 1
-      fi
-      # Bounded write: one line, no growth across episodes (overwrite).
-      printf '%s\n' "$key" > "$marker" || true
-      fm_lock_release "$lock" 2>/dev/null || true
-      return 0
-    fi
-    seen=$(cat "$marker" 2>/dev/null || true)
-    seen=${seen%$'\n'}
-    if [ "$seen" = "$key" ]; then
-      return 1
-    fi
-    # Brief yield; 0.02s is fine on macOS/Linux sleep, fall back to 1s.
-    sleep 0.02 2>/dev/null || sleep 1
-    i=$((i + 1))
-  done
-  # Contended past the spin budget: stay loud rather than dropping the alarm.
-  return 0
-}
-
-fm_guard_stale_banner_seen() {
-  local state=$1 key=$2
-  local marker="$state/.guard-watcher-stale-banner"
-  local seen
-
-  seen=$(cat "$marker" 2>/dev/null || true)
-  seen=${seen%$'\n'}
-  [ "$seen" = "$key" ]
-}
-
-fm_guard_clear_stale_banner() {
-  rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
-}
 
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
@@ -157,90 +83,22 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute supervision need and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
-# source, or an X-mode relay poll needs supervision.
+# Compute supervision need via the shared grace-based predicate
+# (bin/fm-supervision-lib.sh). The guard needs only to know whether ANYTHING is
+# riding on supervision, so it can decide whether a pending wake queue is worth
+# warning about. It deliberately does NOT ask whether a watcher is alive: see
+# the header for why that question was removed rather than refined.
 fm_supervision_status "$STATE" "$GRACE"
-in_flight=$FM_SUP_IN_FLIGHT
-sources=$FM_SUP_SOURCES
 needed=$FM_SUP_NEEDED
-beacon_desc=$FM_SUP_BEACON_DESC
-fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
-watcher_healthy=$FM_WATCHER_VERDICT_OK
-watcher_down_reason=$FM_WATCHER_VERDICT_REASON
 if [ "$needed" = false ]; then
-  # Leave the unhealthy state (nothing riding on the watcher): clear so a later
-  # work or X-mode need + stale combination is a fresh episode even if the
-  # beacon is still absent with the same key string.
-  [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
-if [ "$watcher_healthy" = false ]; then
-  episode_key=$(fm_guard_stale_episode_key "$watcher_down_reason")
-  episode_key=${episode_key%$'\n'}
-  print_full_banner=0
-  if [ "$READ_ONLY" -eq 1 ]; then
-    fm_guard_stale_banner_seen "$STATE" "$episode_key" || print_full_banner=1
-  elif fm_guard_claim_stale_banner "$STATE" "$episode_key"; then
-    print_full_banner=1
-  fi
-  if [ "$print_full_banner" -eq 1 ]; then
-    afk=0
-    [ -e "$STATE/.afk" ] && afk=1
-    queue_arg=0
-    "$queue_pending" && queue_arg=1
-    x_mode=0
-    [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-    fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
-      --read-only "$READ_ONLY" \
-      --afk "$afk" \
-      --x-mode "$x_mode" \
-      --queue-pending "$queue_arg" \
-      --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
-    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-    {
-      printf '●%s\n' "$rule"
-      printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
-        watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
-      else
-        watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
-      fi
-      if [ "$in_flight" -gt 0 ]; then
-        printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
-      elif [ "$sources" -gt 0 ]; then
-        printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
-      else
-        printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
-      fi
-      if [ "$READ_ONLY" -eq 1 ]; then
-        printf '●  This read-only session should report the lapse, not repair it.\n'
-      else
-        printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
-      fi
-      printf '●  %s\n' "$CONTINUE_LINE"
-      printf '●  %s\n' "$fix"
-      printf '●%s\n' "$rule"
-    } >&2
-  else
-    printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
-      "$beacon_desc" "$GRACE" >&2
-  fi
-else
-  # Healthy again while work is still in flight: end the episode so a later
-  # restale re-prints the full banner.
-  [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
-fi
-
-# Queued wakes are an independent hazard; warn whenever they are pending, even if
-# a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
-# Dedup of the watcher-down banner never suppresses this warning.
+# Queued wakes are an independent hazard, unrelated to watcher liveness: warn
+# whenever they are pending. This warning predates the removed watcher banner
+# and is deliberately untouched by that removal.
 # The supervision branch is the exception: it runs guarded commands (fm-peek,
 # fm-crew-state) in the middle of handling the very rows that are queued, and
 # "drain them before anything else" mid-handling reads as "an earlier wake is
