@@ -166,8 +166,8 @@
 # lifecycle without necessarily touching the task's status log, so a consumer
 # that bounds repeated work per call cannot use the task id alone.
 # bin/fm-teardown.sh asks it before its automatic
-# backlog close and, on 0, returns the row to Queued instead
-# (bin/fm-backlog-transition-lib.sh owns that transition), so
+# backlog close and, on 0, returns the row to Queued with its deliverable
+# recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
 # captain's words or evidence-backed `reconcile close` closes the call.
 # bin/fm-watch.sh asks it when an ordinary
