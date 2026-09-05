@@ -170,7 +170,12 @@ EOF
 
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), and a relaunch reaches it through fm-control.sh, so this runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -185,7 +190,12 @@ run_control() {  # <case-dir> <args...>
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -312,6 +322,44 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_from_linked_home_preserves_recorded_worktree() {
+  local dir out rc head fetch_head
+  dir=$(new_case linked-home rl42)
+  add_ship_task "$dir" rl42 claude
+  git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
+  sed "s|^project=.*|project=$dir/secondmate|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
+  mv "$dir/linked.meta" "$dir/home/state/rl42.meta"
+  printf 'committed task work\n' > "$dir/wt/task.txt"
+  git -C "$dir/wt" add task.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-work
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'unfinished task work\n' >> "$dir/wt/task.txt"
+  fetch_head=$(git -C "$dir/wt" rev-parse --git-path FETCH_HEAD)
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue from linked home"); rc=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: linked-home relaunch\n'
+    printf '$ bin/fm-control.sh rl42 relaunch --note "continue from linked home"\n%s\nexit=%s\n' "$out" "$rc"
+    printf 'worker HEAD before=%s after=%s\n' "$head" "$(git -C "$dir/wt" rev-parse HEAD)"
+    printf 'saved task metadata:\n'; cat "$dir/home/state/rl42.meta"
+    printf 'worker status:\n'; git -C "$dir/wt" status --short
+    printf 'preserved task.txt:\n'; cat "$dir/wt/task.txt"
+    if [ -e "$fetch_head" ]; then
+      printf 'worker FETCH_HEAD:\n'; cat "$fetch_head"
+    else
+      printf 'worker FETCH_HEAD absent\n'
+    fi
+    printf '# evidence end\n'
+  fi
+  expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
+  [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
+  assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
+  [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
+  pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1485,6 +1533,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

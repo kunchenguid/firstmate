@@ -204,6 +204,13 @@ cpu_count() {
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
 # unclassified so new tests are still runnable and visible in summaries.
+#
+# `standalone` is the residual family: scripts that belong to no subsystem
+# family above but each own their own surface. Its membership is enumerated
+# rather than inherited from the `*)` catch-all precisely because the catch-all
+# also swallows every test nobody has classified yet. Keeping the two separate
+# is what lets `standalone` carry a concurrent proof while a brand-new test
+# lands in `unclassified` and stays serial until someone proves it.
 family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
@@ -240,6 +247,7 @@ family_for_basename() {
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
+    fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
@@ -265,6 +273,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
@@ -274,6 +283,7 @@ family_for_basename() {
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -286,7 +296,7 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -310,6 +320,21 @@ family_for_basename() {
       ;;
     fm-backend-orca.test.sh)
       printf '%s\n' orca
+      ;;
+    fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
+    fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
+    fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
+    fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
+    fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
+    fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
+    fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
+    fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
+    fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
+    fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
+    fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
+    fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
+    fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
+      printf '%s\n' standalone
       ;;
     *)
       printf '%s\n' unclassified
@@ -342,6 +367,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+standalone
 unclassified
 EOF
 }
@@ -443,6 +469,9 @@ list_concurrent_safe_families() {
 watcher-wake-lock
 pure-contract-unit
 pr-forge
+secondmate
+session-bootstrap
+standalone
 EOF
 }
 
@@ -457,6 +486,7 @@ family_is_concurrent_safe() {
 concurrent_safe_family_jobs_max() {
   case "$1" in
     watcher-wake-lock|pure-contract-unit|pr-forge) printf '4\n' ;;
+    secondmate|session-bootstrap|standalone) printf '4\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -517,7 +547,6 @@ tests/fm-afk-return.test.sh 1837
 tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend-cmux-smoke.test.sh 33
 tests/fm-backend-cmux.test.sh 3657
-tests/fm-backend-herdr-focus-flash-e2e.test.sh 22
 tests/fm-backend-orca.test.sh 19253
 tests/fm-backend-tmux-smoke.test.sh 393
 tests/fm-backend-zellij-smoke.test.sh 23
@@ -578,6 +607,7 @@ tests/fm-peek-remote.test.sh 1018
 tests/fm-pending-reply.test.sh 24679
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
+tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pr-check-security.test.sh 160475
@@ -1211,6 +1241,35 @@ families_for_changed_path() {
       ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
+    .pi/extensions/lib/fm-branch-dispatch.ts)
+      # The portable suites that actually load these files, named one by one.
+      # Left unmapped, a Pi extension library resolves through the reference
+      # scan, which widens to each referencing suite's WHOLE family - and
+      # these suites sit in four different families, so that pulls in dozens
+      # of suites with nothing to do with Pi.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-wake-queue.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      # Whether an arriving outcome still lets the captain type is a fact only
+      # a real Pi TUI can answer, so the live guards are selected too.
+      printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/lib/fm-operational-input.ts)
+      # The same rule for the operational-input library, whose reach is wider:
+      # every Pi extension that classifies or encodes operational text.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
+      printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

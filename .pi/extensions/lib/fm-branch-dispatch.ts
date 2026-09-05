@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
 // dispatcher) and the supervision-branch extension (the handler), carried over
@@ -34,6 +34,15 @@ export interface UnreadWakeScope {
    */
   eligibleSeqs: string[];
   /**
+   * The exact task ids the eligible signal/stale rows name (a signal row by
+   * its status-log key, a stale row through the task metadata recording that
+   * endpoint). The branch may report only these tasks while it handles the
+   * wake; `fleet` or a task it merely remembers is refused (docs/
+   * pi-supervision-branch.md "Components and their owners"). Empty for a
+   * heartbeat, which is not scoped by task.
+   */
+  eligibleTasks: string[];
+  /**
    * True only when this scan itself is untrustworthy: the queue or its
    * metadata could not be read, a line fails the structural tab-field check,
    * or an unresolvable signal/stale row was found. False whenever the scan
@@ -47,8 +56,22 @@ export interface UnreadWakeScope {
   corrupted: boolean;
 }
 
-const EMPTY_SCOPE: UnreadWakeScope = { status: "empty", eligible: false, projects: [], eligibleSeqs: [], corrupted: false };
-const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, projects: [], eligibleSeqs: [], corrupted: true };
+const EMPTY_SCOPE: UnreadWakeScope = {
+  status: "empty",
+  eligible: false,
+  projects: [],
+  eligibleSeqs: [],
+  eligibleTasks: [],
+  corrupted: false,
+};
+const UNSAFE_SCOPE: UnreadWakeScope = {
+  status: "unsafe",
+  eligible: false,
+  projects: [],
+  eligibleSeqs: [],
+  eligibleTasks: [],
+  corrupted: true,
+};
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
 // (docs/pi-supervision-branch.md "Autonomy"; docs/watcher-continuity.md
@@ -92,6 +115,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
+  // The task id behind each key a signal or stale row may carry: the task id
+  // itself, or the endpoint its metadata records.
+  const taskByKey = new Map<string, string>();
   try {
     for (const name of readdirSync(state)) {
       if (!name.endsWith(".meta")) continue;
@@ -101,7 +127,11 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
       if (project) {
         metadata.set(task, project);
-        if (window) metadata.set(window, project);
+        taskByKey.set(task, task);
+        if (window) {
+          metadata.set(window, project);
+          taskByKey.set(window, task);
+        }
       }
     }
   } catch {
@@ -109,6 +139,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   }
 
   const eligibleSeqs: string[] = [];
+  const eligibleTasks = new Set<string>();
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -126,18 +157,21 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       continue;
     }
     let project = "";
+    let task = "";
     if (kind === "signal") {
-      const task = key.replace(/\.(?:status|turn-ended)$/, "");
+      task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
     } else if (kind === "stale") {
+      task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
       return UNSAFE_SCOPE;
     }
-    if (!project) return UNSAFE_SCOPE;
+    if (!project || !task) return UNSAFE_SCOPE;
     projects.add(project);
+    eligibleTasks.add(task);
     eligibleSeqs.push(seq);
   }
   const eligible = eligibleSeqs.length > 0;
@@ -148,7 +182,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   // empty eligible set, so reading eligibility off the claim set rather than
   // off the heartbeat flag changes no pre-existing outcome and keeps a
   // heartbeat from being offered with nothing to hand over.)
-  return { status: eligible ? "safe" : "unsafe", eligible, projects: [...projects], eligibleSeqs, corrupted: false };
+  return {
+    status: eligible ? "safe" : "unsafe",
+    eligible,
+    projects: [...projects],
+    eligibleSeqs,
+    eligibleTasks: [...eligibleTasks],
+    corrupted: false,
+  };
 }
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a
@@ -164,56 +205,63 @@ export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
 // actor acquired the requested rows.
 export type EligibleRowsSnapshotResult = "published" | "main-owned" | "error";
 
-function runGrantScript(state: string, grantScript: string, args: readonly string[]): number | null {
-  try {
-    const result = spawnSync("bash", [grantScript, ...args], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        FM_STATE_OVERRIDE: state,
-        FM_WAKE_QUEUE: `${state}/.wake-queue`,
-        FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
-      },
-    });
-    return result.status;
-  } catch {
-    return null;
-  }
+// Awaited rather than synchronous because every caller runs on the Pi thread
+// that draws the captain's TUI (lib/fm-async-exec.ts). The grant script itself
+// is unchanged, and so is each result: a null status still means the script
+// could not be run at all.
+async function runGrantScript(
+  state: string,
+  grantScript: string,
+  args: readonly string[],
+): Promise<number | null> {
+  const result = await runCommandAsync("bash", [grantScript, ...args], {
+    env: {
+      ...process.env,
+      FM_STATE_OVERRIDE: state,
+      FM_WAKE_QUEUE: `${state}/.wake-queue`,
+      FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
+    },
+  });
+  return result.status;
 }
 
-export function activateEligibleRowsOwner(
+export async function activateEligibleRowsOwner(
   state: string,
   grantScript: string,
   ownerPid: number,
   generation: string,
-): boolean {
-  return runGrantScript(state, grantScript, ["activate", String(ownerPid), generation]) === 0;
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["activate", String(ownerPid), generation])) === 0;
 }
 
-export function writeEligibleRowsSnapshot(
+export async function writeEligibleRowsSnapshot(
   state: string,
   seqs: readonly string[],
   grantScript: string,
   generation: string,
-): EligibleRowsSnapshotResult {
+): Promise<EligibleRowsSnapshotResult> {
   if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return "error";
-  const status = runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
+  const status = await runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
   if (status === 0) return "published";
   if (status === 3) return "main-owned";
   return "error";
 }
 
-export function releaseEligibleRowsSnapshot(state: string, grantScript: string, generation: string): boolean {
-  return runGrantScript(state, grantScript, ["release", generation]) === 0;
+export async function releaseEligibleRowsSnapshot(
+  state: string,
+  grantScript: string,
+  generation: string,
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["release", generation])) === 0;
 }
 
-export function deactivateEligibleRowsOwner(
+export async function deactivateEligibleRowsOwner(
   state: string,
   grantScript: string,
   ownerPid: number,
   generation: string,
-): boolean {
-  return runGrantScript(state, grantScript, ["deactivate", String(ownerPid), generation]) === 0;
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["deactivate", String(ownerPid), generation])) === 0;
 }
 
 export interface BranchDispatchOffer {

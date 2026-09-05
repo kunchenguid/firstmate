@@ -24,6 +24,8 @@
 #   - bin/fm-merge-outcome-lib.sh    a merged PR
 #   - bin/fm-teardown.sh             the child's final ledger line, refusing to
 #                                    remove the child while it is undelivered
+#   - bin/fm-secondmate-report.sh     a marked request's correlated answer,
+#                                    with this resolver choosing its destination
 # The mate's own appends are reserved for judgement (bin/fm-brief.sh charter).
 # docs/secondmate-parent-channel.md records the design and its coverage.
 #

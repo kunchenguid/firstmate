@@ -308,10 +308,6 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   fi
-  fm_backlog_root "$data" >/dev/null || {
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
-  }
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
   if [ "$command_status" -ne 0 ]; then
@@ -342,7 +338,10 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 }
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
-# output line in FM_BACKLOG_TRANSITION_ERROR on failure.
+# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The markdown backend
+# keeps its explicit <data>/backlog.md file and presence requirement; every
+# other configured backend is addressed by the root's own tasks-axi
+# configuration, so passing the markdown-era path would write the wrong store.
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   local data authorized_data=$1 verb=$2 id=$3 out command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -374,9 +373,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone) and return the row to
-# Queued, which is the shape every other captain call has and what
-# bin/fm-fleet-snapshot.sh's captain_actionable requires. The hold itself is
-# untouched; only bin/fm-captain-hold.sh answer closes the call. The links are
+# Queued, the conventional post-cleanup shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
 # written into the body rather than through `tasks-axi update --report`,
 # because that flag rewrites the title of a row that is not Done.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]

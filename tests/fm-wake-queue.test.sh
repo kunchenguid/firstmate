@@ -951,6 +951,110 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   pass "wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode"
 }
 
+# An acknowledgement for an EARLIER wake while the current one is still
+# presented consumes nothing. That must be said plainly, with the exact command
+# for the current wake, because "re-run the drain" re-presents the same row and
+# invites the same stale acknowledgement again (the refused-ack loop).
+stale_ack_remedy() {  # <stderr-file> -> "<seq>\t<generation>"
+  local seq generation
+  seq=$(sed -n 's/^wake drain: nothing was acknowledged through [0-9][0-9]*.*run bin\/fm-wake-drain.sh --ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]* after handling it$/\1/p' "$1")
+  generation=$(sed -n 's/^wake drain: nothing was acknowledged through [0-9][0-9]*.*run bin\/fm-wake-drain.sh --ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\) after handling it$/\1/p' "$1")
+  [ -n "$seq" ] && [ -n "$generation" ] || return 1
+  printf '%s\t%s\n' "$seq" "$generation"
+}
+
+test_stale_ack_that_consumes_nothing_names_the_current_wake() {
+  local dir state first_seq first_gen second_seq second_gen remedy rc
+  dir=$(make_case stale-ack-current-wake)
+  state="$dir/state"
+
+  append_wake "$state" check first 'check: first wake' || fail "first append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" || fail "first drain failed"
+  first_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/first.err")
+  first_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ -n "$first_seq" ] && [ -n "$first_gen" ] || fail "first drain printed no acknowledgement command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+    || fail "first acknowledgement failed"
+
+  append_wake "$state" check second 'check: second wake' || fail "second append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" || fail "second drain failed"
+  second_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/second.err")
+  second_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
+  [ "$second_seq" -gt "$first_seq" ] || fail "second drain did not present a newer row"
+
+  # The stale acknowledgement: the previous wake's command, re-run from memory.
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+    > "$dir/stale.out" 2> "$dir/stale.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale.err")"
+  grep -F "nothing was acknowledged through $first_seq" "$dir/stale.err" >/dev/null \
+    || fail "a no-op acknowledgement was not reported as acknowledging nothing: $(cat "$dir/stale.err")"
+  grep -F "the current wake is row $second_seq" "$dir/stale.err" >/dev/null \
+    || fail "a no-op acknowledgement did not name the current wake: $(cat "$dir/stale.err")"
+  ! grep -F 're-run' "$dir/stale.err" >/dev/null \
+    || fail "a no-op acknowledgement told the caller to drain again instead of naming the exact command: $(cat "$dir/stale.err")"
+  remedy=$(stale_ack_remedy "$dir/stale.err") \
+    || fail "a no-op acknowledgement did not print the exact current command: $(cat "$dir/stale.err")"
+  [ "${remedy%%$'\t'*}" = "$second_seq" ] && [ "${remedy##*$'\t'}" = "$second_gen" ] \
+    || fail "the printed remedy differs from the drain's own WAKE_ACK_REQUIRED command: $remedy vs $second_seq/$second_gen"
+  grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale acknowledgement consumed the current wake"
+
+  # Following the printed command, verbatim, closes the wake and the episode.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${remedy%%$'\t'*}" --recovery-generation "${remedy##*$'\t'}" \
+    2> "$dir/remedy.err" || fail "the printed remedy failed: $(cat "$dir/remedy.err")"
+  [ ! -s "$state/.wake-queue" ] || fail "the printed remedy left the current wake queued"
+  ! grep -F 'nothing was acknowledged' "$dir/remedy.err" >/dev/null \
+    || fail "a real acknowledgement was reported as acknowledging nothing: $(cat "$dir/remedy.err")"
+  case "$(cat "$state/.watcher-down")" in
+    acked:*) ;;
+    *) fail "the printed remedy did not retire the recovery episode" ;;
+  esac
+  pass "wake drain: an acknowledgement that consumes nothing says so and names the exact command for the current wake"
+}
+
+test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
+  local dir state first_seq first_gen second_seq second_gen remedy
+  dir=$(make_case branch-stale-ack-current-wake)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a first" || fail "first signal append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-stale || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stale 1 || fail "first grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "first branch drain failed: $(cat "$dir/first.err")"
+  first_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/first.err")
+  first_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+    || fail "first branch acknowledgement failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" release branch-stale || fail "first grant release failed"
+
+  # The next prompt: a stale escalation for another pane, granted on its own.
+  append_wake "$state" stale "fm-window-b" "stale: fm-window-b (idle 378s, possible wedge)" || fail "stale append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stale 2 || fail "second grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" \
+    || fail "second branch drain failed: $(cat "$dir/second.err")"
+  second_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/second.err")
+  second_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
+  [ "$second_seq" -eq 2 ] || fail "second branch drain did not present the granted stale row: $(cat "$dir/second.out")"
+
+  # The refused-ack loop's first step: the PREVIOUS wake's command.
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+    > "$dir/stale.out" 2> "$dir/stale.err" || fail "a stale branch acknowledgement failed instead of degrading safely: $(cat "$dir/stale.err")"
+  grep -F "nothing was acknowledged through $first_seq" "$dir/stale.err" >/dev/null \
+    || fail "the branch's no-op acknowledgement was not reported as acknowledging nothing: $(cat "$dir/stale.err")"
+  remedy=$(stale_ack_remedy "$dir/stale.err") \
+    || fail "the branch's no-op acknowledgement did not print the exact current command: $(cat "$dir/stale.err")"
+  [ "${remedy%%$'\t'*}" = "$second_seq" ] && [ "${remedy##*$'\t'}" = "$second_gen" ] \
+    || fail "the branch remedy differs from its drain's WAKE_ACK_REQUIRED command: $remedy vs $second_seq/$second_gen"
+  grep "$(printf '\tstale\tfm-window-b\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale branch acknowledgement consumed the granted wake"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "${remedy%%$'\t'*}" --recovery-generation "${remedy##*$'\t'}" \
+    || fail "the branch's printed remedy failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the branch's printed remedy left its wake queued"
+  FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" branch-stale || fail "branch owner deactivation failed"
+  pass "wake drain: a branch acknowledgement that consumes nothing names the exact command for its granted wake"
+}
+
 test_recovery_ack_failure_is_reported() {
   local dir state fakebin real_mv rc generation
   dir=$(make_case recovery-ack-failure)
@@ -1142,6 +1246,33 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
   [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+}
+
+test_subshell_lock_ownership_without_bashpid() {
+  local dir state rc
+  dir=$(make_case subshell-lock-ownership)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    unset BASHPID
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_release "$lock" )
+    [ "$(cat "$lock/pid")" = "$$" ] || exit 11
+    ( fm_lock_try_acquire "$lock" && exit 12; exit 0 ) || exit 12
+    fm_lock_release "$lock"
+    (
+      fm_lock_acquire_wait "$lock" || exit 13
+      [ "$(cat "$lock/pid")" != "$$" ] || exit 14
+      fm_lock_try_acquire "$lock" || exit 15
+      fm_lock_set_role "$lock" terminal-check || exit 16
+      fm_lock_release "$lock"
+      [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 17
+    ) || exit $?
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "subshell lock ownership without BASHPID failed (rc=$rc)"
+  pass "without BASHPID a subshell cannot release or reclaim its parent lock and owns its own hold"
 }
 
 # A bounded waiter acquires in a helper process, but the caller must own the
@@ -1438,6 +1569,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
@@ -1467,5 +1599,7 @@ test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode
+test_stale_ack_that_consumes_nothing_names_the_current_wake
+test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit

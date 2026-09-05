@@ -19,19 +19,42 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
 export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 
+type OperationalInputCommand = "encode" | "classify" | "kind";
+
+// The one owner of how each command is invoked and how its exit status and
+// stdout become an answer, shared by the synchronous and awaited callers
+// below so the two can never drift.
+function operationalInputArgs(
+  command: OperationalInputCommand,
+  kind?: FirstmateCurrentOperationalKind,
+): string[] {
+  return command === "encode" ? [command, kind ?? ""] : [command];
+}
+
+function operationalInputAnswer(
+  command: OperationalInputCommand,
+  status: number | null,
+  stdout: string,
+): string | undefined {
+  if (status !== 0) return undefined;
+  return command === "classify" ? stdout.replace(/\n$/, "") : stdout;
+}
+
 function runOperationalInputCommand(
-  command: "encode" | "classify" | "kind",
+  command: OperationalInputCommand,
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
-  const args = command === "encode" ? [command, kind ?? ""] : [command];
-  const result = spawnSync(operationalInputScript, args, {
+  const result = spawnSync(operationalInputScript, operationalInputArgs(command, kind), {
     encoding: "utf8",
     input: content,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) return undefined;
-  return command === "classify" ? result.stdout.replace(/\n$/, "") : result.stdout;
+  return operationalInputAnswer(command, result.status, result.stdout);
+}
+
+function encodeFailure(kind: FirstmateCurrentOperationalKind): Error {
+  return new Error(`could not encode Firstmate operational input kind ${kind}`);
 }
 
 export function encodeFirstmateOperationalInput(
@@ -39,9 +62,32 @@ export function encodeFirstmateOperationalInput(
   content: string,
 ): string {
   const encoded = runOperationalInputCommand("encode", content, kind);
-  if (encoded === undefined) {
-    throw new Error(`could not encode Firstmate operational input kind ${kind}`);
-  }
+  if (encoded === undefined) throw encodeFailure(kind);
+  return encoded;
+}
+
+// The supervision branch encodes on Pi's render thread while a captain
+// outcome is being delivered, so that one caller must await the child rather
+// than stop the TUI for it. It supplies the wait; everything that makes this
+// an encode - the script, its argument shape, and how its exit status and
+// stdout become an answer - stays owned here, so the two forms cannot drift.
+// The runner is a parameter rather than an import so that every extension
+// already carrying this module does not also have to carry a spawn helper it
+// never calls.
+export type OperationalInputRunner = (
+  command: string,
+  args: readonly string[],
+  options: { input: string },
+) => Promise<{ status: number | null; stdout: string }>;
+
+export async function encodeFirstmateOperationalInputWith(
+  run: OperationalInputRunner,
+  kind: FirstmateCurrentOperationalKind,
+  content: string,
+): Promise<string> {
+  const result = await run(operationalInputScript, operationalInputArgs("encode", kind), { input: content });
+  const encoded = operationalInputAnswer("encode", result.status, result.stdout);
+  if (encoded === undefined) throw encodeFailure(kind);
   return encoded;
 }
 

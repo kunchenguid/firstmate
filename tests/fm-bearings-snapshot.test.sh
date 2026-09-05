@@ -217,10 +217,19 @@ write_remote_home_summary() {  # <remote-home> <generated-epoch>
   mkdir -p "$home/state"
   jq -n --arg home "$home" --argjson epoch "$epoch" '{
     schema:"fm-secondmate-home-summary.v1",
+    hold_classifier_schema:"fm-captain-hold-buckets.v1",
     generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
-    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",
-    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
-    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
+    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"captain_decision",
+    active_children:[],
+    decisions_open:[
+      {id:"remote-parked",key:"remote-parked",verb:"captain-hold",summary:"Remote parked hold",reason:"parked",hold_until:null,hold_bucket:"live",hold_age_days:null,source:"backlog"},
+      {id:"remote-aged",key:"remote-aged",verb:"captain-hold",summary:"Remote aged hold",reason:"choose a route",hold_until:null,hold_bucket:"aged",hold_age_days:40,source:"backlog"}
+    ],holds:[],
+    queued:[
+      {id:"remote-parked",title:"Remote parked hold",blocked_by:null,blocked_by_ids:[],unresolved_blocker_ids:[],blocked_reason:null,hold_reason:"parked",hold_kind:"captain",hold_until:null,hold_bucket:"live",hold_age_days:null,captain_actionable:true,repo:"firstmate",kind:"captain"},
+      {id:"remote-aged",title:"Remote aged hold",blocked_by:null,blocked_by_ids:[],unresolved_blocker_ids:[],blocked_reason:null,hold_reason:"choose a route",hold_kind:"captain",hold_until:null,hold_bucket:"aged",hold_age_days:40,captain_actionable:false,repo:"firstmate",kind:"captain"}
+    ],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:2,holds:0,queued:2,landed:0,endpoints:0},omitted:[]
   }' > "$home/state/home-summary.json"
 }
 
@@ -261,6 +270,17 @@ while IFS= read -r -d '' arg; do args+=("$arg"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$4")
 printf '%s\t%s\n' "$remote_home" "${args[0]:-}" >> "$FM_TEST_LEDGER_CALL_LOG"
 if [ -f "$remote_home/state/slow-ledger-read" ]; then
+  active_marker="$FM_TEST_LEDGER_ACTIVE_DIR/collector-$$"
+  : > "$active_marker"
+  trap 'rm -f "$active_marker"' EXIT
+  while [ ! -f "$FM_TEST_LEDGER_ACTIVE_DIR/overlap-proved" ]; do
+    set -- "$FM_TEST_LEDGER_ACTIVE_DIR"/collector-*
+    if [ "$#" -ge 5 ] && [ -e "$1" ]; then
+      : > "$FM_TEST_LEDGER_ACTIVE_DIR/overlap-proved"
+      break
+    fi
+    sleep 0.05
+  done
   sleep 30 &
   sleeper=$!
   printf '%s %s\n' "$$" "$sleeper" >> "$FM_TEST_LEDGER_PID_LOG"
@@ -287,6 +307,7 @@ run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
   FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" \
     FM_TEST_LEDGER_PID_LOG="$parent/ledger-pids.log" \
+    FM_TEST_LEDGER_ACTIVE_DIR="$parent/ledger-active" \
     FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
     FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
     FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
@@ -1091,24 +1112,27 @@ test_report_pointers_surface() {
   pass "current report pointers surface"
 }
 
-test_superseded_queued_item_dropped_by_default() {
+test_queued_item_prose_never_hides_it() {
   local home fakebin json
   home=$(make_home superseded); write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.gates | any(.[]; .id == "live-gate")) and (.gates | any(.[]; .id == "dead-gate") | not)
-  ' >/dev/null || fail "default gates must include live and drop superseded: $json"
+    (.gates | any(.[]; .id == "live-gate")) and (.gates | any(.[]; .id == "dead-gate"))
+  ' >/dev/null || fail "queued body prose must not hide a gate from the default board: $json"
   json=$(run "$home" "$fakebin" --json --all-queued)
-  printf '%s' "$json" | jq -e '.gates | any(.[]; .id == "dead-gate")' >/dev/null \
-    || fail "--all-queued must restore the superseded item"
-  pass "superseded queued items are dropped by default and restored with --all-queued"
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.[]; .id == "dead-gate"))
+      and (.omitted | any(.reveal == "--all-queued") | not)
+  ' >/dev/null || fail "--all-queued must not advertise a suppression that no longer exists: $json"
+  pass "queued body prose never hides an item from the board"
 }
 
 # The collapsed captain-call contract: any due, unblocked captain-held task is
 # Captain's Call whatever its kind; a date-deferred hold is a dated gate until
-# due; a prose-deferred hold leaves the default views with a disclosure; and
-# Recently Landed excludes only what closed while still held for the captain.
+# due; deferral wording in the reason changes nothing, because only structured
+# fields classify; and Recently Landed excludes only what closed while still
+# held for the captain.
 test_collapsed_captain_call_deferral_and_landed() {
   local home fakebin json
   home=$(make_home collapsed-call)
@@ -1133,7 +1157,7 @@ EOF
     (.decisions_open | any(.[]; .id == "work-gate"))
       and (.decisions_open | any(.[]; .id == "due-call"))
       and (.decisions_open | any(.[]; .id == "later-call") | not)
-      and (.decisions_open | any(.[]; .id == "parked-call") | not)
+      and (.decisions_open | any(.[]; .id == "parked-call"))
       and (.decisions_open | any(.[]; .id == "external-gate") | not)
       and (.gates | any(.[]; .id == "later-call" and (.reason | startswith("until 2026-08-01"))))
       and (.gates | any(.[]; .id == "work-gate") | not)
@@ -1141,7 +1165,7 @@ EOF
       and (.gates | any(.[]; .id == "external-gate"))
       and (.landed | any(.[]; .id == "shipped-work"))
       and (.landed | any(.[]; .id == "answered-call") | not)
-      and (.omitted | any(.[]; .surface | startswith("captain holds marked deferred")))
+      and (.omitted | any(.[]; .surface | startswith("captain holds bucketed blocked, dated, or aged")))
   ' >/dev/null || fail "the collapsed captain-call projection is wrong: $json"
   json=$(run "$home" "$fakebin" --json --all-decisions --all-queued)
   printf '%s' "$json" | jq -e '
@@ -1149,6 +1173,220 @@ EOF
       and (.gates | any(.[]; .id == "parked-call") | not)
   ' >/dev/null || fail "--all-decisions must reveal the prose-deferred call: $json"
   pass "captain-held tasks of any kind reach Captain's Call, deferral is honored, and landed excludes answered calls"
+}
+
+test_undated_hold_phrasing_and_aging_projection() {
+  local home mate fakebin json
+  home=$(make_home undated-aging-proj)
+  mate=$(fixture_mate_home "$home")
+  mkdir -p "$home/data" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf 'aging-mate\n' > "$mate/.fm-secondmate-home"
+  printf -- '- aging-mate - hold aging fixture (home: %s; scope: captain holds; projects: firstmate; added 2026-07-11)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/aging-mate.meta" \
+    "kind=secondmate" "mode=secondmate" "harness=pi" "home=$mate" "projects=firstmate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] mate-parked - Remote parked call (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain)
+- [ ] mate-blocked-parked - Remote blocked parked call blocked-by: missing-remote-blocker (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain)
+- [ ] mate-future-parked - Remote parked call for later (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-08-01)
+- [ ] mate-due-parked - Remote parked call now due (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-07-11)
+- [ ] mate-due-not-required - Remote moot call now due (repo: firstmate) (kind: captain) (hold: choose a remote route) (hold-kind: captain) (hold-until: 2026-07-11)
+  NOT REQUIRED - the remote decision is moot.
+- [ ] mate-aged - Remote aged call (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: choose a remote route) (hold-kind: captain)
+  Captain hold set: 2026-06-01T00:00:00Z
+
+## Done
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] parked-hold - Parked style call (repo: firstmate) (kind: ship) (since 2026-07-10) (hold: not urgent) (hold-kind: captain)
+- [ ] blocked-parked - Blocked parked call blocked-by: missing-blocker (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain)
+- [ ] future-parked - Parked style call for later (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-08-01)
+- [ ] due-parked - Parked style call now due (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-07-11)
+- [ ] due-superseded - Superseded call now due (repo: firstmate) (kind: captain) (hold: SUPERSEDED) (hold-kind: captain) (hold-until: 2026-07-11)
+- [ ] aged-call - Aged genuine call (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)
+  Captain hold set: 2026-06-01T00:00:00Z
+- [ ] recent-call - Recent genuine call (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: choose a sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] contextual-call - Context is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: choose whether to pursue this queued opportunity) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+  This is not urgent context, but the captain decision is current.
+- [ ] contextual-not-urgent - Leading context is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: not urgent but choose the route now) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] contextual-comma - Comma context is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: not urgent, choose the launch route now) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] metadata-context - Metadata-like context is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: not urgent, priority: decide P1 or P2) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] contextual-opportunity - Leading opportunity is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: queued opportunity: choose whether to proceed) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] contextual-gated - Leading gate is not a deferral (repo: firstmate) (kind: captain) (since 2026-07-10) (hold: captain-gated decision needs current approval) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] reheld-current-call - Re-held genuine call (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: choose a current sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+  Current decision prose lists route north or route south.
+  Resolution recorded by fm-captain-hold.
+  Decision digest: historical-sample
+  Resolution mode: released
+  Captain decision:
+  Not urgent at the time of the previous call.
+- [ ] legacy-old-hold - Legacy unstamped hold (repo: firstmate) (kind: ship) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "recent-call"))
+      and (.decisions_open | any(.[]; .id == "due-parked"))
+      and (.decisions_open | any(.[]; .id == "parked-hold"))
+      and (.decisions_open | any(.[]; .id == "due-superseded"))
+      and (.decisions_open | any(.[]; .id == "future-parked") | not)
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-due-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-due-not-required"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-future-parked") | not)
+      and (.decisions_open | any(.[]; .id == "contextual-call"))
+      and (.decisions_open | any(.[]; .id == "contextual-not-urgent"))
+      and (.decisions_open | any(.[]; .id == "contextual-comma" and .summary == "Comma context is not a deferral: not urgent, choose the launch route now"))
+      and (.decisions_open | any(.[]; .id == "metadata-context" and .summary == "Metadata-like context is not a deferral: not urgent, priority: decide P1 or P2"))
+      and (.decisions_open | any(.[]; .id == "contextual-opportunity"))
+      and (.decisions_open | any(.[]; .id == "contextual-gated"))
+      and (.decisions_open | any(.[]; .id == "reheld-current-call"))
+      and (.decisions_open | any(.[]; .id == "legacy-old-hold") | not)
+      and (.decisions_open | any(.[]; .id == "aged-call") | not)
+      and (.decisions_open | any(.[]; .id == "blocked-parked") | not)
+      and (.gates | any(.[]; .id == "parked-hold") | not)
+      and (.gates | any(.[]; .id == "blocked-parked" and .blocked_by == "missing-blocker"
+                        and (.reason | startswith("blocked-by missing-blocker"))))
+      and (.gates | any(.[]; .id == "future-parked" and .reason == "until 2026-08-01: parked"))
+      and (.gates | any(.[]; .id == "due-parked") | not)
+      and (.gates | any(.[]; .id == "due-superseded") | not)
+      and (.gates | any(.[]; .id == "aged-call" and (.reason | startswith("held 40d"))))
+      and (.gates | any(.[]; .id == "legacy-old-hold" and (.reason | startswith("held 40d"))))
+      and (.gates | any(.[]; .id == "mate-parked") | not)
+      and (.gates | any(.[]; .id == "mate-blocked-parked" and .owner == "aging-mate"
+                        and .blocked_by == "missing-remote-blocker"))
+      and (.gates | any(.[]; .id == "mate-future-parked" and .owner == "aging-mate" and .reason == "until 2026-08-01: parked"))
+      and (.gates | any(.[]; .id == "mate-due-parked" and .owner == "aging-mate") | not)
+      and (.gates | any(.[]; .id == "mate-due-not-required" and .owner == "aging-mate") | not)
+      and (.gates | any(.[]; .id == "mate-aged" and .owner == "aging-mate" and (.reason | startswith("held 40d"))))
+      and (.gates | any(.[]; .id == "recent-call") | not)
+      and ([.decisions_open[].id, .gates[].id]
+           | contains(["due-parked", "due-superseded", "future-parked", "parked-hold", "blocked-parked", "aged-call",
+                       "aging-mate/mate-due-parked", "aging-mate/mate-due-not-required", "mate-future-parked",
+                       "aging-mate/mate-parked", "mate-blocked-parked", "mate-aged"]))
+      and (.omitted | any(.[]; .surface == "captain holds bucketed blocked, dated, or aged: 7"))
+  ' >/dev/null || fail "structured buckets must decide Captain's Call placement: $json"
+  json=$(run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "parked-hold"))
+      and (.decisions_open | any(.[]; .id == "aged-call"))
+      and (.decisions_open | any(.[]; .id == "due-parked"))
+      and (.decisions_open | any(.[]; .id == "due-superseded"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-aged"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-due-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-due-not-required"))
+      and (.decisions_open | any(.[]; .id == "blocked-parked"))
+      and (.decisions_open | any(.[]; .id == "future-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-blocked-parked"))
+      and (.decisions_open | any(.[]; .id == "aging-mate/mate-future-parked"))
+      and (.decisions_open | any(.[]; .id == "recent-call"))
+      and (.decisions_open | any(.[]; .id == "contextual-call"))
+      and (.decisions_open | any(.[]; .id == "contextual-not-urgent"))
+      and (.decisions_open | any(.[]; .id == "contextual-comma" and .summary == "Comma context is not a deferral: not urgent, choose the launch route now"))
+      and (.decisions_open | any(.[]; .id == "metadata-context" and .summary == "Metadata-like context is not a deferral: not urgent, priority: decide P1 or P2"))
+      and (.decisions_open | any(.[]; .id == "contextual-opportunity"))
+      and (.decisions_open | any(.[]; .id == "contextual-gated"))
+      and (.decisions_open | any(.[]; .id == "reheld-current-call"))
+      and (.decisions_open | any(.[]; .id == "legacy-old-hold"))
+      and (.gates | any(.[]; .id == "parked-hold" or .id == "aged-call" or .id == "legacy-old-hold"
+          or .id == "due-superseded" or .id == "future-parked" or .id == "blocked-parked"
+          or .id == "mate-parked" or .id == "mate-aged" or .id == "mate-due-parked"
+          or .id == "mate-due-not-required" or .id == "mate-future-parked"
+          or .id == "mate-blocked-parked") | not)
+  ' >/dev/null || fail "--all-decisions must reveal every captain hold without duplicating its gate: $json"
+  json=$(FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=50 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "aged-call"))
+      and (.gates | any(.[]; .id == "aged-call") | not)
+  ' >/dev/null || fail "raising the age threshold must restore an undated hold to Captain's Call: $json"
+  pass "structured hold buckets decide Captain's Call, Charted Next, and the reveal"
+}
+
+test_blocked_deferred_hold_has_concrete_disclosure() {
+  local home fakebin json
+  home=$(make_home blocked-deferred-disclosure)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] only-blocked-parked - Blocked parked call blocked-by: missing-blocker (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-07-11)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "only-blocked-parked" and .blocked_by == "missing-blocker"
+                  and (.reason | startswith("blocked-by missing-blocker"))))
+      and (.omitted | any(.surface == "captain holds bucketed blocked, dated, or aged: 1"))
+  ' >/dev/null || fail "a lone blocked deferred hold lacked its concrete disclosure: $json"
+  json=$(run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "only-blocked-parked" and .verb == "captain-hold"))
+      and (.gates | any(.id == "only-blocked-parked") | not)
+  ' >/dev/null || fail "--all-decisions did not reveal a blocked deferred hold whose date had arrived: $json"
+  pass "a blocked deferred hold stays gated when its date arrives and is revealed by --all-decisions"
+}
+
+test_revealed_deferred_holds_show_their_deferral_reason() {
+  local home fakebin json
+  home=$(make_home revealed-deferral-reason)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] reveal-blocked - Blocked parked call blocked-by: missing-blocker-1234567890123456789012345678901234567890 (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain)
+- [ ] reveal-future - 1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890 (repo: firstmate) (kind: captain) (hold: parked) (hold-kind: captain) (hold-until: 2026-12-01)
+- [ ] reveal-aged - Aged undated call (repo: firstmate) (kind: captain) (since 2026-06-01) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-06-01T00:00:00Z
+- [ ] reveal-live - 123456789012345678901234567890123456789012345678901234567890 (repo: firstmate) (kind: captain) (hold: choose A) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "reveal-blocked"
+      and (.summary | contains("blocked-by missing-blocker-1234567890123456789012345678901234567890"))))
+  ' >/dev/null || fail "a revealed blocked hold must show its complete blocked-by identity: $json"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "reveal-future" and (.summary | contains("until 2026-12-01"))))
+  ' >/dev/null || fail "a revealed date-deferred hold must show its until date: $json"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "reveal-aged" and (.summary | contains("held ") and contains("d: "))))
+  ' >/dev/null || fail "a revealed aged hold must show its age: $json"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "reveal-live"
+       and .summary == "123456789012345678901234567890123456789012345678901234567890: choose A"
+       and (.summary | contains("blocked-by") or contains("until ") or contains("held ") | not)))
+  ' >/dev/null || fail "a long-titled live call must remain complete and unannotated: $json"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[].id] == ["reveal-live"])
+      and (.decisions_open[0].summary == "123456789012345678901234567890123456789012345678901234567890: choose A")
+      and (.gates | any(.id == "reveal-blocked"))
+      and (.gates | any(.id == "reveal-future"))
+      and (.gates | any(.id == "reveal-aged"))
+  ' >/dev/null || fail "the default board must keep deferred holds gated and show only the live call: $json"
+  pass "revealed deferred holds display their deferral reason while live calls stay unannotated"
 }
 
 test_include_prs_is_the_only_fetch_path() {
@@ -1760,6 +1998,98 @@ seed_working_child() {  # <mate-home> <id> <doing> [repo]
   printf 'working: %s\n' "$doing" > "$mate/state/$id.status"
 }
 
+test_working_captain_holds_keep_their_bucket_surfaces() {
+  local home mate fakebin id summary json expanded
+  home=$(make_home working-hold-buckets)
+  mate="$TMP_ROOT/working-hold-buckets-mate"
+  : > "$home/data/secondmates.md"
+  make_valid_secondmate_home working-mate "$mate"
+  append_secondmate_registry "$home" working-mate "$mate"
+
+  for home in "$home" "$mate"; do
+    cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] working-live - Working live call (repo: sample) (kind: captain) (hold: choose release route) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] working-live-two - Second working live call (repo: sample) (kind: captain) (hold: choose backup route) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] working-blocked - Working blocked call blocked-by: blocker-alpha-123456789012345678901234567890 blocked-by: blocker-beta-123456789012345678901234567890 (repo: sample) (kind: captain) (hold: choose blocked route) (hold-kind: captain)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] working-dated - Working dated call (repo: sample) (kind: captain) (hold: choose dated route) (hold-kind: captain) (hold-until: 2026-08-01)
+  Captain hold set: 2026-07-10T00:00:00Z
+- [ ] working-aged - Working aged call (repo: sample) (kind: captain) (hold: choose aged route) (hold-kind: captain)
+  Captain hold set: 2026-06-01T00:00:00Z
+
+## Queued
+
+## Done
+EOF
+    for id in working-live working-live-two working-blocked working-dated working-aged; do
+      mkdir -p "$home/projects/$id"
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=sample" \
+        "harness=claude" "kind=ship" "mode=no-mistakes"
+      record_claude_state "$home/state" "$id" busy
+      printf 'working: active held work\n' > "$home/state/$id.status"
+    done
+  done
+  home=$(make_home working-hold-buckets)
+  fakebin=$(make_fakebin "$home")
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_DECISIONS=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    ([.decisions_open[].id] == ["working-live"])
+      and ([.queued[].id] | contains(["working-live", "working-live-two", "working-blocked", "working-dated", "working-aged"]))
+      and ([.queued[] | select(.hold_bucket != null)] | length) == 5
+  ' >/dev/null || fail "working captain holds were filtered from the secondmate summary: $summary"
+
+  json=$(FM_SNAPSHOT_SECONDMATE_DECISIONS=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[].id] | contains([
+      "working-live", "working-live-two", "working-blocked", "working-dated", "working-aged",
+      "working-mate/working-live", "working-mate/working-live-two", "working-mate/working-blocked",
+      "working-mate/working-dated", "working-mate/working-aged"]))
+      and (.decisions_open | any(.id == "working-live"))
+      and (.decisions_open | any(.id == "working-live-two"))
+      and (.decisions_open | any(.id == "working-mate/working-live"))
+      and (.decisions_open | any(.id == "working-mate/working-live-two") | not)
+      and ([.decisions_open[] | select(.id == "working-blocked" or .id == "working-dated" or .id == "working-aged"
+          or .id == "working-mate/working-blocked" or .id == "working-mate/working-dated"
+          or .id == "working-mate/working-aged")] | length) == 0
+      and ([.gates[] | select(.id == "working-live" or .id == "working-live-two")] | length) == 0
+      and ([.gates[] | select(.id == "working-blocked" and .owner == "(main)"
+          and .blocked_by == "blocker-alpha-123456789012345678901234567890,blocker-beta-123456789012345678901234567890")] | length) == 1
+      and ([.gates[] | select(.id == "working-dated" and .owner == "(main)" and (.reason | startswith("until 2026-08-01")))] | length) == 1
+      and ([.gates[] | select(.id == "working-aged" and .owner == "(main)" and (.reason | startswith("held 40d")))] | length) == 1
+      and ([.gates[] | select(.id == "working-blocked" and .owner == "working-mate")] | length) == 1
+      and ([.gates[] | select(.id == "working-dated" and .owner == "working-mate")] | length) == 1
+      and ([.gates[] | select(.id == "working-aged" and .owner == "working-mate")] | length) == 1
+  ' >/dev/null || fail "working captain holds did not surface in Underway and exactly one default decision bucket: $json"
+
+  expanded=$(FM_SNAPSHOT_SECONDMATE_DECISIONS=1 run "$home" "$fakebin" --json --all-decisions --all-queued)
+  printf '%s' "$expanded" | jq -e '
+    ([.in_flight[].id] | contains([
+      "working-live", "working-live-two", "working-blocked", "working-dated", "working-aged",
+      "working-mate/working-live", "working-mate/working-live-two", "working-mate/working-blocked",
+      "working-mate/working-dated", "working-mate/working-aged"]))
+      and ([.decisions_open[].id]
+        | contains(["working-live", "working-live-two", "working-blocked", "working-dated", "working-aged",
+                    "working-mate/working-live", "working-mate/working-live-two", "working-mate/working-blocked",
+                    "working-mate/working-dated", "working-mate/working-aged"]))
+      and ([.decisions_open[] | select(.id == "working-mate/working-live")] | length) == 1
+      and ([.decisions_open[] | select(.id == "working-mate/working-live-two")] | length) == 1
+      and ([.decisions_open[] | select(
+          (.id == "working-blocked" or .id == "working-mate/working-blocked")
+          and (.summary | contains("blocked-by blocker-alpha-123456789012345678901234567890 +1 more"))
+          and (.summary | length) <= 90)] | length) == 2
+      and ([.gates[] | select(.id == "working-live" or .id == "working-live-two" or .id == "working-blocked"
+          or .id == "working-dated" or .id == "working-aged")] | length) == 0
+  ' >/dev/null || fail "--all-decisions did not keep working holds Underway and reveal each gate-free: $expanded"
+  pass "working captain holds retain main and secondmate bucket surfaces"
+}
+
 test_active_children_project_independent_of_home_captain_hold() {
   local home mate fakebin json
   home=$(make_home underway-hold-parent)
@@ -2163,11 +2493,278 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_task_teardown_during_metadata_capture_does_not_abort_snapshot() {
+  local home fakebin real_cp output snapshot_pid i
+  home=$(make_home metadata-teardown-race)
+  fakebin=$(make_fakebin "$home")
+  real_cp=$(command -v cp)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] a-hold - Stable local worker (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/a-hold.meta" \
+    "window=fixture:a-hold" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/z-gone.meta" \
+    "window=fixture:z-gone" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'working: stable fixture\n' > "$home/state/a-hold.status"
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */a-hold.meta)
+      : > "$FAKE_CP_STARTED"
+      while [ ! -e "$FAKE_CP_RELEASE" ]; do sleep 0.01; done
+      break
+      ;;
+  esac
+done
+exec "$REAL_CP" "$@"
+SH
+  chmod +x "$fakebin/cp"
+
+  REAL_CP="$real_cp" FAKE_CP_STARTED="$home/cp-started" FAKE_CP_RELEASE="$home/cp-release" \
+    run "$home" "$fakebin" --json > "$home/snapshot.json" &
+  snapshot_pid=$!
+  i=0
+  while [ ! -e "$home/cp-started" ] && [ "$i" -lt 500 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$home/cp-started" ]; then
+    kill "$snapshot_pid" 2>/dev/null || true
+    wait "$snapshot_pid" 2>/dev/null || true
+    fail "snapshot never entered metadata capture"
+  fi
+  rm -f "$home/state/z-gone.meta"
+  : > "$home/cp-release"
+  wait "$snapshot_pid" || fail "task teardown aborted the public Bearings snapshot"
+  output=$(<"$home/snapshot.json")
+  printf '%s' "$output" | jq -e '
+    .schema == "fm-bearings.v1"
+      and ([.in_flight[].id] | sort) == ["a-hold"]
+  ' >/dev/null || fail "snapshot after concurrent teardown was not usable: $output"
+  pass "task teardown during metadata capture is omitted without aborting the snapshot"
+}
+
+test_current_state_uses_captured_status_observation() {
+  local home fakebin real_cp worktree json
+  home=$(make_home captured-status-race)
+  fakebin=$(make_fakebin "$home")
+  real_cp=$(command -v cp)
+  worktree="$home/projects/captured-status"
+  mkdir -p "$worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] captured-status - Captured status fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/captured-status.meta" \
+    "window=fixture:captured-status" "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=stable-generation"
+  printf 'working: captured state\n' > "$home/state/captured-status.status"
+  record_claude_state "$home/state" captured-status idle
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+"$REAL_CP" "$@" || exit
+for arg in "$@"; do
+  if [ "$arg" = "$RACE_STATUS" ] && mkdir "$RACE_ONCE" 2>/dev/null; then
+    printf 'needs-decision[new]: appended after capture\n' >> "$RACE_STATUS"
+    break
+  fi
+done
+SH
+  chmod +x "$fakebin/cp"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" REAL_CP="$real_cp" \
+    RACE_ONCE="$home/status-race-once" RACE_STATUS="$home/state/captured-status.status" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed during captured status race"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "captured-status")
+    | .current_state.state == "working"
+      and .current_state.source == "status-log"
+      and .paths.status_log.last_event.raw == "working: captured state"
+      and .hints.pending_decision == false
+      and .hints.open_decisions == []
+  ' >/dev/null || fail "current state escaped the captured status observation: $json"
+  [ "$(tail -n 1 "$home/state/captured-status.status")" = \
+      "needs-decision[new]: appended after capture" ] \
+    || fail "captured status race fixture did not append the live decision"
+  pass "current state and decision hints share one captured status observation"
+}
+
+test_relaunched_task_does_not_inherit_reused_endpoint_state() {
+  local home fakebin worktree json
+  home=$(make_home endpoint-generation-race)
+  worktree="$home/projects/generation-race-not-created"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] generation-race - Generation identity fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/generation-race.meta" \
+    "window=fixture:fm-generation-race" "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=old-generation"
+  printf 'working: old generation\n' > "$home/state/generation-race.status"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then
+  if mkdir "$RACE_ONCE" 2>/dev/null; then
+    tmp="$RACE_META.tmp.$$"
+    cat > "$tmp" <<EOF
+window=fixture:fm-generation-race
+worktree=$RACE_WORKTREE
+project=firstmate
+harness=claude
+kind=ship
+mode=no-mistakes
+spawn_gen=new-generation
+EOF
+    mv "$tmp" "$RACE_META"
+    printf 'needs-decision[replacement]: replacement-only decision https://github.com/acme/firstmate/pull/999\n' > "$RACE_STATUS"
+    mkdir -p "$(dirname "$RACE_REPORT")"
+    printf 'replacement-only report\n' > "$RACE_REPORT"
+  fi
+  # The old endpoint disappeared while a replacement reused the same target.
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" \
+    RACE_ONCE="$home/relaunch-once" RACE_META="$home/state/generation-race.meta" \
+    RACE_STATUS="$home/state/generation-race.status" \
+    RACE_REPORT="$home/data/generation-race/report.md" RACE_WORKTREE="$worktree" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed during endpoint generation race"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "generation-race")
+    | .spawn_gen == "old-generation"
+      and .current_state.state == "unknown"
+      and .endpoint.exists == null
+      and .endpoint.agent_alive == "unknown"
+      and .endpoint.status == "unknown"
+      and .pr.url == null
+      and .paths.status_log.present == false
+      and .paths.report.present == false
+      and .hints.pending_decision == false
+      and .hints.open_decisions == []
+      and .hints.scout_report_present == false
+      and .hints.last_event_text == ""
+  ' >/dev/null || fail "replacement live state crossed task generations: $json"
+  pass "reused live state is discarded when task generation changes"
+}
+
+test_large_local_snapshot_overlaps_local_reads_without_projection_drift() {
+  local home fakebin worktree serial parallel parallel_file snapshot_pid i
+  local serial_started serial_elapsed parallel_started parallel_elapsed saved
+  home=$(make_home large-local-snapshot)
+  worktree="$home/projects/shared-worktree"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -qb fm/synthetic-large-local
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then
+  [ -z "${FAKE_NM_SIGNAL:-}" ] || : > "$FAKE_NM_SIGNAL"
+  sleep 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 5 ]; do
+      printf -- '- [ ] local-%s - Synthetic local worker %s (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+    i=1
+    while [ "$i" -le 300 ]; do
+      printf -- '- [x] history-%s - Historical completed item %s https://github.com/acme/firstmate/pull/%s (repo: firstmate) (kind: ship) (done 2026-01-01)\n' "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 5 ]; do
+    fm_write_meta "$home/state/local-$i.meta" \
+      "window=fixture:local-$i" "worktree=$worktree" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    printf 'working: synthetic fixture\n' > "$home/state/local-$i.status"
+    i=$((i + 1))
+  done
+
+  serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
+
+  # Serialized reads pay every worker's delay end to end while concurrent reads
+  # overlap them. Time both runs and compare, because the two pay the same
+  # composition overhead: the difference isolates the overlap this change
+  # delivers, where an absolute wall-clock budget would instead measure how
+  # loaded the host happens to be and flake on a busy runner.
+  serial_started=$(date +%s)
+  FAKE_NM_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 \
+    run "$home" "$fakebin" --json >/dev/null \
+    || fail "serialized local snapshot failed"
+  serial_elapsed=$(( $(date +%s) - serial_started ))
+
+  parallel_started=$(date +%s)
+  parallel_file="$home/parallel-snapshot.json"
+  FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" \
+    FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
+    run "$home" "$fakebin" --json > "$parallel_file" &
+  snapshot_pid=$!
+  i=0
+  while [ ! -e "$home/nm-started" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ ! -e "$home/nm-started" ]; then
+    kill "$snapshot_pid" 2>/dev/null || true
+    wait "$snapshot_pid" 2>/dev/null || true
+    fail "concurrent local snapshot never began a current-state read"
+  fi
+  wait "$snapshot_pid" || fail "concurrent local snapshot failed"
+  parallel=$(<"$parallel_file")
+  parallel_elapsed=$(( $(date +%s) - parallel_started ))
+  # Five one-second reads serialize into five seconds and overlap into about
+  # one, so at least two of those four seconds must show up as real savings.
+  # Serializing the reads again collapses that difference to roughly zero.
+  saved=$(( serial_elapsed - parallel_elapsed ))
+  [ "$saved" -ge 2 ] \
+    || fail "concurrent local reads saved no measurable time (serial ${serial_elapsed}s vs concurrent ${parallel_elapsed}s)"
+  [ "$parallel" = "$serial" ] \
+    || fail "concurrent local observation changed the fm-bearings.v1 projection"
+  printf '%s' "$parallel" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | length) == 5
+      and ([.in_flight[].id] | sort) == ["local-1","local-2","local-3","local-4","local-5"]
+      and ([.in_flight[] | select(.id == "local-1" and .kind == "ship")] | length) == 1
+  ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
+  pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
-  local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid duplicate_base
+  local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
   parent=$(make_home concurrent-remote-ledgers)
   make_remote_ledger_fleet "$parent" 5
   fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  mkdir -p "$parent/ledger-active"
   : > "$parent/ledger-calls.log"
   : > "$parent/ledger-pids.log"
 
@@ -2177,7 +2774,52 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
-  ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages: $json"
+      and (.decisions_open | any(.id == "ledger-1/remote-parked" and .owner == "ledger-1"))
+      and (.gates | all(.id != "remote-parked"))
+      and (.gates | any(.id == "remote-aged" and .owner == "ledger-1" and (.reason | startswith("held 40d"))))
+  ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages and bucketed holds: $json"
+
+  cache_file=
+  remote_home=$(cd "$TMP_ROOT/remote-ledger-home-1" && pwd -P)
+  for candidate in "$parent/state/summary-cache"/*.json; do
+    if jq -e --arg home "$remote_home" '.home == $home' "$candidate" >/dev/null 2>&1; then
+      cache_file=$candidate
+      break
+    fi
+  done
+  [ -n "$cache_file" ] || fail "healthy remote read did not populate its summary cache"
+  tmp="$cache_file.tmp"
+  jq 'del(.hold_classifier_schema)' \
+    "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
+  tmp="$remote_home/state/home-summary.json.tmp"
+  jq 'del(.hold_classifier_schema)' \
+    "$remote_home/state/home-summary.json" > "$tmp" && mv "$tmp" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .state == "unknown"
+      and .provenance == "unknown" and (.reason | contains("no valid cached copy"))))
+      and (.omitted | any(.surface == "secondmate home(s) with unreadable structured state: 1"))
+  ' >/dev/null || fail "a hold-bearing pre-classifier live and cached summary was not invalidated and disclosed: $json"
+
+  tmp="$cache_file.tmp"
+  jq '.decisions_open = [] | .queued = []' "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
+  tmp="$remote_home/state/home-summary.json.tmp"
+  jq '.decisions_open = [] | .queued = []' \
+    "$remote_home/state/home-summary.json" > "$tmp" && mv "$tmp" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .state == "unknown"
+      and .provenance == "unknown" and (.reason | contains("no valid cached copy"))))
+      and (.omitted | any(.surface == "secondmate home(s) with unreadable structured state: 1"))
+  ' >/dev/null || fail "an empty pre-classifier live and cached summary was not invalidated and disclosed: $json"
+
+  write_remote_home_summary "$remote_home" 1000
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .freshness == "fresh"))
+      and (.decisions_open | any(.id == "ledger-1/remote-parked" and .owner == "ledger-1"))
+      and (.gates | any(.id == "remote-aged" and .owner == "ledger-1"))
+  ' >/dev/null || fail "a refreshed current-schema summary did not restore bucketed remote holds: $json"
 
   duplicate_base="$TMP_ROOT/remote-ledger-home-1/state/home-summary.single"
   cp "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json" "$duplicate_base"
@@ -2211,14 +2853,10 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   done
   : > "$parent/ledger-calls.log"
   : > "$parent/ledger-pids.log"
-  started=$(date +%s)
+  rm -f "$parent/ledger-active/overlap-proved" "$parent/ledger-active"/collector-*
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
-  elapsed=$(( $(date +%s) - started ))
-  # The three-second bound covers remote collection, while setup, cache validation,
-  # and projection run outside it. Keep the end-to-end ceiling well below the
-  # fifteen seconds that five serial three-second reads would require, without
-  # treating slower stock-macOS jq/process startup as collector serialization.
-  [ "$elapsed" -lt 12 ] || fail "five wedged remote reads behaved serially despite the shared three-second budget (${elapsed}s)"
+  [ -f "$parent/ledger-active/overlap-proved" ] \
+    || fail "five wedged remote reads never overlapped within the shared three-second budget"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "cached" and .age_seconds == 1000
@@ -2283,6 +2921,10 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_task_teardown_during_metadata_capture_does_not_abort_snapshot
+test_current_state_uses_captured_status_observation
+test_relaunched_task_does_not_inherit_reused_endpoint_state
+test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
@@ -2313,18 +2955,22 @@ test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
+test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
-test_superseded_queued_item_dropped_by_default
+test_queued_item_prose_never_hides_it
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
 test_collapsed_captain_call_deferral_and_landed
+test_undated_hold_phrasing_and_aging_projection
+test_blocked_deferred_hold_has_concrete_disclosure
+test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
