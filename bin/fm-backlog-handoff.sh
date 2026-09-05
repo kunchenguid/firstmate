@@ -466,7 +466,7 @@ wake_secondmate_receiver() { # <secondmate-id> <correlation-id>
 }
 
 wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
-  local id=$1 retain=${2:-0} marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec delivered
+  local id=$1 retain=${2:-0} marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec delivered archive
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   if [ ! -f "$marker" ] || [ -L "$marker" ]; then
     printf 'error: receiver wake state for secondmate %s is unsafe or invalid\n' "$id" >&2
@@ -490,8 +490,13 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
     ;;
   esac
   rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
+  if [ ! -f "$rec" ] || [ -L "$rec" ]; then
+    archive="$(fm_pending_reply_archive_dir "$STATE")/$corr"
+    [ -f "$archive" ] && [ ! -L "$archive" ] \
+      && [ "$(fm_pending_reply_get "$archive" phase)" = resolved ] || return 1
+    rec=$archive
+  fi
+  [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
   fm_pending_reply_reconcile_delivery "$STATE" "$corr" >/dev/null 2>&1 || true
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then

@@ -505,7 +505,7 @@ test_foreign_blocker_is_not_selected_as_escalation() {
 }
 
 test_concurrent_resolution_closes_escalation_once() {
-  local home state corr rec
+  local home state corr rec results
   home=$(setup_parent concurrent-resolution)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=4800
@@ -518,11 +518,23 @@ test_concurrent_resolution_closes_escalation_once() {
     "$corr" "$corr" > "$state/hibit.status"
   printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
 
+  results="$home/resolve-results"
+  : > "$results"
   for _ in 1 2 3 4 5 6 7 8; do
-    fm_pending_reply_try_resolve "$state" "$corr" &
+    (
+      if fm_pending_reply_try_resolve "$state" "$corr"; then
+        printf 'resolved\n' >> "$results"
+      else
+        printf 'failed\n' >> "$results"
+      fi
+    ) &
   done
   wait
 
+  ! grep -q '^failed$' "$results" \
+    || fail "a concurrent resolver returned failure after another archived the result"
+  [ "$(grep -c '^resolved$' "$results")" -eq 8 ] \
+    || fail "not every concurrent resolver reported idempotent success"
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "concurrent resolvers left the expectation unresolved"
   [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
