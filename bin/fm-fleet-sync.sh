@@ -13,13 +13,15 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# After the depth check, still skips (benignly) local-only/no-origin projects,
+# missing remotes/branches, and ordinary refresh fetch failures. A shallow clone
+# whose repair cannot reach origin is instead reported loudly and left shallow.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
-# Anything else is reported as "skipped: not a clone root" naming the repository
-# that would have been touched.
+# Whole-fleet enumeration silently ignores entries that are not their own roots;
+# a directly requested nested path is reported as "skipped: not a clone root"
+# naming the repository that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
