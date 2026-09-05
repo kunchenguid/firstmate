@@ -489,7 +489,7 @@ os.environ.update({
     'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
     'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
     'FM_MAIL_CURSOR': sys.argv[1],
-    'FM_MAIL_POLL_MAX_WAKES': '1',
+    'FM_MAIL_POLL_MAX_WAKES': '2',
 })
 class FakeConn:
     untagged_responses = {'UIDVALIDITY': [b'90009']}
@@ -520,9 +520,9 @@ PYEOF
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
   expect_code 0 "$rc" "window poll must succeed"
   assert_contains "$out" "uidvalidity	90009" "poll emits the generation guard"
-  assert_not_contains "$out" $'1\t' "the unfetchable uid is skipped"
-  assert_contains "$out" $'2\t' "a later uid fills the cap despite the failure"
-  pass "fm-mail: a persistently unfetchable uid cannot starve later mail"
+  assert_contains "$out" $'1\t' "the unfetchable uid is still surfaced, not missed"
+  assert_contains "$out" $'2\t' "a later uid surfaces despite the failure"
+  pass "fm-mail: an unfetchable uid is surfaced degraded and cannot starve later mail"
 }
 
 test_poll_caps_wakes_per_run() {

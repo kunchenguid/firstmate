@@ -170,9 +170,10 @@ def cmd_poll_list():
             ids = [x for x in ids if x.decode() not in seen]
         # Scan a bounded window of candidates rather than exactly the cap, so a
         # repeatedly unfetchable uid (a corrupt message) cannot starve later
-        # mail: failed fetches are skipped and stay unseen for the next poll -
-        # nothing is ever missed - while the loop keeps going until the cap
-        # fills or the window is exhausted.
+        # mail. An unfetchable uid is still surfaced with a degraded row and
+        # recorded in the cursor, so it is never missed and the next poll moves
+        # past it; the loop keeps going until the cap fills or the window is
+        # exhausted.
         window = max(cap * 4, cap + 10)
         out = []
         for i in ids[:window]:
@@ -180,6 +181,8 @@ def cmd_poll_list():
                 break
             typ, msg = m.uid('fetch', i, '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
+                uid = clean(i.decode())
+                out.append((uid, '', '(no header)', 'unfetchable header - see fm-mail read'))
                 continue
             mi = email.message_from_bytes(msg[0][1])
             uid = clean(i.decode())

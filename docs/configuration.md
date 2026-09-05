@@ -559,6 +559,7 @@ FM_SMTP_HOST=   # SMTP server hostname
 
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 The per-poll wake cap bounds both the header fetches and the wakes of one `poll` run, and only uids this home has not already surfaced are fetched; a flood or large backlog therefore makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
+A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
 Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, while the standing check itself prints a line (and the watcher turns that line into a wake) only when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
