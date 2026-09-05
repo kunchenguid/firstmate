@@ -10,6 +10,23 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+# housekeeping()'s stale-escalation threshold now resolves through
+# fm_stale_escalate_secs (bin/fm-classify-lib.sh), which falls back to
+# $FM_HOME/config when a caller passes no FM_CONFIG_OVERRIDE. Sourcing
+# fm-supervise-daemon.sh below pins FM_HOME once from whatever this process
+# inherits, so a test that never mentions FM_CONFIG_OVERRIDE would otherwise
+# silently read the real operator's own config/stale-escalate-secs and change
+# the escalation counts these suites assert on. Point unset callers at a
+# directory nothing writes to; a test that wants config behavior sets its own
+# FM_CONFIG_OVERRIDE inline, which still wins for that one command. Scoped to
+# this file (not tests/wake-helpers.sh) because tests/fm-watcher-lock.test.sh
+# shares that helper and deliberately relies on FM_CONFIG_OVERRIDE being unset
+# so fm-guard.sh derives its config path from FM_ROOT_OVERRIDE instead.
+if [ -z "${FM_CONFIG_OVERRIDE:-}" ]; then
+  FM_CONFIG_OVERRIDE="$(fm_test_tmproot fm-daemon-empty-config)"
+  export FM_CONFIG_OVERRIDE
+fi
+
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
@@ -1211,6 +1228,65 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+# config/stale-escalate-secs (bin/fm-classify-lib.sh's fm_stale_escalate_secs)
+# overrides FM_STALE_ESCALATE_SECS for housekeeping's stale recheck too, so the
+# watcher and the away-mode daemon cannot read a different effective threshold
+# from the same home. A decoy env value that alone would NOT escalate a 5s-old
+# marker must be overridden by a short config threshold.
+test_housekeeping_stale_config_overrides_env() {
+  local dir state fakebin win pane key cfg
+  dir=$(make_supercase stale-config-override)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  cfg="$dir/config"; mkdir -p "$cfg"
+  printf '2\n' > "$cfg/stale-escalate-secs"
+  win="sess:fm-cfg-w1"
+  pane="$dir/pane.txt"
+  printf 'working\n' > "$state/cfg-w1.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "cfg-w1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$cfg" FM_STALE_ESCALATE_SECS=999999 \
+    housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "a decoy FM_STALE_ESCALATE_SECS was not overridden by config/stale-escalate-secs"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
+  pass "config/stale-escalate-secs overrides a decoy FM_STALE_ESCALATE_SECS in housekeeping's stale recheck"
+}
+
+# The declared pipeline-wait verb (paused:) tracks its recheck in a SEPARATE
+# marker (.subsuper-paused-<key>) on the FM_PAUSE_RESURFACE_SECS cadence, never
+# the wedge-escalation .subsuper-stale-<key> marker config/stale-escalate-secs
+# tunes above. This is the other half of the 2026-08/09 alarm-loop fix (dozens of
+# escalations a day for panes simply inside a no-mistakes run): a home that
+# lowers config/stale-escalate-secs to cut wedge-alarm noise for genuinely idle
+# panes must not also start wedge-escalating panes that declared the wait. Same
+# short config threshold as the sibling test above, but a paused: status instead
+# of a bare working: one, and no possible-wedge line should ever appear.
+test_housekeeping_paused_ignores_stale_config() {
+  local dir state fakebin win pane key cfg
+  dir=$(make_supercase paused-ignores-stale-config)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  cfg="$dir/config"; mkdir -p "$cfg"
+  printf '2\n' > "$cfg/stale-escalate-secs"
+  win="sess:fm-cfg-w2"
+  pane="$dir/pane.txt"
+  printf 'paused: pipeline run in progress\n' > "$state/cfg-w2.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "cfg-w2" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$cfg" FM_STALE_ESCALATE_SECS=999999 \
+    FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a declared pipeline wait escalated under a short config/stale-escalate-secs: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "the pause marker was cleared instead of left to mature on its own cadence"
+  pass "config/stale-escalate-secs does not shorten the declared pipeline-wait recheck, only the wedge-escalation one"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -2636,6 +2712,8 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_config_overrides_env
+test_housekeeping_paused_ignores_stale_config
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets

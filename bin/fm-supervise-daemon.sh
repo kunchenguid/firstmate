@@ -92,7 +92,10 @@
 #                                   captain-relevant escalation for matching
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
+#                                   as a possible wedge (default 240);
+#                                   config/stale-escalate-secs overrides it for
+#                                   this home (fm_stale_escalate_secs,
+#                                   fm-classify-lib.sh)
 #          FM_PAUSE_RESURFACE_SECS  seconds a declared wait (external or
 #                                   captain-held) stays declared, idle or busy,
 #                                   before it re-surfaces as a recheck
@@ -152,6 +155,10 @@ set -u
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# Resolved inline at each use site (matching the wedge-alarm config read
+# below), never cached in a top-level variable: the unit tests source this
+# file once and then call housekeeping() many times with a different
+# FM_CONFIG_OVERRIDE per call, so a global fixed at source time would go stale.
 
 # Shared tmux pane primitives for supervisor injection (busy/composer detection
 # + verify-retry submit). Sourced at top level so BOTH the executed daemon and
@@ -1022,9 +1029,14 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs stale_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
+  # config/stale-escalate-secs overrides FM_STALE_ESCALATE_SECS for this home
+  # (fm_stale_escalate_secs, fm-classify-lib.sh); resolved fresh each tick, like
+  # every other env-driven tunable this function reads, so a live env override
+  # (tests, an operator's one-off run) still takes effect immediately.
+  stale_secs=$(fm_stale_escalate_secs "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$STALE_ESCALATE_SECS_DEFAULT")
 
   # (1) batch flush
   if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
@@ -1074,7 +1086,7 @@ housekeeping() {  # <state>
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    [ "$age" -ge "$stale_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1636,7 +1648,7 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=$(fm_stale_escalate_secs "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$STALE_ESCALATE_SECS_DEFAULT")s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------

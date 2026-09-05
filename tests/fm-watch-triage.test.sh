@@ -22,6 +22,22 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
+# fm-watch.sh's own STALE_ESCALATE_SECS now resolves through
+# fm_stale_escalate_secs (bin/fm-classify-lib.sh), which falls back to
+# $FM_HOME/config when a spawned watcher inherits no FM_CONFIG_OVERRIDE. A test
+# that never mentions FM_CONFIG_OVERRIDE would otherwise silently read the real
+# operator's own config/stale-escalate-secs and change the escalation timing
+# these suites assert on. Point unset callers at a directory nothing writes to;
+# a test that wants config behavior (the churn_config helper below) sets its
+# own FM_CONFIG_OVERRIDE inline, which still wins for that one command. Scoped
+# to this file (not tests/wake-helpers.sh) because tests/fm-watcher-lock.test.sh
+# shares that helper and deliberately relies on FM_CONFIG_OVERRIDE being unset
+# so fm-guard.sh derives its config path from FM_ROOT_OVERRIDE instead.
+if [ -z "${FM_CONFIG_OVERRIDE:-}" ]; then
+  FM_CONFIG_OVERRIDE="$(fm_test_tmproot fm-watch-triage-empty-config)"
+  export FM_CONFIG_OVERRIDE
+fi
+
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
@@ -3265,6 +3281,51 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   pass "a quiet pane writing its own worktree is deferred, while one writing nothing still wedge-escalates on the unchanged schedule"
 }
 
+# config/stale-escalate-secs (bin/fm-classify-lib.sh's fm_stale_escalate_secs)
+# overrides FM_STALE_ESCALATE_SECS for this home. Same stalled-pane fixture as
+# the phase B case above (nothing written, so wedge_timer_check has no deferral
+# evidence), but the escalation-due timer is set to land inside a short config
+# threshold while FM_STALE_ESCALATE_SECS carries a decoy value the config must
+# win over.
+test_config_stale_escalate_secs_overrides_env() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back cfg
+  dir=$(make_case stale-escalate-secs-config); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-config-escalate"; wt="$dir/wt"
+  cfg="$dir/config"; mkdir -p "$cfg" "$wt"
+  printf '2\n' > "$cfg/stale-escalate-secs"
+  printf 'idle waiting' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/config-escalate.meta"
+  printf 'working: implementing\n' > "$state/config-escalate.status"
+  sig=$(seen_sig "$state/config-escalate.status"); printf '%s' "$sig" > "$state/.seen-config-escalate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle waiting")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 5 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$cfg" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999999 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a decoy FM_STALE_ESCALATE_SECS was not overridden by config/stale-escalate-secs"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the config-thresholded escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the config-thresholded escalation did not flag a possible wedge"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the config-thresholded escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the config-thresholded escalation was not queued"
+  pass "config/stale-escalate-secs overrides a decoy FM_STALE_ESCALATE_SECS for this home"
+}
+
 # A deferral is not silence. A worktree can churn without real progress (a
 # rewritten log, a build touching the same file), so the whole deferral chain ages
 # and re-surfaces once per PAUSE_RESURFACE_SECS - the same bounded cadence a
@@ -4065,6 +4126,7 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
+test_config_stale_escalate_secs_overrides_env
 test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain

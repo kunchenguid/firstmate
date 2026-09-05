@@ -99,6 +99,35 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Effective wedge-escalation threshold for a home. config/stale-escalate-secs
+# (LOCAL, gitignored per AGENTS.md section 1's project/config split) overrides
+# FM_STALE_ESCALATE_SECS for this home when it holds a valid positive integer;
+# an absent, unreadable, or malformed file falls through to the env var, then
+# to the caller's own default. ONE resolver so the watcher and the away-mode
+# daemon cannot read a different effective threshold from the same config
+# directory. Each caller chooses its own resolution cadence: fm-watch.sh
+# resolves it ONCE at startup (matching its existing top-level
+# STALE_ESCALATE_SECS assignment), so an operator editing the file mid-session
+# takes effect on the watcher's next restart, consistent with every other
+# config/* knob in this repo; fm-supervise-daemon.sh's housekeeping instead
+# resolves it fresh on every tick because the unit tests source that file once
+# and invoke housekeeping many times, each under a different
+# FM_CONFIG_OVERRIDE - a value cached at source time would go stale across
+# those calls, and re-reading one small file every tick costs nothing an
+# operator would notice.
+fm_stale_escalate_secs() {  # <config-dir> <default-secs>
+  local config_dir=$1 default=$2 path value
+  path="$config_dir/stale-escalate-secs"
+  if [ -f "$path" ]; then
+    value=$(tr -d '[:space:]' < "$path" 2>/dev/null || true)
+    case "$value" in
+      ''|0|*[!0-9]*) ;;
+      *) printf '%s' "$value"; return ;;
+    esac
+  fi
+  printf '%s' "${FM_STALE_ESCALATE_SECS:-$default}"
+}
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
