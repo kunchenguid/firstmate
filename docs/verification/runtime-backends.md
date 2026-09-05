@@ -921,24 +921,34 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)).
+The classifier combines Herdr's native registration with the strict pane process proof already measured in this record's workspace-removal evidence.
+A native Pi registration is live unless the pane process information and operating-system process table independently prove that one childless idle recognized shell solely owns the foreground.
+
+The portable control-plane regression was run on 2026-08-16 on Darwin 25.5.0 arm64 with a real idle zsh process and a protocol-16 Herdr response fixture:
+
+```sh
+tests/fm-control.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - fm-control Herdr recovery: stale Pi registration over a real idle zsh is already stopped, while non-shell ownership stays live
+```
+
+The same executable test proves that the stopped path sends no `/quit`, then changes only the process evidence to a real non-shell foreground process and requires the registered Pi endpoint to remain `alive` through an interrupt postcondition.
+Unreadable, multi-process, active-job, child-process, and non-shell evidence never authorizes replacement.
+
+The live guard was updated to exercise the same stale-registration and non-shell ownership split against the real Herdr binary:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output:
-
-```text
-ok - real herdr: exit on a pane with no registered agent is idempotent success
-ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
-ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
-ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
-```
-
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+Its result is not claimed here until the guarded live command is run after this behavior change.
+The prior real lifecycle run was on Herdr 0.8.0, but it exercised registry presence alone and is not evidence for the new cross-check.
+Run the live guard after every Herdr upgrade before refreshing this record.
 
 ### Away-mode transport
 

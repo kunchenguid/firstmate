@@ -99,6 +99,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
+  Herdr's registered-agent versus proven idle-shell contradiction is resolved by the recovery classifier documented in [`herdr-backend.md`](herdr-backend.md#restart-and-liveness-behavior); every inconclusive process read still preserves the live-agent refusal.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
 
 ## Capability matrix
@@ -120,4 +121,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real Herdr binary, including stale registration over an idle shell and non-shell process ownership, on an isolated throwaway lab session.

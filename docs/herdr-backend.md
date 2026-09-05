@@ -268,9 +268,13 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
-The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
-Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+The generic Herdr agent-liveness probe starts from the native registry and then checks one independently proven contradiction.
+A structurally gone pane becomes `missing`, an unregistered shell becomes `dead`, and a registered agent normally becomes `alive`.
+A registry entry also becomes `dead` when Herdr process information and the operating-system process table agree that the pane's sole foreground owner is one childless idle recognized shell.
+This is the stale state Pi can leave after exiting on a provider failure.
+Any non-shell foreground process, shell child, active job, process-table ambiguity, or unreadable process evidence preserves `alive`, so the repair cannot authorize a replacement from an inconclusive read.
+The recovery check takes one strict sample rather than delaying every healthy agent probe with cleanup's settle retries, which means a transient prompt helper can only postpone recovery until a later read.
+Native registration still classifies Pi without guessing from a generic interpreter name, while process ownership prevents a stale registration from outliving the agent process it represented.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.

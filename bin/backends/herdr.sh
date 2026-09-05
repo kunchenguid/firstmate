@@ -1190,8 +1190,8 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
 # fails every sample and still refuses.
 # This is the single owner of the idle-shell proof; the session-start
 # projection cleanup and every pane-death close path both rely on it.
-fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
-  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}
+fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id> [max-attempts]
+  local attempt=0 max_attempts=${3:-${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}}
   while :; do
     if fm_backend_herdr_pane_idle_shell_sample "$1" "$2"; then
       return 0
@@ -1929,17 +1929,33 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
-# sweep as the tmux classifier. It reuses the husk classifier rather than
-# creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# sweep as the tmux classifier. It starts from the native registry classifier,
+# then rejects one proven stale-registration shape: a pane whose registry still
+# names an agent while process-info and the operating-system process table agree
+# that its only foreground owner is the idle shell. This is the state Pi can
+# leave after exiting on a provider failure. A non-shell foreground process, a
+# child process, an active shell job, or any unreadable process evidence keeps
+# the registered agent `alive`, so ambiguity never licenses a replacement.
+#
+# The recovery read takes one strict idle-shell sample instead of paying the
+# cleanup path's settle retries on every healthy agent probe. A transient prompt
+# helper therefore preserves `alive` and can only delay recovery until a later
+# read, never create a false `dead`.
 fm_backend_herdr_agent_state() {  # <target>
-  local target=$1
+  local target=$1 pane_state
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
-  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+  pane_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$pane_state" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
-    live) printf 'alive' ;;
+    live)
+      if fm_backend_herdr_pane_idle_shell_pid \
+          "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 1 >/dev/null 2>&1; then
+        printf 'dead'
+      else
+        printf 'alive'
+      fi
+      ;;
     *) printf 'unreadable' ;;
   esac
 }

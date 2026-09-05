@@ -17,6 +17,8 @@
 #   6. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
+#   7. Herdr recovery: stale native Pi registration over a real idle shell is
+#      already stopped, while non-shell foreground ownership remains live.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,7 +35,15 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-control)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
-trap 'rm -rf "$TMP_ROOT"' EXIT
+CONTROL_BG_PIDS=()
+control_test_cleanup() {
+  local pid
+  for pid in "${CONTROL_BG_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+  rm -rf "$TMP_ROOT"
+}
+trap control_test_cleanup EXIT
 
 VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
 
@@ -148,6 +158,47 @@ SH
   printf '%s\n' "$fb"
 }
 
+# A fake Herdr CLI for the stale-registration regression below. It reports the
+# exact production contradiction: the native registry still names Pi while
+# pane process-info shows that a real idle shell solely owns the foreground.
+make_stale_registration_herdr_stub() {  # <case-dir>
+  local dir=$1 fb="$1/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.8.0","protocol":16},"server":{"running":true}}'
+    ;;
+  "pane get")
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}'
+    ;;
+  "agent get")
+    printf '%s\n' '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}'
+    ;;
+  "pane process-info")
+    if [ -n "${FM_FAKE_FOREGROUND_PID:-}" ]; then
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s"}]}}}\n' \
+        "$FM_FAKE_SHELL_PID" "$FM_FAKE_FOREGROUND_PID" "$FM_FAKE_FOREGROUND_PID" \
+        "$FM_FAKE_FOREGROUND_NAME" "$FM_FAKE_FOREGROUND_NAME"
+    else
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s"}]}}}\n' \
+        "$FM_FAKE_SHELL_PID" "$FM_FAKE_SHELL_PID" "$FM_FAKE_SHELL_PID" \
+        "$FM_FAKE_SHELL_NAME" "$FM_FAKE_SHELL_NAME"
+    fi
+    ;;
+  "pane send-text")
+    printf '%s\n' "${4:-}" >> "$D/literal"
+    ;;
+  "pane send-keys")
+    printf '%s\n' "${4:-}" >> "$D/keys"
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+}
+
 # new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
@@ -197,6 +248,10 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_SHELL_PID="${FM_FAKE_SHELL_PID:-}" \
+    FM_FAKE_SHELL_NAME="${FM_FAKE_SHELL_NAME:-}" \
+    FM_FAKE_FOREGROUND_PID="${FM_FAKE_FOREGROUND_PID:-}" \
+    FM_FAKE_FOREGROUND_NAME="${FM_FAKE_FOREGROUND_NAME:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -628,6 +683,71 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
+# Pi can exit after a provider timeout while Herdr retains its last native
+# registration. This drives fm-control through that end-user path with a real
+# childless shell process: the process evidence must override only this exact
+# stale shape, so /quit is never typed into the shell and same-task recovery can move
+# on to its already-stopped boundary.
+test_herdr_stale_pi_registration_over_idle_shell_is_already_stopped() {
+  local dir out rc fifo shell_bin shell_pid shell_name child_count agent_pid
+  dir=$(new_case herdr-stale-pi)
+  add_task "$dir" t1 pi ship herdr "fmses:w1:p1"
+  {
+    echo "herdr_session=fmses"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t1"
+    echo "herdr_pane_id=w1:p1"
+  } >> "$dir/home/state/t1.meta"
+  make_stale_registration_herdr_stub "$dir"
+
+  fifo="$dir/idle-shell-input"
+  mkfifo "$fifo"
+  exec 9<>"$fifo"
+  shell_bin=$(command -v zsh 2>/dev/null || command -v sh 2>/dev/null) \
+    || fail "the regression fixture needs a recognized shell"
+  "$shell_bin" -f <"$fifo" >"$dir/idle-shell.out" 2>&1 &
+  shell_pid=$!
+  CONTROL_BG_PIDS+=("$shell_pid")
+  shell_name=$(ps -p "$shell_pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+  shell_name=${shell_name#-}
+  shell_name=${shell_name##*/}
+  case "$shell_name" in
+    sh|bash|zsh|dash|ksh|fish) ;;
+    *) fail "the regression fixture did not start a recognized idle shell (pid=$shell_pid comm='$shell_name')" ;;
+  esac
+  child_count=$(ps -axo ppid= 2>/dev/null | awk -v parent="$shell_pid" '$1 == parent { count++ } END { print count + 0 }')
+  [ "$child_count" -eq 0 ] || fail "the regression shell has a child process, so it is not the plain-shell defect shape"
+
+  out=$(FM_FAKE_SHELL_PID="$shell_pid" FM_FAKE_SHELL_NAME="$shell_name" \
+    run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a stale Pi registration over a proven idle shell should be already stopped"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" \
+    "the recovery boundary should report the exited Pi worker already stopped"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a stale Pi registration over the idle shell must receive no /quit command"
+
+  # Change only the process evidence to a real non-shell foreground process.
+  # The same registered Pi identity must become live again, proving that the
+  # repair does not turn registry/process ambiguity into replacement authority.
+  /bin/sleep 30 &
+  agent_pid=$!
+  CONTROL_BG_PIDS+=("$agent_pid")
+  out=$(FM_FAKE_SHELL_PID="$shell_pid" FM_FAKE_SHELL_NAME="$shell_name" \
+    FM_FAKE_FOREGROUND_PID="$agent_pid" FM_FAKE_FOREGROUND_NAME=pi \
+    run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a registered Pi identity with a non-shell foreground process must remain alive"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive" \
+    "non-shell process ownership must preserve the real-agent protection"
+  [ "$(keys_sent "$dir")" = escape ] \
+    || fail "the live-agent control path should deliver Pi's verified interrupt key through Herdr's normalized vocabulary"
+
+  kill "$agent_pid" "$shell_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  wait "$shell_pid" 2>/dev/null || true
+  exec 9>&-
+  pass "fm-control Herdr recovery: stale Pi registration over a real idle $shell_name is already stopped, while non-shell ownership stays live"
+}
+
 test_missing_endpoint_refuses() {
   local dir out rc
   dir=$(new_case gone)
@@ -894,6 +1014,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_herdr_stale_pi_registration_over_idle_shell_is_already_stopped
 test_missing_endpoint_refuses
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
