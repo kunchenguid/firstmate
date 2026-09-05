@@ -13,8 +13,8 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (b2) blocked log claiming the daemon/timeout while the run is fixing with
 #       fresh activity = superseded BECAUSE THE RUN IS ALIVE; the same claim
-#       a genuine socket-refusal claim over a stale fixing record remains
-#       blocked, and an ordinary blocked log over a live run keeps the generic
+#       a genuine socket-refusal claim over a stale or terminal run record
+#       remains blocked, and an ordinary blocked log over a live run keeps the generic
 #       superseded reading
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
@@ -512,6 +512,25 @@ test_socket_refusal_over_stale_fixing_run_reports_blocked() {
   assert_contains "$out" "source: status-log" "missing socket remains status-log evidence"
   assert_not_contains "$out" "state: working" "missing socket cannot be suppressed by a stale active record"
   pass "socket refusal or missing socket over a stale fixing run reports blocked"
+}
+
+# A terminal run record can be the final persisted state after the daemon exits.
+# Positive socket-failure evidence must not be discarded merely because that
+# attributed record no longer has an active status.
+test_socket_refusal_over_terminal_run_reports_blocked() {
+  reset_fakes
+  local d; d=$(new_case daemon-socket-refused-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-dqt
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dqt.meta" "window=fm:fm-feat-dqt" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
+    > "$d/state/feat-dqt.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dqt)"
+  local out; out=$(run_crew_state "$d" feat-dqt)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a terminal run record"
+  assert_contains "$out" "source: status-log" "terminal run cannot suppress socket-failure evidence"
+  assert_not_contains "$out" "state: failed" "terminal run state is not emitted over socket-failure evidence"
+  pass "socket refusal over a terminal attributed run reports blocked"
 }
 
 # And the claim half: an ordinary blocked line over the same live run keeps the
@@ -2029,6 +2048,7 @@ test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
+test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded

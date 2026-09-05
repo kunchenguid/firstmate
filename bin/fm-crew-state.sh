@@ -55,8 +55,8 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked. A `blocked:` line that reports a
-#      refused or missing daemon socket remains blocked even if a stale run
-#      record says running/fixing. Other daemon, timeout, or unreachability
+#      refused or missing daemon socket remains blocked even if an attributed
+#      run record is stale or terminal. Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
@@ -611,16 +611,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   # stale: the gate resolved and the run resumed or finished.
   #
   # A refused or missing daemon socket is positive daemon-down evidence and
-  # outranks a stale running/fixing record. Other blocked claims caused by a
-  # timed-out drive call are contradicted only when the run reports recent
+  # outranks any attributed run record, including a terminal one left behind
+  # after the daemon stopped. Other blocked claims caused by a timed-out drive
+  # call are contradicted only when the run reports recent
   # activity; the answer is then to steer the crew to reattach without touching
   # the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
-        && log_reports_daemon_socket_down "$LOG_LINE" \
-        && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ] || [ "$COARSE_STATUS" = running ]; }; then
-        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite active run record"
+        && log_reports_daemon_socket_down "$LOG_LINE"; then
+        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
