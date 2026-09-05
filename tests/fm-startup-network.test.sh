@@ -95,7 +95,15 @@ SH
 # `cd`/`pwd`. Matching that exact prefix is what keeps the sweep from ever
 # touching a concurrent suite run or a real fleet home on the same machine.
 launched_workers() {
-  ps -eo pid=,args= 2>/dev/null | awk -v root="$TMP_ROOT/" '
+  local snapshot
+  # Snapshot first, filter second, rather than piping ps straight into awk. Both
+  # stages of a pipeline start together, so ps can list the awk itself - and that
+  # awk's own command line carries this root AND the literal being searched for,
+  # which makes the matcher report itself as a worker that never exits. Running
+  # ps to completion before the filter process exists removes that race outright
+  # instead of relying on which stage happens to reach exec first.
+  snapshot=$(ps -eo pid=,args= 2>/dev/null)
+  printf '%s\n' "$snapshot" | awk -v root="$TMP_ROOT/" '
     index($0, root) && index($0, "fm-startup-network.sh run") { print $1 }'
 }
 
