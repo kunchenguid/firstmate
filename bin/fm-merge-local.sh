@@ -12,6 +12,10 @@
 # After landing, fail-softly refreshes that project's GitNexus main-index
 # (bin/fm-gitnexus-reindex.sh owns the mirror, flag, and never-mutate-the-clone
 # contract); an index failure never fails the landing.
+# This script does not itself run `git push`; if a future change adds one that
+# pushes directly to a project's main/master, prefix that exact command with
+# `FM_PUSH_GUARD_OWNER=fm-merge-local` so bin/fm-push-guard-pretool-check.sh
+# recognizes it as sanctioned (docs/push-guard.md).
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 

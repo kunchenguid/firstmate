@@ -369,6 +369,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/push-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },
