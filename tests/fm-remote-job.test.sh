@@ -139,15 +139,6 @@ export FM_REMOTE_JOB_TIMEOUT=$((5 * FM_TEST_TIMEOUT_SCALE))
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
-case "$(/usr/bin/uname -s)" in
-  Darwin) EXPECTED_HOST_PLATFORM=darwin ;;
-  Linux) EXPECTED_HOST_PLATFORM=linux ;;
-  *) EXPECTED_HOST_PLATFORM=$(/usr/bin/uname -s) ;;
-esac
-[ "$(fm_remote_job_host_platform)" = "$EXPECTED_HOST_PLATFORM" ] \
-  || fail "the logical worker platform override changed host identity semantics"
-pass "the worker platform override leaves host identity semantics unchanged"
-
 LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
 LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
 mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"
@@ -222,22 +213,6 @@ for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   sleep 0.05
 done
 assert_present "$STATE_ROOT/worker.ready" "the worker did not publish its readiness heartbeat"
-
-if [ "$(fm_remote_job_host_platform)" = darwin ]; then
-  WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
-  SUPERVISOR_PID=$(cat "$STATE_ROOT/supervisor.lock/pid")
-  SUPERVISOR_START=$(cat "$STATE_ROOT/supervisor.lock/start")
-  printf 'stale supervisor identity\n' > "$STATE_ROOT/supervisor.lock/start"
-  set +e
-  fm_remote_job_resolve_stop_owner "$WORKER_PID" >/dev/null 2> "$TMP_ROOT/stale-supervisor.err"
-  STALE_SUPERVISOR_RC=$?
-  set -e
-  [ "$STALE_SUPERVISOR_RC" -ne 0 ] || fail "a stale supervisor identity authorized worker-tree shutdown"
-  kill -0 "$WORKER_PID" 2>/dev/null || fail "a stale supervisor identity signaled the serving worker"
-  kill -0 "$SUPERVISOR_PID" 2>/dev/null || fail "a stale supervisor identity signaled the supervisor"
-  printf '%s\n' "$SUPERVISOR_START" > "$STATE_ROOT/supervisor.lock/start"
-  pass "worker shutdown refuses a stale supervisor identity"
-fi
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then

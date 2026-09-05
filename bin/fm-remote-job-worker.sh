@@ -318,7 +318,7 @@ worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
     worker_supervisor_identity_status "$job" "$pid" || return 0
   else
     recorded_start=$(fm_remote_job_read_single_line "$job/.claim/group_start" 256 2>/dev/null || true)
-    if [ "$(fm_remote_job_host_platform)" = linux ]; then
+    if [ "$(fm_remote_job_platform)" = linux ]; then
       case "$recorded_start" in
         linux:*:*) ;;
         *)
@@ -583,7 +583,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   ) &
   group_pid=$!
   set +m
-  if [ "$(fm_remote_job_host_platform)" = linux ]; then
+  if [ "$(fm_remote_job_platform)" = linux ]; then
     if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" = 1 ]; then
       group_start=
     else
