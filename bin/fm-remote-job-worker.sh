@@ -1075,11 +1075,12 @@ worker_supervisor_cleanup() {
 }
 
 worker_supervise_linux() {
-  local account_home child_status started failures=0 restarts=0 backoff lock_status
+  local account_home child_status started failures=0 restarts=0 backoff lock_status worker_lock
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
+  worker_lock=$(fm_remote_job_worker_lock_path)
   # The serving child releases worker.lock on exit. A separate ownership lease
   # survives its restart window, preventing concurrent ensure calls from
   # accumulating independent restart loops while serving ownership is stale.
@@ -1090,7 +1091,13 @@ worker_supervise_linux() {
   lock_status=$?
   case "$lock_status" in
     0) ;;
-    2) return 0 ;;
+    2)
+      if [ -e "$worker_lock/quarantine" ] || [ -L "$worker_lock/quarantine" ]; then
+        worker_error "worker ownership is quarantined after an unconfirmed shutdown"
+        return 75
+      fi
+      return 0
+      ;;
     *) worker_error "cannot acquire supervisor ownership"; return 1 ;;
   esac
   while :; do

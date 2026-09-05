@@ -10,6 +10,26 @@ import sys
 import tempfile
 import time
 
+if len(sys.argv) > 1 and sys.argv[1] == "--reuse-group":
+    parent_group = int(sys.argv[2])
+    owned_path = Path(sys.argv[3])
+    trigger_path = Path(sys.argv[4])
+    reused_path = Path(sys.argv[5])
+    outside_root = sys.argv[6]
+    os.setpgid(0, 0)
+    owned_path.write_text(f"{os.getpid()} {os.getpgrp()}\n")
+    while not trigger_path.exists():
+        time.sleep(0.01)
+    os.setpgid(0, parent_group)
+    os.chdir(outside_root)
+    os.execve(sys.executable, [sys.executable, __file__, "--reused-group", str(reused_path)], {})
+
+if len(sys.argv) > 1 and sys.argv[1] == "--reused-group":
+    os.setpgid(0, 0)
+    Path(sys.argv[2]).write_text(f"{os.getpid()} {os.getpgrp()}\n")
+    while True:
+        signal.pause()
+
 repo = Path(sys.argv[1]).resolve()
 if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
     raise OSError(ctypes.get_errno(), "cannot become child subreaper")
@@ -69,7 +89,7 @@ def wait_for(predicate, seconds=10):
     raise AssertionError("condition did not become true before deadline")
 
 
-def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
+def worker_environment(queue, timezone="UTC0", locale_name="C", locale_path=None):
     env = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                FM_REMOTE_JOB_STATE_ROOT=str(queue), FM_REMOTE_JOB_PLATFORM_OVERRIDE="Linux", TZ=timezone,
                LC_ALL=locale_name,
@@ -79,6 +99,11 @@ def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
         env["LOCPATH"] = str(locale_path)
     else:
         env.pop("LOCPATH", None)
+    return env
+
+
+def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
+    env = worker_environment(queue, timezone, locale_name, locale_path)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -137,23 +162,53 @@ done
     call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', other)
     wait_for(lambda: not processes())
     print("ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue")
-    unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+
+    direct_queue = fixture / "direct-queue"
+    direct_queue.mkdir()
+    direct = subprocess.Popen([str(worker)], env=worker_environment(direct_queue), cwd=root,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        call(f'''
-fm_remote_job_process_scope() {{
-  [ "$1" = 123 ] || return 1
-  FM_REMOTE_JOB_PROCESS_ROOT=$FM_ROOT_OVERRIDE
-  FM_REMOTE_JOB_PROCESS_STATE=$FM_REMOTE_JOB_STATE_ROOT
-}}
-fm_remote_job_worker_process_group() {{ printf '{unrelated.pid}\\n'; }}
-fm_remote_job_stop_worker_tree 123
-''', queue)
-        assert unrelated.poll() is None, "stop signalled the recycled unrelated group"
+        wait_for(lambda: (direct_queue / "worker.pid").is_file() and len(processes()) == 2)
+        direct_child = int((direct_queue / "worker.pid").read_text())
+        assert os.getpgid(direct.pid) == os.getpgrp()
+        call(f"fm_remote_job_stop_worker_tree {direct_child}", direct_queue)
+        wait_for(lambda: not processes())
+        direct.wait(timeout=5)
+        for _ in range(30):
+            assert not processes(), "same-group supervisor respawned after stop"
+            time.sleep(0.1)
     finally:
-        if unrelated.poll() is None:
-            unrelated.terminate()
-            unrelated.wait()
-    print("ok - stop leaves a group recycled before its scoped snapshot untouched")
+        if direct.poll() is None:
+            direct.kill()
+            direct.wait()
+    print("ok - stop terminates a same-group supervisor without signalling the caller group")
+
+    call(start, queue)
+    wait_for(lambda: (queue / "worker.pid").is_file() and len(processes()) == 2)
+    anchor = int((queue / "worker.pid").read_text())
+    owned_path = fixture / "group-owned"
+    trigger_path = fixture / "group-reuse"
+    reused_path = fixture / "group-reused"
+    reuser = subprocess.Popen([sys.executable, __file__, "--reuse-group", str(os.getpgrp()),
+                               str(owned_path), str(trigger_path), str(reused_path), str(fixture)],
+                              env=worker_environment(queue), cwd=root)
+    try:
+        wait_for(owned_path.exists)
+        owned_pid, owned_group = map(int, owned_path.read_text().split())
+        assert owned_pid == reuser.pid and owned_group == reuser.pid
+        call(f'fm_remote_job_scoped_process_identity {reuser.pid} "$FM_ROOT_OVERRIDE" "$FM_REMOTE_JOB_STATE_ROOT" >/dev/null', queue)
+        trigger_path.touch()
+        wait_for(reused_path.exists)
+        reused_pid, reused_group = map(int, reused_path.read_text().split())
+        assert reused_pid == owned_pid and reused_group == owned_group
+        call(f"fm_remote_job_stop_worker_tree {anchor}", queue)
+        wait_for(lambda: not processes())
+        assert reuser.poll() is None, "stop signalled the unrelated reused group"
+    finally:
+        if reuser.poll() is None:
+            reuser.terminate()
+            reuser.wait()
+    print("ok - stop leaves a concretely dissolved and reused unrelated group untouched")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
@@ -166,6 +221,13 @@ fm_remote_job_stop_worker_tree 123
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     call(start, queue, "EST5", locale_name, locale_root)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
+    quarantine = queue / "worker.lock/quarantine"
+    quarantine.write_text("active execution could not be confirmed stopped\n")
+    replacement = subprocess.run([str(worker)], env=worker_environment(queue), cwd=root,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    assert replacement.returncode == 75, (replacement.stdout, replacement.stderr)
+    quarantine.unlink()
+    print("ok - a live supervisor lease cannot mask quarantined serving ownership")
     original = set(processes())
     ensure = 'fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ]'
     launches = launch_log.read_text()

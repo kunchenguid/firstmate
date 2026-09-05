@@ -978,13 +978,14 @@ fm-test-run: no fm-remote or fm-lab-* Herdr server survived the suite
 `tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
 It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
 The runner regression separately proves that the process check rejects surviving test servers and unreadable inventories while accepting the default server, readers, and zombies.
+Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
-The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, and independent restart supervisors from the same queue, plus a separate queue that must survive.
-It also verifies that cleanup leaves an unrelated process untouched when it reuses the numeric group before the scoped snapshot.
+The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, a directly backgrounded same-group supervisor, and independent restart supervisors from the same queue, plus a separate queue that must survive.
+It also dissolves a previously scoped process group, recreates the same numeric group with an unrelated process identity before stop, and verifies that cleanup leaves it untouched.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
-The regression asserts both termination and absence of respawns after stop; it failed against the previous implementation and passed with the fix.
+The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
 
 ```sh
 bin/fm-test-run.sh --jobs 1 tests/fm-remote-job-orphan-reap.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh

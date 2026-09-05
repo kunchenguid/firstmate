@@ -1056,14 +1056,12 @@ fm_remote_job_scoped_process_identity() { # <pid> <root> <state>
 }
 
 fm_remote_job_scope_snapshot() { # <root> <state>
-  local root=$1 state=$2 candidate identity own_group group
-  own_group=$(fm_remote_job_process_pgid "$$") || return 1
+  local root=$1 state=$2 candidate identity
   for candidate in /proc/[0-9]*; do
     candidate=${candidate##*/}
+    [ "$candidate" != "$$" ] || continue
     identity=$(fm_remote_job_scoped_process_identity "$candidate" "$root" "$state" 2>/dev/null || true)
     [ -n "$identity" ] || continue
-    group=${identity##*$'\t'}
-    [ "$group" != "$own_group" ] || continue
     printf '%s\t%s\n' "$candidate" "$identity"
   done
 }
@@ -1107,13 +1105,15 @@ fm_remote_job_group_all_members_scoped() { # <group> <root> <state>
 }
 
 fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal>
-  local snapshot=$1 root=$2 state=$3 signal=$4 pid recorded_start group identity
+  local snapshot=$1 root=$2 state=$3 signal=$4 pid recorded_start group identity own_group
   local groups='' signalled_groups=''
+  own_group=$(fm_remote_job_process_pgid "$$") || return 1
   while IFS=$'\t' read -r _ _ group; do
     case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
   done <<< "$snapshot"
   for group in $groups; do
-    if fm_remote_job_group_all_members_scoped "$group" "$root" "$state" &&
+    if [ "$group" != "$own_group" ] &&
+      fm_remote_job_group_all_members_scoped "$group" "$root" "$state" &&
       fm_remote_job_snapshot_group_has_identity "$snapshot" "$group" "$root" "$state"; then
       kill -"$signal" -- "-$group" 2>/dev/null || true
       signalled_groups="$signalled_groups $group"

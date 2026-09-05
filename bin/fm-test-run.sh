@@ -2358,7 +2358,7 @@ fi
 
 if [ "$CHECK_HERDR_LEAKS" -eq 1 ]; then
   # Kernel inventory does not contact Herdr or risk starting a server.
-  if ps -u "$(id -u)" -o pid=,stat=,args= > "$RUN_TMP/herdr-processes"; then
+  if ps -ww -u "$(id -u)" -o pid=,stat=,args= > "$RUN_TMP/herdr-processes"; then
     awk '
       $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
         for (i = 5; i <= NF; i++) {

@@ -1454,7 +1454,7 @@ test_fixture_cleanup_stops_only_its_own_users
 test_fixture_timeout_scale
 
 test_herdr_leak_check() {
-  local tmp repo out rc row
+  local tmp repo out rc row long_row
   tmp=$(fm_test_tmproot fm-test-run-herdr-leaks)
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests" "$tmp/fakebin"
@@ -1463,12 +1463,17 @@ test_herdr_leak_check() {
   cat > "$tmp/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 [ "${FM_LEAK_PS_FAIL:-0}" = 0 ] || exit 1
-cat "$FM_LEAK_PS_ROWS"
+case " $* " in
+  *' -ww '*) cat "$FM_LEAK_PS_ROWS" ;;
+  *) cut -c 1-80 "$FM_LEAK_PS_ROWS" ;;
+esac
 SH
   chmod +x "$tmp/fakebin/ps"
+  long_row="47 S /nix/store/$(printf '%090d' 0)/bin/herdr server --session fm-lab-wide"
   for row in \
     '42 S herdr server --session fm-remote' \
-    '43 S /nix/store/example/bin/herdr server --session=fm-lab-owned'; do
+    '43 S /nix/store/example/bin/herdr server --session=fm-lab-owned' \
+    "$long_row"; do
     printf '%s\n' "$row" > "$tmp/rows"
     rc=0
     out=$(FM_LEAK_PS_ROWS="$tmp/rows" PATH="$tmp/fakebin:$PATH" \
