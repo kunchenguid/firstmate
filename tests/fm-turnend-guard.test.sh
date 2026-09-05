@@ -797,13 +797,22 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
 # counterpart registration, so guarding it would REMOVE the guard from Grok
 # rather than deduplicate it (docs/subagent-guard.md "Known residual gap").
 # It is asserted to stay unguarded so the exception cannot be closed silently.
+#
+# The stub-script list below is this test's census of every tracked entry in
+# .claude/settings.json (currently 6 guarded: fm-turnend-guard.sh,
+# fm-claude-stop-autoarm.sh, fm-sessionstart-run.sh, fm-arm-pretool-check.sh,
+# fm-cd-pretool-check.sh, fm-push-guard-pretool-check.sh, plus the 1
+# documented unguarded exception above). Add a new hook's script to this list
+# in the same change that registers it, or this test fails loudly naming the
+# missing entry instead of silently missing a real coverage gap.
 test_tracked_claude_entries_inert_under_grok() {
   local dir cmd script target guarded=0 unguarded=0
   command -v jq >/dev/null 2>&1 || fail "test host must provide jq"
   dir="$TMP_ROOT/claude-entries-grok-inert"
   mkdir -p "$dir/bin"
   for script in fm-turnend-guard.sh fm-claude-stop-autoarm.sh fm-sessionstart-run.sh \
-    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh; do
+    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-push-guard-pretool-check.sh \
+    fm-subagent-pretool-check.sh; do
     printf '#!/usr/bin/env bash\nprintf ran >> %q\n' "$dir/invoked" > "$dir/bin/$script"
     chmod +x "$dir/bin/$script"
   done
@@ -819,6 +828,8 @@ test_tracked_claude_entries_inert_under_grok() {
     [ -n "$cmd" ] || continue
     target=$(printf '%s\n' "$cmd" | sed -n 's|.*/bin/\([a-z0-9-]*\.sh\).*|\1|p')
     [ -n "$target" ] || fail "could not identify the target script of tracked entry: $cmd"
+    [ -e "$dir/bin/$target" ] \
+      || fail "tracked entry for $target is missing from this test's stub-script census; add it alongside its .claude/settings.json registration"
 
     # Native Claude: EVERY tracked entry must still reach its script, or a guard
     # has silently disarmed Claude's own protection.
@@ -844,7 +855,7 @@ test_tracked_claude_entries_inert_under_grok() {
       || fail "tracked entry for $target ran under a legacy GROK_AGENT environment"
   done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
 
-  [ "$guarded" -eq 5 ] || fail "expected 5 grok-guarded tracked entries, saw $guarded"
+  [ "$guarded" -eq 6 ] || fail "expected 6 grok-guarded tracked entries, saw $guarded"
   [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
