@@ -593,6 +593,26 @@ SH
   grep -Eq '^FM_TEST_BUDGET max_wall_ms=100 duration_ms=[0-9]+$' "$tmp/slow-selection.out" \
     || fail "over-budget empty selection omitted its budget result"
   [ -e "$tmp/slow-git" ] || fail "the slow selection fixture did not run"
+  # A wall-clock correction during selection must not erase elapsed work.
+  mkdir -p "$tmp/clock"
+  cat > "$tmp/clock/sitecustomize.py" <<'PY_CLOCK'
+import os
+import time
+
+original_time = time.time
+if os.path.exists(os.environ["SLOW_GIT_MARKER"]):
+    time.time = lambda: original_time() - 60
+PY_CLOCK
+  set +e
+  (cd "$repo" && PATH="$fake_bin:$PATH" REAL_GIT="$real_git" \
+    SLOW_GIT_MARKER="$tmp/clock-step" PYTHONPATH="$tmp/clock" \
+    bin/fm-test-run.sh --changed --base HEAD --max-wall-ms 100) \
+    >"$tmp/clock-selection.out" 2>"$tmp/clock-selection.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a backward wall-clock step erased the elapsed budget, got $rc"
+  [ -e "$tmp/clock-step" ] || fail "the wall-clock step fixture did not run"
+  pass "runner elapsed budgets survive backward wall-clock changes"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
     >"$tmp/bad-budget.out" 2>"$tmp/bad-budget.err"

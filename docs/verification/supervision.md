@@ -592,3 +592,24 @@ fm-test-run: no fm-remote or fm-lab-* Herdr server survived the suite
 
 The fake remote transport owns a strict Herdr fixture, so its doorbell cannot start a host server even when the modeled pane is absent.
 The regression verifies attempted doorbell delivery, durable inbox publication, cooldown commitment, and rejection of unexpected fixture operations.
+
+Elapsed-budget clock handling and queued-expiry ordering were reverified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-test-run.test.sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-remote-job.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - runner elapsed budgets survive backward wall-clock changes
+FM_TEST_END 2026-09-05T13:12:49Z tests/fm-test-run.test.sh exit=0 duration_ms=141925 gate_skip=false
+ok - the worker expires queued jobs before they can mutate
+ok - failed shutdown quarantines ownership against replacement workers
+FM_TEST_END 2026-09-05T13:00:26Z tests/fm-remote-job.test.sh exit=0 duration_ms=56911 gate_skip=false
+fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+The Python elapsed clock is monotonic; the budget regression moves wall time backward during deliberately slow selection and still requires a budget failure.
+The queued-expiry fixture holds its lane until the queued deadline is durably in the past, then checks timeout publication and absence of command side effects.

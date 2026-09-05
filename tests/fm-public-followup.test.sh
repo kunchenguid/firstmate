@@ -56,10 +56,11 @@ pf_test_cleanup() {
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
     if [ -n "$pid" ]; then
-      fm_remote_job_stop_worker_tree "$pid" || {
+      if ! { fm_remote_job_resolve_stop_owner "$pid" &&
+        fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"; }; then
         printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
         return 1
-      }
+      fi
     fi
   fi
   fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
