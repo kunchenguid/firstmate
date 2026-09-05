@@ -23,12 +23,32 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX")
 SESSION=liveness
+
+# The stand-in "harness" binaries below are symlinks whose LINK NAME is the
+# executable identity under test, exec'd as `<name> <seconds>`. A multi-call
+# coreutils `sleep` (e.g. Nix's) dispatches on argv[0], so under a renamed
+# symlink it prints "coreutils: unknown program <name>" and exits 1 - the pane
+# dies at once and every case misreads as dead. Pick the FIRST sleep that still
+# runs correctly when invoked through a renamed symlink; a standalone /bin/sleep
+# does, the coreutils multi-call one does not.
+SLEEP_BIN=
+for _sleep_candidate in /bin/sleep /usr/bin/sleep "$(command -v sleep 2>/dev/null)"; do
+  [ -n "$_sleep_candidate" ] && [ -x "$_sleep_candidate" ] || continue
+  _probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-probe.XXXXXX") || continue
+  ln -s "$_sleep_candidate" "$_probe_dir/probe-link"
+  if ( cd "$_probe_dir" && ./probe-link 0 ) >/dev/null 2>&1; then
+    SLEEP_BIN=$_sleep_candidate
+    rm -rf "$_probe_dir"
+    break
+  fi
+  rm -rf "$_probe_dir"
+done
+[ -n "$SLEEP_BIN" ] || { echo "skip: no argv0-independent sleep binary found"; exit 0; }
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
