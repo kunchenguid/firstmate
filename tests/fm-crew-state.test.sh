@@ -497,7 +497,21 @@ test_socket_refusal_over_stale_fixing_run_reports_blocked() {
   assert_contains "$out" "source: status-log" "socket refusal remains status-log evidence"
   assert_contains "$out" "socket refused connections" "socket failure is preserved"
   assert_not_contains "$out" "run alive" "stale fixing record is not reported alive"
-  pass "socket refusal over a stale fixing run reports blocked"
+
+  # Exercise the exact alternate wordings emitted by the generated crew rule.
+  printf 'blocked: no-mistakes daemon socket refuses connections\n' \
+    > "$d/state/feat-dq.status"
+  out=$(run_crew_state "$d" feat-dq)
+  assert_contains "$out" "state: blocked" "socket-refuses wording outranks a stale fixing record"
+  assert_not_contains "$out" "state: working" "socket-refuses wording cannot be suppressed by a stale active record"
+
+  printf 'blocked: no-mistakes daemon socket is missing\n' \
+    > "$d/state/feat-dq.status"
+  out=$(run_crew_state "$d" feat-dq)
+  assert_contains "$out" "state: blocked" "missing socket outranks a stale fixing record"
+  assert_contains "$out" "source: status-log" "missing socket remains status-log evidence"
+  assert_not_contains "$out" "state: working" "missing socket cannot be suppressed by a stale active record"
+  pass "socket refusal or missing socket over a stale fixing run reports blocked"
 }
 
 # And the claim half: an ordinary blocked line over the same live run keeps the

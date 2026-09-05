@@ -49,7 +49,7 @@ So a crewmate's timed-out, killed, or errored drive call leaves it waiting on a 
 Read the two authoritative sources yourself before believing the claim:
 
 1. `no-mistakes daemon status` for the socket.
-2. `no-mistakes axi status --run <id>` for the run, or `bin/fm-crew-state.sh <id>`, which already folds this contradiction in and reports a daemon-or-timeout `blocked:` line over a running or fixing run with fresh activity as superseded because the run is alive.
+2. `no-mistakes axi status --run <id>` for the run, or `bin/fm-crew-state.sh <id>`, which already folds this contradiction in and reports a non-socket daemon-or-timeout `blocked:` line over a running or fixing run with fresh activity as superseded because the run is alive.
 
 A refused connection or missing socket from `daemon status` is positive daemon-down evidence and must be escalated even if the persisted run record still says running or fixing; that record can be stale after the daemon exits.
 Otherwise, if the run is still running or fixing with recent activity, the claim is wrong: steer the crewmate to reattach with `no-mistakes axi run` from its own worktree, which is safe and idempotent while the run still matches its `HEAD`, and tell it a timeout is not daemon death.
@@ -57,7 +57,7 @@ Nothing reaches the captain in that case.
 
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
-Only a daemon that genuinely refuses connections on its socket is a real finding, and only that finding is escalated to the captain.
+Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
 ## Live-endpoint escalation
 

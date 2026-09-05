@@ -331,7 +331,7 @@ log_reports_daemon_socket_down() {  # <line>
     *) return 1 ;;
   esac
   case "$line" in
-    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket missing"*|*"missing socket"*) return 0 ;;
+    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
   esac
   return 1
 }
