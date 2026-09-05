@@ -2078,8 +2078,68 @@ EOF
   printf '%s' "$lines" >&2
 }
 
+# True when <worktree> is a worktree of firstmate's OWN repo (this task is a
+# firstmate-repo task), never of an ordinary registered project clone. Compares
+# git-common-dir, the same isolation-proof shape validate_spawn_worktree above
+# already uses, so a linked-worktree secondmate home is correctly recognized
+# too (AGENTS.md task fm-spawn-base-local-main).
+worktree_is_firstmate_home_repo() {  # <worktree>
+  local worktree=$1 wt_common fm_root_common
+  wt_common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && wt_common=$(cd "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+  fm_root_common=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && fm_root_common=$(cd "$fm_root_common" 2>/dev/null && pwd -P) || fm_root_common=
+  [ -n "$wt_common" ] && [ -n "$fm_root_common" ] && [ "$wt_common" = "$fm_root_common" ]
+}
+
+# Set by freshen_spawn_worktree_base on success, so the caller can record the
+# chosen base in the brief the worker reads.
+FRESH_SPAWN_BASE_SHA=""
+FRESH_SPAWN_BASE_LABEL=""
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  FRESH_SPAWN_BASE_SHA=""
+  FRESH_SPAWN_BASE_LABEL=""
+
+  # A firstmate-repo task worktree must start from THIS HOME's local main tip,
+  # never origin/<default>: a home with no push rights to upstream would
+  # otherwise hand the worker a branch that cannot fast-forward onto local main
+  # at merge time (the exact incident this guard exists for). No fetch, no
+  # origin dependency - primary_head_commit (bin/fm-ff-lib.sh) reads the local
+  # refs/heads/<default> ref only, the same local-HEAD sync every secondmate
+  # already follows.
+  if worktree_is_firstmate_home_repo "$worktree"; then
+    if ! expected=$(primary_head_commit "$FM_ROOT"); then
+      echo "error: could not resolve this home's local default-branch tip for firstmate task worktree '$worktree'; refusing to launch from origin/<default>. Recover with: git -C '$worktree' fetch '$FM_ROOT' main && git -C '$worktree' checkout -B <branch> FETCH_HEAD" >&2
+      return 1
+    fi
+    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+      echo "error: could not inspect firstmate task worktree '$worktree' before refreshing its base" >&2
+      return 1
+    }
+    if [ -n "$status" ]; then
+      if describe_stale_submodule_pins "$worktree" "$status"; then
+        echo "error: firstmate task worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+      else
+        echo "error: firstmate task worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+      fi
+      return 1
+    fi
+    if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+      echo "error: could not reset firstmate task worktree '$worktree' to local main tip '$expected'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$expected" ]; then
+      echo "error: firstmate task worktree '$worktree' is at '${actual:-unknown}', not local main tip '$expected'; refusing to launch" >&2
+      return 1
+    fi
+    FRESH_SPAWN_BASE_SHA=$actual
+    FRESH_SPAWN_BASE_LABEL="local main ($FM_ROOT)"
+    return 0
+  fi
+
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2121,6 +2181,30 @@ freshen_spawn_worktree_base() {  # <worktree>
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
+  fi
+  FRESH_SPAWN_BASE_SHA=$actual
+  FRESH_SPAWN_BASE_LABEL="$target"
+}
+
+# Record the worktree base freshen_spawn_worktree_base actually chose, right
+# after the scaffold's standard "You are in a disposable git worktree of ..."
+# setup line, so the worker can see whether it started from this home's local
+# main or origin/<default> without inspecting git itself. Best-effort: a brief
+# this cannot annotate (missing, or no matching setup line) still launches.
+record_spawn_base_in_brief() {  # <brief-file> <sha> <label>
+  local brief=$1 sha=$2 label=$3 tmp
+  [ -n "$sha" ] && [ -n "$label" ] && [ -f "$brief" ] || return 0
+  tmp="$brief.basehdr.$$"
+  if awk -v note="Base: $sha ($label)." '
+      { print }
+      !done && index($0, "You are in a disposable git worktree of ") == 1 {
+        print note
+        done = 1
+      }
+    ' "$brief" > "$tmp" && [ -s "$tmp" ]; then
+    mv "$tmp" "$brief"
+  else
+    rm -f -- "$tmp"
   fi
 }
 
@@ -2666,6 +2750,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  record_spawn_base_in_brief "$BRIEF_REAL" "$FRESH_SPAWN_BASE_SHA" "$FRESH_SPAWN_BASE_LABEL"
 fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the

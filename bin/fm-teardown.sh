@@ -1197,10 +1197,22 @@ validate_pr_confirmed_before_close() {
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
+# A firstmate-repo task's landing target is this home's LOCAL default branch
+# (fm-merge-local.sh's fast-forward, or a home with no push rights to upstream),
+# never a fetch from origin: git-common-dir identifies that case the same way
+# bin/fm-spawn.sh's freshen_spawn_worktree_base does (AGENTS.md task
+# fm-spawn-base-local-main), so it is checked first, before the origin branch.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree merged_tree wt_common fm_root_common
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  wt_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && wt_common=$(cd "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+  fm_root_common=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    && fm_root_common=$(cd "$fm_root_common" 2>/dev/null && pwd -P) || fm_root_common=
+  if [ -n "$wt_common" ] && [ -n "$fm_root_common" ] && [ "$wt_common" = "$fm_root_common" ]; then
+    git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1 || return 1
+    ref="refs/heads/$name"
+  elif git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
