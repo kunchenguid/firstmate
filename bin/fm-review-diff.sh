@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
-# Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# The base is whichever of origin/<default> and the local <default> contains the other, after fetching the default branch when the project has an origin remote.
+# Remote-backed and local-only projects follow that one rule alike, because a local-only project's landed work lives only on the local default branch while its origin stays frozen at the last push.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -133,11 +132,24 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+resolve_review_base() {
+  local origin_rev local_rev
+  origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$origin_rev" ] || { printf '%s' "$DEFAULT"; return 0; }
+  local_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$local_rev" ] || { printf '%s' "origin/$DEFAULT"; return 0; }
+  if git -C "$WT" merge-base --is-ancestor "$local_rev" "$origin_rev" 2>/dev/null; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  printf '%s' "$DEFAULT"
+}
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  BASE=$(resolve_review_base)
 else
   BASE="$DEFAULT"
 fi

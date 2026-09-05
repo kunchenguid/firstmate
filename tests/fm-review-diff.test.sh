@@ -11,6 +11,9 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) mode=local-only project whose origin is frozen behind its local default
+#       branch -> base must be the local default, so the review shows the task's
+#       own work and not every locally landed commit
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,6 +40,40 @@ make_case() {
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+make_local_only_case() {
+  local name=$1 case_dir i
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  printf 'base\n' > "$case_dir/_seed/feature.txt"
+  git -C "$case_dir/_seed" add feature.txt
+  git -C "$case_dir/_seed" commit -qm "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+
+  # A local-only project lands work on the primary checkout's own default branch
+  # and never pushes, so origin stays frozen at the baseline above.
+  for i in 1 2 3; do
+    printf 'landed %s\n' "$i" > "$case_dir/project/landed-$i.txt"
+    git -C "$case_dir/project" add "landed-$i.txt"
+    git -C "$case_dir/project" commit -qm "local landing $i"
+  done
+
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  printf 'task work\n' > "$case_dir/wt/task-change.txt"
+  git -C "$case_dir/wt" add task-change.txt
+  git -C "$case_dir/wt" commit -qm "task work"
 
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
@@ -169,8 +206,32 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_frozen_origin_loses_to_the_local_default_branch() {
+  local case_dir out origin_sha local_sha
+  case_dir=$(make_local_only_case local-only-base)
+  write_task_meta "$case_dir" "mode=local-only"
+
+  origin_sha=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)
+  local_sha=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+  [ "$origin_sha" != "$local_sha" ] || \
+    fail "local-only-base: fixture did not leave origin/main behind the local main"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: main' \
+    "local-only-base: base must be the local default branch that carries the landed work"
+  assert_not_contains "$out" 'diff base: origin/main' \
+    "local-only-base: a frozen origin must not anchor the review of a local-only project"
+  assert_contains "$out" 'task-change.txt' "local-only-base: the task's own change must be in the diff"
+  assert_not_contains "$out" 'landed-1.txt' "local-only-base: locally landed work must not enter the review diff"
+  assert_not_contains "$out" 'landed-2.txt' "local-only-base: locally landed work must not enter the review diff"
+  assert_not_contains "$out" 'landed-3.txt' "local-only-base: locally landed work must not enter the review diff"
+  pass "fm-review-diff anchors a local-only project on the local default branch, not a frozen origin"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_frozen_origin_loses_to_the_local_default_branch

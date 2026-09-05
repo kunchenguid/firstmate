@@ -2148,12 +2148,6 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected"; then
-    echo "error: cannot resolve a base for pooled worktree '$worktree': $SPAWN_BASE_ERROR; refusing to launch rather than guess which history to build on" >&2
-    return 1
-  fi
-  expected=$SPAWN_BASE_REV
-  target=$SPAWN_BASE_LABEL
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2166,6 +2160,12 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
     fi
     return 1
   fi
+  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected"; then
+    echo "error: cannot resolve a base for pooled worktree '$worktree': $SPAWN_BASE_ERROR; refusing to launch rather than guess which history to build on" >&2
+    return 1
+  fi
+  expected=$SPAWN_BASE_REV
+  target=$SPAWN_BASE_LABEL
   # Count the drift BEFORE the reset, so the report below carries the exact number
   # of commits this slot would otherwise have started behind rather than an adjective.
   behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null || true)
