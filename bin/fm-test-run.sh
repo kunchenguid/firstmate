@@ -133,8 +133,90 @@ now_ms() {
   fi
 }
 
+herdr_portable_identity_from_ps() { # <pid> <session>
+  awk -v pid="$1" -v expected="$2" '
+    $1 == pid && $7 !~ /^Z/ && $8 ~ /(^|\/)herdr$/ && $9 == "server" {
+      for (i = 10; i <= NF; i++) {
+        name = ""
+        if ($i == "--session") name = $(i + 1)
+        else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+        if (name == expected) {
+          printf "%s %s %s %s %s\t%s\n", $2, $3, $4, $5, $6, name
+          exit
+        }
+      }
+    }
+  '
+}
+
+herdr_portable_candidate_status() { # <pid> <session>
+  local pid=$1 session=$2 listing
+  if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
+    LC_ALL=C ps -p "$pid" -o pid= >/dev/null 2>&1 && return 1
+    return 2
+  fi
+  printf '%s\n' "$listing" | awk -v pid="$pid" -v expected="$session" '
+    $1 == pid && $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
+      for (i = 5; i <= NF; i++) {
+        name = ""
+        if ($i == "--session") name = $(i + 1)
+        else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+        if (name == expected) found = 1
+      }
+    }
+    END { exit !found }
+  ' && return 0
+  return 2
+}
+
+herdr_portable_process_identity() { # <pid> <session>
+  local pid=$1 session=$2 listing identity confirmed cwd lsof_bin status
+  if ! listing=$(LC_ALL=C TZ=UTC0 ps -ww -p "$pid" -o pid=,lstart=,stat=,args= 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  identity=$(printf '%s\n' "$listing" | herdr_portable_identity_from_ps "$pid" "$session")
+  if [ -z "$identity" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  lsof_bin=$(command -v lsof 2>/dev/null) || return 1
+  if ! listing=$(LC_ALL=C "$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  cwd=$(printf '%s\n' "$listing" | awk 'substr($0, 1, 1) == "n" { print substr($0, 2); exit }')
+  if [ -z "$cwd" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  if ! listing=$(LC_ALL=C TZ=UTC0 ps -ww -p "$pid" -o pid=,lstart=,stat=,args= 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  confirmed=$(printf '%s\n' "$listing" | herdr_portable_identity_from_ps "$pid" "$session")
+  if [ -z "$confirmed" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  [ "$confirmed" = "$identity" ] || return 1
+  printf '%s\t%s\n' "${identity%%$'\t'*}" "$cwd"
+}
+
 herdr_server_snapshot() { # <output> <processes> <candidates>
-  local output=$1 processes=$2 candidates=$3 proc_root pid session stat_line start cwd
+  local output=$1 processes=$2 candidates=$3 proc_root pid session stat_line start cwd identity status
   local -a stat_fields=()
   proc_root=${FM_TEST_RUN_PROC_ROOT:-/proc}
   ps -ww -u "$(id -u)" -o pid=,stat=,args= > "$processes" || return 1
@@ -151,6 +233,16 @@ herdr_server_snapshot() { # <output> <processes> <candidates>
   : > "$output"
   while read -r pid session; do
     [ -n "$pid" ] && [ -n "$session" ] || continue
+    if [ ! -d "$proc_root" ]; then
+      status=0
+      identity=$(herdr_portable_process_identity "$pid" "$session") || status=$?
+      [ "$status" -ne 2 ] || continue
+      [ "$status" -eq 0 ] || return 1
+      start=${identity%%$'\t'*}
+      cwd=${identity#*$'\t'}
+      printf '%s\t%s\t%s\t%s\n' "$pid" "$start" "$session" "$cwd" >> "$output"
+      continue
+    fi
     if ! IFS= read -r stat_line < "$proc_root/$pid/stat"; then
       [ ! -d "$proc_root/$pid" ] && continue
       return 1

@@ -977,9 +977,10 @@ fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
 
 `tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
 It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
-The runner records each matching server's PID and `/proc` start time before the suite, then fails for new or restarted identities found afterward.
+The runner records each matching server's PID and Linux `/proc` start time before the suite, then fails for new or restarted identities found afterward.
+On hosts without `/proc`, it uses the process start time rendered under the C locale and UTC, with a revalidated working directory lookup, so identity does not depend on host locale or timezone.
 It warns with PID, start time, working directory, and session when a pre-existing identity remains, so shared-host contamination stays visible without being attributed to the current suite.
-The runner regression separately proves that the process check rejects new and reused identities and unreadable baseline or final inventories while accepting the default server, readers, and zombies.
+The runner regression separately proves both identity paths reject new and reused identities and unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
 Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
