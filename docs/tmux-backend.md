@@ -61,8 +61,8 @@ The same scoping covers multi-process launchers without a special case, so the P
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
-Copilot is identified from the exact `copilot` command or executable path component.
-That preserves identity when its bundled Linux executable reports the generic kernel command `MainThread` while argv zero remains Copilot.
+Copilot is identified only from the exact `copilot` command or from an executable or argv[0] basename of `copilot`.
+That preserves identity when its bundled Linux executable reports the generic kernel command `MainThread` while argv zero remains Copilot, without treating a `/copilot/` directory name as evidence.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
