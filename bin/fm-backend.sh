@@ -317,13 +317,13 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
-#     spawn/liveness paths parse the backend's JSON output (see each adapter's
-#     tool check, e.g. fm_backend_herdr_tool_check);
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/thurbox);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux,
+#     thurbox) whose spawn/liveness paths parse the backend's JSON output (see
+#     each adapter's tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, thurbox); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
