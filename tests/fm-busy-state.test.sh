@@ -11,8 +11,8 @@
 # footer text. All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
@@ -397,6 +397,45 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+# The herdr-native fallthrough is the ONLY place a record-free herdr task can
+# still read busy, and herdr's registry is written by whatever reports into it:
+# a report is not withdrawn when the process that made it goes away, so a
+# harness killed mid-turn leaves `agent get` answering `working` forever. That
+# used to suppress this task's stale-pane escalation with no state that could
+# ever clear it. This case drives the REAL herdr adapter over a scripted herdr
+# CLI, so the corroboration itself runs; only the CLI is faked.
+test_herdr_native_busy_requires_a_live_pane() {
+  local state dir fb pid husk live
+  state=$(new_state_dir herdr-native-corroborated)
+  dir="$TMP_ROOT/herdr-native-corroborated"
+  mkdir -p "$dir"
+  fb=$(make_herdr_agent_state_fakebin "$dir")
+  # A real, bare, idle pid with no child of its own: the operating-system half
+  # of the idle-shell proof is answered by the real `ps`, never by a stub.
+  sleep 300 & pid=$!
+  herdr_bare_shell_process_info w1:p2 "$pid" > "$dir/husk.json"
+  herdr_live_process_info w1:p2 "$pid" > "$dir/live.json"
+  husk=$(PATH="$fb:$PATH" FM_FAKE_HERDR_AGENT_STATUS=working \
+    FM_FAKE_HERDR_PROCESS_INFO="$dir/husk.json" \
+    bash -c '. "$0/bin/fm-backend.sh"
+      fm_backend_source herdr >/dev/null || exit 1
+      . "$0/bin/fm-busy-lib.sh"
+      fm_busy_classify herdr fmtest:w1:p2 claude t1 "$1"' "$ROOT" "$state")
+  # The IDENTICAL registered reading, with a real harness process in the pane.
+  live=$(PATH="$fb:$PATH" FM_FAKE_HERDR_AGENT_STATUS=working \
+    FM_FAKE_HERDR_PROCESS_INFO="$dir/live.json" \
+    bash -c '. "$0/bin/fm-backend.sh"
+      fm_backend_source herdr >/dev/null || exit 1
+      . "$0/bin/fm-busy-lib.sh"
+      fm_busy_classify herdr fmtest:w1:p2 claude t1 "$1"' "$ROOT" "$state")
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  [ "$husk" = "unknown missing" ] \
+    || fail "a registration whose pane holds only a bare idle shell must not classify 'busy herdr-native', got '$husk'"
+  [ "$live" = "busy herdr-native" ] \
+    || fail "the same registration over a live foreground process must still classify busy, got '$live'"
+  pass "herdr's native busy verdict is trusted only when the pane's own processes do not contradict it, so a registration that outlived its agent stops suppressing stale-pane escalation"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -459,6 +498,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_herdr_native_busy_requires_a_live_pane
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

@@ -40,3 +40,27 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+# herdr_pane_run_foreground: give <pane> in <session> a real, long-lived,
+# non-shell foreground process and wait until Herdr's own inventory reports it.
+#
+# A case that means "this pane hosts a genuinely live agent" needs both halves
+# the liveness classifier reads: a registration AND a pane that is actually
+# running something. `pane report-agent` alone leaves a registration standing
+# over a bare idle shell, which is the husk shape, not the live one
+# (docs/herdr-backend.md "Restart and liveness behavior"). Requires the herdr
+# backend adapter to be sourced.
+herdr_pane_run_foreground() {  # <session> <pane> [command]
+  local session=$1 pane=$2 cmd=${3:-sleep 600} attempt=0 names
+  fm_backend_herdr_cli "$session" pane run "$pane" "$cmd" >/dev/null 2>&1 || return 1
+  while [ "$attempt" -lt 200 ]; do
+    names=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null \
+      | jq -r '[.result.process_info.foreground_processes[]?.name] | join(",")' 2>/dev/null)
+    case "$names" in
+      *"${cmd%% *}"*) return 0 ;;
+    esac
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
+}

@@ -169,7 +169,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
-Herdr uses native registered-agent state and needs no process-name branch.
+Herdr combines native registered-agent state with backend-generic idle-shell corroboration and needs no Pi-specific process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
@@ -546,7 +546,7 @@ No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort,
 ## Herdr
 
 The compatibility floor is protocol 14.
-The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, with agent lifecycle control and the agent-free proof measured on Herdr 0.8.2, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -917,24 +917,173 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-09-02 on Herdr 0.8.2, macOS aarch64, and first measured 2026-08-02 on Herdr 0.7.5:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output:
+Observed output on Herdr 0.8.2:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: a reported registration the pane's own process inventory contradicts reads agent-free
+ok - real herdr: an exited worker's pane is positively eligible for its replacement instead of being typed into
+ok - real herdr: interrupt still refuses on a pane whose registration outlived its agent
+ok - real herdr: the same registration over a running foreground process stays alive
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: no control verb removed the endpoint, the task's local copy, or its branch
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The registry written through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so the case drives the registry and the pane's processes apart deliberately and runs the identical registered reading twice: once over a plain shell and once over a real foreground process, with no real agent launched.
+
+Herdr 0.8.2 keeps such a report registered even though the pane runs nothing but its shell, measured in an isolated `fm-lab-` session:
+
+```text
+herdr pane report-agent <pane> --source fm-control-smoke --agent fm-control-smoke-agent --state idle
+herdr agent get <pane>   -> {"agent_status":"idle"}
+herdr pane process-info  -> foreground_processes [{"name":"zsh","argv0":"zsh"}]
+```
+
+That is why the classifier corroborates the registry against the pane's own inventory rather than trusting a reported registration alone.
+Herdr does validate a report claiming a source it owns itself: an otherwise identical `--source herdr:pi --agent pi` report on the same shell-only pane was rejected and `agent get` still answered `agent_not_found`.
+
+`tests/fm-control-herdr-smoke.test.sh` is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Agent-free proof across installed harnesses
+
+The classifier's negative verdict rests on `pane process-info` naming a lone bare idle shell, and both that name and its argv0 come from the harness vendor, so the proof is measured against every installed harness rather than a stub.
+Reverified 2026-09-02 on Herdr 0.8.2, macOS aarch64, in an isolated `fm-lab-` session, and first measured 2026-09-01 on the same Herdr with the then-current claude 2.1.252 and codex 0.150.1:
+
+```sh
+FM_HERDR_AGENT_FREE_PROOF=1 tests/fm-herdr-agent-free-proof-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+# herdr: herdr 0.8.2
+# claude 2.1.259 (Claude Code): foreground=[security/security 2.1.259/claude] state=alive
+ok - herdr agent-free proof: claude 2.1.259 (Claude Code) running in a Herdr pane never proves a bare idle shell
+# codex codex-cli 0.152.1: foreground=[codex/codex] state=alive
+ok - herdr agent-free proof: codex codex-cli 0.152.1 running in a Herdr pane never proves a bare idle shell
+# opencode 1.17.11: foreground=[opencode/opencode] state=alive
+ok - herdr agent-free proof: opencode 1.17.11 running in a Herdr pane never proves a bare idle shell
+# pi 0.84.4: foreground=[node/pi] state=alive
+ok - herdr agent-free proof: pi 0.84.4 running in a Herdr pane never proves a bare idle shell
+# skip: pi-signed is not installed on this machine, so its Herdr classification is unverified here
+# skip: grok is not installed on this machine, so its Herdr classification is unverified here
+# skip: kimi is not installed on this machine, so its Herdr classification is unverified here
+# cursor 2026.08.31-4057e58: foreground=[node/cursor-agent] state=alive
+ok - herdr agent-free proof: cursor 2026.08.31-4057e58 running in a Herdr pane never proves a bare idle shell
+# skip: muse is not installed on this machine, so its Herdr classification is unverified here
+# unverified on this machine (not installed): pi-signed grok kimi muse
+# checked 5 installed harness(es) on herdr herdr 0.8.2 in workspace w1
+```
+
+Both guards resolve the harness binary through one shared helper (`tests/harness-binary-helpers.sh`), which is also what `tests/fm-harness-liveness-drift-live-e2e.test.sh` launches through, so neither guard can measure a different binary than the other or than a real spawn.
+
+No installed harness leaves the pane holding one lone bare shell, so none can satisfy the proof, and Herdr registered each of them within the guard's wait.
+Each owns the pane's foreground under its own argv0, and claude 2.1.259 additionally keeps a `security` helper in that foreground, which is a second process rather than a shell and so refuses the proof twice over.
+`pi-signed`, `grok`, `kimi`, and `muse` were not installed on that machine and remain unverified here; the guard reports them explicitly and refuses a pass that checked nothing.
+This is the command that refreshes this record; run it after every harness upgrade.
+
+### Native busy-state corroboration cost
+
+`fm_backend_herdr_busy_state` corroborates every reported agent state against the pane's own `pane process-info` inventory.
+`bin/backends/herdr.sh` owns that contract and [`herdr-backend.md`](../herdr-backend.md#current-transport-behavior) states it; this record measures what it costs.
+Busy state is read on watcher and away-mode ticks, so the added read was measured rather than assumed.
+Each reported branch is measured twice, once through the shipped function and once through the same read without the corroboration, so the added cost is derivable from this output rather than asserted beside it.
+The agent is registered before the first row, so every read priced here is a registered read rather than the `agent_not_found` path, which short-circuits before jq.
+Measured 2026-09-02 on Darwin arm64, Herdr 0.8.2, in an isolated `fm-lab-` session, 50 calls per row:
+
+```sh
+# From the repo root. Isolated fm-lab- session only, never the default one.
+. tests/herdr-test-safety.sh
+. bin/fm-backend.sh
+fm_backend_source herdr
+herdr_forget_inherited_pane
+SESSION=fm-lab-busycost-$$
+export HERDR_SESSION="$SESSION"
+fm_herdr_lab_prepare "$SESSION"
+WT=$(mktemp -d)/wt && mkdir -p "$WT"
+RAW=$(fm_backend_herdr_container_ensure "$WT")
+IDS=$(fm_backend_herdr_create_task "${RAW%%$'\t'*}" fm-busycost "$WT" "${RAW#*$'\t'}")
+PANE=${IDS##* }
+
+report() { herdr pane report-agent "$PANE" --source fm-busy-cost \
+  --agent fm-busy-cost-agent --state "$1" --session "$SESSION" >/dev/null; }
+verdict() { printf '%-52s -> %s\n' "$1" "$(fm_backend_herdr_busy_state "$SESSION:$PANE")"; }
+# The same read WITHOUT the corroboration, so the added cost is derivable from
+# this output rather than asserted beside it.
+uncorroborated() {  # <target>
+  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_classify_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
+}
+bench() {  # <label> <calls> <command...>
+  local label=$1 n=$2 secs
+  shift 2
+  secs=$( { TIMEFORMAT=%R; time ( for _ in $(seq 1 "$n"); do "$@" >/dev/null 2>&1; done ); } 2>&1 )
+  awk -v l="$label" -v s="$secs" -v n="$n" \
+    'BEGIN { printf "%-52s %6.1f ms/call (%s s / %d calls)\n", l, s * 1000 / n, s, n }'
+}
+
+printf '%s | %s\n' "$(uname -sm)" "$(herdr --version)"
+report working
+bench 'agent get (the existing per-poll read)' 50 fm_backend_herdr_agent_status_raw "$SESSION" "$PANE"
+bench 'pane process-info (the added read)' 50 fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE"
+verdict 'working registration over a bare idle shell'
+bench 'busy_state, working over a bare idle shell' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+report idle
+verdict 'idle registration over a bare idle shell'
+bench 'busy_state, idle over a bare idle shell' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+herdr_pane_run_foreground "$SESSION" "$PANE" 'sleep 600'
+report working
+verdict 'working registration over a live foreground process'
+bench 'busy_state, working over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+bench 'the same read uncorroborated, working' 50 uncorroborated "$SESSION:$PANE"
+report idle
+verdict 'idle registration over a live foreground process'
+bench 'busy_state, idle over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+bench 'the same read uncorroborated, idle' 50 uncorroborated "$SESSION:$PANE"
+fm_herdr_lab_teardown "$SESSION"
+```
+
+Observed output:
+
+```text
+Darwin arm64 | herdr 0.8.2
+agent get (the existing per-poll read)                 11.8 ms/call (0.590 s / 50 calls)
+pane process-info (the added read)                      7.1 ms/call (0.353 s / 50 calls)
+working registration over a bare idle shell          -> unknown
+busy_state, working over a bare idle shell             97.0 ms/call (4.848 s / 50 calls)
+idle registration over a bare idle shell             -> unknown
+busy_state, idle over a bare idle shell               111.8 ms/call (5.589 s / 50 calls)
+working registration over a live foreground process  -> busy
+busy_state, working over a live process                56.8 ms/call (2.841 s / 50 calls)
+the same read uncorroborated, working                  26.3 ms/call (1.313 s / 50 calls)
+idle registration over a live foreground process     -> idle
+busy_state, idle over a live process                   54.0 ms/call (2.699 s / 50 calls)
+the same read uncorroborated, idle                     31.0 ms/call (1.549 s / 50 calls)
+```
+
+Both reported branches do identical added work, and this run prices it at 30.5 ms on the `working` branch (56.8 against 26.3) and 23.0 ms on the `idle` branch (54.0 against 31.0).
+The spread between those two is machine load across the run, not a difference between the branches; the added `pane process-info` read alone is 7.1 ms here and the rest is parsing it.
+The sample ends as soon as the foreground process group turns out not to be the shell, before the operating-system process table is scanned.
+An already-`unknown` verdict pays nothing, since no inventory reading can change it.
+
+Only a pane that really is a lone bare idle shell runs the proof to the end, around 100 ms per call, since that is the one shape whose foreground process group is the shell and therefore reaches the process-table scan.
+That pane is the husk this exists to catch, and it is read once per watcher tick rather than in a loop.
+The verdict rows show it resolving to `unknown` from both a stale `working` and a stale `idle`, which is the behavior this record exists to price.
+
+The tight submit-confirmation loops pay nothing at all, because they never call this function.
+`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, measured unchanged at 11.8 ms per call above on the same registered pane, and it deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
+The consumers that do read busy state are `bin/fm-busy-lib.sh`, `bin/fm-supervise-daemon.sh`, and `bin/fm-pending-reply-lib.sh`, all once per tick.
+
+Per-call figures move with machine load, so each row prints the raw elapsed seconds and call count it divided, and the verdict rows show which branch each measurement actually took.
 
 ### Away-mode transport
 

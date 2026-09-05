@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"
@@ -2466,7 +2468,9 @@ test_pane_is_busy_herdr_native_busy_state() {
 
 test_primary_busy_guard_is_harness_scoped() {
   (
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_capture() { printf 'esc interrupt\n'; }
     if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
       fail "OpenCode's rendered signature must not classify a Claude primary busy"
@@ -2476,6 +2480,38 @@ test_primary_busy_guard_is_harness_scoped() {
   ) || fail "harness-scoped primary busy guard subshell failed"
   pass "primary busy guard isolates rendered signatures by detected harness"
 }
+
+# A herdr registration is not withdrawn when the process that made it goes
+# away, so a harness killed mid-turn keeps `agent get` answering `working`
+# forever. Away-mode injection defers while the pane reads busy, so that stale
+# report used to defer every escalation for good. Driven through the REAL herdr
+# adapter over a scripted herdr CLI: only the CLI is faked, so the adapter's own
+# corroboration is what decides here.
+test_pane_is_busy_herdr_registration_outlived_its_agent() {
+  local dir fb pid
+  dir=$(make_supercase primary-herdr-stale-registration)
+  fb=$(make_herdr_agent_state_fakebin "$dir")
+  sleep 300 & pid=$!
+  herdr_bare_shell_process_info w1:p2 "$pid" > "$dir/husk.json"
+  herdr_live_process_info w1:p2 "$pid" > "$dir/live.json"
+  # A bare shell prompt, so the rendered fallback cannot rescue the verdict
+  # either: not busy here has to mean the pane really is not busy.
+  printf 'wt %% \n' > "$dir/pane.txt"
+  (
+    if PATH="$fb:$PATH" FM_FAKE_HERDR_AGENT_STATUS=working \
+      FM_FAKE_HERDR_PROCESS_INFO="$dir/husk.json" FM_FAKE_HERDR_PANE_READ="$dir/pane.txt" \
+      FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "fmtest:w1:p2" herdr; then
+      fail "a herdr registration whose pane holds only a bare idle shell must not defer injection as busy"
+    fi
+    PATH="$fb:$PATH" FM_FAKE_HERDR_AGENT_STATUS=working \
+      FM_FAKE_HERDR_PROCESS_INFO="$dir/live.json" FM_FAKE_HERDR_PANE_READ="$dir/pane.txt" \
+      FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "fmtest:w1:p2" herdr \
+      || fail "the same registration over a live foreground process must still read busy"
+  ) || { kill "$pid" 2>/dev/null; fail "herdr stale-registration pane_is_busy subshell failed"; }
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  pass "pane_is_busy: a herdr registration the pane's own processes contradict stops deferring away-mode injection, while the same registration over a live process still defers"
+}
+
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
@@ -2729,6 +2765,7 @@ test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
+test_pane_is_busy_herdr_registration_outlived_its_agent
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch

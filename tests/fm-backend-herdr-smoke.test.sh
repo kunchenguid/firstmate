@@ -121,6 +121,11 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 
 # 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
 #    `pane report-agent`) must still refuse exactly as before.
+#    "Genuinely live" means both halves the classifier reads: a registration
+#    AND a pane that is actually running something. A registration standing
+#    over a bare idle shell is the husk shape instead, because a report is not
+#    withdrawn when the process that made it goes away
+#    (docs/herdr-backend.md "Restart and liveness behavior").
 LIVE_DUP_LABEL="fm-smoke-livedup"
 LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
@@ -129,6 +134,8 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
+herdr_pane_run_foreground "$SESSION" "$LIVE_DUP_PANE_ID" \
+  || fail "could not give the live-duplicate scenario's pane a running foreground process"
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then

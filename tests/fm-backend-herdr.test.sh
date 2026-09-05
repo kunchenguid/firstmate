@@ -10,8 +10,8 @@
 # gated on the herdr binary actually being installed.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 
@@ -835,6 +835,180 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
 }
 
+# --- a reported registration corroborated against the process inventory ------
+#
+# Herdr's agent registry is written by whatever reports into it, and a report
+# is not withdrawn when the process that made it goes away. A task whose worker
+# had exited to its shell therefore read `alive` forever: every lifecycle verb
+# typed the harness's exit command into a shell and refused to relaunch, with
+# no state that could ever clear it. The classifier now settles the negative
+# verdict from the pane's own `pane process-info` inventory, exactly as the
+# tmux classifier already settles it from the foreground process group.
+#
+# These cases drive the two signals apart deliberately with REAL processes and
+# no harness: the same registered `idle` reading resolves to `no-agent` or to
+# `live` purely from the inventory beside it. Only a positive proof of a lone
+# bare idle shell downgrades the verdict; a live process, an extra foreground
+# process, a shell with a child, an unreadable inventory, and an inventory
+# about a different pane all keep `live`.
+
+# agent_state_case: run both classifier entry points over one canned
+# pane-get/agent-get/process-info sequence and echo "<pane-state> <agent-state>".
+agent_state_case() {  # <dir> <pane> <agent-get-json> [<process-info-json>]
+  local dir=$1 pane=$2 agent_json=$3 proc_json=${4:-} log resp fb
+  mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane" > "$resp/1.out"
+  printf '%s' "$agent_json" > "$resp/2.out"
+  [ -z "$proc_json" ] || printf '%s' "$proc_json" > "$resp/3.out"
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane" > "$resp/4.out"
+  printf '%s' "$agent_json" > "$resp/5.out"
+  [ -z "$proc_json" ] || printf '%s' "$proc_json" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      printf "%s %s" \
+        "$(fm_backend_herdr_pane_agent_state fmtest "$1")" \
+        "$(fm_backend_herdr_agent_state "fmtest:$1")"' "$ROOT" "$pane"
+}
+
+test_stale_registration_over_a_bare_idle_shell_is_agent_free() {
+  local dir bgpid stale live
+  dir="$TMP_ROOT/reg-stale"
+  # A real, bare, idle process with no child of its own: the operating-system
+  # half of the idle-shell proof is answered by the real `ps`.
+  sleep 300 & bgpid=$!
+  stale=$(agent_state_case "$dir/shell" w1:p2 \
+    '{"result":{"agent":{"agent_status":"idle"}}}' \
+    "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  # The SAME registered reading, with a live harness process in the pane
+  # instead. Asserting both halves keeps the case from going vacuous: the
+  # downgrade must come from the inventory, never from the registration.
+  live=$(agent_state_case "$dir/live" w1:p2 \
+    '{"result":{"agent":{"agent_status":"idle"}}}' \
+    "$(herdr_live_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$stale" = "no-agent dead" ] \
+    || fail "a registration whose pane holds only a bare idle shell must classify agent-free, got '$stale'"
+  [ "$live" = "live alive" ] \
+    || fail "the same registration with a live harness process in the pane must stay alive, got '$live'"
+  pass "herdr agent state: a reported registration contradicted by a lone bare idle shell reads agent-free, while the identical registration over a live process stays alive"
+}
+
+test_registration_over_an_ambiguous_inventory_stays_alive() {
+  local dir bgpid out
+  dir="$TMP_ROOT/reg-ambiguous"
+  sleep 300 & bgpid=$!
+  # An idle shell transiently hosting a prompt helper: two foreground
+  # processes, so nothing is proved and the registration stands.
+  out=$(agent_state_case "$dir" w1:p2 \
+    '{"result":{"agent":{"agent_status":"working"}}}' \
+    "$(herdr_process_info w1:p2 "$bgpid" "$bgpid" \
+      "$(printf '[{"pid":99998,"name":"starship","argv0":"starship"},{"pid":%s,"name":"zsh","argv0":"zsh"}]' "$bgpid")")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = "live alive" ] \
+    || fail "an ambiguous process inventory must never downgrade a registration, got '$out'"
+  pass "herdr agent state: an ambiguous process inventory leaves a registered agent alive rather than licensing recovery"
+}
+
+test_registration_over_a_shell_with_a_child_stays_alive() {
+  local dir bgpid out attempt=0 child=
+  dir="$TMP_ROOT/reg-child"
+  # A real shell that is genuinely running something: the trailing `true` keeps
+  # bash from exec-ing away, so the child row is real.
+  bash -c 'sleep 300; true' &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  # Give the real child a moment to exist before the proof reads the table.
+  while [ "$attempt" -lt 200 ]; do
+    child=$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')
+    [ -n "$child" ] && break
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  if [ -z "$child" ]; then
+    kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+    fail "ps never reported a child of the backgrounded shell $bgpid, so this case cannot exercise a shell that is running something"
+  fi
+  out=$(agent_state_case "$dir" w1:p2 \
+    '{"result":{"agent":{"agent_status":"idle"}}}' \
+    "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = "live alive" ] \
+    || fail "a shell that still has a child of its own is not idle and must stay alive, got '$out'"
+  pass "herdr agent state: a shell running a child of its own never proves an agent-free pane"
+}
+
+test_registration_with_an_unreadable_inventory_stays_alive() {
+  local dir out
+  dir="$TMP_ROOT/reg-unreadable"
+  # No process-info response at all: the fake answers empty, exactly as a
+  # failed or unparseable inventory read would.
+  out=$(agent_state_case "$dir" w1:p2 '{"result":{"agent":{"agent_status":"idle"}}}')
+  [ "$out" = "live alive" ] \
+    || fail "an unreadable process inventory must leave the registration standing, got '$out'"
+  pass "herdr agent state: an unreadable process inventory leaves a registered agent alive"
+}
+
+test_registration_with_an_inventory_for_another_pane_stays_alive() {
+  local dir bgpid out
+  dir="$TMP_ROOT/reg-other-pane"
+  sleep 300 & bgpid=$!
+  # A bare-idle-shell inventory that answers about a DIFFERENT pane: the
+  # reading belongs to something else and can never settle this pane.
+  out=$(agent_state_case "$dir" w1:p2 \
+    '{"result":{"agent":{"agent_status":"idle"}}}' \
+    "$(herdr_bare_shell_process_info w9:p9 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$out" = "live alive" ] \
+    || fail "an inventory about another pane must never settle this pane's state, got '$out'"
+  pass "herdr agent state: a process inventory answering about a different pane never downgrades this pane's registration"
+}
+
+test_unregistered_pane_never_reads_the_process_inventory() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/reg-absent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = no-agent ] || fail "an unregistered pane must still read no-agent, got '$out'"
+  assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' \
+    "an already-agent-free pane must not pay for the corroborating inventory read"
+  pass "herdr agent state: an unregistered pane is agent-free without reading the process inventory at all"
+}
+
+test_create_task_replaces_a_stale_registration_husk() {
+  local dir log resp fb bgpid out tab pane
+  dir="$TMP_ROOT/husk-stale-registration"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  sleep 300 & bgpid=$!
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-husk3","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  # 4: agent get -> still registered, because nothing ever withdrew the report
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  # 5: pane process-info -> the pane is a lone bare idle shell
+  herdr_bare_shell_process_info w1:p2 "$bgpid" > "$resp/5.out"
+  # 6: tab create -> the replacement tab, created BEFORE the husk is closed
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk3","workspace_id":"w1"}]}}\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk3 /tmp/proj' "$ROOT" ) \
+    || { kill "$bgpid" 2>/dev/null; fail "create_task should replace a duplicate whose registration outlived its agent"; }
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  read -r tab pane <<EOF
+$out
+EOF
+  if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
+    "create_task did not close the stale-registration husk's tab"
+  pass "fm_backend_herdr_create_task: a same-labeled tab whose registration outlived its agent is a husk on the same terms as a restored shell"
+}
+
 # --- container_ensure / create_task: --no-focus and per-home label ----------
 
 test_container_ensure_creates_with_no_focus_flag() {
@@ -1530,10 +1704,6 @@ SH
   : > "$dir/mover.log"
 }
 
-death_process_info_fixture() {  # <pane> <pid>
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$1" "$2" "$2" "$2"
-}
-
 test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
   local dir log resp fb out status bgpid
   dir="$TMP_ROOT/close-death-after"; mkdir -p "$dir/responses"
@@ -1546,7 +1716,7 @@ test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
@@ -1583,7 +1753,7 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death() {
   printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/8.out"
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w1:p1 "$bgpid" > "$resp/10.out"
+  herdr_bare_shell_process_info w1:p1 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
   cp "$resp/12.out" "$resp/13.out"
@@ -1620,7 +1790,7 @@ test_projection_close_emptying_before_last_focus_needs_no_move() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w1:p1 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w1:p1 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/10.out"
@@ -1652,7 +1822,7 @@ test_projection_close_emptying_last_workspace_needs_no_move() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w3:p1","tab_id":"w3:t1"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w3:p1 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w3:p1 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
@@ -1839,7 +2009,7 @@ test_projection_close_transient_prompt_helper_settles_then_uses_pane_death() {
   # a helper such as starship rides along as a second foreground process).
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":99998,"name":"starship","argv":["/usr/local/bin/starship","prompt","--continuation"]},{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$bgpid" "$bgpid" "$bgpid" > "$resp/7.out"
   # Sample 2: the helper finished; the shell is provably alone and idle.
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/8.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/8.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/11.out"
@@ -1871,10 +2041,10 @@ test_projection_close_death_escalates_sigkill_after_sighup_survival() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   bash -c 'trap "" HUP; sleep 300' & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"internal_error","message":"transient failure"}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/9.out"
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/10.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/12.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/13.out"
@@ -1907,10 +2077,10 @@ test_projection_close_death_failure_falls_back_to_plain_close() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   bash -c 'trap "" HUP; sleep 300' & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/9.out"
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/10.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/12.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/14.out"
@@ -1941,7 +2111,7 @@ test_projection_close_death_still_restores_a_stolen_focus() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
   # The backstop still fires when the post-close snapshot disagrees.
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/9.out"
@@ -1976,10 +2146,10 @@ test_projection_close_death_never_sigkills_a_reused_pid() {
   # information shows a DIFFERENT shell pid, modeling the original pid having
   # been reused by an unrelated process the pane no longer owns.
   bash -c 'trap "" HUP; sleep 300' & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   cp "$resp/3.out" "$resp/8.out"   # SIGHUP poll 1: pane still present
   cp "$resp/3.out" "$resp/9.out"   # SIGHUP poll 2: pane still present
-  death_process_info_fixture w2:p2 99997 > "$resp/10.out"
+  herdr_bare_shell_process_info w2:p2 99997 > "$resp/10.out"
   : > "$resp/11.out"               # fallback explicit close: pane close ok
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/12.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/13.out"
@@ -2020,7 +2190,7 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
   printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/8.out"
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
   bash -c 'trap "" HUP; sleep 300' & bgpid=$!
-  death_process_info_fixture w1:p1 "$bgpid" > "$resp/10.out"
+  herdr_bare_shell_process_info w1:p1 "$bgpid" > "$resp/10.out"
   if [ "$mode" = pane-gone-workspace-present ]; then
     printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
     printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false},{"workspace_id":"w1","active_tab_id":"w1:t2","focused":false}]}}' > "$resp/12.out"
@@ -2029,7 +2199,7 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
   else
     cp "$resp/3.out" "$resp/11.out"  # SIGHUP poll 1: pane still present
     cp "$resp/3.out" "$resp/12.out"  # SIGHUP poll 2: pane still present
-    death_process_info_fixture w1:p1 "$bgpid" > "$resp/13.out"  # escalation resample: same owner
+    herdr_bare_shell_process_info w1:p1 "$bgpid" > "$resp/13.out"  # escalation resample: same owner
     cp "$resp/3.out" "$resp/14.out"  # SIGKILL poll 1: pane still present
     cp "$resp/3.out" "$resp/15.out"  # SIGKILL poll 2: pane still present
   fi
@@ -2084,7 +2254,7 @@ test_kill_emptying_non_focused_uses_pane_death() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   cp "$resp/1.out" "$resp/6.out"
   sleep 300 & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
+  herdr_bare_shell_process_info w2:p2 "$bgpid" > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
@@ -2993,6 +3163,118 @@ test_current_path_reads_cwd() {
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
+
+# --- busy_state corroborated against the pane's own processes ---------------
+#
+# The registry is written by whatever reports into it and a report is not
+# withdrawn when the process that made it goes away, so a harness killed
+# mid-turn leaves `agent get` answering `working` forever. The busy verdict
+# reuses the SAME idle-shell proof the liveness classifier uses, so the two can
+# never disagree about what the pane is, and it resolves to `unknown` rather
+# than `idle`: a pane with no agent has no native agent state at all, and
+# `unknown` is every consumer's cue to fall back to its own evidence.
+
+busy_state_case() {  # <dir> <pane> <agent-status> [<process-info-json>]
+  local dir=$1 pane=$2 status=$3 proc_json=${4:-} log resp fb
+  mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/1.out"
+  [ -z "$proc_json" ] || printf '%s' "$proc_json" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state "fmtest:$1"' "$ROOT" "$pane"
+}
+
+test_busy_state_stale_registration_is_not_busy() {
+  local dir bgpid stale live
+  dir="$TMP_ROOT/busy-stale-registration"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  stale=$(busy_state_case "$dir/husk" w1:p2 working "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  # The IDENTICAL working reading, with a live harness process in the pane.
+  live=$(busy_state_case "$dir/live" w1:p2 working \
+    "$(herdr_live_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$stale" = unknown ] \
+    || fail "a working registration whose pane holds only a bare idle shell must not read busy, got '$stale'"
+  [ "$live" = busy ] \
+    || fail "the same working registration over a live process must still read busy, got '$live'"
+  pass "fm_backend_herdr_busy_state: a working registration contradicted by a lone bare idle shell reads unknown, while the identical registration over a live process stays busy"
+}
+
+test_busy_state_keeps_busy_when_the_inventory_proves_nothing() {
+  local dir bgpid ambiguous unreadable other
+  dir="$TMP_ROOT/busy-inconclusive"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  # An idle shell transiently hosting a prompt helper: two foreground
+  # processes, so nothing is proved and the busy verdict stands.
+  ambiguous=$(busy_state_case "$dir/ambiguous" w1:p2 working \
+    "$(herdr_process_info w1:p2 "$bgpid" "$bgpid" \
+      "$(printf '[{"pid":99998,"name":"starship","argv0":"starship"},{"pid":%s,"name":"zsh","argv0":"zsh"}]' "$bgpid")")")
+  unreadable=$(busy_state_case "$dir/unreadable" w1:p2 working)
+  other=$(busy_state_case "$dir/other-pane" w1:p2 working "$(herdr_bare_shell_process_info w9:p9 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$ambiguous" = busy ] || fail "an extra foreground process proves nothing and must leave busy standing, got '$ambiguous'"
+  [ "$unreadable" = busy ] || fail "an unreadable inventory must leave busy standing, got '$unreadable'"
+  [ "$other" = busy ] || fail "an inventory about another pane must leave busy standing, got '$other'"
+  pass "fm_backend_herdr_busy_state: an extra foreground process, an unreadable inventory, and an inventory about another pane all leave the busy verdict untouched"
+}
+
+test_busy_state_keeps_busy_for_a_shell_with_a_child() {
+  local dir bgpid child attempt=0 childpid=
+  dir="$TMP_ROOT/busy-shell-child"
+  # A real shell that is genuinely running something: the trailing `true` keeps
+  # bash from exec-ing away, so the child row is real.
+  bash -c 'sleep 300; true' &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  while [ "$attempt" -lt 200 ]; do
+    childpid=$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')
+    [ -n "$childpid" ] && break
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  if [ -z "$childpid" ]; then
+    kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+    fail "ps never reported a child of the backgrounded shell $bgpid, so this case cannot exercise a shell that is running something"
+  fi
+  child=$(busy_state_case "$dir" w1:p2 working "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$child" = busy ] || fail "a shell with a child of its own is not idle and must leave busy standing, got '$child'"
+  pass "fm_backend_herdr_busy_state: a shell running a child of its own never proves an agent-free pane, so its busy verdict stands"
+}
+
+test_busy_state_stale_idle_registration_is_not_idle() {
+  local dir bgpid stale live
+  dir="$TMP_ROOT/busy-stale-idle-registration"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  stale=$(busy_state_case "$dir/husk" w1:p2 idle "$(herdr_bare_shell_process_info w1:p2 "$bgpid")")
+  # The IDENTICAL idle reading, with a live harness process in the pane.
+  live=$(busy_state_case "$dir/live" w1:p2 idle "$(herdr_live_process_info w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$stale" = unknown ] \
+    || fail "an idle registration whose pane holds only a bare idle shell must not read idle, got '$stale'"
+  [ "$live" = idle ] \
+    || fail "the same idle registration over a live process must still read idle, got '$live'"
+  pass "fm_backend_herdr_busy_state: an idle registration contradicted by a lone bare idle shell reads unknown, so a secondmate delivery confirmation cannot read a fabricated completed turn"
+}
+
+test_busy_state_unknown_verdict_never_reads_the_inventory() {
+  local dir out
+  dir="$TMP_ROOT/busy-unknown-no-inventory"; mkdir -p "$dir/responses"; : > "$dir/log"
+  printf '{"result":{"agent":{"agent_status":"bogus"}}}\n' > "$dir/responses/1.out"
+  out=$(PATH="$(make_herdr_fakebin "$dir"):$PATH" FM_HERDR_LOG="$dir/log" \
+    FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = unknown ] || fail "an unrecognized agent state must still read unknown, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'pane\x1fprocess-info' \
+    "a verdict the inventory could not change must not pay for the inventory read"
+  pass "fm_backend_herdr_busy_state: an already-unknown verdict skips the corroborating inventory read entirely"
+}
 
 test_busy_state_working_maps_to_busy() {
   local dir log resp fb out
@@ -4513,6 +4795,13 @@ test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk
+test_stale_registration_over_a_bare_idle_shell_is_agent_free
+test_registration_over_an_ambiguous_inventory_stays_alive
+test_registration_over_a_shell_with_a_child_stays_alive
+test_registration_with_an_unreadable_inventory_stays_alive
+test_registration_with_an_inventory_for_another_pane_stays_alive
+test_unregistered_pane_never_reads_the_process_inventory
+test_create_task_replaces_a_stale_registration_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
@@ -4588,6 +4877,11 @@ test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
+test_busy_state_stale_registration_is_not_busy
+test_busy_state_keeps_busy_when_the_inventory_proves_nothing
+test_busy_state_keeps_busy_for_a_shell_with_a_child
+test_busy_state_stale_idle_registration_is_not_idle
+test_busy_state_unknown_verdict_never_reads_the_inventory
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty

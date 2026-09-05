@@ -239,6 +239,17 @@ Herdr's native agent state can read idle while a harness waits on its own long f
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
+Every reported agent state, `busy` and `idle` alike, is corroborated against the pane's own process inventory, through the same idle-shell proof the liveness classifier uses, so the two verdicts always agree about what the pane is.
+A registration is not withdrawn when the process that made it goes away, so a harness that dies mid-turn keeps reporting its last state forever, with nothing that could ever clear it.
+Both reported states are acted on positively by a consumer, which is why neither is trusted alone: a stale `working` suppresses this task's stale-pane escalation and defers away-mode injection indefinitely, and a stale `idle` is taken directly as evidence when a secondmate delivery is confirmed.
+The corroboration is positive-only: a live process, an extra foreground process, a shell with a child, an unreadable inventory, and an inventory answering about a different pane all leave the reported verdict standing.
+A pane the inventory positively proves to be a lone bare idle shell reads `unknown` rather than `busy` or `idle`, because a pane with no agent has no native agent state at all.
+For the watcher and the away-mode daemon that ends the problem, since both act on `busy` alone: the pane surfaces for stale-pane escalation instead of being suppressed, and injection stops deferring.
+For the secondmate delivery confirmation it narrows and delays the outcome rather than eliminating it: `unknown` costs that path its native short-circuit and sends it to independent rendered evidence, where a dead pane still reaches idle, at once if the turn was already observed busy and after the grace window if it was not.
+Closing that residual belongs to the pending-reply observation contract, not to this adapter.
+The submit-confirmation path never reads busy state at all, so no tight loop pays for the corroboration.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#native-busy-state-corroboration-cost) records the measured per-poll cost.
+
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
@@ -269,8 +280,17 @@ Create replaces only a confidently dead or no-agent husk, creates the replacemen
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
-Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+A structurally gone pane becomes `missing`, an agent-free shell becomes `dead`, a registration the pane's processes do not contradict becomes `alive`, and an unexpected read becomes `unreadable`.
+Native registration classifies a harness without guessing from a generic interpreter name, which tmux process-name inspection cannot do.
+
+A reported registration is not evidence on its own.
+Herdr's agent registry is written by whatever reports into it, and a report is not withdrawn when the process that made it goes away, so a registration can outlive the agent it describes.
+The classifier therefore corroborates a reported registration against the pane's own `pane process-info` inventory and treats the registration as stale when that inventory positively proves a lone bare idle shell.
+This is the same rule the tmux classifier already applies from the foreground process group, expressed through Herdr's own inventory.
+
+Only positive proof of an agent-free pane can move the verdict from `alive` to `dead`; an inconclusive inventory leaves the registration standing and recovery refuses until a later poll settles it.
+`bin/backends/herdr.sh` owns the exact proof and sampling mechanics.
+A pane whose registration outlived its agent is a husk on the same terms as a restored one, so create-time replacement and presentation reclaim treat both identically.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
@@ -344,7 +364,11 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-herdr-agent-free-proof-live-e2e.test.sh
 ```
+
+`tests/fm-herdr-agent-free-proof-live-e2e.test.sh` is the opt-in drift guard for the agent-free proof: it launches every installed harness for real and fails naming the harness and version if a running one ever proves a bare idle shell.
+Run it after any harness upgrade and refresh the per-harness evidence it prints.
 
 Real Herdr tests use the named lab helper and default-session tripwire.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.

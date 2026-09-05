@@ -472,6 +472,85 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+# --- 1b. an agent that already exited to its shell ---------------------------
+#
+# The endpoint outlives the agent: a worker that exits leaves its shell sitting
+# in the task's local copy. That endpoint is positively agent-free, so the
+# replacement its operator is asking for must launch, and nothing may be typed
+# at the shell on the way there. Durable busy evidence from the incarnation
+# that ended is stale by definition and must not resurrect an interrupt.
+
+test_relaunch_over_an_exited_shell_stops_nothing_and_launches() {
+  local dir out rc gen head_before
+  dir=$(new_case exited rl40)
+  add_ship_task "$dir" rl40 claude
+  # The worker exited: the endpoint is a plain shell, not the harness.
+  printf 'zsh' > "$dir/fake/command"
+  # Its last busy report never got a settling counterpart, so the durable
+  # record still says busy long after the process producing it went away.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl40)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/rl40.meta"
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" rl40 busy \
+    --gen "$gen" --source pi-ext --event agent-start >/dev/null
+  # Real uncommitted work the replacement must inherit untouched.
+  printf 'half-finished\n' > "$dir/wt/scratch.txt"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+
+  out=$(run_control "$dir" rl40 relaunch --note "prior worker exited after the PR went green"); rc=$?
+  expect_code 0 "$rc" "a relaunch over an exited shell should launch the replacement"$'\n'"$out"
+  assert_contains "$out" "relaunched rl40" "the outcome should name the completed transition"
+  [ "$(journal_field "$dir" rl40 exit_result)" = already-stopped ] \
+    || fail "an already-exited agent should be recorded as already-stopped, not stopped"
+  # The keys log also carries the replacement launch's own input, so pin the
+  # interrupt key itself rather than emptiness.
+  case "$(cat "$dir/fake/keys")" in
+    *Escape*) fail "stale busy evidence must not deliver an interrupt key into a pane with no agent" ;;
+  esac
+  # Whole-line matches: the launch literal legitimately carries paths.
+  if grep -qxE '/(exit|quit)' "$dir/fake/literal"; then
+    fail "an already-exited agent must not be sent the harness's exit command"
+  fi
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "relaunch must not move the task's branch"
+  [ "$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)" = "task-rl40" ] \
+    || fail "relaunch must not change the task's branch identity"
+  [ "$(cat "$dir/wt/scratch.txt")" = half-finished ] \
+    || fail "relaunch must leave every uncommitted change exactly as the previous worker left it"
+  [ "$(journal_field "$dir" rl40 worktree_dirty)" = yes ] \
+    || fail "the checkpoint should record that there was uncommitted work to preserve"
+  [ "$(journal_field "$dir" rl40 worktree_head)" = "$head_before" ] \
+    || fail "the checkpoint should record the exact head it preserved"
+  assert_grep "prior worker exited after the PR went green" "$dir/home/data/rl40/brief.md" \
+    "the replacement must be told what happened"
+  pass "fm-control relaunch: an endpoint whose agent already exited is replaced without an interrupt, without the exit command, and without touching the branch or its uncommitted work"
+}
+
+test_relaunch_over_an_exited_shell_preserves_work_when_the_launch_fails() {
+  local dir out rc head_before
+  dir=$(new_case exitedfail rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'zsh' > "$dir/fake/command"
+  # The replacement never comes up: `becomes` leaves the endpoint a shell.
+  printf 'zsh' > "$dir/fake/becomes"
+  printf 'half-finished\n' > "$dir/wt/scratch.txt"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+
+  out=$(run_control "$dir" rl41 relaunch --note "prior worker exited"); rc=$?
+  expect_code 1 "$rc" "a replacement that never comes up must fail loudly"
+  assert_contains "$out" "did not come up" "the failure should name the missing replacement"
+  [ "$(meta_field "$dir" rl41 harness)" = claude ] \
+    || fail "a failed launch must leave the durable record naming a harness, not a half-transition"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "a failed relaunch must not move the task's branch"
+  [ "$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)" = "task-rl41" ] \
+    || fail "a failed relaunch must not change the task's branch identity"
+  [ "$(cat "$dir/wt/scratch.txt")" = half-finished ] \
+    || fail "a failed relaunch must still preserve every uncommitted change"
+  assert_grep "prior worker exited" "$dir/home/state/rl41.control-relaunch.note" \
+    "the progress note must survive a failed relaunch for the next recovery"
+  pass "fm-control relaunch: a replacement that never comes up still preserves the branch, the uncommitted work, and the progress note"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -1500,6 +1579,8 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_relaunch_over_an_exited_shell_stops_nothing_and_launches
+test_relaunch_over_an_exited_shell_preserves_work_when_the_launch_fails
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
