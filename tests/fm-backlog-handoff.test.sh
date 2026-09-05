@@ -150,6 +150,38 @@ EOF
   pass "a failed receiver wake is loud and retries from an already-present handoff"
 }
 
+test_archived_fast_reply_clears_pending_receiver_wake() {
+  local home="$TMP_ROOT/archived-reply-main" sub="$TMP_ROOT/archived-reply-sub"
+  local corr=00000000000000cc marker archive out
+  setup_homes "$home" "$sub"
+  mkdir -p "$sub/data" "$home/state/pending-replies/archive"
+  printf '## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  cat > "$sub/data/backlog.md" <<'EOF'
+## Queued
+- [ ] fast-reply - already routed (repo: alpha)
+
+## Done
+EOF
+  marker="$home/state/.backlog-handoff-design.wake-pending"
+  archive="$home/state/pending-replies/archive/$corr"
+  printf 'pending:%s\n' "$corr" > "$marker"
+  cat > "$archive" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=design
+delivered_epoch=100
+phase=resolved
+resolved_epoch=101
+EOF
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design fast-reply 2>&1) \
+    || fail "an archived fast reply wedged the pending receiver wake: $out"
+  assert_absent "$marker" "an archived fast reply left the receiver wake pending"
+  [ "$(inbox_record_count "$home/state" design)" -eq 0 ] \
+    || fail "an archived fast reply caused a duplicate receiver instruction"
+  assert_contains "$out" "nothing to move" "the archived fast-reply retry did not complete idempotently"
+  pass "an archived fast reply completes its pending receiver wake"
+}
+
 test_known_receiver_failure_remains_retryable_after_grace() {
   local home="$TMP_ROOT/known-fail-main" sub="$TMP_ROOT/known-fail-sub"
   local basebin rejectbin="$TMP_ROOT/known-fail-reject" out corr rec_count rc=0
@@ -1346,6 +1378,7 @@ EOF
 
 test_handoff_wakes_live_local_receiver
 test_failed_wake_retries_when_the_item_is_already_present
+test_archived_fast_reply_clears_pending_receiver_wake
 test_known_receiver_failure_remains_retryable_after_grace
 test_known_failure_restores_retry_after_reconciliation_race
 test_move_crash_keeps_wake_pending_for_recovery

@@ -682,9 +682,12 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   local state=$1 corr=$2 status_override=${3-}
   local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
   local unconfirmed=0
-  rec=$(fm_pending_reply_path "$state" "$corr")
-  [ -f "$rec" ] || return 1
+  rec=$(fm_pending_reply_locate "$state" "$corr") || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
+  if [ "$rec" != "$(fm_pending_reply_path "$state" "$corr")" ]; then
+    [ "$phase" = resolved ]
+    return $?
+  fi
   if [ "$phase" = resolved ]; then
     _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
     return 0
