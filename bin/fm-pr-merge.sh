@@ -6,6 +6,19 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
+# Before any GitHub mutation, this script reads the pull request's own live
+# head commit and that exact commit's check runs (gh is a hard prerequisite for
+# this read; there is no gh-axi equivalent). Every check must be completed with
+# conclusion success, neutral, or skipped - skipped is accepted unconditionally
+# because the check-runs API exposes no field distinguishing why a check was
+# skipped, so any other conclusion or an incomplete status refuses, naming the
+# exact failing check. The verified head is then passed to gh-axi as
+# --match-head-commit, the same live-head-pinning contract GitLab's --sha
+# already uses below, so a push that lands between the read and the merge
+# fails the merge instead of landing an unverified commit. A caller-supplied
+# --match-head-commit is rejected the same way GitLab's --sha override is,
+# because the verified head comes only from this script's own live read.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # The gh-axi merge abstraction always performs the merge; the outcome read that
@@ -178,7 +191,7 @@ reject_repo_overrides() {
   done
 }
 
-reject_head_overrides() {
+reject_gitlab_head_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -190,8 +203,26 @@ reject_head_overrides() {
   done
 }
 
+# GitHub's own head-pinning flag, mirroring reject_gitlab_head_overrides: the
+# verified head comes only from this script's own pre-merge read.
+reject_github_head_overrides() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --match-head-commit|--match-head-commit=*)
+        echo "error: extra merge arguments must not override the head commit" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 reject_repo_overrides "$@" || exit 1
-[ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+if [ "$PROVIDER" = gitlab ]; then
+  reject_gitlab_head_overrides "$@" || exit 1
+else
+  reject_github_head_overrides "$@" || exit 1
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -321,6 +352,63 @@ FIELDS
   printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
+}
+
+# Read the pull request's own current head commit before any mutation. Reused
+# is the same "pr view --json headRefOid" shape bin/fm-pr-check.sh already
+# reads, so the existing mock and live behavior agree.
+FM_PR_GITHUB_HEAD=
+github_read_head_sha() {
+  local sha
+  if ! sha=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json headRefOid -q .headRefOid 2>/dev/null) || [ -z "$sha" ]; then
+    return 1
+  fi
+  fm_pr_head_valid "$sha" || return 1
+  FM_PR_GITHUB_HEAD=$sha
+}
+
+# Every check run at the given head must be completed with conclusion success,
+# neutral, or skipped. GITHUB_TOKEN/GH_TOKEN are unset for this read so it
+# cannot be answered by a stale or narrower-scoped ambient credential instead
+# of gh's own authenticated identity. Every failing check is reported, not
+# just the first.
+github_check_runs_green() {
+  local head=$1 lines line name status conclusion refusals='' any=false
+  if ! lines=$(env -u GITHUB_TOKEN -u GH_TOKEN gh api \
+    --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs" \
+    --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv' 2>/dev/null); then
+    echo "error: could not read GitHub check runs at head $head before merging" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r name status conclusion; do
+    [ -n "$name" ] || continue
+    any=true
+    if [ "$status" != completed ]; then
+      refusals="$refusals  - $name is \"${status:-unreadable}\", not completed
+"
+      continue
+    fi
+    case "$conclusion" in
+      success|neutral|skipped) ;;
+      *)
+        refusals="$refusals  - $name completed with conclusion \"${conclusion:-unreadable}\", not success, neutral, or skipped
+"
+        ;;
+    esac
+  done <<CHECKS
+$lines
+CHECKS
+  if [ "$any" != true ]; then
+    echo "error: refusing to merge $URL: no checks were found at head $head" >&2
+    return 1
+  fi
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s: not every check is green at head %s\n' "$URL" "$head" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: every check is green for %s at head %s\n' "$URL" "$head" >&2
 }
 
 # Read one live GitHub pull request view after gh-axi returns. The selected
@@ -637,6 +725,11 @@ case "$PROVIDER" in
   github)
     merge_output=
     merge_args=()
+    command -v gh >/dev/null 2>&1 \
+      || { echo "error: verifying GitHub check runs before merging requires gh on PATH" >&2; exit 1; }
+    github_read_head_sha \
+      || { echo "error: could not read the GitHub pull request's current head commit before merging" >&2; exit 1; }
+    github_check_runs_green "$FM_PR_GITHUB_HEAD" || exit 1
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
@@ -645,7 +738,7 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
+      "${merge_args[@]+"${merge_args[@]}"}" --match-head-commit "$FM_PR_GITHUB_HEAD" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
       merge_status=$?
