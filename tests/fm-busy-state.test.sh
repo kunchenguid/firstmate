@@ -16,6 +16,8 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-state)
 EV="$ROOT/bin/fm-busy-event.sh"
@@ -396,6 +398,131 @@ test_herdr_native_busy_only() {
   unset -f fm_backend_busy_state
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
+
+# task fm-endpoint-shell-backends: herdr, zellij, orca, and cmux have no
+# process-identity or native-registration signal of their own, so a bare pane
+# with no record classifies through fm-spawn's endpoint-shell marker instead
+# of falling all the way to the generic unknown.
+test_endpoint_shell_marker_classifies_dead() {
+  local state out backend
+  state=$(new_state_dir endpoint-shell)
+  for backend in zellij orca cmux herdr; do
+    # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+    fm_backend_capture() { printf '%s\n' "$FM_COMPOSER_ENDPOINT_SHELL_MARKER "; }
+    out=$(fm_busy_classify "$backend" w1 claude t1 "$state")
+    [ "$out" = "dead endpoint-shell" ] \
+      || fail "$backend: a captured marked shell with no record must classify dead endpoint-shell, got '$out'"
+  done
+  unset -f fm_backend_capture
+  pass "a bare pane carrying fm-spawn's endpoint-shell marker classifies dead endpoint-shell on herdr, zellij, orca, and cmux"
+}
+
+test_endpoint_shell_marker_absent_stays_unknown() {
+  local state out
+  state=$(new_state_dir endpoint-shell-absent)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { printf '%s\n' 'user@host:~$ '; }
+  out=$(fm_busy_classify zellij w1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "an unmarked bare shell must never be assumed dead, got '$out'"
+  # A capture failure (empty output, non-zero exit) must fail the same safe way.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { return 1; }
+  out=$(fm_busy_classify zellij w1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "a capture failure must never be assumed dead, got '$out'"
+  unset -f fm_backend_capture
+  pass "the marker is never assumed: an unmarked or unreadable pane stays unknown missing"
+}
+
+test_endpoint_shell_marker_never_checked_on_tmux() {
+  local state out
+  state=$(new_state_dir endpoint-shell-tmux)
+  # tmux proves liveness from the real foreground process and never carries
+  # this marker; even if something captured it back, tmux must not be taught
+  # to read it, since fm_busy_classify only checks the four marker backends.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { printf '%s\n' "$FM_COMPOSER_ENDPOINT_SHELL_MARKER "; }
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "tmux must never classify from the endpoint-shell marker, got '$out'"
+  unset -f fm_backend_capture
+  pass "tmux is excluded from the endpoint-shell marker check"
+}
+
+# A marked prompt carrying a typed command - anything run at the endpoint
+# shell, up to and including the launch line itself - is not an exited agent.
+# With no record yet, such a pane must classify exactly as it did before this
+# feature existed.
+test_endpoint_shell_typed_command_stays_unknown() {
+  local state out backend
+  state=$(new_state_dir endpoint-shell-launching)
+  for backend in zellij orca cmux herdr; do
+    # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+    fm_backend_capture() {
+      printf '%s export GOTMPDIR=/tmp/t/gotmp\n%s export TRACEPARENT=00-4bf92f-00f067-01\n%s claude --model opus\n' \
+        "$FM_COMPOSER_ENDPOINT_SHELL_MARKER" "$FM_COMPOSER_ENDPOINT_SHELL_MARKER" \
+        "$FM_COMPOSER_ENDPOINT_SHELL_MARKER"
+    }
+    out=$(fm_busy_classify "$backend" w1 claude t1 "$state")
+    [ "$out" = "unknown missing" ] \
+      || fail "$backend: marker-led rows carrying a typed command must not classify dead, got '$out'"
+  done
+  unset -f fm_backend_capture
+  pass "a marked prompt carrying a typed command keeps its pre-feature unknown missing verdict"
+}
+
+# The daemon and the watcher already hand fm_busy_classify a 40-line tail on
+# every poll; the endpoint-shell arm must read that instead of paying a second
+# backend round trip, the same as the Grok arm.
+# The relaunch shape end to end: a relaunch retires the busy wiring, so there
+# is no record, and the pane the daemon captures still shows the bare marked
+# prompts spawn's own pre-launch lines left above the live harness. That
+# endpoint is healthy and must classify exactly as it did before this feature
+# existed.
+test_endpoint_shell_relaunch_scrollback_stays_unknown() {
+  local state out backend m
+  state=$(new_state_dir endpoint-shell-relaunch)
+  m=$FM_COMPOSER_ENDPOINT_SHELL_MARKER
+  for backend in zellij orca cmux herdr; do
+    out=$(fm_busy_classify "$backend" w1 claude t1 "$state" \
+      "$(printf '%s export GOTMPDIR=/tmp/t/gotmp\n%s\n%s export TRACEPARENT=00-4bf92f-00f067-01\n%s\n%s claude --model opus\n\n> reading the brief\n' \
+        "$m" "$m" "$m" "$m" "$m")")
+    [ "$out" = "unknown missing" ] \
+      || fail "$backend: a relaunched endpoint with bare marked prompts in scrollback above a live harness must not classify dead, got '$out'"
+  done
+  pass "a relaunched endpoint's stale bare marked prompts never outrank the live harness below them"
+}
+
+test_endpoint_shell_reuses_caller_tail40() {
+  local state out captures
+  state=$(new_state_dir endpoint-shell-tail40)
+  captures="$state/captures"
+  : >"$captures"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { printf 'x\n' >>"$captures"; printf 'nothing marked here\n'; }
+  out=$(fm_busy_classify zellij w1 claude t1 "$state" \
+    "$(printf 'process exited\n%s \n' "$FM_COMPOSER_ENDPOINT_SHELL_MARKER")")
+  [ "$out" = "dead endpoint-shell" ] \
+    || fail "the caller's tail40 must be classified, got '$out'"
+  [ ! -s "$captures" ] \
+    || fail "a non-empty tail40 must not trigger another fm_backend_capture round trip"
+  # With no tail40 the arm still captures for itself.
+  out=$(fm_busy_classify zellij w1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] \
+    || fail "with no tail40 the arm must fall back to its own capture, got '$out'"
+  [ -s "$captures" ] \
+    || fail "with no tail40 the arm must issue its own fm_backend_capture"
+  unset -f fm_backend_capture
+  pass "the endpoint-shell arm reuses a caller-supplied tail40 and captures only when it has none"
+}
+
+test_endpoint_shell_marker_classifies_dead
+test_endpoint_shell_typed_command_stays_unknown
+test_endpoint_shell_relaunch_scrollback_stays_unknown
+test_endpoint_shell_reuses_caller_tail40
+test_endpoint_shell_marker_absent_stays_unknown
+test_endpoint_shell_marker_never_checked_on_tmux
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered

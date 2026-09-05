@@ -200,6 +200,24 @@ A Herdr pane id contains a colon, so the adapter splits `window=` on the first c
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
 
+## Endpoint shell marker
+
+`bin/fm-spawn.sh` writes fm-composer-lib.sh's `FM_COMPOSER_ENDPOINT_SHELL_MARKER` into the task pane's shell prompt, as a `PS1=` line of its own sent immediately before the launch text - never chained onto the launch command, because a `VAR=value` prefix is a parse error on a non-POSIX pane shell (fish, nushell) and those shells reject the whole line, which would stop the agent from launching at all, the same as on zellij, orca, and cmux.
+Herdr does not need it for its own dead/husk decision, which stays on the native `agent get` registration read above, but `bin/fm-busy-lib.sh`'s `fm_busy_classify` does include herdr in the same `dead endpoint-shell` read as the other three backends, so a plain capture of a Herdr pane reads that fleet-wide fact exactly the way it reads everywhere else.
+That read is per task and sits last in `fm_busy_classify`, so it is reached only when the task has no busy record at all and no earlier harness-specific arm has already resolved it.
+`cursor`, `grok`, and `muse` tasks always resolve inside their own arm and never reach it, so an exited agent on those harnesses still reports that arm's verdict rather than `dead endpoint-shell`.
+`codex` and `kimi` tasks reach it only once their own semantic source is verified; until then they resolve as `unknown codex-unverified` / `unknown kimi-unverified`.
+Every other harness (`claude`, `opencode`, and the Pi-hosted harnesses) reaches it whenever the task has no record.
+A capture that omits the marker proves nothing either way and must not be read as "never a firstmate endpoint".
+The pane does show a bare marked prompt while spawn is still launching, and the bound on that window differs per path.
+On a **fresh spawn** `PS1` is not the marker until that one send, so no bare marked prompt exists before it and the launch text follows with nothing in between: the window is bounded by those two adjacent sends.
+On a **relaunch** `PS1` already carries the marker from the endpoint's prior life before the pre-launch sequence starts, so the `GOTMPDIR` export, the `TRACEPARENT` export, and the marker resend each land on an already-marked prompt and redraw a fresh bare one - the window spans the whole pre-launch sequence, meta-lock wait and settle sleeps included.
+The read is therefore decided from the bottom-most marked row - the pane's current prompt - and never from stale scrollback above it.
+The fresh-spawn window is a real residual race and is accepted: a capture landing in the instant between the marker line and the launch text reads `dead endpoint-shell` for a healthy launching endpoint.
+The wider relaunch window is not a false positive: a relaunch refuses unless the previous agent is already positively verified gone (herdr is one of only two backends whose agent state is trusted for that check), so nothing is running while the pane reads dead.
+The marker is planted with a one-shot `PS1=` assignment, so it is absent for a session predating this change, for a harness that overwrote the shell's `PS1`, for a shell that regenerates its prompt per command (starship, powerlevel10k, a `PROMPT_COMMAND` or `precmd` git prompt), and for a shell that never consults `PS1` at all (fish, nushell).
+In every one of those cases the pane classifies exactly as it did before this feature existed; absence is never read as "the agent is alive" and never on its own as `dead endpoint-shell`.
+
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.

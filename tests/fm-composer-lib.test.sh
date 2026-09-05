@@ -664,3 +664,164 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# --- Endpoint-shell marker (task fm-endpoint-shell-backends) ----------------
+#
+# fm-spawn.sh writes FM_COMPOSER_ENDPOINT_SHELL_MARKER into a task pane's own
+# shell prompt on herdr, zellij, orca, and cmux before the harness ever
+# launches, so a bare pane that later shows it is provably firstmate's own
+# agent-free endpoint shell rather than an unrelated shell. See
+# fm_composer_endpoint_shell_present's own comment in bin/fm-composer-lib.sh.
+
+test_endpoint_shell_marker_detected_alone() {
+  fm_composer_endpoint_shell_present "$FM_COMPOSER_ENDPOINT_SHELL_MARKER " \
+    || fail "the bare marker line must be detected"
+  pass "fm_composer_endpoint_shell_present: detects the marker on its own"
+}
+
+test_endpoint_shell_exited_agent_leaves_bare_marked_prompt() {
+  local screen
+  screen=$(printf 'some earlier scrollback\nmore output\n%s \n' "$FM_COMPOSER_ENDPOINT_SHELL_MARKER")
+  fm_composer_endpoint_shell_present "$screen" \
+    || fail "an exited agent's bare marked prompt inside a larger capture must be detected"
+  pass "fm_composer_endpoint_shell_present: an exited agent's bare marked prompt is the endpoint shell"
+}
+
+# A command typed at the marked prompt - by a human, by fm-send, by a recovery
+# path - echoes as `[fm-endpoint-shell] <that command>`. Those rows lead with
+# the marker but carry a typed command, so they say something is running there
+# and must never be read as "the agent exited".
+test_endpoint_shell_typed_command_is_not_an_exited_agent() {
+  local screen
+  screen=$(printf '%s export GOTMPDIR=/tmp/t/gotmp\n%s export TRACEPARENT=00-4bf92f-00f067-01\n%s claude --model opus\n' \
+    "$FM_COMPOSER_ENDPOINT_SHELL_MARKER" "$FM_COMPOSER_ENDPOINT_SHELL_MARKER" "$FM_COMPOSER_ENDPOINT_SHELL_MARKER")
+  if fm_composer_endpoint_shell_present "$screen"; then
+    fail "marker-led rows carrying a typed command must not read as an exited agent"
+  fi
+  pass "fm_composer_endpoint_shell_present: a marked prompt carrying a typed command is not an exited agent"
+}
+
+# The marker is a PROMPT construct, so it only counts as the leading content of
+# a row: a capture that merely quotes the literal (an agent editing this
+# repo's own source or docs) is not an endpoint shell.
+test_endpoint_shell_marker_must_lead_the_row() {
+  local screen
+  screen=$(printf 'FM_COMPOSER_ENDPOINT_SHELL_MARKER=%s\ngrep -n %s bin/fm-composer-lib.sh\n' \
+    "$FM_COMPOSER_ENDPOINT_SHELL_MARKER" "$FM_COMPOSER_ENDPOINT_SHELL_MARKER")
+  if fm_composer_endpoint_shell_present "$screen"; then
+    fail "a capture that merely quotes the marker mid-row must not read as an endpoint shell"
+  fi
+  pass "fm_composer_endpoint_shell_present: the marker only counts as the leading content of a row"
+}
+
+# THE SAFETY RULE on the four cursorless backends: fm-spawn replaces PS1 with
+# the marker, so the pane's prompt no longer starts with a shell glyph. The
+# marked prompt must still be a shell row, or a stale composer painted above a
+# dead shell would win selection and read as a safe injection target.
+test_endpoint_shell_marked_prompt_invalidates_cursorless_candidate() {
+  # A killed TUI leaves its `❯` composer row painted; the shell prompt is
+  # below it, separated by the blank row that ends the composer's wrap region.
+  # Without the guard the stale row wins selection and reads `empty` - a
+  # "safe injection target" on a pane with no agent.
+  local head stale caps out
+  head=$'old transcript\n❯\n\n'
+  for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+    stale="$head$FM_COMPOSER_ENDPOINT_SHELL_MARKER "
+    assert_screen "stale composer above a bare marked prompt" unknown "$caps" "$stale"
+    # Looser than the exited-agent shape on purpose: a marked prompt carrying a
+    # typed command is still a shell prompt for the staleness rule.
+    stale="$head$FM_COMPOSER_ENDPOINT_SHELL_MARKER ls -la"
+    assert_screen "stale composer above a marked prompt with a command" unknown "$caps" "$stale"
+  done
+  # The guard is the marker, not the bracket: an unrelated bracketed prompt is
+  # not a shell row and still reads empty, which is what the marked prompt
+  # wrongly read before the marker was recognized here.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "${head}[not-a-marker] ")
+  [ "$out" = empty ] \
+    || fail "only the endpoint-shell marker may arm the guard, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$head$FM_COMPOSER_ENDPOINT_SHELL_MARKER " 1)
+  [ "$out" = empty ] \
+    || fail "cursor mode must keep the cursor-anchored composer verdict, got '$out'"
+  pass "fm_composer_classify_screen: a marked endpoint-shell prompt invalidates a stale cursorless composer"
+}
+
+# A RELAUNCH into an endpoint whose shell already carries the marker replays
+# spawn's pre-launch lines through that marked prompt, so the capture keeps
+# bare marked prompts in scrollback ABOVE a live, healthy harness. Only the
+# bottom-most marked row is the pane's current state; deciding from any marked
+# row would report an exited agent for a running one.
+test_endpoint_shell_bare_marked_prompt_above_a_live_agent_is_not_dead() {
+  local m screen
+  m=$FM_COMPOSER_ENDPOINT_SHELL_MARKER
+  screen=$(printf '%s export GOTMPDIR=/tmp/t/gotmp\n%s\n%s export TRACEPARENT=00-4bf92f-00f067-01\n%s\n%s PS1=%s; claude --model opus\n\n> working on the brief\n' \
+    "$m" "$m" "$m" "$m" "$m" "'$m '")
+  if fm_composer_endpoint_shell_present "$screen"; then
+    fail "a bare marked prompt left in scrollback above a live harness must not read as an exited agent"
+  fi
+  # The same shape with nothing below the launch line is still live.
+  screen=$(printf '%s\n%s claude --model opus\n' "$m" "$m")
+  if fm_composer_endpoint_shell_present "$screen"; then
+    fail "the launch line under an earlier bare marked prompt must not read as an exited agent"
+  fi
+  # ... and once that agent really exits, the pane's own new prompt is the
+  # bottom-most marked row again, so the verdict comes back.
+  screen=$(printf '%s\n%s claude --model opus\nsession ended\n%s \n' "$m" "$m" "$m")
+  fm_composer_endpoint_shell_present "$screen" \
+    || fail "the bare marked prompt drawn after that agent exits must read as an exited agent"
+  pass "fm_composer_endpoint_shell_present: only the bottom-most marked row decides, so stale bare prompts never outrank a live agent"
+}
+
+# One list owns which backends carry the marker, so the planting site
+# (bin/fm-spawn.sh) and the reading site (bin/fm-busy-lib.sh) cannot drift.
+test_endpoint_shell_backend_set_is_the_four_marker_backends() {
+  local b
+  for b in herdr zellij orca cmux; do
+    fm_composer_endpoint_shell_backend "$b" \
+      || fail "$b must be a marker-carrying backend"
+  done
+  for b in tmux '' unknown-backend herd zellijx; do
+    if fm_composer_endpoint_shell_backend "$b"; then
+      fail "'$b' must not be a marker-carrying backend"
+    fi
+  done
+  pass "fm_composer_endpoint_shell_backend: exactly herdr, zellij, orca, and cmux carry the marker"
+}
+
+# Only zellij and cmux send a text line in two phases, so only there can a
+# send leave text pasted-but-uncommitted. herdr and orca send and submit in one
+# call, so their exit statuses describe some other failure and must never be
+# read as a residue signal.
+test_endpoint_shell_two_phase_send_backends() {
+  local b
+  for b in zellij cmux; do
+    fm_composer_endpoint_shell_two_phase_send "$b" \
+      || fail "$b sends in two phases and must carry the uncommitted-residue contract"
+  done
+  for b in herdr orca tmux '' unknown-backend; do
+    if fm_composer_endpoint_shell_two_phase_send "$b"; then
+      fail "'$b' does not send in two phases and must not carry the residue contract"
+    fi
+  done
+  pass "fm_composer_endpoint_shell_two_phase_send: only zellij and cmux can leave uncommitted residue"
+}
+
+test_endpoint_shell_marker_absent_on_ordinary_content() {
+  local content
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal sample string, not a real substitution
+  for content in '' 'user@host:~$ ' '❯ ' '$(some unrelated output)' "$(classify 0 '❯')"; do
+    if fm_composer_endpoint_shell_present "$content"; then
+      fail "ordinary content '$content' must never be misread as the endpoint-shell marker"
+    fi
+  done
+  pass "fm_composer_endpoint_shell_present: never fires on ordinary content lacking the exact marker"
+}
+
+test_endpoint_shell_marker_detected_alone
+test_endpoint_shell_exited_agent_leaves_bare_marked_prompt
+test_endpoint_shell_typed_command_is_not_an_exited_agent
+test_endpoint_shell_marker_must_lead_the_row
+test_endpoint_shell_marked_prompt_invalidates_cursorless_candidate
+test_endpoint_shell_bare_marked_prompt_above_a_live_agent_is_not_dead
+test_endpoint_shell_backend_set_is_the_four_marker_backends
+test_endpoint_shell_two_phase_send_backends
+test_endpoint_shell_marker_absent_on_ordinary_content

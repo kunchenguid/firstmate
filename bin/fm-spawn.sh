@@ -313,6 +313,13 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# The fleet-wide owner of composer and prompt shapes, including the
+# endpoint-shell marker planted on the launch line below. Sourced directly
+# rather than relied on through whichever backend adapter fm_backend_source
+# happens to load, so the marker is defined under `set -u` no matter how
+# adapter loading changes. Re-sourcing is safe: it only declares.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2475,6 +2482,70 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# spawn_marker_residue_cleared: 0 only when a FRESH capture positively shows
+# the pane's input line no longer carries <residue> - the exact text a failed
+# marker send left uncommitted there.
+#
+# A terminal wraps one input line across as many grid rows as it needs, and a
+# capture dumps those rows one per line, so the residue can be split at an
+# arbitrary point and no single row contains it. The check therefore joins a
+# trailing WINDOW of non-blank rows and looks for the residue in the join.
+# The window is sized from the two things that decide how far the residue can
+# spread - its own length and the pane's width - never a fixed guess. Width is
+# not exposed by any adapter, so it is estimated as the longest captured row:
+# a wrapped row is exactly the pane width, and any underestimate only widens
+# the window, which can only turn a "clean" into a "dirty".
+#
+# Every uncertainty resolves toward dirty, because the costs are not
+# symmetric: a false "dirty" refuses the launch with a named cause the
+# operator can see and fix, while a false "clean" pastes the launch command
+# onto stranded text and corrupts it silently. So a failed or empty capture,
+# no non-blank row, an unusable width, or a capture too short to hold the
+# window all return 1.
+spawn_marker_residue_cleared() {  # <target> <residue>
+  local cap residue=$2 row width=0 rows_needed i joined='' needle=''
+  local -a nonblank=()
+  cap=$(fm_backend_capture "$BACKEND" "$1" "${FM_COMPOSER_CAPTURE_LINES:-20}" "$W" 2>/dev/null) || return 1
+  [ -n "$cap" ] || return 1
+  [ -n "$residue" ] || return 1
+  while IFS= read -r row; do
+    case "$row" in
+      *[![:space:]]*)
+        nonblank+=("$row")
+        [ "${#row}" -le "$width" ] || width=${#row}
+        ;;
+    esac
+  done <<EOF
+$cap
+EOF
+  [ "${#nonblank[@]}" -gt 0 ] || return 1
+  [ "$width" -gt 0 ] || return 1
+  rows_needed=$(( (${#residue} + width - 1) / width + 1 ))
+  [ "$rows_needed" -le "${#nonblank[@]}" ] || return 1
+  # Whitespace is the one thing a capture may freely add or drop at a row
+  # boundary: some pad short rows out to the pane width, some emit each row
+  # only up to its last non-blank cell - and when the wrap lands on the
+  # residue's own space, that second kind deletes a genuinely typed character
+  # before this function ever sees it. No amount of re-joining can recover a
+  # character the capture never emitted, and enumerating join variants only
+  # works for as many boundaries as the variants anticipate. So whitespace is
+  # removed from BOTH sides instead: the residue is then matched on its
+  # non-whitespace shape alone, which is invariant under padding, trimming,
+  # and any number of wrap boundaries. Dropping whitespace can only join
+  # neighbours that were apart, never separate ones that were together, so
+  # this can turn a "clean" into a "dirty" but never the reverse.
+  i=$(( ${#nonblank[@]} - rows_needed ))
+  while [ "$i" -lt "${#nonblank[@]}" ]; do
+    joined="$joined${nonblank[$i]}"
+    i=$((i + 1))
+  done
+  joined=$(printf '%s' "$joined" | tr -d '[:space:]')
+  needle=$(printf '%s' "$residue" | tr -d '[:space:]')
+  [ -n "$needle" ] || return 1
+  case "$joined" in *"$needle"*) return 1 ;; esac
+  return 0
+}
+
 # Kimi launch-readiness and delivery route their composer-emptiness half
 # through the shared classifier (bin/fm-composer-lib.sh via
 # fm_backend_composer_state), the same owner every steer and injection guard
@@ -3249,6 +3320,74 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+# Endpoint-shell marker (bin/fm-composer-lib.sh's
+# FM_COMPOSER_ENDPOINT_SHELL_MARKER): the backends in that file's
+# FM_COMPOSER_ENDPOINT_SHELL_BACKENDS - the one list the reader in
+# bin/fm-busy-lib.sh consults too - have no process-identity signal of their
+# own for a bare shell the way tmux does, so firstmate writes its own proof
+# into the pane's shell prompt. It goes on a line of ITS OWN and is never
+# chained onto the launch command: a `VAR=value` prefix is a parse error on a
+# pane shell that is not POSIX-compatible (fish, nushell), and those shells
+# reject the WHOLE input line on a parse error, so chaining would take the
+# agent's launch down with it. On its own line the worst case is that the
+# assignment has no effect and the marker is simply absent, which every
+# reader already treats as undetermined.
+#
+# Sent LAST, immediately before the launch text with no pre-launch command
+# between them. On a FRESH spawn that bounds the interval in which the pane
+# shows a bare marked prompt - the shape a reader treats as "the agent
+# exited" - to those two adjacent sends, because PS1 is not the marker until
+# this very send; a capture landing in exactly that instant can still read
+# `dead endpoint-shell` for a healthy launching endpoint, and that residual
+# race is known and accepted. On a RELAUNCH the bound is wider and this
+# ordering does not narrow it: PS1 already carries the marker from the
+# endpoint's prior life, so every pre-launch send above redraws a bare marked
+# prompt and the exposure spans the whole pre-launch sequence. That is not a
+# false positive - a relaunch refuses unless the previous agent is already
+# positively verified gone (the RELAUNCH_STATE check above), so no agent is
+# running while it reads dead.
+#
+# The marker lands on the same shell process that runs the harness as a plain
+# foreground job (never `exec`), so the prompt - with the marker in it -
+# reappears verbatim once the harness exits. tmux needs no marker (its adapter
+# already proves liveness from the pane's real foreground process), so it is
+# deliberately excluded from that list.
+if fm_composer_endpoint_shell_backend "$BACKEND"; then
+  MARKER_LINE="PS1='$FM_COMPOSER_ENDPOINT_SHELL_MARKER '"
+  MARKER_SEND_STATUS=0
+  spawn_send_text_line "$T" "$MARKER_LINE" || MARKER_SEND_STATUS=$?
+  # rc=2 is the ONE outcome that is not "the marker simply did not take" - but
+  # only on a backend that actually sends in two phases, where "pasted but not
+  # committed" is a state that exists at all (bin/fm-composer-lib.sh's
+  # FM_COMPOSER_ENDPOINT_SHELL_TWO_PHASE_BACKENDS records which those are and
+  # why the others cannot be). There the text was pasted and neither the Enter
+  # submit nor the clearing C-c landed, so it is still sitting uncommitted in
+  # the pane's input line. Pasting the launch command on top of that residue
+  # would submit one concatenated line and the agent would never start, so
+  # clear it and prove it is gone before continuing - and refuse loudly rather
+  # than launch onto a line whose contents cannot be confirmed. Every other
+  # status, and every status at all from a single-call backend, is the
+  # documented, already-accepted outcome: the marker is absent and readers
+  # treat it as undetermined.
+  if [ "$MARKER_SEND_STATUS" -eq 2 ] && fm_composer_endpoint_shell_two_phase_send "$BACKEND"; then
+    MARKER_RESIDUE_CLEARED=0
+    MARKER_CLEAR_TRY=1
+    while [ "$MARKER_CLEAR_TRY" -le 3 ]; do
+      spawn_send_key "$T" C-u >/dev/null 2>&1 || true
+      spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+      sleep 0.2
+      if spawn_marker_residue_cleared "$T" "$MARKER_LINE"; then
+        MARKER_RESIDUE_CLEARED=1
+        break
+      fi
+      MARKER_CLEAR_TRY=$((MARKER_CLEAR_TRY + 1))
+    done
+    if [ "$MARKER_RESIDUE_CLEARED" -ne 1 ]; then
+      echo "error: the endpoint-shell marker was pasted into $W but could not be submitted or cleared, and the pane's input line cannot be confirmed clean; refusing to send the launch command on top of that residue" >&2
+      exit 1
+    fi
+  fi
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

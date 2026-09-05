@@ -383,6 +383,162 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # boxes) from ever competing with the live composer.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
+# fm-spawn.sh's endpoint-shell marker (task fm-endpoint-shell-backends): a
+# fixed, unique literal every spawn writes into the interactive shell PS1 of a
+# herdr, zellij, orca, or cmux pane, as a `PS1=` line of its own sent
+# immediately before the launch text (bin/fm-spawn.sh, just before
+# `spawn_send_literal "$T" "$LAUNCH"`). The pane does show a BARE marked
+# prompt while spawn is still launching, and the bound on that window differs
+# per path - it is NOT one claim for both:
+#
+#   FRESH SPAWN: PS1 is not the marker until that one send, so no bare marked
+#   prompt exists before it, and the launch text follows with nothing in
+#   between. The window is bounded by those two adjacent sends. A capture
+#   landing in exactly that instant reads `dead endpoint-shell` for a healthy
+#   launching endpoint; that residual race is known and accepted.
+#
+#   RELAUNCH: PS1 already carries the marker from the endpoint's prior life
+#   before the pre-launch sequence even starts, so the GOTMPDIR export, the
+#   TRACEPARENT export, and the marker resend each land on an already-marked
+#   prompt and redraw a fresh bare one. The window spans the WHOLE pre-launch
+#   sequence, meta-lock wait and settle sleeps included. This one is not a
+#   false positive: a relaunch refuses unless the previous agent is already
+#   positively verified gone (bin/fm-spawn.sh's RELAUNCH_STATE check, gated to
+#   the backends bin/fm-control-lib.sh's fm_control_backend_state_verified
+#   trusts - among the marker backends, herdr only), so nothing is running
+#   while the pane reads dead.
+#
+# Either way only the pane's CURRENT prompt may decide, which is why the
+# readers below take the BOTTOM-MOST marked row and never stale scrollback
+# above it. It is a structural fact
+# about that ONE persistent shell
+# process, not composer content the harness can be mistaken for: the shell
+# process runs the harness as a plain foreground job (never `exec`), so PS1
+# survives the harness exiting and reappears verbatim the next time that
+# exact shell prints its own prompt - which is exactly when a recovery path
+# needs proof that a bare pane is firstmate's own agent-free endpoint shell
+# rather than some unrelated shell that happens to sit at the recorded
+# coordinates. tmux and herdr's native `agent get` already prove liveness
+# from a structural source (process identity, registration), so the marker is
+# the only proof zellij, orca, and cmux have; herdr also carries it, for a
+# human or a generic capture-based tool to read the same fact the same way in
+# every backend. See fm_composer_endpoint_shell_present below. A backend or
+# harness that clears or rewrites the shell's PS1 before exiting (nothing
+# fleet-verified does today) makes the marker absent, which callers must read
+# as "cannot prove" - never as a false `dead`.
+FM_COMPOSER_ENDPOINT_SHELL_MARKER='[fm-endpoint-shell]'
+
+# The backends whose panes carry the marker, declared here with the shape
+# itself so the writer (bin/fm-spawn.sh's own `PS1=` pre-launch line) and the reader
+# (bin/fm-busy-lib.sh's endpoint-shell arm) can never drift apart: a backend
+# added to only one of the two lists would otherwise silently write a marker
+# nothing reads, or read one nothing writes. tmux is deliberately absent - its
+# adapter already proves liveness from the pane's real foreground process.
+FM_COMPOSER_ENDPOINT_SHELL_BACKENDS='herdr zellij orca cmux'
+
+# fm_composer_endpoint_shell_backend: 0 when <backend> is one of the backends
+# above, so both the planting and the reading site ask this one question.
+fm_composer_endpoint_shell_backend() {  # <backend>
+  case " $FM_COMPOSER_ENDPOINT_SHELL_BACKENDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Which of those backends send a text line in TWO phases, so that "the text was
+# pasted but never committed" is a state that exists and can be detected. This
+# is what makes an exit status of 2 from a text-line send readable as leftover
+# residue on the pane's input line, and it is NOT a property all four share:
+#
+#   zellij pastes the text and then submits it with a separate `send-keys
+#   Enter`, falling back to a separate clearing C-c, so text can sit pasted and
+#   uncommitted between those calls.
+#   cmux does the same thing through its own paste and send-key pair, so the
+#   same intermediate state exists there.
+#   herdr sends and runs in ONE call (`pane run` executes the command rather
+#   than typing it into an input line), so nothing can be left pasted; whatever
+#   status its CLI returns describes some other failure.
+#   orca likewise sends and submits in one call (`terminal send --enter`), and
+#   its 2 comes from its JSON helper rejecting a malformed or `ok:false`
+#   response - an API-level failure where nothing was typed at all.
+#
+# So a status from herdr or orca must never be read as a residue signal: the
+# only correct reading there is the ordinary one, that the marker is absent and
+# every reader treats it as undetermined. Recorded here, with the shape it
+# qualifies, because over-generalizing this contract to all four backends is
+# exactly the mistake that has to stay fixed.
+FM_COMPOSER_ENDPOINT_SHELL_TWO_PHASE_BACKENDS='zellij cmux'
+
+# fm_composer_endpoint_shell_two_phase_send: 0 when <backend> is one of those.
+fm_composer_endpoint_shell_two_phase_send() {  # <backend>
+  case " $FM_COMPOSER_ENDPOINT_SHELL_TWO_PHASE_BACKENDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_composer_endpoint_shell_lead_var: THE one anchoring definition of "the
+# marker leads this row", declared exactly once (see THE SAFETY RULE above) and
+# reached by every reader of the shape. The marker is a PROMPT construct: it is
+# the leading content of the shell's own prompt row, so a row merely containing
+# it somewhere - an echoed command line, a capture of source or docs that quote
+# the literal - is not this shape. Sets <out-varname> to the REST of the row
+# after the marker (a prompt row's typed command, empty on a bare prompt) so
+# callers can impose their own condition on it, and returns 1 with an empty
+# out-var when the row does not lead with the marker. Leading whitespace is
+# ignored, matching the glyph readers below.
+fm_composer_endpoint_shell_lead_var() {  # <out-varname> <row>
+  local __fmes_out=$1 __fmes_row=$2
+  __fmes_row="${__fmes_row#"${__fmes_row%%[![:space:]]*}"}"
+  case "$__fmes_row" in
+    "$FM_COMPOSER_ENDPOINT_SHELL_MARKER"*)
+      printf -v "$__fmes_out" '%s' "${__fmes_row#"$FM_COMPOSER_ENDPOINT_SHELL_MARKER"}"
+      return 0
+      ;;
+  esac
+  printf -v "$__fmes_out" '%s' ''
+  return 1
+}
+
+# fm_composer_endpoint_shell_present: 0 when <screen>'s BOTTOM-MOST marked row
+# is a BARE marked prompt - the marker leads it with nothing but whitespace
+# after it - and 1 otherwise.
+#
+# Bottom-most, not "any row": every marked row above the last one is history,
+# and history is not the pane's state. A relaunch replays spawn's pre-launch
+# lines into a shell that already carries the marker, leaving bare marked
+# prompts in scrollback above a perfectly live harness; deciding from any of
+# them would report an exited agent for a running one.
+#
+# Blank rest, on that row: a line typed at a marked prompt (a human's,
+# fm-send's, spawn's own launch line) echoes as `[fm-endpoint-shell] <that
+# line>`, which leads with the marker too and says only that something is
+# running there.
+#
+# WHY THIS IS NOT fm_composer_leading_shell_glyph_var's question, though both
+# read marked rows through the same anchor primitive: that one answers "where
+# is a shell prompt row, of ANY shell, relative to a candidate composer" for
+# the cursorless staleness rule, so it must accept plain `>`/`$`/`%`/`#`
+# prompts and rows carrying a typed command; this one answers "is this pane
+# right now firstmate's OWN agent-free endpoint shell", which only the marker
+# can prove and only with nothing typed after it.
+#
+# No ANSI stripping is needed: the marker is a fixed literal firstmate itself
+# writes, never de-emphasised ghost text a harness could render. Callers never
+# fake presence when a capture is empty or failed - the caller must check that
+# first and treat "could not read" as unproven, not absent.
+fm_composer_endpoint_shell_present() {  # <screen>
+  local __fmesp_line __fmesp_rest __fmesp_bare=1
+  while IFS= read -r __fmesp_line; do
+    fm_composer_endpoint_shell_lead_var __fmesp_rest "$__fmesp_line" || continue
+    fm_composer_normalize_trim_var __fmesp_rest
+    if [ -n "$__fmesp_rest" ]; then __fmesp_bare=1; else __fmesp_bare=0; fi
+  done <<EOF
+$1
+EOF
+  return "$__fmesp_bare"
+}
+
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -439,9 +595,29 @@ EOF
   return 1
 }
 
+# fm_composer_leading_shell_glyph_var: SHELL prompt rows only - deliberately a
+# different question from fm_composer_endpoint_shell_present above, which is
+# why the two predicates differ: this one locates a shell prompt row of ANY
+# shell for the cursorless staleness rule (so glyph prompts count, and a row
+# carrying a typed command is still a prompt row), while that one proves the
+# pane is firstmate's own agent-free endpoint shell (so only the marker
+# counts, and only with nothing typed after it). Besides the
+# glyph list, firstmate's own endpoint-shell prompt is a shell prompt row here:
+# fm-spawn replaces PS1 with FM_COMPOSER_ENDPOINT_SHELL_MARKER on herdr,
+# zellij, orca, and cmux, so on those panes the prompt no longer begins with
+# any of `>`/`$`/`%`/`#` and the dead-shell rule would otherwise have nothing
+# left to anchor on. Any marker-led row counts, echoed command and all - a
+# prompt row carrying a typed command is still a shell prompt, and this reader
+# only has to FIND the shell row, not prove the agent exited (that stricter
+# question is fm_composer_endpoint_shell_present's, above). The out-var gets
+# the marker as a literal, so `${v#"$glyph"}` stays byte-exact as for a glyph.
 fm_composer_leading_shell_glyph_var() {  # <out-varname> <content>
   local __fmsg_out=$1 __fmsg_text=$2 __fmsg_glyph
   __fmsg_text="${__fmsg_text#"${__fmsg_text%%[![:space:]]*}"}"
+  if fm_composer_endpoint_shell_lead_var __fmsg_glyph "$__fmsg_text"; then
+    printf -v "$__fmsg_out" '%s' "$FM_COMPOSER_ENDPOINT_SHELL_MARKER"
+    return 0
+  fi
   while IFS= read -r __fmsg_glyph; do
     [ -n "$__fmsg_glyph" ] || continue
     case "$__fmsg_text" in

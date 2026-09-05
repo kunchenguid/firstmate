@@ -58,6 +58,24 @@ Recorded pane ids are numeric and are never trusted alone after a session recrea
 Metadata-routed operations also verify the owning tab's expected scoped or unambiguous legacy title.
 An explicit raw `session:pane` target remains a pane-existence-only operator escape hatch.
 
+Zellij exposes no per-pane pid (see "Active limits" below), so it has no process-identity signal at all, unlike tmux or herdr.
+`bin/fm-spawn.sh` compensates by writing fm-composer-lib.sh's `FM_COMPOSER_ENDPOINT_SHELL_MARKER` into the pane's own shell prompt, as a `PS1=` line of its own sent immediately before the launch text - never chained onto the launch command, because a `VAR=value` prefix is a parse error on a non-POSIX pane shell (fish, nushell) and those shells reject the whole line, which would stop the agent from launching at all; `bin/fm-busy-lib.sh`'s `fm_busy_classify` reads it back through `dump-screen` to report `dead endpoint-shell` for a pane that has reverted to that marked shell, rather than the generic `unknown` a bare Zellij prompt reported before.
+This is a busy-state read only: it does not change `fm_control_backend_state_verified`'s tmux/herdr-only recovery-grade gate, so `exit` and `relaunch` still refuse on Zellij.
+Zellij types a text line in two phases - a bracketed paste followed by a separate Enter - so a marker send that reports the line pasted but neither submitted nor cleared leaves it stranded on the pane's input line.
+Spawn then clears that line, re-reads the pane, and aborts the spawn with a named error rather than sending the launch command on top of text it cannot positively prove is gone, because one concatenated line would launch nothing and say nothing.
+The pane does show a bare marked prompt while spawn is still launching, and the bound on that window differs per path.
+On a **fresh spawn** `PS1` is not the marker until that one send, so no bare marked prompt exists before it and the launch text follows with nothing in between: the window is bounded by those two adjacent sends.
+That is the only window on this backend: `relaunch` refuses on Zellij (the recovery-grade gate above), so the wider relaunch window - where `PS1` already carries the marker before the pre-launch sequence even starts - can only arise on herdr, and is documented in docs/herdr-backend.md.
+The read is therefore decided from the bottom-most marked row - the pane's current prompt - and never from stale scrollback above it.
+The fresh-spawn window is a real residual race and is accepted: a capture landing in the instant between the marker line and the launch text reads `dead endpoint-shell` for a healthy launching endpoint.
+That read is per task and sits last in `fm_busy_classify`, so it is reached only when the task has no busy record at all and no earlier harness-specific arm has already resolved it.
+`cursor`, `grok`, and `muse` tasks always resolve inside their own arm and never reach it, so an exited agent on those harnesses still reports that arm's verdict rather than `dead endpoint-shell`.
+`codex` and `kimi` tasks reach it only once their own semantic source is verified; until then they resolve as `unknown codex-unverified` / `unknown kimi-unverified`.
+Every other harness (`claude`, `opencode`, and the Pi-hosted harnesses) reaches it whenever the task has no record.
+The marker is planted with a one-shot `PS1=` assignment on the pane's interactive shell, so it is absent whenever that shell regenerates its prompt per command (starship, powerlevel10k, a `PROMPT_COMMAND` or `precmd` git prompt) or never consults `PS1` at all (fish, nushell).
+An absent marker therefore proves nothing about the pane: it is read as undetermined, never as "the agent is alive", never as "this was never a firstmate endpoint", and never on its own as `dead endpoint-shell`.
+A pane with no marker classifies exactly as it did before this feature existed.
+
 ## Current operation and safety
 
 Zellij's CLI action commands return exit 0 even for missing sessions or panes.

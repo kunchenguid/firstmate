@@ -25,8 +25,11 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  # Both sides were built with `LC_ALL=C sort`, so comm has to merge them in
+  # that same collation; inheriting the caller's would make it reject its own
+  # input as unsorted.
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -761,7 +764,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -786,6 +789,43 @@ test_portable_shard_union_and_coverage_guard() {
   [ "$first" = "tests/fm-x-mode.test.sh" ] \
     || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# The coverage guard is the whole body of a required CI job
+# (`bin/fm-test-run.sh --check-coverage`), and it builds every list it compares
+# with `LC_ALL=C sort`. The comparison itself must use that same collation: run
+# under a locale that orders differently, comm rejected its own C-sorted input
+# with "input is not in sorted order" and the guard exited non-zero without
+# reporting a single thing about lane coverage - a green or red CI job decided
+# by the runner image's locale rather than by lane composition.
+test_coverage_guard_does_not_depend_on_the_callers_collation() {
+  local tmp cand out
+  local loc=''
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-collation.XXXXXX")
+  # Two real suite paths that C sorts in this order ('-' < '.') while a
+  # punctuation-ignoring collation sorts them the other way. Probing with
+  # `sort -c` picks a locale that genuinely differs, so an image shipping only
+  # C/C.UTF-8 reports that it had nothing to exercise instead of passing
+  # vacuously.
+  printf 'tests/fm-backend-zellij.test.sh\ntests/fm-backend.test.sh\n' >"$tmp/c-sorted"
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    LC_ALL="$cand" sort -c "$tmp/c-sorted" 2>/dev/null && continue
+    loc=$cand
+    break
+  done <<EOF
+$(locale -a 2>/dev/null || true)
+EOF
+  if [ -z "$loc" ]; then
+    rm -rf "$tmp"
+    pass "coverage guard collation: no locale installed that collates differently from C"
+    return
+  fi
+  out=$(LC_ALL="$loc" "$RUNNER" --check-coverage 2>&1) \
+    || { rm -rf "$tmp"; fail "--check-coverage failed under LC_ALL=$loc: $out"; }
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under LC_ALL=$loc"
+  rm -rf "$tmp"
+  pass "coverage guard verdict is independent of the caller's collation (LC_ALL=$loc)"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -1387,6 +1427,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_does_not_depend_on_the_callers_collation
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals

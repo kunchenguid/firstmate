@@ -31,6 +31,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -109,6 +111,7 @@ case "${1:-}" in
       read)
         [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
         if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+        elif [ "${FM_FAKE_HERDR_ENDPOINT_SHELL:-0}" = 1 ]; then printf 'all quiet\n%s\n' "${FM_FAKE_ENDPOINT_SHELL_MARKER:-[fm-endpoint-shell]}"
         else printf 'all quiet\n> \n'; fi
         exit 0 ;;
     esac ;;
@@ -169,9 +172,12 @@ reset_fakes() {
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_ENDPOINT_SHELL=0
+  FM_FAKE_ENDPOINT_SHELL_MARKER="$FM_COMPOSER_ENDPOINT_SHELL_MARKER"
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_ENDPOINT_SHELL FM_FAKE_ENDPOINT_SHELL_MARKER
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -900,6 +906,54 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
 
 # The record must not mask a genuinely idle or human-blocked agent: an idle
 # record with idle agent_status still reads not-busy.
+# task fm-endpoint-shell-backends, before/after demonstration for herdr:
+# a bare pane with no busy record and no fm-spawn marker (the pre-change
+# world, and any pane firstmate never wrote the marker into) still reads the
+# generic unknown - the marker is never assumed.
+test_no_run_herdr_bare_shell_without_marker_stays_unknown() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr bare-shell-no-marker skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-bare-no-marker)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-no-marker
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-no-marker.meta" "window=default:w1:p5" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=0
+  FM_FAKE_HERDR_AGENT_STATUS=""
+  local out; out=$(run_crew_state "$d" feat-herdr-no-marker)
+  assert_contains "$out" "state: unknown" "an unmarked bare pane with no record reads unknown"
+  assert_not_contains "$out" "agent exited" "an unmarked bare pane must never be read as a known agent-free shell"
+  pass "before: a bare herdr pane with no endpoint-shell marker stays the generic unknown"
+}
+
+# The same pane after the marker is in place (fm-spawn ran, the harness later
+# exited and reverted to that same marked shell) now reports the specific
+# agent-exited detail, through the identical no-record path above.
+test_no_run_herdr_endpoint_shell_marker_reports_agent_exited() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr endpoint-shell-marker skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-endpoint-shell)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-exited
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-exited.meta" "window=default:w1:p6" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=0
+  FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_ENDPOINT_SHELL=1
+  local out; out=$(run_crew_state "$d" feat-herdr-exited)
+  assert_contains "$out" "state: unknown" "a marked agent-free pane still reports unknown state"
+  assert_contains "$out" "source: pane" "the endpoint-shell verdict is attributed to the pane"
+  assert_contains "$out" "agent exited, endpoint is a bare firstmate shell" \
+    "the marker gives a specific, non-guessed detail instead of the generic unavailable message"
+  pass "after: a herdr pane carrying fm-spawn's endpoint-shell marker names the agent-exited case specifically"
+}
+
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   command -v jq >/dev/null 2>&1 || { pass "herdr idle+idle-record skipped without jq"; return; }
   reset_fakes
@@ -1753,6 +1807,8 @@ test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
+test_no_run_herdr_bare_shell_without_marker_stays_unknown
+test_no_run_herdr_endpoint_shell_marker_reports_agent_exited
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log

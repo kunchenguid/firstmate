@@ -572,6 +572,16 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  # crew_busy_verdict calls fm_busy_classify, never the _live wrapper that
+  # produces dead endpoint-gone, so endpoint-shell (bin/fm-busy-lib.sh) is the
+  # only dead verdict reachable here; pane_readable above already covers a
+  # structurally gone target. Matched on the full verdict string, not just its
+  # first word, so this can never shadow the ordinary busy/idle cases below.
+  case "$BUSY_VERDICT" in
+    "dead endpoint-shell")
+      emit unknown pane "agent exited, endpoint is a bare firstmate shell"
+      ;;
+  esac
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
