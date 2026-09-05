@@ -342,12 +342,20 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
     [ -n "$label" ] || continue
     if ! project_root=$(fm_idle_project_root "$data" "$root" "$label"); then
       free=unknown
-      [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN="IDLE CAPACITY WARN: no pool is registered for project $label, so its free slots are unknown."
+      if [ "$label" = '-' ]; then
+        [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN='IDLE CAPACITY WARN: this home'"'"'s own pool could not be read, so its free slots are unknown.'
+      else
+        [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN="IDLE CAPACITY WARN: no pool is registered for project $label, so its free slots are unknown."
+      fi
     elif free=$(fm_idle_pool_free "$project_root"); then
       :
     else
       free=unknown
-      [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN="IDLE CAPACITY WARN: the pool for project $label could not be read, so its free slots are unknown."
+      if [ "$label" = '-' ]; then
+        [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN='IDLE CAPACITY WARN: this home'"'"'s own pool could not be read, so its free slots are unknown.'
+      else
+        [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN="IDLE CAPACITY WARN: the pool for project $label could not be read, so its free slots are unknown."
+      fi
     fi
     FM_IDLE_PROJECTS="${FM_IDLE_PROJECTS}${label}$(printf '\t')${ready_n}$(printf '\t')${free}"$'\n'
   done <<< "$project_ready_lines"
@@ -462,21 +470,27 @@ fm_idle_capacity_signature() {
 }
 
 # fm_idle_capacity_should_escalate <state-dir>
-# True, and records the new signature, only when FM_IDLE_CAPACITY is true AND
-# its (ready ids, free counts) tuple differs from the last one this state dir
-# escalated - so a daemon polling every heartbeat nags once per real change,
-# never once per poll. Call after fm_idle_capacity_compute. False leaves the
-# marker untouched, so a caller that skips escalating a transient read failure
-# still recognizes the same unchanged tuple next time.
+# True only when FM_IDLE_CAPACITY is true AND its (ready ids, free counts)
+# tuple differs from the last one this state dir actually escalated - so a
+# daemon polling every heartbeat nags once per real change, never once per
+# poll. Call after fm_idle_capacity_compute. Never writes the marker itself:
+# a caller must call fm_idle_capacity_mark_escalated only once the escalation
+# it gates has actually landed (e.g. after fm_wake_append succeeds), or a
+# failed escalation would be recorded as delivered and never retried.
 fm_idle_capacity_should_escalate() {  # <state-dir>
   local state=$1 marker="$1/.idle-capacity-last-escalated" sig
   [ "$FM_IDLE_CAPACITY" = true ] || return 1
   sig=$(fm_idle_capacity_signature)
-  if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$sig" ]; then
-    return 1
-  fi
-  printf '%s\n' "$sig" > "$marker" 2>/dev/null || true
+  [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] && return 1
   return 0
+}
+
+# fm_idle_capacity_mark_escalated <state-dir>
+# Records the current (ready ids, free counts) tuple as escalated. Call only
+# after the escalation fm_idle_capacity_should_escalate gated has actually
+# been delivered.
+fm_idle_capacity_mark_escalated() {  # <state-dir>
+  printf '%s\n' "$(fm_idle_capacity_signature)" > "$1/.idle-capacity-last-escalated" 2>/dev/null || true
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]

@@ -2052,6 +2052,7 @@ EOF
       fm_idle_capacity_compute "$STATE" "$DATA" "$FM_ROOT"
       if fm_idle_capacity_should_escalate "$STATE"; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        fm_idle_capacity_mark_escalated "$STATE"
         touch "$STATE/.last-heartbeat"
         wake "heartbeat"
       fi

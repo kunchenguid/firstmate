@@ -1187,7 +1187,10 @@ housekeeping() {  # <state>
     local idle_line idle_show
     fm_idle_capacity_compute "$state" "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$FM_ROOT"
     idle_show=false
-    fm_idle_capacity_should_escalate "$state" && idle_show=true
+    if fm_idle_capacity_should_escalate "$state"; then
+      idle_show=true
+      fm_idle_capacity_mark_escalated "$state"
+    fi
     while IFS= read -r idle_line; do
       [ -n "$idle_line" ] || continue
       escalate_add "$state" "$idle_line"
