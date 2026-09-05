@@ -147,9 +147,10 @@ def load_cursor(cursor_path):
 
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
-    # cursor are fetched, and at most FM_MAIL_POLL_MAX_WAKES of them, so a large
-    # unseen backlog makes bounded progress every poll instead of re-fetching
-    # every unseen header and timing out the standing check.
+    # cursor are considered, and a bounded window of candidates is scanned to
+    # fill the per-poll cap, so a large unseen backlog makes bounded progress
+    # every poll instead of re-fetching every unseen header and timing out the
+    # standing check.
     cap = int(os.environ.get('FM_MAIL_POLL_MAX_WAKES') or '20')
     if cap < 1:
         cap = 20
@@ -167,9 +168,16 @@ def cmd_poll_list():
             # change the cursor is stale, so list everything and let the bash
             # generation reset re-surface.
             ids = [x for x in ids if x.decode() not in seen]
-        ids = ids[:cap]
+        # Scan a bounded window of candidates rather than exactly the cap, so a
+        # repeatedly unfetchable uid (a corrupt message) cannot starve later
+        # mail: failed fetches are skipped and stay unseen for the next poll -
+        # nothing is ever missed - while the loop keeps going until the cap
+        # fills or the window is exhausted.
+        window = max(cap * 4, cap + 10)
         out = []
-        for i in ids:
+        for i in ids[:window]:
+            if len(out) >= cap:
+                break
             typ, msg = m.uid('fetch', i, '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
                 continue

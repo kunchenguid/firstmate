@@ -479,6 +479,52 @@ SH
   pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
 }
 
+test_poll_skips_unfetchable_uid_but_keeps_progress() {
+  local harness out rc=0
+  harness="$TMP_ROOT/poll-window-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'1 2 3'])
+        if cmd == 'fetch':
+            if args[0] == b'1':
+                return ('NO', None)  # persistently unfetchable message
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "window poll must succeed"
+  assert_contains "$out" "uidvalidity	90009" "poll emits the generation guard"
+  assert_not_contains "$out" $'1\t' "the unfetchable uid is skipped"
+  assert_contains "$out" $'2\t' "a later uid fills the cap despite the failure"
+  pass "fm-mail: a persistently unfetchable uid cannot starve later mail"
+}
+
 test_poll_caps_wakes_per_run() {
   local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -645,3 +691,4 @@ test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake
 test_poll_caps_wakes_per_run
 test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
+test_poll_skips_unfetchable_uid_but_keeps_progress
