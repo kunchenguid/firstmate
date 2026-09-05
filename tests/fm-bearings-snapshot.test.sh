@@ -1400,7 +1400,8 @@ EOF
 # in every home. A rejected captain-held work item never becomes a delivery merely
 # because its title names a PR. Local, deterministic, no GitHub call.
 test_captain_approved_delivery_stays_in_landed() {
-  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr spoof_pr prior_pr
+  local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
+  local spoof_pr spoof_marker spoof_show spoof_body spoof_records none_marker prior_pr
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1554,12 +1555,14 @@ test_captain_approved_delivery_stays_in_landed() {
     answer rejected-merge --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not record the rejected merge answer"
   spoof_pr="https://github.com/acme/repo/pull/7"
+  spoof_marker="<!-- firstmate-completion.v1 {\"value\":\"PR $spoof_pr\"} -->"
+  none_marker='<!-- firstmate-completion.v1 {"value":"none"} -->'
   "$TASKS_AXI_BIN" add spoofed-question "Should we approve the quoted example?" \
     --kind captain --repo firstmate --file "$backlog" >/dev/null \
     || fail "could not create the provenance-spoof question"
   "$TASKS_AXI_BIN" update spoofed-question \
-    --body "Deliverable of the finished work: PR $spoof_pr" --file "$backlog" >/dev/null \
-    || fail "could not record the quoted provenance wording"
+    --body "$spoof_marker" --file "$backlog" >/dev/null \
+    || fail "could not record the quoted provenance marker"
   "$TASKS_AXI_BIN" hold spoofed-question --reason "captain choice pending" \
     --kind captain --file "$backlog" >/dev/null \
     || fail "could not hold the provenance-spoof question"
@@ -1569,6 +1572,20 @@ test_captain_approved_delivery_stays_in_landed() {
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer spoofed-question --decision-file "$home/spoof-answer.txt" >/dev/null \
     || fail "could not record the provenance-spoof answer"
+  spoof_show=$("$TASKS_AXI_BIN" show spoofed-question --full --file "$backlog") \
+    || fail "could not read the closed provenance-spoof question"
+  spoof_body=$(printf '%s\n' "$spoof_show" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+      print $value unless $value eq "-";
+    ') || fail "could not decode the closed provenance-spoof body"
+  spoof_records=$(printf '%s\n' "$spoof_body" \
+    | sed -n '/^<!-- firstmate-completion\.v1 /p')
+  [ "$spoof_records" = "$(printf '%s\n%s' "$spoof_marker" "$none_marker")" ] \
+    || fail "the close did not append its none verdict after the quoted marker: $spoof_body"
   "$TASKS_AXI_BIN" add legacy-approved "Legacy approved merge" --kind ship --repo firstmate \
     --file "$backlog" >/dev/null || fail "could not create the legacy merge fixture"
   "$TASKS_AXI_BIN" hold legacy-approved --reason "legacy captain merge word" \
@@ -1603,9 +1620,9 @@ test_captain_approved_delivery_stays_in_landed() {
     --kind captain --repo firstmate --file "$mate/data/backlog.md" >/dev/null \
     || fail "could not create the secondmate provenance-spoof question"
   "$TASKS_AXI_BIN" update mate-spoofed-question \
-    --body "Deliverable of the finished work: PR $spoof_pr" \
+    --body "$spoof_marker" \
     --file "$mate/data/backlog.md" >/dev/null \
-    || fail "could not record the secondmate quoted provenance wording"
+    || fail "could not record the secondmate quoted provenance marker"
   "$TASKS_AXI_BIN" hold mate-spoofed-question --reason "captain choice pending" \
     --kind captain --file "$mate/data/backlog.md" >/dev/null \
     || fail "could not hold the secondmate provenance-spoof question"
