@@ -307,9 +307,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-LAUNCH_ENV_ENABLED=0
+if ! LAUNCH_ENV_ENABLED=$(perl -MErrno=ENOENT -e '
+  if (lstat $ARGV[0]) { print 1 }
+  elsif ($! == ENOENT) { print 0 }
+  else { die "error: cannot inspect launch-env-allowlist at $ARGV[0]: $!\n" }
+' -- "$CONFIG/launch-env-allowlist"); then
+  exit 1
+fi
 LAUNCH_ENV_NAMES=
-if [ -e "$CONFIG/launch-env-allowlist" ] || [ -L "$CONFIG/launch-env-allowlist" ]; then
+if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
     echo "error: config/launch-env-allowlist must be a readable regular file" >&2
     exit 1
@@ -322,7 +328,6 @@ if [ -e "$CONFIG/launch-env-allowlist" ] || [ -L "$CONFIG/launch-env-allowlist" 
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
-  LAUNCH_ENV_ENABLED=1
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then

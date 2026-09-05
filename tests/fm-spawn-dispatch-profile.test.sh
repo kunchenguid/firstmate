@@ -802,11 +802,12 @@ test_launch_environment_allowlist() {
   local setting rec id out status probe result expected launch value pane_shell
   # shellcheck disable=SC2016
   value='synthetic value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
-  for setting in absent enabled empty; do
+  for setting in absent missing-config enabled empty; do
     id="env-$setting"
     rec=$(make_spawn_case "$id" codex "$id")
     read_case_record "$rec"
     case "$setting" in
+      missing-config) rm "$HOME_DIR/config/crew-harness"; rmdir "$HOME_DIR/config" ;;
       enabled) printf '# Synthetic credential name\nFM_TEST_ALLOWED\nFM_TEST_EMPTY\nFM_TEST_UNSET\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
       empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
     esac
@@ -829,7 +830,7 @@ SH
       FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
       "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
-        absent) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
+        absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
@@ -855,6 +856,41 @@ test_launch_environment_invalid_config_refuses() {
     [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "invalid allowlist published a task"
   done
   pass "invalid allowlist names refuse before launch or task publication"
+}
+
+test_launch_environment_inaccessible_config_refuses() {
+  local setting presence rec id blocked out status
+  if [ "$(id -u)" = 0 ]; then
+    printf '# skip - inaccessible launch configuration requires a non-root user\n'
+    return
+  fi
+  for setting in config ancestor; do
+    for presence in present absent; do
+      id="env-inaccessible-$setting-$presence"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      if [ "$presence" = present ]; then
+        printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+      fi
+      blocked="$HOME_DIR/config"
+      if [ "$setting" = ancestor ]; then
+        blocked="$HOME_DIR/config-parent"
+        mkdir "$blocked"
+        mv "$HOME_DIR/config" "$blocked/config"
+        ln -s config-parent/config "$HOME_DIR/config"
+      fi
+      chmod 600 "$blocked" || fail "could not remove configuration search permission"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+      status=$?
+      chmod 700 "$blocked" || fail "could not restore configuration search permission"
+      expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"
+      assert_contains "$out" 'launch-env-allowlist' "refusal must identify the launch configuration"
+      [ ! -s "$LAUNCH_LOG" ] || fail "inaccessible configuration delivered a launch command"
+      [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "inaccessible configuration published a task"
+      pass "inaccessible $setting with $presence allowlist refuses before launch or task publication"
+    done
+  done
 }
 
 test_launch_environment_inherited_by_secondmate() {
@@ -894,6 +930,7 @@ SH
 
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
+test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
 
 test_no_profile_keeps_claude_profile_defaults
