@@ -254,11 +254,12 @@ wake_for() {
   # The wake append, the emission journal, and the cursor record commit under a
   # single held FM_WAKE_QUEUE_LOCK: the drain acknowledges and deletes consumed
   # rows only under the same lock, so it can never remove our wake between the
-  # surface and the uid record. At least one of the journal or the cursor must
-  # land with the row - if both evidence writes fail, the queued wake would be
-  # ackable with no durable record and the next poll could not tell the mail
-  # already surfaced, so it is rolled back under the same lock before the drain
-  # can ever see it and the mail retries cleanly on the next poll.
+  # surface and the uid record. At least one durable record must survive with a
+  # queued wake row - if both evidence writes fail, the row would be ackable
+  # with no record. It is first rolled back under the held lock and retried on
+  # the next poll; if the queue rewrite also fails, a final best-effort record
+  # is landed instead, and only when the journal, the cursor, and the queue
+  # rewrite all fail does the poll fail closed with an honest report.
   local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
@@ -278,12 +279,28 @@ wake_for() {
     if [ "$journal_ok" -eq 0 ] && [ "$cursor_ok" -eq 0 ]; then
       # No durable record landed. Remove the wake row and any partial evidence
       # under the held lock so nothing ackable survives without a record; the
-      # next poll retries the mail from a clean slate.
-      fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" || {
-        echo "fm-mail: wake for $id could not be rolled back after both evidence writes failed" >&2
-      }
-      echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
-      status=1
+      # next poll retries the mail from a clean slate. A transient queue
+      # rewrite is retried once; if the row still survives, land a durable
+      # record as the final fallback rather than releasing the lock with a
+      # wake the drain could acknowledge and no record of its uid.
+      local rollback_ok=1
+      fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" \
+        || fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" \
+        || rollback_ok=0
+      if [ "$rollback_ok" -eq 1 ]; then
+        echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
+        status=1
+      else
+        journal_ok=0 cursor_ok=0
+        printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" && journal_ok=1 || true
+        printf '%s\n' "$id" >> "$CURSOR" && cursor_ok=1 || true
+        if [ "$journal_ok" -eq 1 ] || [ "$cursor_ok" -eq 1 ]; then
+          echo "fm-mail: wake for $id durably recorded after the queue rewrite failed" >&2
+        else
+          echo "fm-mail: wake for $id could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
+          status=1
+        fi
+      fi
     fi
   else
     status=1
