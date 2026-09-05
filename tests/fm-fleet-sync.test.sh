@@ -585,7 +585,8 @@ test_hidden_non_repo_directory_stays_silent() {
   mkdir -p "$home/projects/.cache"
   before=$(head_sha "$home")
 
-  out=$(run_sync "$home")
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" 2>&1)
   after=$(head_sha "$home")
 
   assert_not_contains "$out" ".cache:" \
