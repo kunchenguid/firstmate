@@ -1490,6 +1490,10 @@ test_spawn_relaunch_keeps_the_recorded_base_when_the_primary_advanced() {
   git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm 'task work'
   before=$(git -C "$dir/wt" rev-parse HEAD)
+  # A relaunch resolves no new base, so the one the original spawn recorded has to
+  # survive the task record rewrite - otherwise bin/fm-promote.sh loses the fact it
+  # needs to re-check the base against origin.
+  printf 'base=%s\n' "$before" >> "$dir/home/state/rl40.meta"
   printf 'landed after the task started\n' > "$dir/proj/landed.txt"
   git -C "$dir/proj" add landed.txt
   git -C "$dir/proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -1502,6 +1506,10 @@ test_spawn_relaunch_keeps_the_recorded_base_when_the_primary_advanced() {
   branch=$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)
   [ "$branch" = task-rl40 ] || fail "a relaunch left the task off its own branch, on '$branch'"
   assert_grep 'work in flight' "$dir/wt/in-flight.txt" "a relaunch discarded the task's own work"
+  grep -qx "base=$before" "$dir/home/state/rl40.meta" \
+    || fail "a relaunch dropped the base the original spawn recorded"
+  [ "$(grep -c '^base=' "$dir/home/state/rl40.meta")" = 1 ] \
+    || fail "a relaunch left more than one base= line in the task record"
   pass "fm-spawn --relaunch: the task keeps its branch, base, and work while the primary's default branch moves on"
 }
 

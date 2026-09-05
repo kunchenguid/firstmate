@@ -553,6 +553,8 @@ test_local_only_landings_beat_a_frozen_origin() {
     "the refreshed slot is missing work the primary had already landed"
   assert_contains "$out" "was 3 commits behind main in the primary checkout" \
     "the refresh did not report the exact number of commits the slot was behind"
+  grep -qx "base=$head" "$HOME_DIR/state/$id.meta" \
+    || fail "spawn did not record the base it started the slot from"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed refresh: %s\n' "$(printf '%s\n' "$out" | grep 'commits behind')"
   fi
@@ -608,6 +610,8 @@ test_pull_request_delivery_keeps_the_forge_tip() {
     "the spawn did not report how much the withheld primary branch carried"
   assert_contains "$out" "opens a pull request against origin" \
     "the spawn did not say why the primary's branch was not used as the base"
+  grep -qx "base=$frozen" "$HOME_DIR/state/$id.meta" \
+    || fail "spawn did not record the forge tip it started the slot from"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed withheld candidate: %s\n' "$(printf '%s\n' "$out" | grep 'opens a pull request against origin')"
   fi
@@ -653,8 +657,14 @@ test_pull_request_delivery_ignores_a_diverged_primary() {
 # copy drifting is how a branch gets built on one base and reviewed against
 # another, so this drives all three over one repository state per mode and
 # requires their verdicts to match.
+# The promotion leg is driven from its own worktree parked on the base a locally
+# landed delivery would have been given, with nothing committed on top, so its
+# verdict follows that base: a mode promotion treats as pull-request-opening refuses
+# it and any other mode accepts it. Reading the verdict off a commit the fixture
+# made itself would make it a constant of the mode, which a fm-promote.sh that
+# refused every mode would satisfy just as well.
 test_base_consumers_agree_on_which_modes_open_a_pull_request() {
-  local mode id scout_id rec out status spawn_verdict review_verdict promote_verdict base_line
+  local mode id scout_id scout_wt rec out status spawn_verdict review_verdict promote_verdict base_line
   for mode in no-mistakes direct-PR local-only; do
     id="pool-agree-${mode}-r18"
     rec=$(make_local_only_case "agree-$mode" "$id" 2)
@@ -684,8 +694,11 @@ test_base_consumers_agree_on_which_modes_open_a_pull_request() {
     fi
 
     scout_id="scout-agree-${mode}-r18"
+    scout_wt="$CASE_DIR/scout-$mode"
     fm_test_spawn_brief "$HOME_DIR" "$scout_id"
-    printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$scout_id" "$POOL_DIR" \
+    git -C "$PROJECT_DIR" worktree add --quiet --detach "$scout_wt" main
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\nbase=%s\n' \
+      "$scout_id" "$scout_wt" "$(git -C "$scout_wt" rev-parse HEAD)" \
       > "$HOME_DIR/state/$scout_id.meta"
     out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
       FM_DATA_OVERRIDE="$HOME_DIR/data" \

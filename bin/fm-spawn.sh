@@ -2116,6 +2116,11 @@ EOF
 # must not be stopped by the state of that branch: only a delivery that could have
 # built on it faces the genuine ambiguity of which history to choose.
 # bin/fm-dod-lib.sh owns which modes open a pull request; do not restate the list.
+# A scout carries no mode, so its base can legitimately be the primary's branch and
+# the delivery question is only answered later by bin/fm-promote.sh. The commit
+# chosen here is therefore recorded as base= in state/<id>.meta, which is the one
+# fact promotion needs: the worker is ordered to drop everything above its base
+# before branching, so the base is the only commit a pull request can inherit.
 SPAWN_BASE_REV=""
 SPAWN_BASE_LABEL=""
 SPAWN_BASE_ERROR=""
@@ -3198,6 +3203,11 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  # The commit freshen_spawn_worktree_base reset this worktree to, so
+  # bin/fm-promote.sh can re-check that base against origin when a scout finally
+  # acquires a delivery. A relaunch keeps the worktree it already has and resolves
+  # no new base, so preserve_relaunch_meta carries the recorded one forward.
+  [ -z "${SPAWN_BASE_REV:-}" ] || echo "base=$SPAWN_BASE_REV"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
