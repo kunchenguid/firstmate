@@ -763,8 +763,10 @@ test_view_renders_kind_labeled_cleanup_candidates() {
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --cleanup-candidates)
   assert_contains "$view" "| ship-task | ship | disposable | bin/fm-teardown.sh ship-task |" \
     "cleanup candidates should label an ordinary ship task disposable with its plain teardown command"
-  assert_contains "$view" "| secondmate-task | secondmate | persistent | bin/fm-teardown.sh secondmate-task --retire-secondmate secondmate-task |" \
-    "cleanup candidates should label a secondmate persistent and name the authority its retirement takes"
+  assert_contains "$view" "| secondmate-task | secondmate | persistent | retire only by an explicit decision naming this home - see .agents/skills/secondmate-provisioning |" \
+    "cleanup candidates should label a secondmate persistent and point at the retirement contract"
+  assert_not_contains "$view" "--retire-secondmate" \
+    "cleanup candidates must never print a runnable retirement command a caller could pipe to a shell"
   assert_contains "$view" "an idle queue is healthy, not finished" \
     "cleanup candidates should say why an idle secondmate is not a cleanup target"
   pass "fleet view lists cleanup candidates labeled by kind"

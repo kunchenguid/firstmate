@@ -243,7 +243,8 @@ That flag is the decision, and its value must be the exact home being retired.
 Without it teardown refuses and changes nothing, so a cleanup list a caller assembled cannot retire standing homes as a side effect, and `--force` never substitutes for it: discarding work and choosing which home to retire are separate decisions.
 Offering the flag for any other kind also refuses, because that mismatch means the target was selected wrong.
 Teardown acts on one target per invocation; extra task ids are refused before anything is locked, naming the count and any secondmates among them, so a mistaken selection list is caught while every seat is still alive.
-Choose targets from `bin/fm-fleet-view.sh --cleanup-candidates`, which labels every live task with its kind and prints the command that kind takes.
+Choose targets from `bin/fm-fleet-view.sh --cleanup-candidates`, which labels every live task with its kind.
+That report prints a runnable teardown command only for a disposable task; a persistent home carries a pointer back to this contract instead, so no report a caller runs can be piped to a shell to retire standing homes.
 Never select them by matching a worktree path: a path suffix cannot tell a crewmate worktree of the firstmate project from a secondmate home, and both are laid out the same way.
 
 The safety check is the secondmate's own home.

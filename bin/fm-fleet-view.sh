@@ -6,12 +6,17 @@
 # structured contract for humans.
 #
 # --cleanup-candidates renders the same snapshot as a kind-labeled cleanup
-# report: one row per live task, its kind, whether that kind is disposable or a
-# persistent home, and the exact teardown command that kind takes. It exists so
-# a cleanup target list is chosen from recorded kinds instead of inferred from a
-# worktree path - a path suffix cannot tell a crewmate worktree of the firstmate
-# project from a secondmate home, and an idle queue is a healthy secondmate's
-# normal state rather than evidence it is finished.
+# report: one row per live task, its kind, and whether that kind is disposable
+# or a persistent home. It exists so a cleanup target list is chosen from
+# recorded kinds instead of inferred from a worktree path - a path suffix cannot
+# tell a crewmate worktree of the firstmate project from a secondmate home, and
+# an idle queue is a healthy secondmate's normal state rather than evidence it
+# is finished.
+#
+# A disposable row carries its runnable teardown command. A persistent home
+# carries a pointer to the retirement contract and never a runnable retirement
+# command, so this report can never be piped to a shell to retire standing
+# homes: that decision has to be typed deliberately, naming the exact home.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,8 +27,9 @@ usage: fm-fleet-view.sh [--json | --cleanup-candidates]
 
 Render a human fleet view from fm-fleet-snapshot.sh.
 Use --json to print the underlying snapshot.
-Use --cleanup-candidates to list every live task with its kind and the teardown
-command that kind takes; it is how cleanup targets are chosen.
+Use --cleanup-candidates to list every live task with its kind; it is how
+cleanup targets are chosen. Disposable rows carry their teardown command;
+a persistent home carries the retirement contract instead of a command.
 EOF
 }
 
@@ -43,8 +49,8 @@ SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 if [ "$MODE" = cleanup-candidates ]; then
   printf '%s\n' "$SNAPSHOT" | jq -r '
     def persistence($t): if $t.kind == "secondmate" then "persistent" else "disposable" end;
-    def command_for($t):
-      if $t.kind == "secondmate" then "bin/fm-teardown.sh \($t.id) --retire-secondmate \($t.id)"
+    def teardown_for($t):
+      if $t.kind == "secondmate" then "retire only by an explicit decision naming this home - see .agents/skills/secondmate-provisioning"
       else "bin/fm-teardown.sh \($t.id)" end;
     "# Cleanup Candidates",
     "",
@@ -53,12 +59,13 @@ if [ "$MODE" = cleanup-candidates ]; then
     (if (.tasks | length) == 0 then
       "No live task metadata found."
      else
-      "| ID | Kind | Persistence | Teardown command |",
+      "| ID | Kind | Persistence | Teardown |",
       "| --- | --- | --- | --- |",
-      (.tasks[] | "| \(.id) | \(.kind) | \(persistence(.)) | \(command_for(.)) |")
+      (.tasks[] | "| \(.id) | \(.kind) | \(persistence(.)) | \(teardown_for(.)) |")
      end),
     "",
     "A persistent home is retired only by a decision naming that exact home; an idle queue is healthy, not finished.",
+    "This report prints no runnable retirement command, so retiring a standing home has to be typed deliberately.",
     "Teardown takes one target per invocation."
   '
   exit $?
