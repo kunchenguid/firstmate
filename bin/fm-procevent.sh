@@ -1245,7 +1245,7 @@ cmd_generation() {
 # and durably capture any result that had already arrived before replacement.
 cmd_restart() {
   local id=${1-} expected_generation='' condition adapter sep generation
-  local claim_state pid token child='' i=0 current_token
+  local claim_state pid token child='' late_child i=0 current_token
   shift 1 2>/dev/null || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   if [ "${1-}" = --if-generation ]; then
@@ -1297,6 +1297,7 @@ cmd_restart() {
 
       while [ "$i" -lt 100 ]; do
         sleep 0.05
+        late_child=
         fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
         if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
           fm_procevent_source_lock_release "$id"
@@ -1329,7 +1330,14 @@ cmd_restart() {
           printf 'restarted: %s\n' "$id"
           return 0
         fi
+        if [ -z "$child" ] && runner_child_load_locked "$id" "$pid" "$token"; then
+          child=$RUNNER_CHILD_PID
+          late_child=$child
+        fi
         fm_procevent_source_lock_release "$id"
+        if [ -n "$late_child" ]; then
+          kill -TERM "$late_child" 2>/dev/null || true
+        fi
         i=$((i + 1))
       done
       if [ -n "$child" ]; then

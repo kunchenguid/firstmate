@@ -1845,6 +1845,34 @@ pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
 pe "$RESTART_HOME" retire restart-src >/dev/null
 pass "the generic restart hook drains the old child and replaces only an exact owned registration"
 
+RESTART_LATE_HOME="$TMP_ROOT/restart-late-home"; new_home "$RESTART_LATE_HOME"
+RESTART_LATE_STARTED="$TMP_ROOT/restart-late-started"
+: > "$RESTART_LATE_STARTED"
+pe_register "$RESTART_LATE_HOME" lavish restart-late-src -- \
+  "$RESTART_BLOCKER" "$RESTART_LATE_STARTED" >/dev/null
+restart_late_generation_out=$(pe "$RESTART_LATE_HOME" generation restart-late-src \
+  --if-matches lavish -- "$RESTART_BLOCKER" "$RESTART_LATE_STARTED") \
+  || fail "generation did not identify the late-child fixture"
+restart_late_generation=${restart_late_generation_out#generation: }
+pe "$RESTART_LATE_HOME" reconcile >/dev/null
+wait_for_lines "$RESTART_LATE_STARTED" 1 || fail "late-child fixture did not start"
+restart_late_child="$RESTART_LATE_HOME/state/procevent/restart-late-src.child"
+wait_for "$restart_late_child" || fail "late-child fixture did not publish its child record"
+mv "$restart_late_child" "$TMP_ROOT/restart-late.child"
+restart_late_out="$TMP_ROOT/restart-late.out"
+pe "$RESTART_LATE_HOME" restart restart-late-src --if-generation "$restart_late_generation" \
+  --if-matches lavish -- "$RESTART_BLOCKER" "$RESTART_LATE_STARTED" > "$restart_late_out" &
+restart_late_pid=$!
+sleep 0.2
+mv "$TMP_ROOT/restart-late.child" "$restart_late_child"
+wait "$restart_late_pid" || fail "restart missed a child record published during its wait"
+assert_contains "$(cat "$restart_late_out")" "restarted: restart-late-src" \
+  "restart did not replace the runner after late child publication"
+wait_for_lines "$RESTART_LATE_STARTED" 2 \
+  || fail "late child publication did not produce the replacement generation"
+pe "$RESTART_LATE_HOME" retire restart-late-src >/dev/null
+pass "restart discovers an identity-bound child published during its wait"
+
 HS="$TMP_ROOT/hs"; new_home "$HS"
 mkdir -p "$HS/state/procevent"
 : > "$HS/state/procevent/source-only.source"
