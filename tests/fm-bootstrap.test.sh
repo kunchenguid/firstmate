@@ -238,22 +238,18 @@ assert_timeout_report() {
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
+#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
+  local label lease tasks quota mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
-  while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
+  while IFS='^' read -r label lease tasks quota mode expect notcontains; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/case-$n"
     mkdir -p "$case_dir/home"
-    if [ "$backend" != "-" ]; then
-      mkdir -p "$case_dir/home/config"
-      printf '%s\n' "$backend" > "$case_dir/home/config/backlog-backend"
-    fi
     fakebin=$(make_fake_toolchain "$case_dir")
     if [ "$tasks" = "-" ]; then
       rm -f "$fakebin/tasks-axi"
@@ -295,16 +291,14 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
-missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
+treehouse --lease support is accepted silently^1^0.2.4^1^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.2.4^1^empty^^
+missing tasks-axi is required by default^1^-^1^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi is required by default^1^0.1.0^1^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing quota-axi is required by default^1^0.2.4^0^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -319,7 +313,6 @@ test_no_mistakes_min_version() {
     case_dir="$TMP_ROOT/no-mistakes-$n"
     mkdir -p "$case_dir/home"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -348,7 +341,6 @@ test_gh_axi_min_version() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/gh-axi-$n"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -379,7 +371,6 @@ test_lavish_axi_min_version() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/lavish-axi-$n"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -410,7 +401,6 @@ test_tasks_axi_min_version() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/tasks-axi-$n"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     archive_body=yes
     multi_id=yes
@@ -460,7 +450,6 @@ test_quota_axi_min_version() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/quota-axi-$n"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -486,7 +475,6 @@ test_git_is_required_with_supported_install_instruction() {
   local case_dir fakebin bash_env out expected
   case_dir="$TMP_ROOT/git-required"
   mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   bash_env="$case_dir/no-git.bash"
   cat > "$bash_env" <<'SH'
@@ -531,7 +519,6 @@ test_session_provider_backends_do_not_require_tmux() {
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-no-tmux"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir" "$cli")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -551,7 +538,6 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-cli"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
@@ -588,7 +574,6 @@ test_unknown_backend_reports_invalid_configuration() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/unknown-backend"
   mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' bogus > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -609,7 +594,6 @@ test_json_backends_require_jq_not_tmux() {
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-jq"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
     fakebin=$(make_fake_toolchain "$case_dir")
@@ -643,7 +627,6 @@ test_treehouse_lease_check_follows_resolved_backend() {
   # session-provider backend that relies on treehouse for worktrees.
   case_dir="$TMP_ROOT/herdr-old-treehouse"
   mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' herdr > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -658,7 +641,6 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
   mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 18
   add_no_origin_projects "$home" 3
   fakebin=$(make_fake_toolchain "$case_dir")
@@ -676,7 +658,6 @@ test_fleet_sync_timeout_floor_preserves_small_fleets() {
   case_dir="$TMP_ROOT/fleet-timeout-small"
   home="$case_dir/home"
   mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 2
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -692,7 +673,6 @@ test_fleet_sync_timeout_explicit_override_wins() {
   case_dir="$TMP_ROOT/fleet-timeout-override"
   home="$case_dir/home"
   mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 18
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -709,7 +689,6 @@ test_fleet_sync_timeout_empty_override_uses_default() {
   case_dir="$TMP_ROOT/fleet-timeout-empty-override"
   home="$case_dir/home"
   mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 18
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -728,7 +707,6 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   started_marker="$case_dir/fleet-started"
   git_record="$case_dir/git-after-start"
   mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   add_origin_backed_projects "$home" 3
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -829,7 +807,6 @@ test_network_phase_partitions_the_run() {
   local case_dir fakebin all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
@@ -871,7 +848,6 @@ test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '222222\n' > "$case_dir/home/state/.lock"
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root="$case_dir/root"
@@ -923,7 +899,6 @@ test_network_phases_record_per_step_elapsed_times() {
   local case_dir fakebin log fields
   case_dir="$TMP_ROOT/network-timings"
   mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/projects"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' $$ > "$case_dir/home/state/.lock"
   fakebin=$(make_fake_toolchain "$case_dir")
   # A real clone with a real origin, so fm-fleet-sync.sh genuinely iterates it.
@@ -1015,7 +990,6 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
@@ -1027,7 +1001,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]\nBOOTSTRAP_INFO: tasks-axi available'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1040,7 +1014,6 @@ test_crew_dispatch_validation() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/dispatch-$n"
     mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"

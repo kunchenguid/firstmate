@@ -14,9 +14,9 @@
 # the next session start enough to finish it; a landed transition removes that
 # record. A transition that fails is fatal and loud, preserves its pending-close
 # record, and is retried by the next session start. The transition is skipped on a
-# config/backlog-backend=manual home and in a home that keeps no
-# data/backlog.md; those cases print the manual follow-up. An automatic-backend
-# home with a backlog but no compatible tasks-axi refuses before cleanup.
+# home that keeps no data/backlog.md; that case prints the manual follow-up. An
+# automatic-backend home with a backlog but no compatible tasks-axi refuses
+# before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the

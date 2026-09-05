@@ -500,10 +500,8 @@ print_backlog_compact() {
   subsection "$label"
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
-      if fm_tasks_axi_backend_available "$CONFIG"; then
+      if fm_tasks_axi_compatible; then
         print_backlog_tasks_axi_compact "$path"
-      elif fm_backlog_backend_manual "$CONFIG"; then
-        print_backlog_manual_compact "$path" "manual backend"
       else
         print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
       fi

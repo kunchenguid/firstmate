@@ -106,7 +106,7 @@ A remote home is a standalone clone on another machine, so that host imports the
 Neither path moves the host's Firstmate copy, and the host-local launch never re-targets that copy after the parent has already synced the home.
 `/updatefirstmate` is the one path that still follows that copy: it first updates the remote code root from its own origin, then syncs the home to that refreshed code-root commit.
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.
-The same placement-specific launch and deferred bootstrap sweep also propagate the primary's inherited local material declared by [`fm_config_inherit_items`](../../../bin/fm-config-inherit-lib.sh), whose owner also defines which items are session-scoped.
+The same placement-specific launch and deferred bootstrap sweep also propagate the primary's inherited local material declared by [`fm_config_inherit_items`](../../../bin/fm-config-inherit-lib.sh).
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
 Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
 The destination keeps whatever safely validated state the helper left behind.
@@ -199,7 +199,6 @@ An unresolved delivery attempt is never blindly resent.
 For a remote route, the outbox remains until both backlog receipt and receiver wake are confirmed; `--resume-pending` retries unfinished outboxes, while the script header owns its stable wake-correlation recovery state.
 There is no two-phase handoff journal and no tasks-axi release beyond the already-required atomic `mv` capability.
 Bootstrap retries pending outboxes when mutation is authorized and emits `SECONDMATE_HANDOFF:` for any that remain.
-This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
 It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
 It refuses a selected item with a single-space or tab-indented continuation rather than risk leaving content orphaned in the main backlog.
 It accepts in-scope `## Queued` entries only and refuses `## In flight` and historical `## Done` entries.

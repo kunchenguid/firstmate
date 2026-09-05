@@ -1458,8 +1458,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
-  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-    && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_home_summary_publication

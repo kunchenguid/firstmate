@@ -11,10 +11,7 @@
 # constants in bin/fm-bootstrap.sh.
 # The feature probes are a separate concern and stay as defense in depth for
 # stripped or forked builds that advertise a current version without those flags.
-# `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
-# backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
-# Absent or any other value keeps the default tasks-axi backend path, falling
-# back to manual mutation when the tool is not compatible.
+# Validated secondmate handoffs always use `tasks-axi mv`.
 # fm_tasks_axi_backend mirrors tasks-axi's environment, project, home-config,
 # and default backend precedence for callers that need backend-specific flags.
 #
@@ -151,27 +148,4 @@ fm_tasks_axi_backend() {  # <tasks-axi-working-directory>
     return 0
   fi
   printf '%s\n' markdown
-}
-
-fm_backlog_backend_value() {
-  local config_dir=$1 backend_file value
-  backend_file="$config_dir/backlog-backend"
-  if [ -f "$backend_file" ]; then
-    value=$(tr -d '[:space:]' < "$backend_file" 2>/dev/null || true)
-    [ -n "$value" ] || value=tasks-axi
-    printf '%s\n' "$value"
-    return 0
-  fi
-  printf '%s\n' tasks-axi
-}
-
-fm_backlog_backend_manual() {
-  local config_dir=$1
-  [ "$(fm_backlog_backend_value "$config_dir")" = manual ]
-}
-
-fm_tasks_axi_backend_available() {
-  local config_dir=$1
-  fm_backlog_backend_manual "$config_dir" && return 1
-  fm_tasks_axi_compatible
 }

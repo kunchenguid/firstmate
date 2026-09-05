@@ -4,8 +4,7 @@
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
-# spawn on codex too, primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too, primary config/backend pins that home's local
+# spawn on codex too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, and primary config/startup-memory-budget
 # bounds that home's startup-memory curation. It also pushes
 # the one primary-authoritative shared captain-preference file,
@@ -53,7 +52,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend startup-memory-budget launch-env-allowlist}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backend startup-memory-budget launch-env-allowlist}"
 
 # The complete declared inherited-material set as home-relative paths, one per
 # line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,

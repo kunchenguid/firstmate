@@ -2131,13 +2131,7 @@ test_bootstrap_stops_when_data_disappears_before_reconciliation() {
 }
 
 test_bootstrap_addressing_exemptions_remain_nonfatal() {
-  local manual_case no_backlog_case secondmate_case secondmate_id out
-  manual_case=$(make_home bootstrap-manual-exempt)
-  printf '%s\n' manual > "$(home_of "$manual_case")/config/backlog-backend"
-  mv "$(home_of "$manual_case")/data" "$manual_case/manual-data"
-  out=$(run_bootstrap "$manual_case") \
-    || fail "manual bootstrap exemption became fatal: $out"
-
+  local no_backlog_case secondmate_case secondmate_id out
   no_backlog_case=$(make_home bootstrap-no-backlog-exempt)
   rm -f "$(backlog_of "$no_backlog_case")"
   out=$(run_bootstrap "$no_backlog_case") \
@@ -2152,7 +2146,7 @@ test_bootstrap_addressing_exemptions_remain_nonfatal() {
     || fail "secondmate bootstrap exemption became fatal: $out"
   assert_present "$(home_of "$secondmate_case")/state/$secondmate_id.meta" \
     "secondmate bootstrap exemption removed the persistent agent record"
-  pass "bootstrap preserves secondmate, manual, and absent-backlog exemptions"
+  pass "bootstrap preserves secondmate and absent-backlog exemptions"
 }
 
 test_recovery_leaves_a_captain_held_item_alone() {
@@ -2292,30 +2286,6 @@ test_home_without_a_backlog_dispatches_and_completes() {
   pass "a home with no backlog remains exempt from lifecycle transitions"
 }
 
-test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog() {
-  local case_dir id data data_resolved out
-  id=atomic-manual-b12
-  case_dir=$(make_home manual-backend "$id")
-  printf '%s\n' manual > "$(home_of "$case_dir")/config/backlog-backend"
-  data="$case_dir/manual-data"
-  mv "$(home_of "$case_dir")/data" "$data"
-  data_resolved=$(cd "$data" && pwd -P)
-  make_tasks_axi_incompatible "$case_dir"
-  # Deliberately no backlog item: on a manual home the operator owns the file,
-  # so neither half of the lifecycle may hard-fail over its contents.
-  out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") \
-    || fail "manual-backend spawn failed: $out"
-  assert_contains "$out" "spawned $id" "manual-backend spawn did not report success"
-
-  out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
-    || fail "manual-backend teardown failed: $out"
-  assert_contains "$out" "Update $data_resolved/backlog.md" \
-    "manual-backend teardown did not name its configured backlog path"
-  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
-    "manual-backend teardown recorded a close it never owed"
-  pass "a manual-backlog home dispatches and completes without a hard failure"
-}
-
 test_a_secondmate_home_keeps_its_own_books() {
   local case_dir id out
   id=atomic-mate-b13
@@ -2433,6 +2403,5 @@ test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry
 test_teardown_rechecks_record_parent_after_lock_acquisition
 test_teardown_refuses_a_symlinked_state_directory_at_entry
 test_home_without_a_backlog_dispatches_and_completes
-test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item

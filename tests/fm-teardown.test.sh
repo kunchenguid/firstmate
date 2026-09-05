@@ -635,23 +635,6 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
-  local case_dir out backlog_path
-  case_dir=$(make_case tasks-axi-manual-optout)
-  write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  printf '%s\n' manual > "$case_dir/config/backlog-backend"
-  seed_backlog_in_flight "$case_dir"
-
-  out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "manual backlog backend was mutated by teardown anyway"
-  backlog_path=$(cd "$case_dir/data" && pwd -P)/backlog.md
-  printf '%s\n' "$out" | grep -F "Update $backlog_path - move task-x1 to Done" >/dev/null \
-    || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
-}
-
 test_local_only_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case truly-unpushed)
@@ -3278,7 +3261,6 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

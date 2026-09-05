@@ -872,7 +872,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
-  printf 'manual\n' > "$child/config/backlog-backend"
+  rm -f "$child/data/backlog.md"
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
@@ -904,7 +904,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
-  printf 'manual\n' > "$child/config/backlog-backend"
+  rm -f "$child/data/backlog.md"
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
@@ -998,7 +998,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
-  printf 'manual\n' > "$child/config/backlog-backend"
+  rm -f "$child/data/backlog.md"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
@@ -1030,7 +1030,7 @@ test_relay_disabled_unmarked_teardown_skips_public_path() {
   home=$(make_home teardown-disabled-unmarked relay-off)
   fm_git_init_commit "$home/projects/worktree"
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
-  printf 'manual\n' > "$home/config/backlog-backend"
+  rm -f "$home/data/backlog.md"
   cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_TASKS_AXI_LOG"
@@ -1066,7 +1066,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
     "$child" > "$parent/data/secondmates.md"
   fm_write_meta "$parent/state/disabled-mate.meta" "kind=secondmate" "home=$child"
   tasks_log="$child/tasks-axi.log"; : > "$tasks_log"
-  printf 'manual\n' > "$child/config/backlog-backend"
+  rm -f "$child/data/backlog.md"
   cat > "$child/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 echo "$*" >> "$FAKE_TASKS_AXI_LOG"

@@ -43,7 +43,7 @@
 # it orphaned, because tasks-axi treats only two-or-more-space lines as body.
 # The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`
 # support. Bootstrap requires a compatible build fleet-wide, so this works
-# everywhere; the `config/backlog-backend=manual` knob only governs firstmate's
+# everywhere;
 # own hand-editing of its own backlog, not this validated helper. Idempotent:
 # re-running converges. Atomic: on any move failure nothing moves.
 # See AGENTS.md project management and task lifecycle.

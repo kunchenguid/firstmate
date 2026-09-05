@@ -987,7 +987,6 @@ test_bootstrap_leaves_unauthenticated_checks() {
   chmod 0700 "$state/task-a.check.sh"
 
   mkdir -p "$dir/home/config"
-  printf '%s\n' manual > "$dir/home/config/backlog-backend"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_NETWORK=skip \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-bootstrap.sh" > "$dir/bootstrap.out" 2> "$dir/bootstrap.err" \

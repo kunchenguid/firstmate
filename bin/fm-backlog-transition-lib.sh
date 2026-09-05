@@ -21,12 +21,11 @@
 # cross-home nudge stay defense in depth, not the primary mechanism.
 #
 # SCOPE. fm_backlog_transition_applies is the single gate. It excludes
-# secondmates (persistent agents are never backlog items, AGENTS.md section 10),
-# and homes whose configured backlog backend is manual. Markdown homes that
-# keep no backlog file at all are likewise exempt. Those return-1 exemptions
-# are never errors; a home on any other configured backend has no markdown
-# file requirement at all. An unresolvable configured data directory or
-# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
+# secondmates (persistent agents are never backlog items, AGENTS.md section 10)
+# and markdown homes that keep no backlog file at all. Those return-1
+# exemptions are never errors; a home on any other configured backend has no
+# markdown file requirement at all. An unresolvable configured data directory
+# or incompatible tasks-axi instead returns 2 so callers refuse before mutation.
 #
 # ADDRESSING. The markdown backend owns the explicit `--file <data>/backlog.md`
 # on every mutation and row probe so the change lands in the home that owns
@@ -177,14 +176,10 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file root
+  local data authorized_data=$2 kind=$3 file root
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
-    return 1
-  fi
-  if fm_backlog_backend_manual "$config"; then
-    FM_BACKLOG_TRANSITION_SKIP="config/backlog-backend selects manual editing"
     return 1
   fi
   if ! data=$(fm_backlog_data_absolute "$2"); then

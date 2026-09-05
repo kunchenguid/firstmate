@@ -14,8 +14,7 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend,
-#      config/startup-memory-budget -
+#      config/backend, config/startup-memory-budget -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, and
 #      startup-memory budget inherit the primary's settings. The generic
@@ -287,7 +286,6 @@ test_propagate_lib() {
   # 1. present source is copied
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
-  printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
@@ -296,7 +294,6 @@ test_propagate_lib() {
   [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
-  [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
@@ -316,12 +313,10 @@ test_propagate_lib() {
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
   printf 'claude\n' > "$src/crew-harness"
-  printf 'tasks-axi\n' > "$src/backlog-backend"
   printf 'zellij\n' > "$src/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
-  [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
   [ "$(cat "$dest/backend")" = zellij ] || fail "changed backend did not converge"
 
   outside="$d/outside-target"
@@ -336,12 +331,11 @@ test_propagate_lib() {
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" \
     "$src/backend"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
-  [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
@@ -363,7 +357,6 @@ test_propagate_lib() {
   printf 'grok\n' > "$src/secondmate-harness"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
-  printf 'manual\n' > "$src/backlog-backend"
   printf 'herdr\n' > "$src/backend"
   rm -rf "$d/home2"
   mkdir -p "$d/home2/config" "$d/home2/state"
@@ -371,7 +364,6 @@ test_propagate_lib() {
   [ -e "$d/home2/config/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
   [ "$(cat "$d/home2/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/home2/config/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
-  [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
@@ -385,7 +377,7 @@ test_propagate_lib() {
   # stderr warning and a skip, not a silent miss.
   guard_repo="$d/guard-repo"
   git init -q -b main "$guard_repo"
-  printf 'config/crew-harness\nconfig/backlog-backend\n' > "$guard_repo/.gitignore"
+  printf 'config/crew-harness\n' > "$guard_repo/.gitignore"
   printf 'guard\n' > "$guard_repo/README.md"
   git -C "$guard_repo" add -A
   git -C "$guard_repo" commit -qm guard
@@ -467,7 +459,6 @@ test_spawn_split_and_inherit() {
   printf '{"default":{"harness":"claude","model":"haiku","effort":"low"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
   make_seeded_home "$sm" sm
 
@@ -481,8 +472,6 @@ test_spawn_split_and_inherit() {
     || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude","model":"haiku","effort":"low"}}' ] \
     || fail "split: home crew-dispatch.json not inherited"
-  [ "$(cat "$sm/config/backlog-backend" 2>/dev/null)" = manual ] \
-    || fail "split: home backlog-backend not inherited as manual"
   [ "$(cat "$sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "split: home backend not inherited as zellij"
   [ -e "$sm/config/secondmate-harness" ] \
@@ -997,7 +986,7 @@ new_world() {
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
-    printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+    printf 'config/crew-harness\nconfig/secondmate-harness\n'
     printf 'config/backend\nconfig/startup-memory-budget\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
@@ -1248,7 +1237,6 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Initial push: primary crew-harness=codex, secondmate-harness=grok (must NOT flow).
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
@@ -1256,8 +1244,6 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: crew-harness not pushed into the live home"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "sweep: crew-dispatch.json not pushed into the live home"
-  [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
-    || fail "sweep: backlog-backend not pushed into the live home"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = tmux ] \
     || fail "sweep: backend not pushed into the live home"
   [ -e "$w/sm/config/secondmate-harness" ] \
@@ -1266,28 +1252,23 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Re-converge: primary changes inherited config values; the home follows on the next sweep.
   printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
-  printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude"}}' ] \
     || fail "sweep: home did not re-converge to the primary's new crew-dispatch.json"
-  [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = tasks-axi ] \
-    || fail "sweep: home did not re-converge to the primary's new backlog-backend"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "sweep: home did not re-converge to the primary's new backend"
 
   # Mirror absence: primary clears inherited config; the home's copies are removed.
   rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" \
-    "$w/home/config/backlog-backend" "$w/home/config/backend"
+    "$w/home/config/backend"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
     && fail "sweep: home crew-dispatch.json not removed after the primary cleared it"
   [ -e "$w/sm/config/crew-harness" ] \
     && fail "sweep: home crew-harness not removed after the primary cleared it"
-  [ -e "$w/sm/config/backlog-backend" ] \
-    && fail "sweep: home backlog-backend not removed after the primary cleared it"
   [ -e "$w/sm/config/backend" ] \
     && fail "sweep: home backend not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
@@ -1303,15 +1284,12 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "crew-dispatch.json did not propagate to a tracked-current home"
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
     || fail "config did not propagate to a tracked-current home"
-  [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
-    || fail "backlog-backend did not propagate to a tracked-current home"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = tmux ] \
     || fail "backend did not propagate to a tracked-current home"
   pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
@@ -1330,7 +1308,6 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   out=$(run_bootstrap "$w")
 
   assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped: diverged from" \
@@ -1339,8 +1316,6 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
     || fail "stale dispatch: crew-dispatch.json was copied before the home ignored it"
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
     || fail "stale dispatch: existing ignored config stopped propagating"
-  [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
-    || fail "stale dispatch: backlog backend stopped propagating"
   status=$(git -C "$w/sm" status --porcelain -- config/crew-dispatch.json)
   [ -z "$status" ] || fail "stale dispatch: crew-dispatch.json dirtied the home: $status"
   pass "B9 bootstrap sweep defers new inherited config until the home ignores it"
@@ -1466,7 +1441,6 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
   record_live_watcher_fixture "$w/home"
   err="$w/config-push-basic.err"
@@ -1482,8 +1456,6 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report crew-dispatch as pushed"
   assert_contains "$out" "crew-harness: pushed" \
     "config push did not report crew-harness as pushed"
-  assert_contains "$out" "backlog-backend: pushed" \
-    "config push did not report backlog-backend as pushed"
   assert_contains "$out" "backend: pushed" \
     "config push did not report backend as pushed"
   assert_contains "$out" "config-reread: sent" \
@@ -1507,8 +1479,6 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report crew-dispatch as unchanged"
   assert_contains "$out2" "crew-harness: unchanged" \
     "idempotent config push did not report crew-harness as unchanged"
-  assert_contains "$out2" "backlog-backend: unchanged" \
-    "idempotent config push did not report backlog-backend as unchanged"
   assert_contains "$out2" "backend: unchanged" \
     "idempotent config push did not report backend as unchanged"
   assert_not_contains "$out2" "config-reread: sent" \
@@ -1541,7 +1511,6 @@ test_config_push_reports_skips_dirty_and_invalid_home() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   err="$w/config-push-warnings.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
 
@@ -1638,15 +1607,13 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   add_sm_worktree "$w" beta "$head"
   mkdir -p "$w/alpha/config" "$w/beta/config" "$w/alpha/state" "$w/beta/state"
 
-  # alpha is stale on harness + backlog; beta is stale on multiline dispatch only.
+  # alpha is stale on harness; beta is stale on multiline dispatch only.
   printf 'pi\n' > "$w/alpha/config/crew-harness"
-  printf 'tasks-axi\n' > "$w/alpha/config/backlog-backend"
   printf '{"default":{"harness":"old"}}\n' > "$w/beta/config/crew-dispatch.json"
 
   multiline_json=$(printf '{\n  "default": {\n    "harness": "grok",\n    "model": "grok-4.5"\n  },\n  "rules": [\n    {"when": "news", "use": {"harness": "grok"}}\n  ]\n}\n')
   printf '%s' "$multiline_json" > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
-  printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
   {
     shared_captain_header_for_tests
@@ -1666,7 +1633,6 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   cmp -s "$w/home/config/crew-dispatch.json" "$w/beta/config/crew-dispatch.json" \
     || fail "beta did not receive multiline dispatch"
   [ "$(cat "$w/alpha/config/crew-harness")" = codex ] || fail "alpha harness not updated"
-  [ "$(cat "$w/alpha/config/backlog-backend")" = manual ] || fail "alpha backlog-backend not updated"
   [ "$(cat "$w/alpha/config/backend")" = tmux ] || fail "alpha backend not updated"
 
   instr_a=$(reread_instruction_path "$w/alpha") || fail "alpha instruction missing after config push"
@@ -1682,16 +1648,14 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   assert_grep "defaults/rules" "$instr_a" "alpha must preserve agent judgment framing"
   assert_contains "$(cat "$instr_a")" "config/crew-dispatch.json" "alpha missing dispatch path"
   assert_contains "$(cat "$instr_a")" "config/crew-harness" "alpha missing harness path"
-  assert_contains "$(cat "$instr_a")" "config/backlog-backend" "alpha missing backlog path"
   assert_contains "$(cat "$instr_a")" "config/backend" "alpha missing backend path"
   # Path order follows FM_INHERITABLE_CONFIG.
   awk '
     /config\/crew-dispatch\.json/ { d=NR }
     /config\/crew-harness/ { h=NR }
-    /config\/backlog-backend/ { b=NR }
-    /config\/backend/ && !/backlog-backend/ { k=NR }
+    /config\/backend/ { k=NR }
     END {
-      if (!(d && h && b && k && d < h && h < b && b < k)) exit 1
+      if (!(d && h && k && d < h && h < k)) exit 1
     }
   ' "$instr_a" || fail "alpha instruction path order is not deterministic allowlist order"
 
@@ -1700,8 +1664,6 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
     "alpha instruction must include exact multiline dispatch bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/crew-harness-----\ncodex\n-----END config/crew-harness-----' \
     "alpha instruction must include exact harness scalar bytes"
-  assert_contains "$(cat "$instr_a")" $'-----BEGIN config/backlog-backend-----\nmanual\n-----END config/backlog-backend-----' \
-    "alpha instruction must include exact backlog-backend scalar bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "alpha instruction must include exact backend scalar bytes"
 
@@ -1748,13 +1710,13 @@ test_config_reread_isolation_and_absent_and_send_failure() {
   add_sm_worktree "$w" beta "$head"
   mkdir -p "$w/alpha/config" "$w/beta/config" "$w/alpha/state" "$w/beta/state"
 
-  # alpha: only harness will change (dispatch+backlog already match primary absence).
+  # alpha: only harness will change (dispatch already matches primary absence).
   # beta: only dispatch will change.
   printf 'old-harness\n' > "$w/alpha/config/crew-harness"
   printf '{"stale":true}\n' > "$w/beta/config/crew-dispatch.json"
   # Primary has only crew-harness set; dispatch and backlog absent.
   printf 'codex\n' > "$w/home/config/crew-harness"
-  rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/backlog-backend"
+  rm -f "$w/home/config/crew-dispatch.json"
 
   log="$w/config-reread-absent.tmux.log"
   err="$w/config-reread-absent.err"
@@ -1772,8 +1734,6 @@ test_config_reread_isolation_and_absent_and_send_failure() {
     "alpha harness block exact"
   assert_not_contains "$(cat "$instr_a")" "config/crew-dispatch.json" \
     "alpha must not list unchanged/absent-both dispatch"
-  assert_not_contains "$(cat "$instr_a")" "config/backlog-backend" \
-    "alpha must not list unchanged/absent-both backlog"
   assert_not_contains "$(cat "$instr_a")" '{"stale":true}' \
     "alpha must not receive beta's changed dispatch content"
 
@@ -1788,7 +1748,6 @@ test_config_reread_isolation_and_absent_and_send_failure() {
   {
     printf '%s\n' $'crew-dispatch.json\tpushed\tmirrored primary absence'
     printf '%s\n' $'crew-harness\tunchanged\t'
-    printf '%s\n' $'backlog-backend\tunchanged\t'
     printf '%s\n' $'backend\tunchanged\t'
     printf '%s\n' $'data/captain-shared.md\tpushed\t'
   } > "$report"

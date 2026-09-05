@@ -558,7 +558,6 @@ EOF
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' pi > "$home/config/secondmate-harness"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
   {
     printf 'window=firstmate:fm-%s\n' "$id"
@@ -600,7 +599,6 @@ EOF
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
-  printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
   {
     printf 'window=default:p-old\n'
@@ -1005,7 +1003,6 @@ EOF
     make_fake_ps_claude "$fakebin"
     rm -f "$fakebin/tmux"
     fm_fake_exit0 "$fakebin" herdr jq
-    printf '%s\n' manual > "$home/config/backlog-backend"
     mask="$home/mask-tmux.bash"
     cat > "$mask" <<'SH'
 command() {
@@ -1764,47 +1761,6 @@ EOF
   pass "the startup backlog bound cuts only dispatchable queued rows and discloses the remainder exactly"
 }
 
-test_backlog_compact_manual_backend_skips_indented_bodies() {
-  local rec root home fakebin out
-  rec=$(new_world backlog-compact-manual)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  write_long_body_backlog "$home/data/backlog.md"
-
-  out=$(FM_SESSION_START_QUEUED_LIMIT=4 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to 4; indented task bodies omitted)" \
-    "manual backend did not use compact title-line rendering"
-  assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
-  assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
-    "manual compact rendering omitted the in-flight title line"
-  assert_contains "$out" "(hold: captain choice pending) (hold-kind: captain)" \
-    "manual compact rendering omitted hold metadata"
-  assert_contains "$out" "blocked-by: compact-startup - waits for implementation" \
-    "manual compact rendering omitted blocker metadata"
-  assert_contains "$out" "- [ ] held-queued - Held queued work" \
-    "manual compact rendering dropped a held queued title line"
-  assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual compact digest leaked an in-flight task body"
-  assert_not_contains "$out" "QUEUED-BODY-LINE" "manual compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "manual compact digest listed a done row at startup"
-  assert_not_contains "$out" "## Done" "manual compact digest printed the done heading it never fills"
-  assert_contains "$out" "- [ ] plain-4 - Plain queued item 4" \
-    "manual compact rendering dropped a queued title line inside its bound"
-  assert_not_contains "$out" "- [ ] plain-5 - Plain queued item 5" \
-    "manual compact rendering did not bound its plain queued listing"
-  assert_contains "$out" "(shown 1 in-flight, 2 held or blocked queued, 4 of 25 other queued title line(s); 1 done row(s) omitted)" \
-    "manual compact rendering did not report its bound accounting"
-  assert_contains "$out" "(21 more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)" \
-    "manual compact rendering did not disclose an exact queued remainder"
-  assert_contains "$out" "or data/backlog.md" "manual compact digest omitted the data/backlog.md full-body pointer"
-
-  pass "manual backlog rendering drops done rows, keeps every held or blocked title line, and bounds the rest"
-}
-
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
   local rec root home fakebin out
   rec=$(new_world backlog-compact-unavailable)
@@ -2559,7 +2515,6 @@ test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
-test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
