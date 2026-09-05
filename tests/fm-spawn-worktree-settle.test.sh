@@ -84,6 +84,8 @@ Exercise settled-worktree detection for $id.
 
 ## Firstmate spec
 Record only the pane's stable worktree.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"

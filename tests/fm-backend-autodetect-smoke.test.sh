@@ -97,6 +97,8 @@ Exercise Herdr backend auto-detection.
 
 ## Firstmate spec
 Verify the real spawn path selects Herdr.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 
 PROJ="$TMP_ROOT/scratch-project"

@@ -153,6 +153,8 @@ Exercise Kimi dispatch.
 
 ## Firstmate spec
 Verify launch and delivery behavior.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
   printf 'kimi\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"

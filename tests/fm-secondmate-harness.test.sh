@@ -968,6 +968,8 @@ Exercise an ordinary crew launch.
 
 ## Firstmate spec
 Verify secondmate harness settings do not affect it.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \

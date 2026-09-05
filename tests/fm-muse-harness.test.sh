@@ -133,6 +133,8 @@ Exercise Muse dispatch.
 
 ## Firstmate spec
 Verify the Muse harness behavior under test.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"

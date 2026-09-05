@@ -370,9 +370,11 @@ Once ownership is settled, validate exactly once against that final head so no o
 
 Review-loop rules, lettered for cross-reference:
 
+- **B** - the first finding of a family is swept across the whole repo for its mechanism, every site is fixed in one commit, and all findings from that sweep are answered in one round with one fix command (`bin/fm-dod-lib.sh`'s rule 8).
 - **C** - a family surviving round two aborts is fixed locally, tests-first, and restarts once with the intent amended.
 - **D** - one tool mechanism killing two runs in a day halts new validation runs until a local mitigation exists.
 - **E** - a learned rule is broadcast to every live worker and added to the scaffold in the same turn.
+- **F** - a `done: PR {url} checks green` report requires check conclusions verified at the exact current head sha of the PR branch, never a conclusion recorded against an earlier or stale head (`bin/fm-dod-lib.sh`).
 - **G** - live tasks are bounded by what can merge per day and by seams, never globally.
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
@@ -384,6 +386,10 @@ Judge validation by the currently attributed run step through `bin/fm-crew-state
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+
+A finding asking for proof machinery beyond the task's stated proof bar is answered out of scope by default.
+A finding family that survives two review rounds is redesigned or deferred, never argued a third round.
+An excluded-not-cancelled capability needs an honest absence surface, never a proof of absence.
 
 ### PR ready, landing, and teardown
 
@@ -545,6 +551,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, mode-specific definitions of done, and what a no-mistakes worker may pass as `--intent`, including its rule that the string must be self-sufficient, rendered into briefs and promotions.
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus only the context needed to read it, including the substance of any report, decision, or PR the ask refers to, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
 Firstmate names the test scope at intake as part of that proof: targeted tests covering the changed surface are the default proof for a surgical change under section 7's proportional-validation doctrine.
+Intake also names the task's prep tier (`{PREP}` in the scaffold's Proof bar section) the same way it names delivery mode and test scope.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.

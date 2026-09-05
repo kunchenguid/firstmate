@@ -30,15 +30,6 @@
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
-fm_ship_batch_rule_block() {
-  cat <<'EOF'
-8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find.
-   Enumerate the COMPLETE finding set first, then check the surfaces that can share each defect's mechanism -
-   same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
-   so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
-EOF
-}
-
 fm_dod_delivery_preflight_block() {  # <task-id> <task-record>
   local id=$1 task_record=$2
   cat <<EOF
@@ -53,6 +44,30 @@ Then inspect that same committed delivery ref and every verified submodule commi
 Exit 1 with no output means no sentinel occurrence; exit 0 means inspect every match and resolve every open placeholder before delivery; any other exit means the scan failed and blocks delivery rather than counting as no matches.
 Immediately before each subsequent delivery action that this mode permits - a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report - run \`cd -- "\$task_root"\` and require physical \`pwd -P\` to equal \`task_root\`.
 If \`task_root\` is unavailable, rerun this entire preflight from the task record; if the directory change or equality check fails, refuse the action and report the concrete mismatch.
+EOF
+}
+
+# Standing worker rule text shared between every generated ship brief's # Rules
+# list (rule 9, rendered next to rule 8) and bin/fm-control.sh's relaunch
+# progress note, so a replacement worker after a relaunch sees the identical
+# standing rule its predecessor's original brief carried. Single owner; do not
+# restate the sentence a second time anywhere else.
+FM_CI_NO_RERUN_LINE='Never re-run a failed CI job or workflow: a red result at a stale head is not evidence. Fix the determinism problem or push a new head, then let CI run fresh.'
+
+# fm_ship_batch_rule_block <rule-8-number> <rule-9-number> prints rule 8 (the
+# pre-run mechanism sweep plus the post-review batch-findings response) and
+# rule 9 (FM_CI_NO_RERUN_LINE) for a ship brief's # Rules list. The pre-run
+# sweep is the Proof bar's Tier 1 prep (data/firstmate-proof-bar-in-intent/prep-tiers.md,
+# rule B) done proactively instead of only after a review surfaces it.
+fm_ship_batch_rule_block() {  # <n8> <n9>
+  local n8=$1 n9=$2
+  cat <<EOF
+$n8. Before your first run, if you already know a fix pattern applies to more than the one site you were asked to change (a parser rule, a validation, a timestamp format, a malformed-input guard), sweep the whole repo for that mechanism, fix every site in one commit, and paste the site list into the Proof bar's Prep line before starting (rule B in the Proof bar above; this is Tier 1 prep done before the run instead of only after a review finds it).
+   When a review, verification run, or test pass fails anyway, never fix and resubmit the first defect you find.
+   Enumerate the COMPLETE finding set first, then check the surfaces that can share each defect's mechanism -
+   same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
+   so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
+$n9. $FM_CI_NO_RERUN_LINE
 EOF
 }
 
@@ -267,6 +282,9 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+
+Rule F: your \`done: PR {url} checks green\` report requires check conclusions verified at the exact current head sha of the PR branch, never a conclusion recorded against an earlier or stale head.
+If the branch moved after checks last ran, confirm CI reran and passed at the new head before reporting done; per rule 9, a red result at a stale head is never re-run as a shortcut past that.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

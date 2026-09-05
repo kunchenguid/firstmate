@@ -45,7 +45,11 @@
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
-#              standing charter is never rewritten.
+#              standing charter is never rewritten. The rendered progress note
+#              also restates FM_CI_NO_RERUN_LINE (bin/fm-dod-lib.sh, the single
+#              owner shared with every ship brief's # Rules list), so a
+#              replacement worker never treats a relaunch as license to re-run
+#              a failed CI job at a stale head.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -134,6 +138,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -775,6 +781,8 @@ record_note() {
         echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
         echo "each message in numeric order, then mv each handled file into"
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo
+        echo "Standing rule, unchanged by this relaunch: $FM_CI_NO_RERUN_LINE"
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

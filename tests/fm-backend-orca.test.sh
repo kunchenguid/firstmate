@@ -24,6 +24,8 @@ Exercise Orca dispatch.
 
 ## Firstmate spec
 Verify the Orca lifecycle behavior under test.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 }
 

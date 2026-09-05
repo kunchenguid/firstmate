@@ -20,6 +20,8 @@ Exercise trace propagation for $2.
 
 ## Firstmate spec
 Verify the spawned process receives the expected trace context.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 }
 

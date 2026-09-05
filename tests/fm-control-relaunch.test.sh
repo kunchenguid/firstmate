@@ -149,6 +149,8 @@ Exercise relaunch behavior for $id.
 
 ## Firstmate spec
 Preserve the task while replacing its agent process.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
   {
     echo "window=fmses:fm-$id"

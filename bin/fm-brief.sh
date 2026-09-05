@@ -78,6 +78,15 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every ship scaffold also carries a "Proof bar" section: the prep tier
+# definitions and evidence contract copied inline, plus a "Prep: {PREP}"
+# placeholder Firstmate fills at intake the same way it fills delivery mode and
+# test scope (AGENTS.md section 11). bin/fm-spawn.sh refuses a ship spawn whose
+# brief has no "Prep:" line at all. bin/fm-dod-lib.sh's fm_ship_batch_rule_block
+# renders the matching rule 8 (pre-run mechanism sweep, batch-findings
+# response) and rule 9 (never re-run a failed CI job) into every ship brief's
+# # Rules list; that same rule 9 sentence is the single owner
+# (FM_CI_NO_RERUN_LINE) also carried into bin/fm-control.sh's relaunch note.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -374,6 +383,37 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# Proof bar (ship only): the prep tier plus tier definitions and evidence
+# contract, copied inline rather than by pointer because it must survive with
+# no other file loaded. Firstmate fills the {PREP} placeholder at intake, on
+# the same line as delivery mode and test scope (AGENTS.md section 11);
+# bin/fm-spawn.sh refuses a ship spawn whose brief carries no "Prep:" line at
+# all. Source of the tier text: data/firstmate-proof-bar-in-intent/prep-tiers.md
+# (captain ruling 2026-09-04), a private record of the ruling, not a runtime
+# pointer target - this section is the tier definitions' one worker-facing owner.
+IFS= read -r -d '' PROOF_BAR_SECTION <<'EOF' || true
+# Proof bar
+Prep: {PREP}
+
+## Tier definitions and evidence contract
+Tier 0, none. The default: human-only prose, cosmetic changes, one-site fixes with no callers. State "Prep: Tier 0 - {one reason}". Honesty test: if you would need a search to state that reason, it is not Tier 0.
+Tier 1, mechanism sweep. The change fixes a pattern or mechanism at one site (a parser rule, a validation, a timestamp format, a malformed-input guard). Before your first run: search the whole repo for the same mechanism, not the same words (rg for the construct; Serena find_symbol for the function family), fix every site in one commit, list the sites.
+Tier 2, wiring trace. The change alters something other code depends on (a signature, a contract, a record shape, a return value, a route, a config key or value). Before your first run: Serena find_referencing_symbols on each changed symbol, PLUS rg for the literal names and values changed - tests and checkers that read source or config as text are invisible to symbol search. Confirm each site is handled, list them. If Serena is unavailable in your runtime, fall back to rg on the symbol name plus an import search, and name which tool produced the list.
+The cap: a Tier 1 or 2 prep that passes 20 minutes or 15 sites stops and reports to firstmate that the task is scoped wrong and gets split. Never prep harder.
+You may raise the stated tier by one with a one-line reason; you may never lower it.
+The evidence contract: paste the prep output as a list, verbatim, under this Proof bar before your first run. One line per site: path and line or symbol, then exactly one disposition - fixed, confirmed unaffected with the reason, or out of scope with the reason and the item that owns it. A site with no disposition is not on the list. No list means no prep happened; "checked, all wired" is not evidence.
+A reviewer finding at a site NOT on your list is both a real finding to fix and a prep miss; record the prep miss in your report.
+
+## Scope boundary
+A finding inside this task's stated bar is yours to fix in this run. A finding asking for proof machinery beyond the stated bar is answered out of scope by default (AGENTS.md section 7). A settled family already answered in an earlier round is out of scope; do not reopen it without new evidence.
+
+## Class-sweep rule (rule B)
+The first finding of a family means sweep the whole repo for the mechanism, fix every site in one commit, and answer every finding in that family in one round with one fix command. Rule 8 under `# Rules` below is this same rule, extended to also apply before your first run whenever you already know the family in advance.
+
+When you run /no-mistakes, copy this entire Proof bar section verbatim into `--intent` alongside the captain intent contract below.
+EOF
+PROOF_BAR_SECTION=${PROOF_BAR_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -451,6 +491,7 @@ case "$MODE" in
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID" "$STATE/$ID.meta") || exit 1
+BATCH_RULE_BLOCK=$(fm_ship_batch_rule_block 8 9)
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -499,9 +540,7 @@ $ASK_USER_BLOCK
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-EOF
-fm_ship_batch_rule_block >> "$BRIEF"
-cat >> "$BRIEF" <<EOF
+$BATCH_RULE_BLOCK
 
 $INBOX_SECTION
 
@@ -511,6 +550,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$PROOF_BAR_SECTION
 
 $DOD
 EOF

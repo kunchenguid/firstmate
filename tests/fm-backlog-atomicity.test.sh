@@ -65,6 +65,8 @@ Exercise backlog dispatch for $id.
 ## Firstmate spec
 Verify the atomic backlog transition.
 
+Prep: Tier 0 - test fixture, not a real change
+
 # Definition of done
 Delivery contract: mode=no-mistakes
 EOF

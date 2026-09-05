@@ -206,7 +206,7 @@ EOF
 $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
-  fm_ship_batch_rule_block
+  fm_ship_batch_rule_block 8 9
   printf '\n'
   fm_dod_block "$MODE" "$ID" "$META"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }

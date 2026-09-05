@@ -96,6 +96,8 @@ Exercise primary-home Herdr placement.
 
 ## Firstmate spec
 Verify the crewmate uses its primary home's workspace.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 
 SM_HOME="$TMP_ROOT/secondmate-home"
@@ -111,6 +113,8 @@ Exercise secondmate-owned Herdr placement.
 
 ## Firstmate spec
 Verify the crewmate uses its secondmate home's workspace.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 
 make_scratch_project() {  # <dir>

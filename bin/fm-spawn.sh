@@ -13,7 +13,9 @@
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
-#   placeholders, an empty Task, or an incomplete pair of Task subsections.
+#   placeholders, an empty Task, or an incomplete pair of Task subsections. A
+#   ship spawn additionally refuses a brief with no "Prep:" line at all (the
+#   scaffold's Proof bar section, bin/fm-brief.sh).
 #   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
 #   `--intent` contract and the extracted captain intent. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
@@ -1904,6 +1906,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
+    exit 1
+  fi
+  if [ "$KIND" = ship ] && ! grep -q '^Prep: ' "$BRIEF"; then
+    echo "error: $BRIEF has no \"Prep:\" line; state the prep tier at intake (AGENTS.md section 11) before spawn" >&2
     exit 1
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then

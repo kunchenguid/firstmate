@@ -53,6 +53,8 @@ Exercise backend dispatch for $2.
 
 ## Firstmate spec
 Verify backend selection without changing task intent.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 }
 

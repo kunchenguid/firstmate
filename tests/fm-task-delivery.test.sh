@@ -61,7 +61,7 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\nPrep: Tier 0 - test fixture, not a real change\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
 }
@@ -628,6 +628,8 @@ Example intent
 Example specification
 ```
 
+Prep: Tier 0 - test fixture, not a real change
+
 # Definition of done
 Delivery contract: mode=direct-PR
 EOF
@@ -643,6 +645,8 @@ EOF
 # Task
 Captain: Fix the legacy dispatch boundary.
 Do not copy this Firstmate-authored constraint into intent.
+
+Prep: Tier 0 - test fixture, not a real change
 
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -675,6 +679,8 @@ Fix the migrated dispatch boundary.
 ## Firstmate spec
 Preserve the existing compatibility path.
 
+Prep: Tier 0 - test fixture, not a real change
+
 # Definition of done
 Delivery contract: mode=no-mistakes
 Pass the entire Task and every Firstmate requirement as --intent.
@@ -703,6 +709,8 @@ EOF
 # Task
 Fix the legacy dispatch boundary.
 Do not copy this Firstmate-authored constraint into intent.
+
+Prep: Tier 0 - test fixture, not a real change
 
 # Definition of done
 Delivery contract: mode=no-mistakes

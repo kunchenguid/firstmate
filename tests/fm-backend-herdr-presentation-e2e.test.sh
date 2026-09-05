@@ -392,6 +392,8 @@ $description
 
 ## Firstmate spec
 Verify projected workspace behavior for $id.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 }
 

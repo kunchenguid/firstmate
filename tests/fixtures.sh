@@ -247,6 +247,8 @@ $intent
 
 ## Firstmate spec
 Exercise the spawn behavior under test.
+
+Prep: Tier 0 - test fixture, not a real change
 EOF
 }
 
