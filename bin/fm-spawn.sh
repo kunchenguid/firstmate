@@ -146,6 +146,11 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A repository with no origin remote configured instead skips the fetch,
+#   resolves its local default branch, resets the slot to that branch's tip, and
+#   prints a notice naming the local branch and commit it launched from.
+#   That stand-aside is keyed on the absence of an origin remote only, so a
+#   configured origin that cannot be fetched still refuses exactly as before.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2018,24 +2023,55 @@ EOF
   printf '%s' "$lines" >&2
 }
 
+# The freshness guard exists to stop a worker launching from an out-of-date copy
+# of a remote, so a repository that HAS no remote is not a stale base - it is a
+# base with no upstream to be stale against, and the guard resolves it from local
+# refs instead of refusing.
+#
+# That stand-aside is deliberately narrow, because widening it would cost the
+# guard its whole point. It fires only when `origin` is absent from the
+# repository's own remote list. A repository that HAS an origin still refuses on
+# every fetch failure - an unreachable network, a bad credential, a deleted
+# remote - because there the failed fetch IS the stale-base risk this gate was
+# written to catch. A remote list that cannot be read is not proof of absence and
+# refuses too.
+#
+# With no upstream, the local default branch is the base, and every other
+# assertion is unchanged: the same clean-worktree gate, the same reset, and the
+# same verification that HEAD really landed on the resolved commit.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  local worktree=$1 default target expected actual status remotes upstream=1
+  if ! remotes=$(git -C "$worktree" remote 2>/dev/null); then
+    echo "error: could not read the remotes of pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  printf '%s\n' "$remotes" | grep -qxF origin || upstream=0
+  if [ "$upstream" -eq 1 ]; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    if [ "$upstream" -eq 1 ]; then
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    else
+      echo "error: could not determine the local default branch of pooled worktree '$worktree', which has no origin remote; refusing to launch from an unverified base" >&2
+    fi
     return 1
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ "$upstream" -eq 1 ]; then
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    target="refs/heads/$default"
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2062,6 +2098,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  [ "$upstream" -eq 1 ] || echo "notice: pooled worktree '$worktree' has no origin remote; starting from its local '$default' base ($expected) rather than freshening from origin" >&2
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>

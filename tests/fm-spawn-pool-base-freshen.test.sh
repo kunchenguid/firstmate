@@ -6,6 +6,9 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# A repository with no remote at all has no upstream to be stale against, so they
+# also prove that case launches from a verified current copy of its local default
+# branch while a configured origin that cannot be fetched still refuses.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -423,6 +426,145 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# A repository with no remote at all is a real, supported case: a purely local
+# repo has no upstream to be stale against, so the freshness guard must resolve
+# its base from local refs instead of refusing to launch into it. The fixture
+# advances the project's own default branch after the slot was allocated, so a
+# guard that merely skipped the fetch and left the slot alone would still fail
+# here - the slot has to land on the current local tip.
+make_remoteless_case() {  # <name> <id> [default-branch]
+  local name=$1 id=$2 default=${3:-master} case_dir home project pool fakebin initial advanced
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf 'must survive a newly spawned branch\n' > "$project/advanced-local.txt"
+  git -C "$project" add advanced-local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+  advanced=$(git -C "$project" rev-parse HEAD)
+
+  [ -z "$(git -C "$pool" remote)" ] || fail "fixture left a remote configured on a remote-less pool"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default|$advanced"
+}
+
+read_remoteless_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH ADVANCED_SHA <<EOF
+$1
+EOF
+}
+
+test_remoteless_repo_launches_from_its_local_base() {
+  local rec id out status head
+  id='pool-no-remote-r12'
+  rec=$(make_remoteless_case no-remote "$id")
+  read_remoteless_case "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch into a repository that has no remote at all"
+  assert_contains "$out" "spawned $id" "spawn did not report success for a remote-less repository"
+  assert_not_contains "$out" "could not fetch origin" \
+    "a repository with no remote was refused as an unfetchable origin"
+  assert_contains "$out" "has no origin remote" \
+    "spawn did not say it started from a local base rather than freshening from origin"
+  assert_contains "$out" "local '$DEFAULT_BRANCH' base" \
+    "the no-upstream notice did not name the local base branch it started from"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$ADVANCED_SHA" ] \
+    || fail "spawn did not refresh the remote-less pool to its current local $DEFAULT_BRANCH tip"
+  [ "$ADVANCED_SHA" != "$INITIAL_SHA" ] \
+    || fail "fixture did not prove the local $DEFAULT_BRANCH advanced past the pool base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-local.txt" \
+    "the remote-less spawn started from history that predates the current local base"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-remote notice: %s\n' "$(printf '%s\n' "$out" | grep 'has no origin remote')"
+    printf '# observed no-remote base: HEAD=%s local-%s=%s\n' \
+      "$head" "$DEFAULT_BRANCH" "$ADVANCED_SHA"
+  fi
+  pass "a repository with no remote launches from a verified current copy of its local default branch"
+}
+
+test_remoteless_repo_refuses_a_dirty_pool() {
+  local rec id out status before
+  id='pool-no-remote-dirty-r13'
+  # main rather than master here, so the local-base path is proven against both
+  # default-branch names the resolver falls back through when no origin/HEAD exists.
+  rec=$(make_remoteless_case no-remote-dirty "$id" main)
+  read_remoteless_case "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a remote-less repository skipped the uncommitted-work gate"
+  assert_contains "$out" "is not clean" \
+    "a dirty remote-less pool was not refused with the unchanged uncommitted-work wording"
+  assert_not_contains "$out" "could not determine the local default branch" \
+    "the local-base path did not resolve a default branch named main"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty remote-less pool"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work in a remote-less pool"
+  pass "having no upstream stands the freshness fetch aside and nothing else: a dirty pool is still refused"
+}
+
+# The whole safety property of the no-upstream stand-aside is that it reads
+# absence, never failure. A configured origin that cannot be fetched is exactly
+# the stale-base risk the guard exists for, so it must keep refusing with its
+# original wording and must never be quietly rerouted onto the local base.
+test_unfetchable_origin_is_never_treated_as_no_remote() {
+  local rec id out status before
+  id='pool-origin-not-absent-r14'
+  rec=$(make_case origin-not-absent "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ -n "$(git -C "$POOL_DIR" remote)" ] || fail "fixture removed the origin it was supposed to keep"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a configured but unfetchable origin was allowed to launch"
+  assert_contains "$out" "could not fetch origin" \
+    "an unfetchable origin lost its original refusal wording"
+  assert_not_contains "$out" "has no origin remote" \
+    "an unfetchable origin was rerouted onto the no-upstream local base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a configured but unfetchable origin"
+  pass "a configured origin that cannot be fetched still refuses and is never mistaken for having no remote"
+}
+
+test_reachable_origin_never_takes_the_local_base_path() {
+  local rec id out status current
+  id='pool-origin-present-r15'
+  rec=$(make_case origin-present "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still refresh a remote-backed pooled worktree"
+  assert_not_contains "$out" "has no origin remote" \
+    "a remote-backed spawn reported itself as having no upstream"
+  current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "a remote-backed spawn did not start at current origin/$DEFAULT_BRANCH"
+  pass "a reachable origin still freshens from origin and never reports a missing upstream"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -434,5 +576,9 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_remoteless_repo_launches_from_its_local_base
+test_remoteless_repo_refuses_a_dirty_pool
+test_unfetchable_origin_is_never_treated_as_no_remote
+test_reachable_origin_never_takes_the_local_base_path
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
