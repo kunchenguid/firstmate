@@ -71,7 +71,7 @@ Usage:
 
 Mail configuration (FM_MAIL_USER, FM_MAIL_PASS, FM_IMAP_HOST, FM_SMTP_HOST,
 FM_IMAP_PORT, FM_SMTP_PORT) is read from <FM_HOME>/.env by fm-mail.sh.
-See docs/scripts.md for details.
+See docs/configuration.md "Mail plane" for the schema.
 EOF
 }
 
