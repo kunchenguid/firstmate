@@ -596,6 +596,24 @@ test_hidden_non_repo_directory_stays_silent() {
   pass "an immediate hidden non-repository directory is ignored silently"
 }
 
+test_direct_non_repo_directory_reports_while_fleet_stays_silent() {
+  local home candidate fleet_out direct_out
+  home=$(new_home)
+  candidate="$home/projects/not-a-repo"
+  mkdir -p "$candidate"
+
+  fleet_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" 2>&1)
+  direct_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$candidate" 2>&1)
+
+  assert_not_contains "$fleet_out" "not-a-repo:" \
+    "whole-fleet enumeration reported a non-repository directory"
+  assert_contains "$direct_out" "not-a-repo: skipped: not a git repo" \
+    "direct invocation did not report the same invalid directory"
+  pass "direct invalid paths report while whole-fleet enumeration stays silent"
+}
+
 test_bootstrap_relays_recovered_and_stuck() {
   local home stuck rec shallow shallow_offline out
   home=$(new_home)
@@ -828,6 +846,7 @@ test_shallow_clone_unshallows_and_reports
 test_shallow_clone_without_network_fails_loud
 test_hidden_shallow_clone_unshallows_and_reports
 test_hidden_non_repo_directory_stays_silent
+test_direct_non_repo_directory_reports_while_fleet_stays_silent
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
