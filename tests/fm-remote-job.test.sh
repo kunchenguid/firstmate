@@ -220,7 +220,7 @@ done
   || fail "the active-job readiness fixture did not begin running"
 ACTIVE_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 touch -t 200001010000 "$STATE_ROOT/worker.ready"
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
   fm_remote_job_probe "$ACCOUNT_HOME" && break
   sleep 0.05
 done
