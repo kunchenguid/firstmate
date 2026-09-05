@@ -153,8 +153,11 @@ CURSOR="$STATE_DIR/.mail-seen"
 WOKEN="$STATE_DIR/.mail-woken"
 # Generation-scoped retry set: a uid whose header fetch failed is recorded
 # here after its degraded wake so a later poll can fetch the real metadata.
-# Cleared with the cursor and journal on a UIDVALIDITY change.
+# Cleared with the cursor and journal on a UIDVALIDITY change. The retry-scan
+# position (.mail-retry-pos) is a durable cursor over this set so the bounded
+# per-poll retry window marches through every uid; it is cleared with the set.
 RETRY="$STATE_DIR/.mail-retry"
+RETRY_POS="$STATE_DIR/.mail-retry-pos"
 
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
@@ -163,6 +166,7 @@ run_py() {
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
+  FM_MAIL_RETRY_POS="$RETRY_POS" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
     "$PY" "$PY_BIN" "$@"
 }
@@ -423,6 +427,7 @@ mail_poll() {
     printf 'uidvalidity=%s\n' "$generation" > "$CURSOR"
     : > "$WOKEN"
     : > "$RETRY"
+    : > "$RETRY_POS"
   fi
 
   if ! mail_heal "$generation"; then

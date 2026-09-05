@@ -191,21 +191,49 @@ def load_retry(retry_path):
     return retry, ordered
 
 
-def rotate_retry_failed(retry_path, uid):
-    """Move a still-failing retry uid to the end of the retry file so the next
-    poll's scan advances past it and a fixed prefix of persistent failures can
-    never starve recovered uids behind it. Runs under the poll's mail-seen
-    lock; the bash layer owns the same file, never concurrently."""
-    if not retry_path or not os.path.exists(retry_path):
+def load_retry_pos(pos_path, n):
+    """Return the durable retry-scan start position, clamped into range."""
+    if not pos_path:
+        return 0
+    try:
+        pos = int(open(pos_path).read().strip() or '0')
+    except (OSError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    return pos % n
+
+
+def retry_scan_window(order, pos, window):
+    """Take the bounded retry scan starting at the durable position, wrapping
+    around the end of the retry file so every retry uid is examined within
+    ceil(len/window) polls. The caller advances the position by the window,
+    making the scan a cursor over the whole retry set: a recovered uid can
+    never be stranded behind a persistent-failure prefix."""
+    if not order:
+        return []
+    if len(order) <= window:
+        return list(order)
+    start = pos % len(order)
+    cands = order[start:start + window]
+    if len(cands) < window:
+        cands += order[:window - len(cands)]
+    return cands
+
+
+def save_retry_pos(pos_path, order_len, window, pos):
+    """Persist the next retry-scan start position after this poll's window."""
+    if not pos_path:
         return
-    with open(retry_path, encoding='utf-8', errors='replace') as f:
-        lines = [ln.rstrip('\n') for ln in f]
-    filtered = [ln for ln in lines if ln and ln != uid]
-    if len(filtered) == len(lines):
-        return
-    filtered.append(uid)
-    with open(retry_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(filtered) + '\n')
+    if order_len <= 0:
+        next_pos = 0
+    else:
+        next_pos = (pos + window) % order_len
+    try:
+        with open(pos_path, 'w', encoding='utf-8') as f:
+            f.write(str(next_pos) + '\n')
+    except OSError:
+        pass
 
 
 def cmd_poll_list():
@@ -220,6 +248,8 @@ def cmd_poll_list():
         cap = 20
     stored_gen, seen = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
     retry, retry_order = load_retry(os.environ.get('FM_MAIL_RETRY', ''))
+    retry_pos_path = os.environ.get('FM_MAIL_RETRY_POS', '')
+    retry_pos = load_retry_pos(retry_pos_path, len(retry_order))
     try:
         m = connect_mailbox()
         m.select('INBOX')
@@ -244,11 +274,14 @@ def cmd_poll_list():
             retry_order = []
         # Bound the expensive fetch work with a window, applied to each class
         # separately so a large new-mail backlog cannot slice retry candidates
-        # out of the scan. Retries rotate past failures, so the bounded retry
-        # window still advances.
+        # out of the scan. The retry scan starts at a durable position and the
+        # position advances by the window each poll, so it is a cursor over the
+        # whole retry set: every retry uid is examined within ceil(N/window)
+        # polls and a recovered uid can never be stranded behind a persistent-
+        # failure prefix.
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
-        retry_candidates = retry_order[:window]
+        retry_candidates = retry_scan_window(retry_order, retry_pos, window)
         # Reserve a quarter of the cap (at least one) for retry successes so a
         # sustained new-mail flood cannot starve recovered metadata, but never
         # let the reservation fully suppress new mail: when both classes have
@@ -282,7 +315,6 @@ def cmd_poll_list():
                 fr = clean(dec(mi.get('From')))
             except Exception:
                 if is_retry:
-                    rotate_retry_failed(os.environ.get('FM_MAIL_RETRY', ''), u)
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
@@ -300,6 +332,7 @@ def cmd_poll_list():
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
+        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         m.logout()
         return 0
     except Exception as e:
