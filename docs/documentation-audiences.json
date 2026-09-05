@@ -505,6 +505,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "skills/app-flow-walkthrough/SKILL.md",
+      "audience": "public-product"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }
