@@ -205,6 +205,8 @@ autoarm_record() {  # <outcome>
 OUT=
 ACTIONABLE=0
 HEALTHY=0
+BUSY_HOLDER=0
+busy_deadline=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -242,6 +244,35 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     HEALTHY=1
     break
   fi
+  # A live, identity-matched holder whose beacon has aged is a SUSPECTED STALL,
+  # never proof that the process is stuck: wait for it rather than re-running the
+  # identical predicate immediately. On 2026-09-04 both refusals landed one second
+  # apart (epochs 1788501895 and 1788501896), so the retry asked the same question
+  # before the holder could possibly have finished its phase, and the cycle ended
+  # in "auto-arm FAILED" for a watcher that was working the whole time.
+  #
+  # Polling here only WAITS. It never signals, kills or replaces the holder, and
+  # never starts a second watcher beside it: the captain ruled on 2026-09-05 that
+  # a running monitor process is not terminated on age, a missing heartbeat, or an
+  # expired wait. If the wait expires the holder keeps running and the next turn
+  # end arms again.
+  if fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    busy_deadline=$(( $(date +%s) + (GRACE / 2) + 1 ))
+    while [ "$(date +%s)" -lt "$busy_deadline" ]; do
+      sleep 1
+      if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+        HEALTHY=1
+        break
+      fi
+      fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" || break
+    done
+    [ "$HEALTHY" -eq 1 ] && break
+    # Still held by a live watcher: this is not a failure to report.
+    if fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+      BUSY_HOLDER=1
+      break
+    fi
+  fi
   [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   OUT=
@@ -251,6 +282,19 @@ done
 # left to supervise, so close quietly instead of waking the model.
 if ! need_supervision; then
   autoarm_record clean
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# A live, identity-matched watcher still holds this home with an aged beacon.
+# That is a suspected stall, not a broken auto-arm mechanism, so the cycle closes
+# quietly and the next turn end arms again. Reporting it as "auto-arm FAILED" is
+# the exact false alarm the 2026-09-04 investigation traced: supervision was
+# working, and the notice cost the main firstmate about four recovery turns.
+# Nothing here signals, kills or replaces the holder.
+if [ "$BUSY_HOLDER" -eq 1 ]; then
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
+  autoarm_record busy-holder
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

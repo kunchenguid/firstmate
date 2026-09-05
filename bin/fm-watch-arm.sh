@@ -77,6 +77,10 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
+# Longest this arm will wait for an identity-matched holder whose beacon has aged
+# to beat again. Fixed rather than configurable: it exists to keep a turn
+# boundary short, which is a property of the model and not a local preference.
+BUSY_HOLDER_WAIT_MAX=${FM_ARM_BUSY_HOLDER_WAIT_MAX:-30}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -267,6 +271,42 @@ wait_for_healthy_successor() {
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 0.2
   done
+}
+
+# Wait for a live, identity-matched holder whose beacon has aged to beat again,
+# then attach to it. Polls roughly every second up to half the liveness grace,
+# which is the window in which a slow phase legitimately completes; the beacon is
+# beaten at every phase boundary now, so a holder that is genuinely working
+# produces a fresh beat well inside it.
+#
+# Returns 0 having set HEALTHY_PID/HEALTHY_IDENTITY when the holder recovers.
+# Returns 1 when the wait expires OR when the holder exits on its own - and in
+# BOTH cases nothing has been signalled, killed or replaced. An expired wait is
+# reported, not acted on: age cannot prove a process is stuck, so terminating one
+# on that evidence is exactly what the captain ruled out on 2026-09-05. The next
+# turn end arms again through the ordinary path.
+wait_for_busy_holder() {
+  local deadline holder budget
+  holder=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
+  # Half the grace is the ceiling, but the wait is also capped outright: this
+  # runs at a turn boundary, and a default 300s grace would otherwise hold the
+  # turn for 150s. The cap is safe because the beacon is beaten at every PHASE
+  # boundary now, so a holder that is genuinely working reappears in seconds
+  # rather than minutes; anything slower is left alone and retried next turn.
+  budget=$(( GRACE / 2 ))
+  [ "$budget" -le "$BUSY_HOLDER_WAIT_MAX" ] || budget=$BUSY_HOLDER_WAIT_MAX
+  [ "$budget" -ge 1 ] || budget=1
+  deadline=$(( $(date +%s) + budget + 1 ))
+  while :; do
+    healthy_watcher && return 0
+    # The holder finished and released the lock: not our process to report on,
+    # and the next arm starts a fresh watcher through the ordinary path.
+    fm_pid_alive "$holder" || return 1
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 1
+  done
+  echo "watcher: busy holder pid=$holder still running after ${budget}s; left alone"
+  return 1
 }
 
 fail_unexplained_cycle() {
@@ -523,6 +563,32 @@ owned_child_finished() {
     fi
     cycle_log_append "$rc" "$signal" unexpected-clean-exit none
     return 1
+  fi
+
+  # The one nonzero exit that is not a failure: the singleton is held by a live,
+  # identity-matched watcher of this home whose beacon has aged. That is a
+  # SUSPECTED STALL and nothing stronger - identity proves which process holds the
+  # lock, never that it is stuck - so this waits for the holder to beat again and
+  # attaches to it. It never signals, kills or replaces that holder, and never
+  # starts a second watcher beside it: on 2026-09-05 the captain ruled that a
+  # running monitor process is not terminated on age, a missing heartbeat, or an
+  # expired wait. When the wait expires the holder is simply reported, and the
+  # next turn end tries again through the existing failure reporting.
+  if [ "$rc" -eq "$FM_WATCHER_BUSY_HOLDER_STATUS" ]; then
+    print_watch_output "$child_out"
+    rm -f "$child_out" 2>/dev/null || true
+    child=
+    child_out=
+    if wait_for_busy_holder; then
+      cycle_log_append "$rc" "$signal" busy-holder-attached "attached:$HEALTHY_PID"
+      cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+      report_attached
+      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+      attach_and_wait "$HEALTHY_PID"
+      return $?
+    fi
+    cycle_log_append "$rc" "$signal" busy-holder-still-running none
+    return 0
   fi
 
   reason_type="nonzero-exit"
