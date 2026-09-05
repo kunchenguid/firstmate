@@ -303,7 +303,13 @@ def cmd_poll_list():
         # failure prefix.
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
-        retry_candidates = retry_scan_window(retry_order, retry_pos, window)
+        # Only a retry uid that is already surfaced (in the cursor) is a pure
+        # retry re-fetch. A retry-set uid that is not yet in the cursor is a
+        # degraded wake that failed to record - it stays a new candidate so
+        # the next poll surfaces it again as degraded instead of silently
+        # dropping it.
+        retry_candidates = [u for u in retry_scan_window(retry_order, retry_pos, window)
+                            if u in seen]
         if cap == 1 and new_candidates and retry_candidates:
             # A single contended slot alternates between new surfacing and
             # retry recovery, so a sustained new-mail flood can never starve
@@ -329,7 +335,7 @@ def cmd_poll_list():
         new_emitted = 0
         retry_emitted = 0
         for u in new_candidates + retry_candidates:
-            is_retry = u in retry
+            is_retry = u in retry and u in seen
             if is_retry:
                 if retry_emitted >= retry_budget:
                     continue
