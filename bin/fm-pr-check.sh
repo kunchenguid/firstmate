@@ -79,10 +79,17 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
 fi
 
 # Same reasoning for Gitea: refuse to arm a watch the poll could never fire,
-# whether tea is absent or its login for this instance is not configured.
+# whether tea or jq is absent, or the login for this instance is not
+# configured. The poll reads the merged state out of tea's raw API JSON, so it
+# needs jq the way the GitLab poll does not - reporting it here is the one
+# place a missing JSON processor is visible rather than indistinguishable from
+# an unmerged pull request.
 if [ "$PROVIDER" = gitea ]; then
-  if ! command -v tea >/dev/null 2>&1; then
-    echo "error: watching a Gitea pull request requires tea on PATH" >&2
+  GITEA_MISSING=
+  command -v tea >/dev/null 2>&1 || GITEA_MISSING="tea"
+  command -v jq >/dev/null 2>&1 || GITEA_MISSING="${GITEA_MISSING:+$GITEA_MISSING and }jq"
+  if [ -n "$GITEA_MISSING" ]; then
+    echo "error: watching a Gitea pull request requires $GITEA_MISSING on PATH" >&2
     exit 1
   fi
   if ! tea login list -o csv 2>/dev/null | tail -n +2 | cut -d, -f1 | grep -qxF "$GITEA_LOGIN"; then
@@ -102,10 +109,10 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
-# For Gitea the head is read through tea when jq is available to pull head.sha
-# out of the raw API JSON; when jq is absent the task records no pr_head, and
-# bin/fm-pr-merge.sh reads the Gitea head live at merge time the same way it
-# does for GitLab.
+# For Gitea the head is read through tea, pulling head.sha out of the raw API
+# JSON with jq (a Gitea watch requirement, checked above); bin/fm-pr-merge.sh
+# still reads the Gitea head live at merge time and treats a recorded value
+# that disagrees as stale, the same as for GitLab.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then

@@ -322,7 +322,7 @@ make_gitlab_case() {
 
 # --- Gitea fixture --------------------------------------------------------------
 GITEA_BASE_URL=http://alps:3222
-GITEA_LOGIN_NAME=firstmate-alps
+GITEA_LOGIN_NAME=firstmate-alps-3222
 GITEA_OWNER=babbarc
 GITEA_REPO=dotfiles
 GITEA_PR_URL="$GITEA_BASE_URL/$GITEA_OWNER/$GITEA_REPO/pulls/7"
@@ -342,7 +342,7 @@ case "$1" in
   login)
     [ "$2" = list ] || exit 0
     printf 'Name,URL,SSH Host,User,Default\n'
-    IFS=, read -ra _l <<< "${FM_TEST_TEA_LOGINS-firstmate-alps}"
+    IFS=, read -ra _l <<< "${FM_TEST_TEA_LOGINS-firstmate-alps-3222}"
     for _n in "${_l[@]}"; do
       [ -n "$_n" ] || continue
       printf '%s,http://alps:3222,,babbarc,true\n' "$_n"
@@ -1889,10 +1889,10 @@ test_gitea_verified_merge_records_and_confirms() {
   expect_code 0 "$rc" "gitea-verified: fm-pr-merge should merge and confirm"
   assert_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
     "gitea-verified: the canonical URL was not recorded"
-  grep -qF 'pr merge --repo babbarc/dotfiles --login firstmate-alps --style squash 7' "$case_dir/tea.log" \
+  grep -qF 'pr merge --repo babbarc/dotfiles --login firstmate-alps-3222 --style squash 7' "$case_dir/tea.log" \
     || fail "gitea-verified: tea was not asked to merge by owner/repo, derived login, and default squash style"
   [ -e "$case_dir/tea-merge-called" ] || fail "gitea-verified: the merge was never attempted"
-  grep -qF 'api --login firstmate-alps repos/babbarc/dotfiles/pulls/7' "$case_dir/tea.log" \
+  grep -qF 'api --login firstmate-alps-3222 repos/babbarc/dotfiles/pulls/7' "$case_dir/tea.log" \
     || fail "gitea-verified: the outcome was not read back through tea api"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "gitea-verified: a GitHub CLI was reached for a Gitea URL"
   pass "fm-pr-merge merges a Gitea pull request and records it only after a merged readback"
@@ -1949,7 +1949,7 @@ printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
 case_dir=$(dirname "$FM_TEST_TEA_JSON")
 case "$1" in
   login) [ "$2" = list ] || exit 0
-    printf 'Name,URL,SSH Host,User,Default\nfirstmate-alps,http://alps:3222,,babbarc,true\n'; exit 0 ;;
+    printf 'Name,URL,SSH Host,User,Default\nfirstmate-alps-3222,http://alps:3222,,babbarc,true\n'; exit 0 ;;
   api)
     [ ! -e "$case_dir/tea-merge-called" ] || exit 1
     cat "$FM_TEST_TEA_JSON"; exit 0 ;;
@@ -2018,7 +2018,7 @@ test_gitea_missing_tool_and_allowlist_refuse_before_recording() {
   rc=$?
   set -e
   expect_code 1 "$rc" "gitea-login-missing: fm-pr-merge should refuse"
-  case "$out" in *"needs a tea login named 'firstmate-alps'"*) ;; *) fail "gitea-login-missing: refusal did not name the login: $out" ;; esac
+  case "$out" in *"needs a tea login named 'firstmate-alps-3222'"*) ;; *) fail "gitea-login-missing: refusal did not name the login: $out" ;; esac
   assert_no_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
     "gitea-login-missing: state was recorded despite the unconfigured login"
   pass "fm-pr-merge refuses a Gitea merge for a missing tool, a non-allow-listed instance, or an unconfigured login before recording"

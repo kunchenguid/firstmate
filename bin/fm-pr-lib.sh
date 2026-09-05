@@ -234,19 +234,35 @@ fm_pr_gitea_base_url_valid() {  # <base-url>
 }
 
 # The tea login name firstmate uses for a Gitea instance, derived from the
-# instance base URL's host with "." replaced by "-": "firstmate-<host>". Both
-# the arming paths and the byte-static poll derive it the same way from the
-# same base URL, so no login name is ever stored - the poll needs no config
-# read and no extra per-task artifact to know which tea login to use.
+# instance base URL as "firstmate-<host>-<port>" (host with "." replaced by
+# "-"). The port is always part of the identity - the explicit port when the
+# base URL carries one, otherwise the scheme default (443 for https, 80 for
+# http) - so two allow-listed instances on the same host but different ports,
+# or the same host:port under different schemes, never collide on one login
+# name. Both the arming paths and the byte-static poll derive it the same way
+# from the same base URL, so no login name is ever stored - the poll needs no
+# config read and no extra per-task artifact to know which tea login to use.
 fm_pr_gitea_derive_login() {  # <base-url>
-  local url=${1-} host
+  local url=${1-} scheme authority host port
   local LC_ALL=C
-  host=${url#*://}
-  host=${host%%:*}
+  case "$url" in
+    http://*) scheme=http; authority=${url#http://} ;;
+    https://*) scheme=https; authority=${url#https://} ;;
+    *) return 1 ;;
+  esac
+  case "$authority" in
+    */*|'') return 1 ;;
+    *:*) host=${authority%:*}; port=${authority##*:} ;;
+    *) host=$authority; port= ;;
+  esac
   case "$host" in
     ''|*[!a-z0-9.-]*) return 1 ;;
   esac
-  printf 'firstmate-%s\n' "${host//./-}"
+  if [ -z "$port" ]; then
+    case "$scheme" in https) port=443 ;; *) port=80 ;; esac
+  fi
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'firstmate-%s-%s\n' "${host//./-}" "$port"
 }
 
 # Read config/gitea-instances and, when <base-url> matches a configured line's
@@ -254,7 +270,7 @@ fm_pr_gitea_derive_login() {  # <base-url>
 # return 0. Return non-zero when the file is absent, unreadable, or has no
 # matching line. A line is one instance base URL, optionally followed by
 # whitespace and the tea login name; when present that second field is only
-# accepted when it equals the derived "firstmate-<host>", because the
+# accepted when it equals the derived "firstmate-<host>-<port>", because the
 # byte-static poll always re-derives the login rather than reading this file,
 # so a divergent name would arm a watch that silently never fires. Blank lines
 # and lines whose first non-blank character is "#" are ignored. This is the

@@ -185,7 +185,7 @@ case "$1" in
   login)
     [ "$2" = list ] || exit 0
     printf 'Name,URL,SSH Host,User,Default\n'
-    IFS=, read -ra _logins <<< "${FM_TEST_TEA_LOGINS-firstmate-alps}"
+    IFS=, read -ra _logins <<< "${FM_TEST_TEA_LOGINS-firstmate-alps-3222}"
     for _l in "${_logins[@]}"; do
       [ -n "$_l" ] || continue
       printf '%s,http://alps:3222,,firstmate,true\n' "$_l"
@@ -199,6 +199,12 @@ case "$1" in
     _mergeable=${FM_TEST_TEA_MERGEABLE-true}
     _head=${FM_TEST_TEA_HEAD:-0123456789abcdef0123456789abcdef01234567}
     [ "${FM_TEST_TEA_API_GARBAGE:-0}" = 0 ] || { printf 'not json\n'; exit 0; }
+    if [ "${FM_TEST_TEA_API_NESTED_TRUE:-0}" != 0 ]; then
+      # Top-level merged is false, but a nested object also carries a "merged"
+      # key set true - a top-level-anchored read must not be fooled by it.
+      printf '{"state":"closed","merged":false,"head":{"sha":"%s"},"base":{"repo":{"merged":true}},"comments":[{"merged":true}]}\n' "$_head"
+      exit 0
+    fi
     printf '{"state":"%s","merged":%s,"mergeable":%s,"head":{"sha":"%s"},"html_url":"http://alps:3222/o/r/pulls/1"}\n' \
       "$_state" "$_merged" "$_mergeable" "$_head"
     exit 0
@@ -216,6 +222,10 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/tea"
+  # The Gitea poll and merge paths parse tea's raw API JSON with the real jq,
+  # and BASE_PATH is deliberately restricted, so expose it here rather than
+  # depending on the host keeping jq in one of those directories.
+  ln -sf "$REAL_JQ" "$fakebin/jq"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -1477,7 +1487,7 @@ EOF
 }
 
 test_gitea_merge_watch() {
-  local dir state out rc url notea bindir entry name
+  local dir state out rc url notea nojq bindir entry name
   dir=$(make_case gitea-merge-watch)
   state="$dir/home/state"
   url=http://alps:3222/babbarc/dotfiles/pulls/7
@@ -1507,10 +1517,24 @@ babbarc/dotfiles
   out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
   [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line for a merged pull request"
 
-  # tea is addressed by the derived login and the owner/repo slug, and the poll
-  # re-derives that login from the base URL rather than reading any config.
-  grep -qF -- 'api --login firstmate-alps repos/babbarc/dotfiles/pulls/7' "$dir/tea.log" \
-    || fail "Gitea poll did not address tea by the derived login and repo slug"
+  # A nested "merged": true anywhere else in a compatible response must not be
+  # read as a merge: only the TOP-LEVEL pull request merged boolean wakes.
+  out=$(FM_TEST_TEA_API_NESTED_TRUE=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a nested merged:true while the top-level field was false"
+
+  # tea is addressed by the port-qualified derived login and the owner/repo
+  # slug, and the poll re-derives that login from the base URL, not any config.
+  grep -qF -- 'api --login firstmate-alps-3222 repos/babbarc/dotfiles/pulls/7' "$dir/tea.log" \
+    || fail "Gitea poll did not address tea by the port-qualified derived login and repo slug"
+
+  # Two allow-listed instances on the same host but different ports resolve to
+  # distinct tea logins.
+  [ "$(fm_pr_gitea_derive_login http://alps:3222)" = firstmate-alps-3222 ] \
+    || fail "derived Gitea login dropped the explicit port"
+  [ "$(fm_pr_gitea_derive_login http://alps:4000)" != "$(fm_pr_gitea_derive_login http://alps:3222)" ] \
+    || fail "two Gitea instances on one host collided on one derived login"
+  [ "$(fm_pr_gitea_derive_login https://gitea.example.com)" = firstmate-gitea-example-com-443 ] \
+    || fail "derived Gitea login did not default the port from the https scheme"
 
   # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
   # the stored URL exactly.
@@ -1548,7 +1572,7 @@ babbarc/dotfiles
   out=$(FM_TEST_TEA_LOGINS=some-other-login run_check_entry "$dir" task-d "$url" 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with the derived login unconfigured"
-  case "$out" in *"needs a tea login named 'firstmate-alps'"*) ;; *) fail "unconfigured-login Gitea arming did not name the login" ;; esac
+  case "$out" in *"needs a tea login named 'firstmate-alps-3222'"*) ;; *) fail "unconfigured-login Gitea arming did not name the login" ;; esac
   [ ! -e "$state/task-d.check.sh" ] || fail "login-refused Gitea arming left a poll armed"
 
   notea="$dir/notea"
@@ -1573,6 +1597,31 @@ EOF
   [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with tea absent"
   case "$out" in *"requires tea on PATH"*) ;; *) fail "tea-absent Gitea arming did not report the missing CLI" ;; esac
   [ ! -e "$state/task-e.check.sh" ] || fail "tea-absent Gitea arming left a poll armed"
+
+  # jq is a Gitea watch requirement too, because the poll reads the merged
+  # state out of tea's JSON; a missing jq is reported at arm time.
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  write_task_meta "$dir" task-f
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" PATH="$nojq" "$PR_CHECK" task-f "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with jq absent"
+  case "$out" in *"requires jq on PATH"*) ;; *) fail "jq-absent Gitea arming did not report the missing tool: $out" ;; esac
+  [ ! -e "$state/task-f.check.sh" ] || fail "jq-absent Gitea arming left a poll armed"
 
   pass "Gitea pull requests are watched only when allow-listed and never wake falsely"
 }
