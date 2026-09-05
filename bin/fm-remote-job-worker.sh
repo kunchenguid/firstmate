@@ -339,6 +339,9 @@ worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
 
 worker_stop_recorded_execution() { # <job-dir>
   local job=$1 kind file pid attempt still_alive recorded_start actual_start snapshot
+  local attempt_limit=${FM_REMOTE_JOB_TEST_STOP_ATTEMPTS:-100}
+  case "$attempt_limit" in ''|*[!0-9]*) attempt_limit=100 ;; esac
+  [ "$attempt_limit" -ge 1 ] && [ "$attempt_limit" -le 100 ] || attempt_limit=100
   for kind in process group; do
     case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
     [ ! -e "$file" ] && [ ! -L "$file" ] && continue
@@ -349,7 +352,7 @@ worker_stop_recorded_execution() { # <job-dir>
     wait "$pid" 2>/dev/null || true
   done
   attempt=0
-  while [ "$attempt" -lt 100 ]; do
+  while [ "$attempt" -lt "$attempt_limit" ]; do
     attempt=$((attempt + 1))
     still_alive=0
     for kind in process group; do

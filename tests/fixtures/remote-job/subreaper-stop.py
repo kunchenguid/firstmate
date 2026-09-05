@@ -48,7 +48,7 @@ def pid_reuse_case(repo, mode=None):
     for path in (root / "bin", state, account, outside):
         path.mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("fixture\n")
-    if mode == "reclaim":
+    if mode in ("reclaim", "lease"):
         for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
             shutil.copy2(repo / "bin" / name, root / "bin" / name)
     else:
@@ -57,6 +57,8 @@ def pid_reuse_case(repo, mode=None):
     environment = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                        FM_REMOTE_JOB_STATE_ROOT=str(state),
                        FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO=str(fifo), TZ="UTC0", LC_ALL="C")
+    if mode == "reclaim":
+        environment["FM_REMOTE_JOB_TEST_STOP_ATTEMPTS"] = "2"
     leader = stop = unrelated = reclaim_worker = None
     release_fd = None
     try:
@@ -77,11 +79,28 @@ def pid_reuse_case(repo, mode=None):
             (claim / "group_start").write_text(legacy_start)
             (claim.parent / "stdout").touch()
             (claim.parent / "stderr").touch()
-        if mode != "reclaim":
+        if mode == "lease":
+            requested = fixture / "requested"
+            shutil.copytree(root, requested, symlinks=True)
+            lock = state / "supervisor.lock"
+            lock.mkdir()
+            command = subprocess.check_output(
+                ["/bin/ps", "-p", str(leader.pid), "-o", "command="], text=True)
+            (lock / "pid").write_text(f"{leader.pid}\n")
+            (lock / "start").write_text(f"{leader_start}\n")
+            (lock / "command").write_text(command)
+            (lock / "root").write_text(f"{root}\n")
+            stop = subprocess.Popen(
+                ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; '
+                 'fm_remote_job_start_linux_worker "$2" "$HOME"',
+                 "fixture", str(repo), str(requested)],
+                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elif mode != "reclaim":
             stop = subprocess.Popen(
                 ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; fm_remote_job_stop_worker_tree "$2"',
                  "fixture", str(repo), str(leader.pid)],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if mode != "reclaim":
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
@@ -116,16 +135,27 @@ def pid_reuse_case(repo, mode=None):
                 reclaim_worker = subprocess.Popen(
                     [str(root / "bin/fm-remote-job-worker.sh"), "--serve"], env=environment,
                     cwd=root, stdout=subprocess.DEVNULL, stderr=log, text=True)
-                deadline = time.monotonic() + 20
+                deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if "NEEDING MANUAL CLEANUP" in reclaim_log.read_text():
                         break
                     assert reclaim_worker.poll() is None, reclaim_log.read_text()
+                    assert unrelated.poll() is None, "replacement-worker reclaim killed the recycled group"
                     time.sleep(0.05)
             report = reclaim_log.read_text()
             assert "NEEDING MANUAL CLEANUP" in report, report
             assert f"surviving pid {unrelated.pid}" in report, report
             assert unrelated.poll() is None, "replacement-worker reclaim signalled a recycled group"
+            return 0
+        if mode == "lease":
+            os.write(release_fd, b"release\n")
+            os.close(release_fd)
+            release_fd = None
+            stdout, stderr = stop.communicate(timeout=10)
+            assert stop.returncode != 0, (stdout, stderr)
+            assert "no longer matches validated identity" in stderr, (stdout, stderr)
+            assert leader_start in stderr, (stdout, stderr)
+            assert unrelated.poll() is None, "mismatched supervisor replacement signalled a recycled PID"
             return 0
         os.write(release_fd, b"release\n")
         os.close(release_fd)
@@ -223,15 +253,14 @@ def worker_environment(queue, timezone="UTC0", locale_name="C"):
     return env
 
 
-def run_call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None,
-             timeout=20):
+def run_call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None):
     env = worker_environment(queue, timezone, locale_name)
     if environment_overrides:
         env.update(environment_overrides)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        wait_for(lambda: proc.poll() is not None, timeout)
+        wait_for(lambda: proc.poll() is not None, 20)
         out, err = proc.communicate()
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     finally:
@@ -312,7 +341,7 @@ def run_kernel_pid_reuse_case(mode=None):
     for _ in range(3):
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                    timeout=30)
+                                    timeout=40)
         except subprocess.TimeoutExpired:
             return "private user/PID namespace setup timed out"
         if "legacy replacement crossed the ps lstart second boundary" not in result.stdout:
@@ -326,9 +355,12 @@ def run_kernel_pid_reuse_case(mode=None):
 
 
 def queue_process_identity(pid, queue):
-    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
-    entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
     assert b"FM_REMOTE_JOB_STATE_ROOT=" + os.fsencode(queue) in entries
     assert os.fsencode(worker) in args
     return fields[19]
@@ -337,7 +369,20 @@ def queue_process_identity(pid, queue):
 def assert_queue_unchanged(queue, expected):
     for pid, start in expected.items():
         assert queue_process_identity(pid, queue) == start, "another queue replaced an owned process"
-    assert not queue_processes(queue) - expected.keys(), "another queue gained an unexpected process"
+    owner_pids = {
+        int((queue / "supervisor.lock/pid").read_text()),
+        int((queue / "worker.pid").read_text()),
+    }
+    assert owner_pids == set(expected), "another queue published different owners"
+    extras = queue_processes(queue) - expected.keys()
+    if extras:
+        extra_starts = {pid: queue_process_identity(pid, queue) for pid in extras}
+        time.sleep(0.1)
+        persistent = {
+            pid for pid, start in extra_starts.items()
+            if start is not None and queue_process_identity(pid, queue) == start
+        }
+        assert not persistent, "another queue gained a persistent unexpected process"
 
 
 def utf8_locale():
@@ -453,6 +498,11 @@ done
         print(f"skip - replacement-worker legacy claim reuse containment: {reclaim_skip}")
     else:
         print("ok - replacement-worker reclaim preserves a legacy recycled group")
+    lease_skip = run_kernel_pid_reuse_case("lease")
+    if lease_skip:
+        print(f"skip - validated supervisor lease PID reuse containment: {lease_skip}")
+    else:
+        print("ok - mismatched supervisor replacement refuses a recycled PID")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
@@ -630,12 +680,15 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     malformed_claim = next((malformed_queue / "jobs").glob("job-*/.claim"))
     (malformed_claim / "group_start").write_text("")
     malformed_serving = int((malformed_queue / "worker.pid").read_text())
+    malformed_started = time.monotonic()
     malformed_result = run_call(f"fm_remote_job_stop_worker_tree {malformed_serving}",
-                                malformed_queue, timeout=30)
+                                malformed_queue)
+    assert time.monotonic() - malformed_started < 5
     assert malformed_result.returncode != 0, (malformed_result.stdout, malformed_result.stderr)
     assert f"invalid armed claim {malformed_claim}" in malformed_result.stderr
     assert "armed claim record is unreadable or malformed" in malformed_result.stderr
     assert process_alive(malformed_child), "malformed claim caused an unvalidated group signal"
+    wait_for(lambda: not queue_processes(malformed_queue))
     assert set(processes()) == original, "malformed claim stop reached another queue"
     os.kill(malformed_child, signal.SIGKILL)
     wait_for(lambda: not process_alive(malformed_child))
@@ -715,8 +768,14 @@ printf 'executed\n' > "$HOME/claim-side-effect"
         wait_for(lambda: set(processes()) == original)
     real_other = fixture / "real-other-queue"
     call(start, real_other)
-    wait_for(lambda: len(queue_processes(real_other)) == 2)
-    unrelated = {pid: queue_process_identity(pid, real_other) for pid in queue_processes(real_other)}
+    wait_for(lambda: (real_other / "supervisor.lock/pid").is_file() and
+             (real_other / "worker.pid").is_file())
+    unrelated_pids = {
+        int((real_other / "supervisor.lock/pid").read_text()),
+        int((real_other / "worker.pid").read_text()),
+    }
+    unrelated = {pid: queue_process_identity(pid, real_other) for pid in unrelated_pids}
+    assert None not in unrelated.values()
     serving = int((queue / "worker.pid").read_text())
     supervisor = int((queue / "supervisor.lock/pid").read_text())
     os.kill(supervisor, signal.SIGSTOP)
