@@ -21,9 +21,13 @@
 #   - --with-captain-permission is given without the captain's own words;
 #   - the app is in the middle of a run (its own store lock is held);
 #   - the live commit is not an ancestor of <sha>;
-#   - the sealed bundle for <sha> cannot be obtained (the build artifact has
-#     expired past its retention, or that commit never built one). There is no
-#     fallback to a bundle built for some other commit;
+#   - the sealed bundle for <sha> cannot be obtained. There is no fallback to a
+#     bundle built for some other commit, and the refusal says which of the four
+#     reasons it is: no build has appeared for that commit yet, the build is
+#     still running, the build finished without succeeding, or the artifact has
+#     expired past its retention. The first two are races - a deploy attempted
+#     before the commit's own build finished - and say so rather than reporting
+#     the bundle as gone;
 #   - a start-time requirement <sha>'s own units make of a host-owned file does
 #     not hold yet. Those validators run read-only, from <sha>'s own copy, as
 #     the user the unit runs as, BEFORE anything is stopped, and the refusal
@@ -300,7 +304,23 @@ if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
         --json databaseId,headSha --limit 100 -q \
         ".[] | select(.headSha==\"$TARGET_SHA\") | .databaseId" 2>/dev/null | head -1) || true
     fi
-    [ -n "$run_id" ] || refuse "no build was found for $TARGET_SHA, so its front-end bundle cannot be obtained"
+    # A deploy that follows a merge can arrive before that commit's own build
+    # does. Asking the run for its state is what separates "not yet" from
+    # "gone": both leave nothing to download, and only one of them is a
+    # problem. Saying the wrong one sends the captain looking for a broken
+    # build that is merely a few minutes behind.
+    [ -n "$run_id" ] || refuse "no build has appeared yet for $TARGET_SHA, so its front-end bundle cannot be obtained; if the commit only just merged, its build has not started"
+    run_state=$(gh run view "$run_id" --repo "$GH_REPO" --json status,conclusion \
+      -q '"\(.status) \(.conclusion)"' 2>/dev/null) || run_state=''
+    case "$run_state" in
+      completed*) ;;
+      '') ;; # the run's state could not be read; fall through to the download
+      *) refuse "the build for $TARGET_SHA has not finished yet (it is ${run_state%% *}), so its front-end bundle does not exist to download; it can go live once that build finishes" ;;
+    esac
+    case "$run_state" in
+      'completed success') ;;
+      completed*) refuse "the build for $TARGET_SHA finished without succeeding (${run_state#* }), so it produced no front-end bundle to deploy" ;;
+    esac
     gh run download "$run_id" --repo "$GH_REPO" -n "$FM_DEPLOY_TGT_bundle_artifact" -D "$BUNDLE_DIR" >/dev/null 2>&1 \
       || refuse "the front-end bundle built for $TARGET_SHA is no longer available for download (builds are kept only briefly), and this machine cannot build one"
     [ -n "$(ls -A "$BUNDLE_DIR" 2>/dev/null)" ] || refuse "the downloaded front-end bundle for $TARGET_SHA is empty"
@@ -332,7 +352,7 @@ PRECONDITIONS=$(fm_deploy_preconditions "$REPO" "$TARGET_SHA" "$CO" "$PRECHECK_D
 mapfile -t PRECHECKS < <(printf '%s\n' "$PRECONDITIONS" | grep "^check	" || true)
 PRECHECK_SKIPPED=$(printf '%s\n' "$PRECONDITIONS" | grep -c "^skip	" || true)
 if [ "${#PRECHECKS[@]}" -gt 0 ]; then
-  archive_dirs=$(printf '%s\n' "${PRECHECKS[@]}" | tr ' \t' '\n\n' \
+  archive_dirs=$(printf '%s\n' "${PRECHECKS[@]}" | tr '[:blank:]' '\n' \
     | sed -n "s#^$PRECHECK_DIR/\([^/]*\)/.*#\1#p" | sort -u | tr '\n' ' ')
   PRECHECK_MADE=1
   fm_deploy_ssh "sudo sh -c 'rm -rf \"$PRECHECK_DIR\" && install -d -o root -g root -m 0755 \"$FM_DEPLOY_TGT_rollback_root\" \"$PRECHECK_DIR\" && git -C \"$CO\" archive '$TARGET_SHA' $archive_dirs | tar -C \"$PRECHECK_DIR\" -x && chmod -R a+rX \"$PRECHECK_DIR\"'" </dev/null \

@@ -13,6 +13,14 @@
 # nothing here and exits 0, so this changes nothing for every other project and
 # every secondmate home.
 #
+# config/deploy-freeze/<project> pauses the automatic deploy without touching
+# the policy. Pausing by moving the policy aside loses the reserved-surface
+# list and the checkout, unit and bundle settings with it, so the way back on
+# is a restore from memory; a freeze file is one file to create and one to
+# delete. The freeze stops only what this script does on its own: a deploy the
+# captain runs by hand still goes through, because the captain asking for it is
+# the decision the freeze exists to reserve.
+#
 # It deploys ONLY when everything merged and not yet live is auto-deployable. A
 # range that touches a captain-reserved surface is never deployed here under any
 # circumstances; it is reported and left for the captain.
@@ -38,6 +46,10 @@ PROJECT=$(basename "$PROJECT_PATH")
 
 POLICY="$HOME_DIR/config/deploy-policy/$PROJECT"
 [ -f "$POLICY" ] && [ ! -L "$POLICY" ] || exit 0
+
+FREEZE="$HOME_DIR/config/deploy-freeze/$PROJECT"
+FROZEN=0
+[ -f "$FREEZE" ] && [ ! -L "$FREEZE" ] && FROZEN=1
 
 # One captain-facing line, through the queue this home already uses.
 queue() {
@@ -74,6 +86,13 @@ captain_paths=$(field pending_captain_paths)
 target=$(field target_sha)
 
 if [ "${pending:-0}" = 0 ]; then
+  exit 0
+fi
+
+if [ "$FROZEN" -eq 1 ]; then
+  # Said once per merged change rather than kept quiet: a freeze that stops
+  # reporting is a freeze everyone forgets is on.
+  queue "$PROJECT has $pending merged change(s) waiting to go live, and going live on its own is paused. Run /deploy to send them yourself, or lift the pause."
   exit 0
 fi
 

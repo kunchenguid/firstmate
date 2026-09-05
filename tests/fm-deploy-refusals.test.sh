@@ -23,6 +23,11 @@
 #   (g) every refusal is recorded in the durable ledger
 #   (h) the merge trigger is completely inert for a project with no policy
 #   (i) the merge trigger never deploys a captain-reserved range
+#   (j) each of the four reasons a sealed bundle cannot be obtained is refused
+#       as itself: no build yet, still running, finished without succeeding,
+#       and a green build whose artifact has expired
+#   (k) a deploy freeze pauses the merge trigger without touching the policy,
+#       and leaves a hand-run deploy working
 #   (j) a clone with no origin/HEAD still resolves its target through the
 #       documented origin/main fallback
 set -u
@@ -139,7 +144,11 @@ case "${1:-} ${2:-}" in
   'run list')
     printf '[{"databaseId":4242,"headSha":"%s"}]\n' "${FMTEST_TARGET_SHA:-}"
     ;;
+  'run view')
+    printf '%s\n' "${FMTEST_BUILD_STATE:-completed success}"
+    ;;
   'run download')
+    [ -z "${FMTEST_DOWNLOAD_FAILS:-}" ] || exit 1
     out=''
     while [ "$#" -gt 0 ]; do
       [ "$1" = -D ] && { shift; out=$1; }
@@ -200,7 +209,7 @@ test_the_permission_flag_alone_is_not_permission() {
 test_the_captains_words_let_the_same_range_through() {
   local out rc=0
   make_case granted-permission
-  FMTEST_GH_RC=0 out=$(run_deploy demo "$DESIGN" \
+  out=$(FMTEST_GH_RC=0 run_deploy demo "$DESIGN" \
     --with-captain-permission "yes, ship the new cockpit design") || rc=$?
   # It proceeds past the captain's gate: whatever it does next, it is no longer
   # refusing on permission grounds.
@@ -239,6 +248,7 @@ test_an_unobtainable_bundle_refuses_before_touching_the_machine() {
   out=$(run_deploy demo "$PLAIN") || rc=$?
   [ "$rc" -ne 0 ] || fail "missing-bundle: deployed a version whose front end was never obtained"
   assert_contains "$out" "$PLAIN" "missing-bundle"
+  assert_contains "$out" "no build has appeared yet" "missing-bundle"
   assert_machine_untouched missing-bundle
   pass "an unobtainable sealed bundle refuses before anything on the machine changes"
 }
@@ -327,7 +337,83 @@ test_the_merge_trigger_never_deploys_a_reserved_range() {
   pass "the merge trigger reports a reserved range to the captain instead of deploying it"
 }
 
+test_a_build_still_running_is_a_race_not_a_missing_bundle() {
+  local out rc=0
+  make_case build-running
+  # The deploy that follows a merge can outrun the commit's own build. That is
+  # the incident this covers: the captain was told the bundle was gone when it
+  # simply did not exist yet.
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' \
+    run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "build-running: deployed against a build that had not finished"
+  assert_contains "$out" "has not finished yet" build-running
+  case "$out" in
+    *"no longer available"* | *"kept only briefly"*)
+      fail "build-running: a build still in progress was reported as an expired bundle: $out"
+      ;;
+  esac
+  assert_machine_untouched build-running
+  pass "a build that has not finished yet is refused as a race, not as a bundle that expired"
+}
+
+test_a_build_that_failed_is_named_as_a_failed_build() {
+  local out rc=0
+  make_case build-failed
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed failure' \
+    run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "build-failed: deployed against a build that did not succeed"
+  assert_contains "$out" "finished without succeeding" build-failed
+  assert_machine_untouched build-failed
+  pass "a build that finished without succeeding is refused as that, not as a missing bundle"
+}
+
+test_an_expired_artifact_is_still_reported_as_expired() {
+  local out rc=0
+  make_case build-expired
+  # The one case that is genuinely about retention: the build for this commit
+  # ran and succeeded, and only the artifact is gone. Splitting the races out
+  # must not cost this path its own message.
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed success' FMTEST_DOWNLOAD_FAILS=1 \
+    run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "build-expired: deployed a version whose front end was never downloaded"
+  assert_contains "$out" "no longer available for download" build-expired
+  assert_machine_untouched build-expired
+  pass "a green build whose artifact has expired is still reported as an expired artifact"
+}
+
+test_a_deploy_freeze_pauses_the_trigger_but_not_the_captain() {
+  local queued out rc=0
+  make_case trigger-frozen
+  fm_write_meta "$HOME_DIR/state/task-f.meta" "project=$REPO" "worktree=$REPO"
+  mkdir -p "$HOME_DIR/config/deploy-freeze"
+  : > "$HOME_DIR/config/deploy-freeze/demo"
+
+  ( PATH="$FAKEBIN:$PATH" FM_DEPLOY_SYNC_TIMEOUT=5 \
+      "$ROOT/bin/fm-deploy-trigger.sh" "$HOME_DIR" "$HOME_DIR/state" task-f ) \
+    || fail "trigger-frozen: the trigger reported a failure for a frozen project"
+  assert_machine_untouched trigger-frozen
+  # The policy is untouched, so the reserved-surface list survives the pause.
+  [ -f "$HOME_DIR/config/deploy-policy/demo" ] \
+    || fail "trigger-frozen: the freeze removed the policy it was supposed to leave alone"
+  queued=$(cat "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queued" "going live on its own is paused" trigger-frozen
+  assert_absent "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "trigger-frozen: a frozen project still reached the deploy path"
+
+  # The captain running it by hand is exactly what the freeze reserves, so that
+  # path must stay open: it gets past the freeze and refuses for its own reason.
+  out=$(run_deploy demo "$PLAIN") || rc=$?
+  case "$out" in
+    *paused*) fail "trigger-frozen: the freeze blocked a deploy the captain ran by hand: $out" ;;
+  esac
+  pass "a deploy freeze pauses the merge trigger, keeps the policy, and leaves a hand-run deploy working"
+}
+
 test_a_reserved_range_refuses_before_touching_the_machine
+test_a_build_still_running_is_a_race_not_a_missing_bundle
+test_a_build_that_failed_is_named_as_a_failed_build
+test_an_expired_artifact_is_still_reported_as_expired
+test_a_deploy_freeze_pauses_the_trigger_but_not_the_captain
 test_the_permission_flag_alone_is_not_permission
 test_the_captains_words_let_the_same_range_through
 test_a_run_in_progress_refuses_before_touching_the_machine

@@ -257,7 +257,7 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
-## Deploy policy and target (config/deploy-policy, config/deploy-target, state/deploy-ledger)
+## Deploy policy, freeze and target (config/deploy-policy, config/deploy-freeze, config/deploy-target, state/deploy-ledger)
 
 These three paths decide, for one project, what may go live without asking the captain and where it goes live.
 Both `config/` files are local, gitignored, and per home; a project with neither is simply not deploy-managed from this home, and every deploy entry point stays inert for it.
@@ -267,6 +267,12 @@ Absence is the off switch, and it is never read as permission.
 A pattern is a bash pattern in which `*` matches any characters including `/`, so `dashboard/v2/src/**` covers that whole subtree and `openspec/changes/dashboard-v21-*` covers every file under every directory whose name starts that way.
 The classifier applies these patterns to the whole range's changed-path set, never to one commit at a time, because a merge commit's own diff is empty and a per-commit walk would report a merged design change as free to ship.
 Everything the policy does not name deploys automatically once it merges.
+
+`config/deploy-freeze/<project>` pauses the automatic deploy for that project while leaving the policy in place.
+Any regular file at that path is the pause; its contents are never read, so a one-line note about who paused it and why costs nothing.
+It stops only what the merge trigger does on its own: a deploy the captain runs by hand still goes through, because the captain asking for it is the decision the pause exists to reserve.
+Pausing by moving the policy aside instead loses the reserved-surface list with it, which is why this file exists.
+While the pause is on, each merged change still produces one line saying how much is waiting, so a pause nobody lifts does not become a pause nobody remembers.
 
 `config/deploy-target/<project>` is a `key=value` file naming the machine that serves the project.
 It lives here rather than in a project repository because the host address, ssh user, and host paths belong in the operator's private record.
@@ -283,6 +289,7 @@ Optional keys are `python` (default `<checkout>/.venv/bin/python`), `ssh_options
 A rollback restores that version's front end from the copy set aside under `rollback_root` before the attempt, not from a build artifact, because artifact retention is short and a rollback is usually wanted long after it lapses.
 A completed rollback, and a version someone restored by hand, are each recorded distinctly from a deploy, so neither becomes the target of the next rollback.
 `bin/fm-deploy.sh --help` owns the exact results, flags, and the order the procedure runs in.
+A deploy that cannot obtain the sealed bundle says which of four reasons it is - no build has appeared for that commit yet, the build is still running, the build finished without succeeding, or the artifact expired - because the first two are a deploy that outran the commit's own build and the last two are not.
 
 [`bin/fm-deploy-status.sh`](../bin/fm-deploy-status.sh), [`bin/fm-deploy.sh`](../bin/fm-deploy.sh), and [`bin/fm-deploy-trigger.sh`](../bin/fm-deploy-trigger.sh) own their exact commands, flags, and refusals in their own headers and `--help`.
 
