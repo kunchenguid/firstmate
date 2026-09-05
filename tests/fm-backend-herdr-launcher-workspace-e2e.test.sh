@@ -113,10 +113,6 @@ tab_labels_of_workspace() {  # <workspace_id>
     | jq -r '[.result.tabs[]?.label] | sort | join(",")' 2>/dev/null
 }
 
-journal_field() {  # <presentation-journal> <key>
-  grep "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2-
-}
-
 # spawn_from_launcher <launcher-pane|""> <home> <task-id> <project> [extra fm-spawn args...]
 # Composes exactly the Herdr identity Herdr itself injects into a pane's
 # processes. An empty launcher pane means "this firstmate is not running inside
@@ -159,11 +155,9 @@ LAB_SOCKET=$(lab session list --json 2>/dev/null \
 # layout below opts out explicitly rather than depending on that default.
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/config"
-printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
 SM_ID="lwsm1"
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin" "$SM_HOME/data"
-printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf '%s\n' "$SM_ID" > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
@@ -171,7 +165,6 @@ printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/chart
 SM2_ID="lwsm2"
 SM2_HOME="$TMP_ROOT/secondmate-home-2"
 mkdir -p "$SM2_HOME/state" "$SM2_HOME/config" "$SM2_HOME/projects" "$SM2_HOME/bin" "$SM2_HOME/data"
-printf 'off\n' > "$SM2_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
 printf '%s\n' "$SM2_ID" > "$SM2_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
@@ -179,10 +172,6 @@ printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/char
 # A third primary-shaped home that keeps presentation spaces ON through the
 # historical empty opt-in file, so the default-on migration is exercised against
 # real Herdr while the opted-out homes above assert the flat layout in isolation.
-PRES_HOME="$TMP_ROOT/presentation-home"
-mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
-: > "$PRES_HOME/config/herdr-presentation-spaces"
-
 write_ship_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task
@@ -194,11 +183,10 @@ Verify the worker is placed in the correct workspace.
 EOF
 }
 
-for id in uniqA uniqB dupC dupD staleF smE presU presD; do
-  mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
+for id in uniqA uniqB dupC dupD staleF smE; do
+  mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id"
   write_ship_brief "$PRIMARY_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
-  write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
 done
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
@@ -249,33 +237,6 @@ UNIQB_PANE=$(grep '^herdr_pane_id=' "$UNIQB_META" | cut -d= -f2-)
   || fail "a crewmate launched from the 'firstmate' workspace must stay in it"
 pass "real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace"
 
-# --- 2b. presentation spaces ON: the projected child is created and bound
-#         UNDER the launcher's exact workspace, not collapsed into it ---------
-
-spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRES_HOME" presU "$PROJ" --mode no-mistakes --yolo off
-[ "$SPAWN_RC" -eq 0 ] || fail "a presentation-enabled spawn from a launcher pane failed"$'\n'"$(cat "$SPAWN_ERR")"
-PRESU_META="$PRES_HOME/state/presU.meta"
-record_worktree "$PRESU_META"
-PRESU_PANE=$(grep '^herdr_pane_id=' "$PRESU_META" | cut -d= -f2-)
-PRESU_WS=$(workspace_of_pane "$PRESU_PANE")
-[ -n "$PRESU_WS" ] || fail "could not read presU's workspace"
-[ "$PRESU_WS" != "$WS_PRIMARY" ] \
-  || fail "a projected worker must get its own disposable workspace, not be collapsed into its parent"
-case "$(label_of_workspace "$PRESU_WS")" in
-  "└ "*" · p:"*) : ;;
-  *) fail "presU's workspace is not a presentation projection: '$(label_of_workspace "$PRESU_WS")'" ;;
-esac
-PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
-[ -f "$PRESU_JOURNAL" ] || fail "a projected spawn did not leave its presentation journal"
-[ "$(journal_field "$PRESU_JOURNAL" version)" = 2 ] \
-  || fail "the projection did not publish an exact restart binding"$'\n'"$(cat "$PRESU_JOURNAL")"
-[ "$(journal_field "$PRESU_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY" ] \
-  || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
-[ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
-  || fail "the projection journal does not name its own workspace"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
-
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
 
@@ -323,34 +284,6 @@ pass "real herdr E2E: with two 'firstmate' workspaces, a worker spawned from ins
   || fail "the other same-labeled workspace was renamed"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the in-pane spawn stole focus from the captain's workspace"
 pass "real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved"
-
-# --- 3b. presentation spaces ON with a duplicated parent label: the projection
-#         still hangs off the launcher's exact workspace ---------------------
-
-spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRES_HOME" presD "$PROJ" --mode no-mistakes --yolo off
-[ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under a duplicated parent label failed"$'\n'"$(cat "$SPAWN_ERR")"
-PRESD_META="$PRES_HOME/state/presD.meta"
-record_worktree "$PRESD_META"
-PRESD_PANE=$(grep '^herdr_pane_id=' "$PRESD_META" | cut -d= -f2-)
-PRESD_WS=$(workspace_of_pane "$PRESD_PANE")
-[ -n "$PRESD_WS" ] || fail "could not read presD's workspace"
-PRESD_JOURNAL="$PRES_HOME/state/presD.herdr-presentation"
-[ "$(journal_field "$PRESD_JOURNAL" version)" = 2 ] \
-  || fail "the duplicate-label projection did not publish a version 2 binding"$'\n'"$(cat "$PRESD_JOURNAL" 2>/dev/null)"
-[ "$(journal_field "$PRESD_JOURNAL" parent_workspace_id)" = "$WS_PRIMARY_DUP" ] \
-  || fail "the duplicate-label projection journal did not bind the launcher's exact parent workspace"
-[ "$PRESD_WS" != "$WS_PRIMARY" ] && [ "$PRESD_WS" != "$WS_PRIMARY_DUP" ] \
-  || fail "a projected worker must not be collapsed into either same-labeled parent workspace"
-PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP" --arg child "$PRESD_WS" '
-  [range(0; (.result.workspaces | length)) as $i
-    | {i: $i, id: .result.workspaces[$i].workspace_id}]
-  | ((map(select(.id == $child)) | .[0].i) - (map(select(.id == $dup)) | .[0].i))')
-[ "$PRESD_ORDER" = 1 ] \
-  || fail "the projected child should sit immediately after the launcher's own workspace, offset was '$PRESD_ORDER'"
-[ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
-  || fail "the other same-labeled workspace was mutated by a projected spawn"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched"
 
 # --- 4. duplicate label with NO launcher identity refuses before publishing --
 

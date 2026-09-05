@@ -201,9 +201,7 @@ This family is the residual set that used to sit in `unclassified`, and it exist
 `standalone` enumerates its 28 members instead, and `unclassified` stays the always-serial home for anything nobody has classified yet.
 `tests/fm-test-run.test.sh` covers that split behaviorally: two `standalone` members run concurrently while an unmapped basename is refused under `--jobs` and still runs serially.
 
-Two scripts left the residual set rather than joining it.
-`tests/fm-backend-herdr-focus-flash-e2e.test.sh` is a real-Herdr lab regression and is now `real-herdr-gated`, which also moves it out of the portable serial lane and into the required Herdr lane; it had been gate-skipping on Linux CI, so that real-Herdr regression was not running anywhere.
-Its current live-backend result is recorded under [workspace-removal focus safety](verification/runtime-backends.md#workspace-removal-focus-safety).
+One script left the residual set rather than joining it.
 `tests/fm-claude-stop-autoarm-live-e2e.test.sh` gate-skips on its opt-in variable and is now `live-harness-optin`, since a candidate that gate-skips cannot prove concurrency.
 
 One member needs a current Pi to pass at all.

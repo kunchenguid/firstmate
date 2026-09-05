@@ -14,14 +14,12 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
+#      config/backlog-backend, config/backend,
 #      config/startup-memory-budget -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, Herdr
-#      presentation choice, and startup-memory budget inherit the
-#      primary's settings. For config/herdr-presentation-spaces, an absent
-#      primary file and an absent destination file both mean the same
-#      unconfigured default, so the generic absence mirror converges that item
+#      dispatch profiles, backlog backend, runtime-backend default, and
+#      startup-memory budget inherit the primary's settings. The generic
+#      absence mirror converges an absent item
 #      without deciding its release-dependent floor.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
@@ -291,7 +289,6 @@ test_propagate_lib() {
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
-  : > "$src/herdr-presentation-spaces"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -301,7 +298,6 @@ test_propagate_lib() {
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
-  [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
@@ -341,13 +337,12 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces"
+    "$src/backend"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
-  [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"
@@ -1003,7 +998,7 @@ new_world() {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
-    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/backend\nconfig/startup-memory-budget\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1414,61 +1409,6 @@ test_backend_inheritance_present_and_absent() {
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\nABSENT\n-----END config/backend-----' \
     "backend absence reread must use ABSENT token"
   pass "B12b backend inheritance: present values and primary absence converge exactly"
-}
-
-# config/herdr-presentation-spaces has an unconfigured default, so this item's
-# convergence is asserted through the preference the spawn gate actually reads
-# in the destination home, not through file presence alone: mirroring the primary's
-# absence must converge a secondmate to the same unconfigured default rather
-# than turning its projection off. The Herdr version floor that decides what
-# that default resolves to is a property of the running release, not of
-# inheritance, so it is pinned in tests/fm-backend-herdr.test.sh instead.
-sm_presentation_verdict() {  # <config-dir> -> on|off
-  bash -c '
-    . "$0/bin/backends/herdr.sh"
-    case "$(fm_backend_herdr_presentation_preference "$1")" in
-      off) printf "off\n" ;;
-      *) printf "on\n" ;;
-    esac
-  ' "$ROOT" "$1" 2>/dev/null
-}
-
-test_presentation_inheritance_default_on_and_opt_out() {
-  local w head out err status verdict
-  w=$(new_world presentation-inherit)
-  head=$(git -C "$w/main" rev-parse HEAD)
-  add_sm_worktree "$w" sm "$head"
-  err="$w/presentation-inherit.err"
-
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "presentation default push should succeed"
-  [ -e "$w/sm/config/herdr-presentation-spaces" ] \
-    && fail "primary default must not write an opt-out downstream"
-  verdict=$(sm_presentation_verdict "$w/sm/config")
-  [ "$verdict" = on ] || fail "primary default left the secondmate projection $verdict"
-
-  mkdir -p "$w/sm/config"
-  printf 'off\n' > "$w/sm/config/herdr-presentation-spaces"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "presentation reconverge push should succeed"
-  assert_contains "$out" "herdr-presentation-spaces: pushed - mirrored primary absence" \
-    "a local secondmate opt-out should reconverge on the primary default"
-  verdict=$(sm_presentation_verdict "$w/sm/config")
-  [ "$verdict" = on ] || fail "primary default did not reconverge a locally opted-out secondmate ($verdict)"
-
-  printf 'off\n' > "$w/home/config/herdr-presentation-spaces"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "presentation opt-out push should succeed"
-  assert_contains "$out" "herdr-presentation-spaces: pushed" "explicit opt-out should report pushed"
-  verdict=$(sm_presentation_verdict "$w/sm/config")
-  [ "$verdict" = off ] || fail "explicit primary opt-out left the secondmate projection $verdict"
-
-  : > "$w/home/config/herdr-presentation-spaces"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "presentation legacy opt-in push should succeed"
-  verdict=$(sm_presentation_verdict "$w/sm/config")
-  [ "$verdict" = on ] || fail "a legacy primary opt-in file left the secondmate projection $verdict"
-  pass "B12c presentation inheritance: the primary default converges on, and only an explicit opt-out propagates off"
 }
 
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
@@ -2571,7 +2511,6 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
-test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge

@@ -145,7 +145,7 @@ MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
+# behavior test is the 200s stale-reclaim suite, and the slowest script in a
 # runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
 # once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
 # slowest real script, so this can only ever fire on a script that is genuinely
@@ -244,11 +244,9 @@ family_for_basename() {
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
-    fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
+    fm-backend-herdr-eventwait-smoke.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
-    fm-backend-herdr-focus-flash-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
       printf '%s\n' real-herdr-gated
@@ -292,7 +290,7 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
-    fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
+    fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-spawn-worktree-settle.test.sh|\
@@ -569,7 +567,6 @@ tests/fm-guard-stale-banner.test.sh 11218
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 20
 tests/fm-harness-adapter-references.test.sh 55
 tests/fm-harness-liveness-drift-live-e2e.test.sh 21
-tests/fm-herdr-session-cleanup.test.sh 6704
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-home-summary-refresh.test.sh 34793
@@ -1156,11 +1153,6 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
-      ;;
-    bin/fm-herdr-session-cleanup.sh)
-      printf '%s\n' session-bootstrap
-      printf '%s\n' real-herdr-gated
-      printf '%s\n' backend-dispatch
       ;;
     bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch

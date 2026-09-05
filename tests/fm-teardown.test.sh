@@ -1862,17 +1862,15 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
-test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
-  local case_dir log closed lock ready release holder_pid rc thlog
-  case_dir=$(make_case herdr-orphan-refusal)
+test_herdr_flat_teardown_closes_and_completes() {
+  local case_dir log closed rc thlog
+  case_dir=$(make_case herdr-flat-complete)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
-  # Record every treehouse invocation: the contended-lock refusal must fire
-  # BEFORE the isolated copy is returned, so phase 1 may not invoke it at all.
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
@@ -1881,60 +1879,16 @@ exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
 
-  lock=$(FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" PATH="$case_dir/fakebin:$PATH" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
-    || fail "herdr-orphan-refusal: could not resolve the fixture presentation lock path"
-  ready="$case_dir/lock-ready"; release="$case_dir/lock-release"
-  ROOT="$ROOT" LOCK="$lock" READY="$ready" RELEASE="$release" bash -c '
-    . "$ROOT/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$LOCK" || exit 1
-    : > "$READY"
-    while [ ! -e "$RELEASE" ]; do sleep 0.1; done
-    fm_lock_release "$LOCK"
-  ' &
-  holder_pid=$!
-  local waited=0
-  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
-  [ -e "$ready" ] || fail "herdr-orphan-refusal: the contending lock holder never started"
-
-  rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    : > "$release"; wait "$holder_pid" 2>/dev/null || true
-    fail "herdr-orphan-refusal: teardown reported success while the exact pane still existed under lock contention"
-  fi
-  [ -e "$case_dir/state/task-x1.meta" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the durable endpoint metadata"; }
-  [ -e "$case_dir/state/task-x1.status" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the task status record"; }
-  [ -e "$case_dir/state/task-x1.turn-ended" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the turn-end record"; }
-  assert_grep "presentation lock is contended" "$case_dir/stderr" \
-    "herdr-orphan-refusal: the pre-return refusal was not explained visibly"
-  if [ -s "$thlog" ]; then
-    : > "$release"; fail "herdr-orphan-refusal: the contended refusal still returned the isolated copy: $(cat "$thlog")"
-  fi
-  [ -d "$case_dir/wt" ] || { : > "$release"; fail "herdr-orphan-refusal: the contended refusal removed the isolated copy"; }
-  if [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "fm/task-x1" ]; then
-    : > "$release"; fail "herdr-orphan-refusal: the contended refusal dropped the task branch before refusing"
-  fi
-  if grep -q "teardown task-x1 complete" "$case_dir/stdout"; then
-    : > "$release"; fail "herdr-orphan-refusal: refusal still reported cleanup complete"
-  fi
-  if grep -q "^pane close" "$log"; then
-    : > "$release"; fail "herdr-orphan-refusal: an unlocked pane close was attempted under contention"
-  fi
-
-  : > "$release"
-  wait "$holder_pid" 2>/dev/null || true
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
-    || fail "herdr-orphan-refusal: the retry after lock release failed: $(cat "$case_dir/stderr2")"
-  [ -e "$closed" ] || fail "herdr-orphan-refusal: the retry never closed the pane under the lock"
-  [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
-  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-orphan-refusal: the successful retry left the metadata behind"
-  [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-orphan-refusal: the successful retry left the status record behind"
-  grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
-    || fail "herdr-orphan-refusal: the successful retry did not report completion"
-  pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-flat-complete: teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$closed" ] || fail "herdr-flat-complete: teardown never closed the exact pane"
+  [ -s "$thlog" ] || fail "herdr-flat-complete: teardown never returned the isolated copy"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-flat-complete: teardown left the metadata behind"
+  [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-flat-complete: teardown left the status record behind"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+    || fail "herdr-flat-complete: teardown did not report completion"
+  pass "herdr flat teardown closes the exact pane and completes cleanly"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -1947,7 +1901,6 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
   : > "$case_dir/state/task-x1.status"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PANE_GET_GARBAGE=1 \
-    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-garbage-presence: teardown erased records on an unparseable pane presence"
@@ -1999,7 +1952,6 @@ SH
   rc=0
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
@@ -2019,7 +1971,6 @@ SH
 }
 
 test_herdr_flat_teardown_preflight_refuses_before_changes() {
-  assert_herdr_teardown_preflight_refuses_before_changes unresolvable-lock
   assert_herdr_teardown_preflight_refuses_before_changes missing-adapter
   assert_herdr_teardown_preflight_refuses_before_changes missing-parser
   assert_herdr_teardown_preflight_refuses_before_changes missing-explicit-close-helper
@@ -2059,6 +2010,10 @@ case "\${1:-} \${2:-}" in
     ;;
   "workspace list") exit 1 ;;
   "pane get")
+    if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
+      printf '%s\n' 'not-json'
+      exit 0
+    fi
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
       if [ "\${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
         printf '%s\n' 'not-json'
@@ -2092,9 +2047,9 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
+    FM_FAKE_HERDR_PANE_GET_GARBAGE=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-child-preflight: teardown continued through an unresolvable child lock"
+  [ "$rc" -ne 0 ] || fail "herdr-child-preflight: teardown continued through an unreadable child presence"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "herdr-child-preflight: refusal erased the parent record"
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
   [ -e "$home/state/child-herdr.status" ] || fail "herdr-child-preflight: refusal erased child status"
@@ -2296,149 +2251,6 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   [ -e "$case_dir/state/task-x1.meta" ] \
     || fail "herdr-grandchild-unconfirmed-close: the recursive failure erased the top-level secondmate's record"
   pass "forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed"
-}
-
-configure_herdr_projection_teardown_case() {  # <case-dir>
-  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
-  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
-  rm -f "$case_dir/state/task-x1.meta.bak"
-  printf '%s\n' \
-    'backend=herdr' \
-    'herdr_session=fmtest' \
-    'herdr_workspace_id=w1' \
-    'herdr_tab_id=w1:t2' \
-    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
-  printf '%s\n' \
-    'version=1' \
-    'task_id=task-x1' \
-    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
-  cat > "$case_dir/fakebin/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
-case "${1:-} ${2:-}" in
-  "workspace list")
-    if [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
-      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
-    elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
-      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
-    else
-      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
-    fi
-    ;;
-  "tab list")
-    case "$*" in
-      *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
-      *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
-      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
-    esac
-    ;;
-  "status --json")
-    printf '%s\n' '{"server":{"running":true}}'
-    ;;
-  "session list")
-    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
-    ;;
-  "pane close")
-    if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
-      exit 1
-    fi
-    : > "${FM_FAKE_HERDR_CLOSED:?}"
-    ;;
-  "pane get")
-    if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
-      if [ "${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
-        printf '%s\n' '{"error":{"code":"internal"}}' >&2
-        exit 1
-      fi
-      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
-      exit 1
-    fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
-    ;;
-  "tab get")
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
-    ;;
-  "tab focus")
-    if [ "${FM_FAKE_HERDR_RESTORE_FAIL:-0}" = 1 ]; then
-      exit 1
-    fi
-    : > "${FM_FAKE_HERDR_RESTORED:?}"
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}'
-    ;;
-  "agent get")
-    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
-    exit 1
-    ;;
-esac
-SH
-  chmod +x "$case_dir/fakebin/herdr"
-}
-
-test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed restored
-  case_dir=$(make_case herdr-projection-confirmed-close)
-  write_meta "$case_dir" local-only ship
-  configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
-
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-projection-confirmed-close: forced teardown failed"
-  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "confirmed exact-pane close did not retire the presentation journal"
-  assert_not_contains "$(cat "$log")" "workspace close" \
-    "projected teardown must never call workspace close"
-  assert_contains "$(cat "$log")" "tab focus w2:t2" \
-    "projected teardown did not restore the exact pre-close active tab"
-  pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
-}
-
-test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored
-  case_dir=$(make_case herdr-projection-unconfirmed-close)
-  write_meta "$case_dir" local-only ship
-  configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
-
-  local rc=0
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] \
-    || fail "herdr-projection-unconfirmed-close: teardown reported success after an unknown post-close presence read"
-  [ -e "$closed" ] \
-    || fail "herdr-projection-unconfirmed-close: regression did not exercise an attempted close"
-  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
-  [ -e "$case_dir/state/task-x1.meta" ] \
-    || fail "unconfirmed task-pane close erased the durable endpoint metadata"
-  assert_grep "close could not be confirmed" "$case_dir/stderr" \
-    "unconfirmed projected close did not explain why the journal was retained"
-  assert_grep "not confirmed gone" "$case_dir/stderr" \
-    "unconfirmed projected close did not explain why the records were retained"
-  assert_not_contains "$(cat "$log")" "workspace close" \
-    "unconfirmed projected close must not escalate to workspace cleanup"
-  pass "herdr projection teardown retains every record when post-close presence is unknown"
-}
-
-test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup() {
-  local case_dir log closed restored
-  case_dir=$(make_case herdr-projection-restore-failure)
-  write_meta "$case_dir" local-only ship
-  configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
-
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
-    FM_FAKE_HERDR_RESTORE_FAIL=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-projection-restore-failure: a confirmed close with a failed focus restore blocked teardown"
-  [ -e "$closed" ] \
-    || fail "herdr-projection-restore-failure: regression did not exercise the exact projected-pane close"
-  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
-    || fail "herdr-projection-restore-failure: confirmed closure did not retire the presentation journal"
-  assert_grep "exact-tab restoration failed" "$case_dir/stderr" \
-    "herdr-projection-restore-failure: teardown swallowed the focus helper's restore warning"
-  pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
@@ -3476,16 +3288,13 @@ test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
-test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_flat_teardown_closes_and_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
-test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
-test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
-test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

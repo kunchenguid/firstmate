@@ -69,32 +69,6 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
-#   Herdr additionally uses a presentation-only layout by default when the
-#   selected client and running server meet the Herdr 0.8.0 floor. The local
-#   config/herdr-presentation-spaces file can say off to disable it or on to
-#   opt in below that floor; an empty file remains the historical opt-in form.
-#   A clean fresh task first writes state/<id>.herdr-presentation atomically,
-#   then creates a disposable
-#   workspace containing only the ordinary task pane. A successful clean create
-#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
-#   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
-#   contention warns and falls back to the ordinary flat layout before any
-#   projection mutation. The exact response-derived new workspace is inserted
-#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
-#   child block. Ordering never authorizes lifecycle cleanup, and any
-#   unavailable, ambiguous, or failed move warns while the spawn continues.
-#   Every projected create, prune, and move captures and verifies the named
-#   session's exact active workspace and tab. A detected focus change restores
-#   only that exact tab id; an ambiguous pre-operation snapshot refuses the
-#   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends. A fresh spawn first takes the
@@ -725,12 +699,6 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
-HERDR_PROJECTION_ABORT_CLEANUP=0
-HERDR_PROJECTION_ABORT_SESSION=
-HERDR_PROJECTION_ABORT_TASK_PANE=
-HERDR_PROJECTION_ABORT_SEEDED_PANE=
-HERDR_PRESENTATION_ORDER_LOCK=
-HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 SPAWN_CONTROL_LOCK=
@@ -788,24 +756,6 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
-     && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
-    fi
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
-  fi
-  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
-  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -835,60 +785,6 @@ spawn_abort_cleanup() {
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
-
-# One bounded lock per live Herdr session/socket, shared across all homes.
-# <session> is required so secondmate and primary spawns serialize against the
-# same session without writing any other home's state directory.
-spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} attempt lock_path
-  [ -n "$session" ] || session=$(fm_backend_herdr_session)
-  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
-  HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
-  attempt=0
-  while [ "$attempt" -lt 50 ]; do
-    if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
-      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-      return 0
-    fi
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
-  # The wiring arms above match on harness PREFIXES, because a task launched
-  # from a raw command records that command's basename rather than the exact
-  # adapter name. The retirement tables are keyed by the exact adapter, so the
-  # recorded value is resolved to its adapter first; otherwise a task recorded
-  # as, say, `grok-2` would have wiring armed and never retired. An
-  # unrecognized value resolves to no adapter, which is also the case in which
-  # no wiring was armed to begin with.
-  harness=$(fm_control_harness_family "$harness") || harness=
-  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
-  token=
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
-    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-  fi
-  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
-  if [ -n "$auth_path" ]; then
-    rm -f -- "$auth_path" || return 1
-  fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
-}
-
-spawn_herdr_presentation_order_lock_release() {
-  [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
-  HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-  fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
-}
-
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
@@ -2104,83 +2000,6 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   fi
 }
-
-herdr_projection_meta_field_exact() {  # <meta> <key>
-  local meta=$1 key=$2 count
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
-}
-
-# A stale presentation journal never grants launch authority.
-# Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
-# Exact Herdr fields are retained for the narrower version 2 reclaim path.
-herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
-  HERDR_RECOVERY_BACKEND=""
-  HERDR_RECOVERY_WORKSPACE_ID=""
-  HERDR_RECOVERY_TAB_ID=""
-  HERDR_RECOVERY_PANE_ID=""
-  old_backend=$(fm_backend_of_meta "$meta")
-  old_target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$old_target" ] || {
-    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
-    return 1
-  }
-  HERDR_RECOVERY_BACKEND=$old_backend
-  if [ "$old_backend" = herdr ]; then
-    fm_backend_herdr_parse_target "$old_target" || {
-      echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
-      return 1
-    }
-    target_session=$FM_BACKEND_HERDR_SESSION
-    target_pane=$FM_BACKEND_HERDR_PANE
-    old_session=$(herdr_projection_meta_field_exact "$meta" herdr_session) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous session; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_WORKSPACE_ID=$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous workspace; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_TAB_ID=$(herdr_projection_meta_field_exact "$meta" herdr_tab_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous tab; refusing duplicate launch" >&2
-      return 1
-    }
-    old_pane=$(herdr_projection_meta_field_exact "$meta" herdr_pane_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous pane; refusing duplicate launch" >&2
-      return 1
-    }
-    [ "$target_session" = "$old_session" ] && [ "$target_pane" = "$old_pane" ] || {
-      echo "error: existing herdr metadata for $ID has inconsistent endpoint identities; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_PANE_ID=$old_pane
-    fm_backend_herdr_server_ensure "$old_session" || {
-      echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
-      return 1
-    }
-    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
-    case "$old_state" in
-      dead|no-agent) return 0 ;;
-      live|unknown)
-        echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
-        return 1
-        ;;
-    esac
-  fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
-  case "$old_state" in
-    dead) return 0 ;;
-    alive|unknown)
-      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
-      return 1
-      ;;
-  esac
-}
-
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -2272,142 +2091,21 @@ case "$BACKEND" in
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
-    HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
-    HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
-      HERDR_SES=$(fm_backend_herdr_session)
-      HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
-      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-        fm_backend_herdr_server_ensure "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not ensure its exact named session" >&2
-          exit 1
-        }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
-          exit 1
-        }
-        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
-        fi
-        fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
-        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
-          set +e
-          FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
-            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
-            "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
-          HERDR_RECLAIM_STATUS=$?
-          set -e
-          case "$HERDR_RECLAIM_STATUS" in
-            0)
-              HERDR_PROJECTED=1
-              HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
-              HERDR_SEEDED_DEFAULT_TAB_ID=""
-              HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-              HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-              HERDR_PROJECTION_ABORT_CLEANUP=1
-              HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-              HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-              HERDR_PROJECTION_ABORT_SEEDED_PANE=""
-              ;;
-            2)
-              spawn_herdr_presentation_order_lock_release
-              ;;
-            *) exit 1 ;;
-          esac
-        else
-          spawn_herdr_presentation_order_lock_release
-        fi
-      elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-        # Session lock path resolution and exact parent binding both need a
-        # live named-session socket before journal publication.
-        if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
-          echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
-        elif [ "${FM_BACKEND_HERDR_PRESENTATION_PREFERENCE:-default}" = default ] \
-          && ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
-          :
-        elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
-          # The projected child is placed and bound UNDER this launcher's exact
-          # parent workspace. Its own herdr pane identity names that workspace
-          # directly; the label lookup is only the fallback for a launcher with
-          # no herdr ancestry at all. A claimed-but-broken identity refuses here
-          # rather than projecting under a guessed parent.
-          set +e
-          fm_backend_herdr_launcher_identity "$HERDR_SES"
-          HERDR_LAUNCHER_STATUS=$?
-          set -e
-          case "$HERDR_LAUNCHER_STATUS" in
-            0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
-            2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
-                 "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
-            *) spawn_herdr_presentation_order_lock_release; exit 1 ;;
-          esac
-          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
-            echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
-            spawn_herdr_presentation_order_lock_release
-          else
-            HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
-            if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
-              if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
-                HERDR_PROJECTION_ABORT_CLEANUP=1
-                HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
-                HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-                HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-              fi
-              exit 1
-            fi
-            HERDR_PROJECTED=1
-            HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
-            HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
-            HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
-            HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
-            HERDR_PROJECTION_ABORT_CLEANUP=1
-            HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-            fm_backend_herdr_projection_order_best_effort \
-              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
-            HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
-            if [ -n "$HERDR_HOME_ID" ] \
-               && fm_backend_herdr_projection_live_binding_matches \
-                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                 "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
-               && fm_backend_herdr_projection_journal_bind \
-                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
-              :
-            else
-              echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
-            fi
-          fi
-        else
-          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
-        fi
-      fi
-    fi
-    if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
-      # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
-      # (the second field empty when this call ADOPTED a pre-existing workspace
-      # rather than creating a fresh one). Split on the guaranteed single tab
-      # character; the seeded tab id is threaded through to create_task
-      # untouched, which is the only function permitted to prune it (never
-      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
-      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-      HERDR_SES=${CONTAINER%%:*}
-      HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+    # (the second field empty when this call ADOPTED a pre-existing workspace
+    # rather than creating a fresh one). Split on the guaranteed single tab
+    # character; the seeded tab id is threaded through to create_task
+    # untouched, which is the only function permitted to prune it (never
+    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+    HERDR_SES=${CONTAINER%%:*}
+    HERDR_WORKSPACE_ID=${CONTAINER#*:}
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
@@ -3234,10 +2932,6 @@ fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
-fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
