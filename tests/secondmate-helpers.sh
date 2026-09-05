@@ -72,6 +72,13 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  # Model the pinned build's global options, including the --root a home that
+  # owns its own pool requires (docs/configuration.md).
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 case "${1:-}" in
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
@@ -81,6 +88,8 @@ case "${1:-}" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --lease) ;;
+        --root) shift ;;
+        --root=*) ;;
         --lease-holder) shift; holder=${1:-} ;;
         --lease-holder=*) holder=${1#--lease-holder=} ;;
       esac
@@ -100,6 +109,8 @@ case "${1:-}" in
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --root) shift ;;
+        --root=*) ;;
         *) target=$1 ;;
       esac
       shift

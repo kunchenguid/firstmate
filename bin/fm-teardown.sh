@@ -1497,6 +1497,11 @@ STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
+# A home that owns its own Treehouse pool cannot release a worktree through a
+# build with no --root option, and raw removal is not a substitute: it would
+# strand the lease and delete work the right pool still owns. Its own code so
+# every caller refuses instead of falling back to removal.
+TEARDOWN_TREEHOUSE_ROOT_UNSUPPORTED=5
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -1570,6 +1575,13 @@ teardown_treehouse_return() {
   }
   treehouse_args=(return --force "$dir")
   if [ -n "$treehouse_root" ]; then
+    # Returning without the home's own root would address the default pool
+    # instead of the one that handed this worktree out, so refuse rather than
+    # release a lease in the wrong pool.
+    if ! fm_treehouse_supports_root; then
+      echo "teardown: this home needs its own Treehouse pool root, but the installed treehouse has no --root option; upgrade treehouse to v2.2.0 or newer to release $label" >&2
+      return "$TEARDOWN_TREEHOUSE_ROOT_UNSUPPORTED"
+    fi
     treehouse_args=(return --root "$treehouse_root" --force "$dir")
   fi
 
@@ -2923,7 +2935,8 @@ cleanup_firstmate_home_children() {
           :
         else
           child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] \
+            || [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_ROOT_UNSUPPORTED" ]; then
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"

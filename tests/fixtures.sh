@@ -251,14 +251,17 @@ EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
-# extra exit-0 tools. Echoes the fakebin path.
+# Creates <dir>/fakebin with the spawn tmux stub, a treehouse stub that models
+# the pinned build's advertised options, and any extra exit-0 tools. Echoes the
+# fakebin path. The treehouse stub must advertise --root because a home that
+# owns its own pool refuses to spawn without it (docs/configuration.md).
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_fake_exit0 "$fakebin" "$@"
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

@@ -71,6 +71,7 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   else
     printf '%s\n' 'Usage: treehouse get'
   fi
+  printf '%s\n' '      --root string   Worktree root directory'
   exit 0
 fi
 exit 0
