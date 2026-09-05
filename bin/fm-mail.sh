@@ -230,14 +230,8 @@ wake_for() {
 
 mail_stored_generation() {
   # Print the mailbox generation the local cursor was last reset to, or "".
-  local u gen=""
   [ -f "$CURSOR" ] || : > "$CURSOR"
-  while IFS= read -r u; do
-    case "$u" in
-      "uidvalidity="*) gen="${u#uidvalidity=}" ;;
-    esac
-  done < "$CURSOR"
-  printf '%s' "$gen"
+  grep -m1 '^uidvalidity=' "$CURSOR" | cut -d= -f2 || true
 }
 
 mail_heal() {
@@ -294,7 +288,7 @@ mail_poll() {
   # on the mail-seen lock; each poll first heals a run interrupted between its
   # phases (mail_heal), so an overlapping poll or an interrupted run can never
   # lose a mail or double-surface it.
-  local list generation line uid fr subj woke=0
+  local list generation uid _ fr subj woke=0
   if [ ! -f "$FM_HOME/bin/fm-wake-lib.sh" ]; then
     echo "fm-mail: $FM_HOME/bin/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -318,11 +312,8 @@ mail_poll() {
 
   mail_heal "$generation"
 
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    uid="$(printf '%s' "$line" | cut -f1)"
-    fr="$(printf '%s' "$line" | cut -f3)"
-    subj="$(printf '%s' "$line" | cut -f4)"
+  while IFS=$'\t' read -r uid _ fr subj; do
+    [ -z "$uid" ] && continue
     if ! mail_seen "$uid"; then
       # Wake first, then record: the wake append, journal, and cursor commit
       # together under the wake-queue lock inside wake_for (so no drain ack can
