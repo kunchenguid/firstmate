@@ -15,6 +15,23 @@
 # layer, so workspace titles are scoped by firstmate home and installation
 # path inside this adapter.
 #
+# Secondmate shape: a --secondmate spawn (bin/fm-spawn.sh) reuses this exact
+# one-workspace-per-task contract with the secondmate's HOME as the workspace
+# cwd - there is no Herdr-style workspace-contains-tabs container to stand up,
+# so "the secondmate's own workspace" IS its one dedicated task workspace.
+# The title deliberately carries the LAUNCHING PRIMARY's home label
+# (fm-<primary-hometag>-<id>), not a 2ndmate-<id> label: the primary owns
+# state/<id>.meta and performs every send/peek/state/teardown/recovery op with
+# its own FM_HOME, and fm_backend_cmux_target_ready re-derives the expected
+# title from the CALLER's FM_HOME on every op, so a secondmate-scoped title
+# would fail every primary-side op and would surface in the secondmate's own
+# fm_backend_cmux_list_live as an unrecorded orphan. The 2ndmate-<id> label
+# namespace remains what that secondmate's OWN crewmate workspaces carry
+# (bin/fm-backend-hometag-lib.sh). No recovery-grade agent-state classifier
+# exists for cmux (fm_backend_agent_state returns unverified), so a dead cmux
+# secondmate is preserved and reported, never auto-relaunched
+# (docs/cmux-backend.md "Active limits").
+#
 # Target string shape: "<workspace_uuid>:<surface_uuid>" - both bare UUIDs
 # with no embedded colon, so splitting on the FIRST colon is trivially
 # correct (mirrors herdr's/zellij's target-string convention).

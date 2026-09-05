@@ -81,6 +81,16 @@ cmux_surface_id=<surface-uuid>
 The UUID pair is the active endpoint authority within one app run.
 Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id.
 
+## Secondmate launch
+
+A `--secondmate` spawn reuses the same one-workspace-per-task shape: one dedicated workspace whose working directory is the secondmate's home rather than a project worktree.
+cmux has no Herdr-style workspace-contains-tabs container, so that dedicated workspace is the secondmate's own workspace, and the secondmate's future crewmates each get their own additional workspaces under its `2ndmate-<id>` home label.
+The secondmate workspace's title deliberately carries the launching primary's home label, because the primary owns the task record and performs every operation, recovery, and cleanup with its own home, and every operation re-verifies the title against the caller's home.
+`bin/backends/cmux.sh`'s header and `bin/fm-spawn.sh`'s header own this contract.
+Metadata matches an ordinary cmux task plus the secondmate fields, with `worktree=` and `home=` both the secondmate's home.
+cmux has no recovery-grade agent-state classifier, so a dead cmux secondmate is preserved and reported by the startup liveness sweep rather than automatically relaunched, and `--relaunch` remains refused; relaunch it deliberately after inspecting the workspace.
+Remote secondmates are unaffected and remain on their own documented transport.
+
 ## Current operation and safety
 
 A genuinely fresh surface returns an internal error from `read-screen` until something has been written.
@@ -116,8 +126,7 @@ Real tests share the captain's running app rather than creating an isolated cmux
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified.
-- There is no native busy or push-event signal.
+- There is no native busy or push-event signal, and no recovery-grade agent-state classifier, so a dead cmux secondmate is never automatically relaunched.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
 - Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.

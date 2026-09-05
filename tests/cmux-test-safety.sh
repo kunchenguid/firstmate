@@ -18,6 +18,12 @@
 # the captain's own live work.
 set -u
 
+# Real-cmux tests drive the REAL bin/fm-spawn.sh lifecycle without sourcing
+# tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
+# tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,
+# which the no-mistakes gate runs from a gate worktree, must be exempt).
+export FM_GATE_REFUSE_BYPASS=1
+
 # cmux_refuse_if_unsafe: 0 (SAFE to proceed) only if <workspace_id> is
 # non-empty, <want_label> carries the fm-test- prefix, and the workspace is
 # CURRENTLY LISTED with the scoped title for <want_label>. 1 (REFUSE) on

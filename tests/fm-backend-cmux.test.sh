@@ -1086,18 +1086,99 @@ test_list_live_filters_by_title_prefix() {
   pass "fm_backend_cmux_list_live: lists only this home's scoped task workspaces using plain fm-<id> labels"
 }
 
-# --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
+# --- fm-spawn.sh: --secondmate launches on backend=cmux ----------------------
 
-test_secondmate_spawn_refuses_cmux_backend() {
-  local dir state data config projects out status
-  dir="$TMP_ROOT/secondmate-refuse"; state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
-  mkdir -p "$state" "$data" "$config" "$projects"
-  out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$projects" \
-    "$ROOT/bin/fm-spawn.sh" sm-cmux-test --secondmate --backend cmux 2>&1 )
+# make_cmux_spawn_fakebin: a subcommand-aware `cmux` stub for driving the FULL
+# fm-spawn.sh secondmate path, where the ordered-response fake above would need
+# fragile hand-counting of every workspace-list/list-panes readiness re-check.
+# It answers by subcommand shape instead: `workspace list` reports nothing
+# until `new-workspace` has run, then reports one workspace whose title is
+# EXACTLY the --name the adapter passed (recorded at creation), so the
+# adapter's own dup-check, id resolution, and per-op title verification all
+# exercise their real logic. Every call still logs to $FM_CMUX_LOG in the same
+# unit-separated format.
+make_cmux_spawn_fakebin() {  # <dir> <workspace_uuid> <surface_uuid> -> echoes fakebin dir
+  local dir=$1 fb="$1/spawn-fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/cmux" <<SH
+#!/usr/bin/env bash
+set -u
+LOG="\${FM_CMUX_LOG:?}"
+CREATED="\${FM_CMUX_RESPONSES:?}/.created-title"
+WSID="$2"
+SFID="$3"
+{
+  printf 'CMUX_SOCKET_PASSWORD=%s' "\${CMUX_SOCKET_PASSWORD:-}"
+  for a in "\$@"; do printf '\x1f%s' "\$a"; done
+  printf '\n'
+} >> "\$LOG"
+case "\${1:-}" in
+  version) printf 'cmux 0.64.17 (97) [abcdef1]\n'; exit 0 ;;
+  ping) printf 'PONG\n'; exit 0 ;;
+  new-workspace)
+    shift
+    while [ \$# -gt 0 ]; do
+      if [ "\$1" = --name ]; then printf '%s' "\$2" > "\$CREATED"; shift 2; else shift; fi
+    done
+    exit 0 ;;
+  workspace)
+    if [ -f "\$CREATED" ]; then
+      jq -n --arg id "\$WSID" --arg t "\$(cat "\$CREATED")" '{workspaces:[{id:\$id,title:\$t}]}'
+    else
+      printf '{"workspaces":[]}\n'
+    fi
+    exit 0 ;;
+  list-panes)
+    printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}\n' "\$SFID" "\$SFID"
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fb/cmux"
+  printf '%s\n' "$fb"
+}
+
+test_secondmate_spawn_launches_cmux_backend() {
+  local dir home sm sm_real fb id out status meta title wsid sfid
+  id='sm-cmux-l1'
+  wsid="cccccccc-2222-2222-2222-222222222222"
+  sfid="dddddddd-3333-3333-3333-333333333333"
+  dir="$TMP_ROOT/secondmate-launch"; home="$dir/home"; sm="$dir/sm-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/responses"
+  touch "$home/state/.last-watcher-beat"
+  mkdir -p "$sm/bin" "$sm/data"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
+  sm_real=$(cd "$sm" && pwd -P)
+  fb=$(make_cmux_spawn_fakebin "$dir" "$wsid" "$sfid")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$sm" 'echo fake-secondmate-agent' --secondmate --backend cmux 2>&1 )
   status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend cmux"
-  assert_contains "$out" "does not support --secondmate" "fm-spawn.sh did not report the cmux secondmate refusal"
-  pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
+  [ "$status" -eq 0 ] || fail "fm-spawn.sh --secondmate --backend cmux should launch, got status=$status:"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_contains "$out" "kind=secondmate" "spawn did not report kind=secondmate"
+
+  # The workspace was created with the primary-scoped title (the launching
+  # home's label, NOT 2ndmate-<id> - the primary owns every op on this
+  # endpoint) and with the SECONDMATE HOME as its cwd.
+  title=$(cmux_expected_scoped_title "fm-$id" "$home" "$ROOT")
+  assert_contains "$(tr '\037' ' ' < "$dir/log")" "new-workspace --name $title --cwd $sm_real " \
+    "new-workspace was not called with the primary-scoped title and the secondmate home as cwd"
+
+  meta="$home/state/$id.meta"
+  assert_grep "backend=cmux" "$meta" "meta missing backend=cmux"
+  assert_grep "cmux_workspace_id=$wsid" "$meta" "meta missing cmux_workspace_id"
+  assert_grep "cmux_surface_id=$sfid" "$meta" "meta missing cmux_surface_id"
+  assert_grep "window=$wsid:$sfid" "$meta" "meta missing window=<workspace>:<surface>"
+  assert_grep "kind=secondmate" "$meta" "meta missing kind=secondmate"
+  assert_grep "worktree=$sm_real" "$meta" "meta worktree should be the secondmate home"
+  assert_grep "home=$sm_real" "$meta" "meta missing home=<secondmate home>"
+  pass "fm-spawn.sh: launches a seeded secondmate home on backend=cmux with a dedicated home-cwd workspace and full cmux metadata"
 }
 
 # shellcheck source=/dev/null
@@ -1163,4 +1244,4 @@ test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
-test_secondmate_spawn_refuses_cmux_backend
+test_secondmate_spawn_launches_cmux_backend

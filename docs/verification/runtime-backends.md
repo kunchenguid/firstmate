@@ -170,7 +170,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij and cmux have no verified recovery-grade agent process probe, while Orca does not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -1059,6 +1059,11 @@ tests/fm-backend-cmux-smoke.test.sh
 ```
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
+
+Secondmate launch was verified live on 2026-09-01 with cmux 0.64.20 build 100 on macOS aarch64.
+`fm-spawn.sh <id> <home> '<raw launch command>' --secondmate --backend cmux` against a throwaway seeded secondmate home created one dedicated workspace whose cwd was the secondmate home, carried the launching primary's scoped title, delivered and submitted the launch command, and recorded `backend=cmux`, the workspace and surface UUIDs, and `window=<workspace>:<surface>` with `worktree=` and `home=` both the secondmate home.
+The portable regression is the full-spawn secondmate case in `tests/fm-backend-cmux.test.sh`, and the guarded live proof is the `fm-test-` secondmate case in `tests/fm-backend-cmux-smoke.test.sh`.
+No recovery-grade cmux agent-state classifier exists, so the startup liveness sweep preserves and reports a dead cmux secondmate instead of relaunching it ([`docs/cmux-backend.md`](../cmux-backend.md#secondmate-launch)).
 
 ### Claude composer confirmation
 

@@ -61,7 +61,13 @@
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. A cmux --secondmate spawn creates one dedicated
+#   workspace whose cwd is the secondmate's home; the workspace title carries
+#   the LAUNCHING primary's home label (fm-<primary-hometag>-<id>) because the
+#   primary owns the task record and performs every op, recovery, and cleanup
+#   with its own FM_HOME, and cmux's per-op title verification derives the
+#   expected title from the caller's FM_HOME. The 2ndmate-<id> label namespace
+#   remains what that secondmate's OWN crewmate workspaces carry.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1098,10 +1104,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fm_backend_source "$BACKEND" || exit 1
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -2386,6 +2388,9 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
+    # For --secondmate, $PROJ_ABS is the secondmate's home, so its dedicated
+    # workspace opens there; the title stays primary-scoped (see header and
+    # bin/backends/cmux.sh's secondmate contract).
     fm_backend_cmux_container_ensure || exit 1
     CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
