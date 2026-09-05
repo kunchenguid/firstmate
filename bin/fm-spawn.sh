@@ -311,6 +311,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-bench-launch-lib.sh
+. "$SCRIPT_DIR/fm-bench-launch-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
@@ -466,6 +468,8 @@ spawn_remote_secondmate() {
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
+  fm_refuse_ungated_benchmark_entrant "$id" || return 1
+  fm_refuse_unconfined_remote_benchmark_entrant "$id" || return 1
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -1003,6 +1007,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# Fail closed before any endpoint exists: a model-routing benchmark entrant may
+# not launch until its gates have passed (see bin/fm-bench-launch-lib.sh).
+fm_refuse_ungated_benchmark_entrant "$ID" || exit 1
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -3200,6 +3207,7 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+LAUNCH=$(fm_bench_wrap_entrant_launch "$ID" "$WT" "$LAUNCH") || exit 1
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0

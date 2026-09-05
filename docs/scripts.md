@@ -41,6 +41,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` `@AGENTS.md` pointer, and the canonical self-governance section |
+| `fm-bench-gate.sh`       | Run one model-routing benchmark gate: plan, freeze, provenance, isolation, evaluator, manifest, preflight, promotion, archive, restore drill, or cleanup |
+| `fm-bench-gate.py`       | Single owner of every benchmark gate check, schema key, and exit code; invoked through `fm-bench-gate.sh` |
+| `fm-bench-confine.sh`    | Run one command inside a benchmark entrant's enforced storage, filesystem, and process confinement |
+| `fm-bench-probe.sh`      | Attempt one sibling-access bypass from inside a confinement and report whether it was denied |
+| `fm-bench-launch-lib.sh` | Fail-closed refusal keeping a benchmark entrant from launching before its gates pass |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity (ancestry walk and holder liveness) for fm-lock.sh and the Claude Stop auto-arm |

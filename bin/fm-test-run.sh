@@ -335,6 +335,10 @@ family_for_basename() {
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
       printf '%s\n' standalone
       ;;
+
+    fm-bench-gate.test.sh|fm-bench-isolation-e2e.test.sh)
+      printf '%s\n' benchmark-gate
+      ;;
     *)
       printf '%s\n' unclassified
       ;;
@@ -347,6 +351,7 @@ expected_gate_skip_for_family() {
     live-harness-optin) printf '%s\n' optin-env ;;
     cmux|zellij|orca) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
+    benchmark-gate) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
 }
@@ -367,6 +372,7 @@ cmux
 zellij
 orca
 standalone
+benchmark-gate
 unclassified
 EOF
 }
@@ -556,6 +562,7 @@ tests/fm-backlog-handoff.test.sh 52291
 tests/fm-bearings-board-render.test.sh 1528
 tests/fm-bearings-board.test.sh 4195
 tests/fm-bearings-snapshot.test.sh 79954
+tests/fm-bench-isolation-e2e.test.sh 25
 tests/fm-bootstrap-network-parallel.test.sh 8214
 tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
@@ -1295,6 +1302,11 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # fm-spawn carries the benchmark entrant launch refusal.
+      printf '%s\n' benchmark-gate
+      ;;
+    bin/fm-bench-*)
+      printf '%s\n' benchmark-gate
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
