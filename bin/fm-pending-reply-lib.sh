@@ -127,8 +127,48 @@ fm_pending_reply_dir() {  # <state-dir>
   printf '%s/pending-replies' "$state"
 }
 
+# Settled records live here instead of the hot directory the watcher tick scans.
+# Adopted, never recreated: this home's archive already exists and already holds
+# records moved out of the hot path by hand during the 2026-09-04 incident, so
+# the retention below must tolerate a populated archive on its very first run.
+fm_pending_reply_archive_dir() {  # <state-dir>
+  printf '%s/archive' "$(fm_pending_reply_dir "$1")"
+}
+
 fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+# The record for <corr_id> wherever it currently lives: hot first, then the
+# archive. Correlation reuse and the wrong-home detector go through here so an
+# archived record is still findable by id, which is what lets the tick's working
+# set shrink to open records only.
+fm_pending_reply_locate() {  # <state-dir> <corr_id>
+  local hot archived
+  hot=$(fm_pending_reply_path "$1" "$2")
+  if [ -f "$hot" ]; then
+    printf '%s' "$hot"
+    return 0
+  fi
+  archived="$(fm_pending_reply_archive_dir "$1")/$2"
+  if [ -f "$archived" ]; then
+    printf '%s' "$archived"
+    return 0
+  fi
+  return 1
+}
+
+# Move a settled record out of the hot set. Best effort by design: a record that
+# cannot be archived stays where it is and is simply scanned again next tick,
+# which is correct but slower - never a lost record. Returns 0 when the record is
+# no longer in the hot directory.
+fm_pending_reply_archive() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 hot archive_dir
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$hot" ] || return 0
+  archive_dir=$(fm_pending_reply_archive_dir "$state")
+  mkdir -p "$archive_dir" 2>/dev/null || return 1
+  mv -f "$hot" "$archive_dir/$corr" 2>/dev/null || return 1
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -214,8 +254,7 @@ fm_pending_reply_sighting_display() {  # <encoded-sighting>
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
-  rec=$(fm_pending_reply_path "$state" "$corr")
-  [ -f "$rec" ] || return 1
+  rec=$(fm_pending_reply_locate "$state" "$corr") || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
@@ -614,7 +653,17 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   # subshell that would make every later use of them read as a lost write.
   # The lock is released explicitly rather than from an EXIT trap, because a trap
   # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
+  local state=$1 corr=$2 lock rc=0 settled
+  # Already settled and archived: resolution is idempotent, so answer from the
+  # archive without taking the lock. Retention moves a record out of the hot set
+  # the moment it resolves (fm_pending_reply_archive), so without this a repeat
+  # resolve of the same correlation would read as a failure purely because the
+  # record had been filed away.
+  settled="$(fm_pending_reply_archive_dir "$state")/$corr"
+  if [ ! -f "$(fm_pending_reply_path "$state" "$corr")" ] && [ -f "$settled" ]; then
+    [ "$(fm_pending_reply_get "$settled" phase)" = resolved ] && return 0
+    return 1
+  fi
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
@@ -671,6 +720,17 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+  # Retention: a settled record leaves the hot set the moment it settles, so the
+  # watcher tick's working set is open records only. Before this, every settled
+  # record was re-read on every poll forever - 1,883 of them cost ~103s per poll
+  # on this home and grew by roughly 3s a day, which is what pushed a single poll
+  # iteration past the liveness grace (2026-09-04 supervision investigation).
+  # Only archive once the escalation is closed, so the retry above still has a
+  # hot record to converge on.
+  if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+    || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
+    fm_pending_reply_archive "$state" "$corr" || true
+  fi
   return 0
 }
 
@@ -1341,7 +1401,14 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   local state=$1 corr=$2 busy_state=$3 sm_home=${4-}
   local rec phase delivered
   rec=$(fm_pending_reply_path "$state" "$corr")
-  [ -f "$rec" ] || return 1
+  if [ ! -f "$rec" ]; then
+    # A settled record has been filed under archive/ by the retention in
+    # fm_pending_reply_archive. There is nothing left to observe or escalate for
+    # it, so this is inert success rather than a missing record - reporting it as
+    # missing would turn every settled correlation into a tick failure.
+    [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] && return 0
+    return 1
+  fi
   fm_pending_reply_reconcile_delivery "$state" "$corr" || true
   phase=$(fm_pending_reply_get "$rec" phase)
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1417,18 +1484,39 @@ fm_pending_reply_tick() {  # <state-dir>
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
+    # The archive subdirectory holds settled records and is deliberately not
+    # scanned: it is read lazily by correlation id (fm_pending_reply_locate).
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
+    # One beat per record. Each record is a unit of progress, so this keeps the
+    # watcher's liveness beacon honest across a long tick without ever becoming a
+    # wall-clock timer: a tick that hangs on one record stops beating, which is
+    # exactly the signal the arm layer needs. The callback runs in the watcher
+    # process itself - never inside command substitution - so the invariant that
+    # only the watcher touches its beacon still holds.
+    if [ -n "${FM_PENDING_REPLY_TICK_BEAT:-}" ]; then
+      "$FM_PENDING_REPLY_TICK_BEAT"
+    fi
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # A settled record that reached the hot set at all is either a legacy
+      # record from before retention or one whose archiving failed. Decide with
+      # two field reads, BEFORE taking the per-correlation lock and re-sourcing
+      # fm-wake-lib.sh, because that lock-and-source was the per-record cost that
+      # made this tick grow without bound (2026-09-04 investigation).
+      if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+        && [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
+        # An escalation is still open: this is the retry that makes the close
+        # converge after a transient write failure. Only here is the lock worth it.
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      else
+        fm_pending_reply_archive "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

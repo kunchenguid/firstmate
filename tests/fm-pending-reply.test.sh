@@ -112,8 +112,17 @@ run_send() {
     "$SEND" "$@" 2>/dev/null
 }
 
+# A record's phase wherever the record currently lives. Settled records are moved
+# into pending-replies/archive/ by the retention in bin/fm-pending-reply-lib.sh,
+# so a resolved record is deliberately NOT at fm_pending_reply_path any more;
+# fm_pending_reply_locate is the lookup that spans both.
 phase_of() {  # <state> <corr>
-  fm_pending_reply_get "$(fm_pending_reply_path "$1" "$2")" phase
+  fm_pending_reply_get "$(fm_pending_reply_locate "$1" "$2")" phase
+}
+
+# The record path for assertions that do not care which set it is in.
+record_of() {  # <state> <corr>
+  fm_pending_reply_locate "$1" "$2"
 }
 
 # A local steer now rides the durable steering inbox rather than the typed
@@ -145,7 +154,7 @@ test_normal_correlated_reply_resolves_once() {
   # Idempotent second resolve.
   fm_pending_reply_try_resolve "$state" "$corr" || fail "second resolve must stay successful"
   [ "$(phase_of "$state" "$corr")" = resolved ] || fail "phase must remain resolved"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
     || fail "resolved_via should be status"
   pass "normal correlated reply resolves once (idempotent)"
@@ -184,7 +193,7 @@ test_completed_turn_no_report_triggers_one_recovery() {
   fi
   lines=$(wc -l < "$hook_log" | tr -d ' ')
   [ "$lines" = 1 ] || fail "expected exactly one recovery send, got $lines"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   case "$(cat "$hook_log")" in
     *"corr=$corr"*) : ;;
     *) fail "recovery message must carry the original corr"$'\n'"$(cat "$hook_log")" ;;
@@ -217,7 +226,7 @@ test_recovery_attempt_is_never_reinjected() {
   fi
   [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
     || fail "failed recovery attempt should preserve failed delivery"
-  [ -z "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_sent_epoch)" ] \
+  [ -z "$(fm_pending_reply_get "$(record_of "$state" "$corr")" recovery_sent_epoch)" ] \
     || fail "failed recovery must not record a sent epoch"
   if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
     fail "committed recovery attempt must refuse reinjection"
@@ -246,7 +255,7 @@ test_recovery_attempt_is_never_reinjected() {
   corr=$(fm_pending_reply_create "$home" "$state" hibit "crashed recovery")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_pending_reply_mark_turn_completed "$state" "$corr" request
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "attempt precommit failed"
   fm_pending_reply_set "$rec" phase recovery_sending || fail "sending phase precommit failed"
   fm_pending_reply_tick_one "$state" "$corr" unknown || fail "recovery reconciliation failed"
@@ -325,7 +334,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   escalations=$(grep -Fc "blocked [key=pending-reply-$corr]:" "$state/hibit.status")
   [ "$escalations" = 1 ] || fail "missed recovery should publish one escalation, got $escalations"
   # Durable record retained (never silently expired).
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   [ -f "$rec" ] || fail "escalated record must remain on disk"
   [ "$(fm_pending_reply_get "$rec" parent_status)" = "$state/hibit.status" ] \
     || fail "parent destination must remain exact"
@@ -395,7 +404,7 @@ test_escalation_publication_failure_retries() {
   export FM_PENDING_REPLY_SEND_HOOK='true'
   fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
   fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   target="$state/escalation-target"
   mkdir -p "$target"
   fm_pending_reply_set "$rec" parent_status "$target" || fail "failed to set escalation target"
@@ -419,7 +428,7 @@ test_legacy_escalation_closes_default_decision() {
   export FM_PENDING_REPLY_NOW=4725
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "legacy close")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   fm_pending_reply_set "$rec" phase escalated
   fm_pending_reply_set "$rec" escalated_epoch 4700
   printf 'blocked: pending-reply-missed: task=hibit pending-reply-id=%s request=legacy close\n' "$corr" \
@@ -431,6 +440,9 @@ test_legacy_escalation_closes_default_decision() {
     || fail "legacy escalation did not append one guarded default-key resolution"
   open=$(status_open_decisions "$state/hibit.status")
   [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
+  # Retention moves a settled record into pending-replies/archive/, so the path
+  # captured before the resolve above is stale here: re-locate it.
+  rec=$(record_of "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "legacy escalation closure was not recorded"
   pass "legacy escalation closes under the shared default key"
@@ -443,7 +455,7 @@ test_legacy_escalation_does_not_close_taken_default_decision() {
   export FM_PENDING_REPLY_NOW=4750
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "legacy escalation")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   fm_pending_reply_set "$rec" phase escalated
   fm_pending_reply_set "$rec" escalated_epoch 4700
   printf 'blocked: pending-reply-missed: task=hibit pending-reply-id=%s request=legacy escalation\n' "$corr" \
@@ -474,7 +486,7 @@ test_foreign_blocker_is_not_selected_as_escalation() {
   fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
   fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "genuine escalation failed"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   printf 'blocked [key=release]: foreign decision pending-reply-id=%s corr=%s\n' \
     "$corr" "$corr" >> "$state/hibit.status"
 
@@ -486,6 +498,7 @@ test_foreign_blocker_is_not_selected_as_escalation() {
     "genuine keyed escalation remained open"
   assert_no_grep 'resolved [key=release]: pending-reply-resolved:' "$state/hibit.status" \
     "foreign release decision was selected as the pending-reply escalation"
+  rec=$(record_of "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "genuine keyed escalation closure was not recorded"
   pass "foreign correlated blocker cannot impersonate a pending-reply escalation"
@@ -498,7 +511,7 @@ test_concurrent_resolution_closes_escalation_once() {
   export FM_PENDING_REPLY_NOW=4800
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent resolution")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   fm_pending_reply_set "$rec" phase escalated
   fm_pending_reply_set "$rec" escalated_epoch 4750
   printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=concurrent resolution\n' \
@@ -514,6 +527,7 @@ test_concurrent_resolution_closes_escalation_once() {
     || fail "concurrent resolvers left the expectation unresolved"
   [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
     || fail "concurrent resolvers did not append exactly one decision close"
+  rec=$(record_of "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "concurrent resolution did not record the closed escalation"
   pass "concurrent resolution closes one keyed escalation exactly once"
@@ -526,7 +540,7 @@ test_concurrent_escalation_yields_to_late_reply() {
   export FM_PENDING_REPLY_NOW=4900
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent escalation")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   fm_pending_reply_set "$rec" phase recovery_sent
   fm_pending_reply_set "$rec" recovery_turn_completed_epoch 4850
   printf 'done [corr=%s]: late concurrent reply\n' "$corr" > "$state/hibit.status"
@@ -572,7 +586,7 @@ test_undelivered_records_are_scan_immutable() {
     # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5500
     corr=$(fm_pending_reply_create "$home" "$state" hibit "not delivered yet")
-    rec=$(fm_pending_reply_path "$state" "$corr")
+    rec=$(record_of "$state" "$corr")
     printf 'done [corr=%s]: arrived too early\n' "$corr" > "$state/hibit.status"
     printf 'done [corr=%s]: wrong home too early\n' "$corr" > "$sm_home/state/hibit.status"
     fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
@@ -608,7 +622,7 @@ test_delivery_confirmation_fallback_reconciles() {
     # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5750
     corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
-    rec=$(fm_pending_reply_path "$state" "$corr")
+    rec=$(record_of "$state" "$corr")
     fm_pending_reply_mark_delivered() { return 1; }
     if fm_pending_reply_confirm_delivery "$state" "$corr"; then
       fail "primary delivery commit failure should be reported"
@@ -662,6 +676,8 @@ test_delivery_confirmation_fallback_reconciles() {
     fm_pending_reply_tick "$state" || fail "watcher should accept a late delivery report"
     [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
       || fail "late report should resolve escalated delivery-unknown"
+    # The record settled during that tick, so retention filed it under archive/.
+    prepared_rec=$(record_of "$state" "$prepared_corr")
     [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
       || fail "late report should provide delivery evidence"
     escalations=$(grep -Fc "blocked [key=pending-reply-$prepared_corr]:" "$state/hibit.status")
@@ -680,6 +696,8 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "attempted delivery with a report should resolve directly"
     [ "$(phase_of "$state" "$reported_corr")" = resolved ] \
       || fail "correlated report should resolve attempted delivery"
+    # Settled during the resolve above, so retention filed it under archive/.
+    reported_rec=$(record_of "$state" "$reported_corr")
     [ "$(fm_pending_reply_get "$reported_rec" delivered_epoch)" = 5800 ] \
       || fail "correlated report should provide delivery evidence"
     [ ! -e "$reported_marker" ] || fail "resolved delivery marker should be removed"
@@ -701,7 +719,7 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5900
     corr=$(fm_pending_reply_create "$home" "$state" hibit "serialized delivery")
-    rec=$(fm_pending_reply_path "$state" "$corr")
+    rec=$(record_of "$state" "$corr")
     calls="$home/mark-delivered.calls"
     entered="$home/mark-delivered.entered"
     release="$home/mark-delivered.release"
@@ -779,7 +797,7 @@ test_restart_preserves_expectation_and_parent_destination() {
   export FM_PENDING_REPLY_NOW=7000
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "survive restart")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   # Simulate process restart: re-source library and re-read the same record.
@@ -812,7 +830,7 @@ test_wrong_home_detected_not_acknowledged() {
   printf 'done [corr=%s]: stranded in self-home\n' "$corr" > "$sm_home/state/hibit.status"
   fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
     || fail "wrong-home detect should succeed"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   hits=$(fm_pending_reply_get "$rec" wrong_home_hits)
   [ "$hits" = 1 ] || fail "first wrong-home sighting should count once, got $hits"
   fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
@@ -889,7 +907,7 @@ test_document_pointer_resolves() {
   fm_pending_reply_mark_delivered "$state" "$corr"
   printf 'done [corr=%s]: see data/hibit/report.md\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" || fail "document pointer status should resolve"
-  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" resolved_via)" = document ] \
+  [ "$(fm_pending_reply_get "$(record_of "$state" "$corr")" resolved_via)" = document ] \
     || fail "resolved_via should be document"
   pass "status-pointed document resolves the expectation"
 }
@@ -909,7 +927,7 @@ test_helper_report_resolves() {
     fail "helper must not write the mate home's own status file"
   fi
   fm_pending_reply_try_resolve "$state" "$corr" || fail "helper report should resolve"
-  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" resolved_via)" = helper ] \
+  [ "$(fm_pending_reply_get "$(record_of "$state" "$corr")" resolved_via)" = helper ] \
     || fail "resolved_via should be helper"
   pass "optional helper report resolves without being required for correctness"
 }
@@ -924,11 +942,11 @@ test_busy_idle_observation_via_backend_abstraction() {
   # Simulates Pi/Claude secondmate busy_state from fm_backend_busy_state without
   # reading conversation text (herdr native idle/busy or tmux unknown fallback).
   fm_pending_reply_observe_busy "$state" "$corr" unknown
-  [ -z "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" request_turn_completed_epoch)" ] \
+  [ -z "$(fm_pending_reply_get "$(record_of "$state" "$corr")" request_turn_completed_epoch)" ] \
     || fail "unknown busy_state must not prove turn completion"
   fm_pending_reply_observe_busy "$state" "$corr" busy
   fm_pending_reply_observe_busy "$state" "$corr" idle
-  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" request_turn_completed_epoch)" ] \
+  [ -n "$(fm_pending_reply_get "$(record_of "$state" "$corr")" request_turn_completed_epoch)" ] \
     || fail "busy->idle must prove turn completion"
   pass "backend busy/idle observation covers Pi/Claude paths without conversation scrape"
 }
@@ -960,7 +978,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
       export FM_PENDING_TEST_CAPTURE='idle footer'
       fm_pending_reply_tick "$state"
-      rec=$(fm_pending_reply_path "$state" "$corr")
+      rec=$(record_of "$state" "$corr")
       [ -z "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" ] \
         || fail "$backend fallback must not accept stale idle before grace"
       # Continue advancing the subshell-local fixture clock.
@@ -1005,7 +1023,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
     || fail "Grok's exact busy token leaked into Kimi pending-reply observation"
   export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   fm_pending_reply_tick "$state"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
     || fail "recorded Kimi spinner was not observed as busy"
   [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
@@ -1187,7 +1205,7 @@ test_remote_repost_waits_for_the_reply_channel() {
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_pending_reply_observe_busy "$state" "$corr" busy
   fm_pending_reply_observe_busy "$state" "$corr" idle
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
 
   # The mate's turn ended, but nothing proves the parent has read the remote
   # reply log since: a repost here would nag for a reply already written there.
@@ -1272,7 +1290,7 @@ test_same_basename_self_home_corr_resolves_on_tick() {
 
   corr=$(fm_pending_reply_create "$home" "$state" mate "status of the audit")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ "$parent_status" = "$state/mate.status" ] \
     || fail "parent_status should be the parent file, got $parent_status"
@@ -1291,6 +1309,8 @@ test_same_basename_self_home_corr_resolves_on_tick() {
   fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "same-basename self-home corr must resolve, got $(phase_of "$state" "$corr")"
+  # Settled by the ticks above, so retention filed it under archive/.
+  rec=$(record_of "$state" "$corr")
   [ -n "$(fm_pending_reply_get "$rec" resolved_epoch)" ] \
     || fail "resolved_epoch must be set after the restatement copy"
   grep -Fq "corr=$corr" "$parent_status" \
@@ -1325,7 +1345,7 @@ test_same_basename_reply_resolves_after_recovery_failure() {
   fi
   [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
     || fail "fixture should reach recovery_failed"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
   printf 'done [corr=%s]: answer landed after recovery failure\n' "$corr" \
@@ -1360,7 +1380,7 @@ test_child_status_wrong_home_is_not_copied() {
 
   corr=$(fm_pending_reply_create "$home" "$state" mate "status of the audit")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   status_file="$sm_home/state/"$'child\nphase=resolved\nteam,west.status'
   printf 'done [corr=%s]: leaked into a child file\n' "$corr" > "$status_file"
 
@@ -1443,7 +1463,7 @@ EOF
   export FM_PENDING_REPLY_NOW=11300
   corr=$(fm_pending_reply_create "$home" "$state" mate "did the build go green")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   printf 'done [corr=%s]: mirrored answer\n' "$corr" > "$sm_home/state/parent-replies.status"
   fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
     || fail "wrong-home detect should succeed over a remote channel file"
@@ -1467,7 +1487,7 @@ test_local_parent_replies_is_wrong_home_evidence() {
   export FM_PENDING_REPLY_NOW=11350
   corr=$(fm_pending_reply_create "$home" "$state" mate "did the build go green")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  rec=$(record_of "$state" "$corr")
   printf 'done [corr=%s]: written to a local alias\n' "$corr" \
     > "$sm_home/state/parent-replies.status"
 
@@ -1544,5 +1564,159 @@ test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
+
+# --- retention: the tick's working set is OPEN records only -----------------
+#
+# 2026-09-04 supervision investigation: fm_pending_reply_tick re-read every
+# already-settled record on every poll. 1,883 of them cost about 103s per poll on
+# the primary home and grew by roughly 3s a day, which is what pushed a single
+# watch iteration past the 300s liveness grace and made a healthy watcher read as
+# dead. Settled records now leave the hot set at resolve time.
+
+test_settled_record_leaves_the_hot_set() {
+  local home state corr hot archive
+  home=$(setup_parent retention-archive)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7000
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "archive me")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$hot" ] || fail "an open record must live in the hot set"
+  printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
+  [ ! -e "$hot" ] || fail "a settled record must leave the hot set"
+  [ -f "$archive" ] || fail "a settled record must be filed under archive/"
+  [ "$(fm_pending_reply_get "$archive" phase)" = resolved ] \
+    || fail "the archived record must keep its resolved phase"
+  pass "a settled record leaves the hot set for archive/"
+}
+
+test_tick_scans_only_open_records() {
+  local home state open_corr i settled scanned
+  home=$(setup_parent retention-hot-set)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7100
+  # One open record, plus several settled ones that must not be scanned.
+  open_corr=$(fm_pending_reply_create "$home" "$state" hibit "still open")
+  fm_pending_reply_mark_delivered "$state" "$open_corr"
+  for i in 1 2 3 4 5; do
+    settled=$(fm_pending_reply_create "$home" "$state" hibit "settled $i")
+    fm_pending_reply_mark_delivered "$state" "$settled"
+    printf 'done [corr=%s]: settled %s\n' "$settled" "$i" >> "$state/hibit.status"
+    fm_pending_reply_try_resolve "$state" "$settled" || fail "settled $i should resolve"
+  done
+  # The hot directory is the tick's working set: it must hold the open record and
+  # the archive directory, and nothing else.
+  scanned=0
+  for rec in "$(fm_pending_reply_dir "$state")"/*; do
+    [ -f "$rec" ] || continue
+    scanned=$((scanned + 1))
+  done
+  [ "$scanned" -eq 1 ] \
+    || fail "the tick's working set holds $scanned records; only the open one belongs there"
+  [ -f "$(fm_pending_reply_path "$state" "$open_corr")" ] \
+    || fail "the open record must stay in the hot set"
+  pass "the tick's working set is open records only"
+}
+
+test_archived_record_is_still_found_by_correlation_id() {
+  local home state corr
+  home=$(setup_parent retention-lookup)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7200
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "lookup after archive")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  # Lazy lookup by id spans both sets, which is what lets the hot set shrink.
+  [ -n "$(fm_pending_reply_locate "$state" "$corr")" ] \
+    || fail "an archived record must still be locatable by correlation id"
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_locate "$state" "$corr")" task_id)" = hibit ] \
+    || fail "the archived record must still carry its task binding"
+  # A settled correlation is not reusable, and answering that must not depend on
+  # the record still sitting in the hot set.
+  fm_pending_reply_corr_reusable "$state" "$corr" hibit \
+    && fail "a settled correlation must not be reusable"
+  # Re-resolving is idempotent rather than a failure.
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "re-resolving an archived record must stay successful"
+  # And the watcher tick treats it as inert, not missing.
+  fm_pending_reply_tick_one "$state" "$corr" unknown \
+    || fail "an archived record must be inert in the tick, not a missing record"
+  pass "an archived record is still found, inert, and not reusable"
+}
+
+test_pre_existing_archive_is_adopted_not_clobbered() {
+  local home state archive_dir corr legacy
+  home=$(setup_parent retention-adopt)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7300
+  # This home's archive already exists and already holds records: they were moved
+  # out of the hot path by hand during the 2026-09-04 incident, before any code
+  # knew about retention. The first run must adopt that directory as-is.
+  archive_dir=$(fm_pending_reply_archive_dir "$state")
+  mkdir -p "$archive_dir"
+  legacy=00000000000000ff
+  printf 'corr_id=%s\ntask_id=hibit\nphase=resolved\n' "$legacy" > "$archive_dir/$legacy"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "adopt me")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: settled\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  [ -f "$archive_dir/$legacy" ] \
+    || fail "a pre-existing archived record was destroyed by the first retention run"
+  [ -f "$archive_dir/$corr" ] \
+    || fail "the newly settled record was not filed into the existing archive"
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_locate "$state" "$legacy")" task_id)" = hibit ] \
+    || fail "a pre-existing archived record must stay locatable by id"
+  pass "an existing populated archive is adopted, not recreated or clobbered"
+}
+
+test_legacy_settled_record_in_hot_set_is_archived_by_the_tick() {
+  local home state corr hot
+  home=$(setup_parent retention-legacy-sweep)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7400
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy settled")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  # A record that settled before retention existed, or whose archiving failed
+  # once: the tick must file it away rather than re-reading it forever.
+  fm_pending_reply_set "$hot" phase resolved
+  fm_pending_reply_tick "$state" || fail "tick should succeed"
+  [ ! -e "$hot" ] || fail "the tick must move a legacy settled record out of the hot set"
+  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
+    || fail "the tick must file the legacy settled record under archive/"
+  pass "a legacy settled record in the hot set is archived by the tick"
+}
+
+test_settled_record_with_an_open_escalation_stays_hot() {
+  local home state corr hot
+  home=$(setup_parent retention-open-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7500
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "open escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  # Settled, but its escalation close has not landed: the retry that makes the
+  # close converge needs the record in the hot set, so retention must wait.
+  fm_pending_reply_set "$hot" phase resolved
+  fm_pending_reply_set "$hot" escalated_epoch 7450
+  fm_pending_reply_tick "$state" || fail "tick should succeed"
+  [ -f "$hot" ] \
+    || fail "a settled record with an unclosed escalation must stay in the hot set"
+  # Once the close is recorded, the next tick may file it away.
+  fm_pending_reply_set "$hot" escalation_closed_epoch 7460
+  fm_pending_reply_tick "$state" || fail "tick should succeed"
+  [ ! -e "$hot" ] || fail "a closed escalation must stop pinning the record to the hot set"
+  pass "retention waits for an open escalation to close before archiving"
+}
+
+test_settled_record_leaves_the_hot_set
+test_tick_scans_only_open_records
+test_archived_record_is_still_found_by_correlation_id
+test_pre_existing_archive_is_adopted_not_clobbered
+test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
+test_settled_record_with_an_open_escalation_stays_hot
 
 printf 'ok - all pending-reply tests passed\n'

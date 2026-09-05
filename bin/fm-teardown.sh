@@ -672,13 +672,32 @@ remote_recovery_paths_validate() {
     fi
     for rec in "$pending_dir"/*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] \
-        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      remote_pending_entry_is_safe "$rec" || return 1
     done
   elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
     echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
     return 1
   fi
+}
+
+# One entry of state/pending-replies/ during remote-retirement validation.
+# bin/fm-pending-reply-lib.sh moves settled records into a real archive/
+# subdirectory, so that one name is a legitimate directory here while every other
+# entry, and everything inside the archive, must still be a plain file.
+remote_pending_entry_is_safe() {  # <entry-path>
+  local entry=$1 archived
+  if [ "${entry##*/}" = archive ]; then
+    [ -d "$entry" ] && [ ! -L "$entry" ] \
+      || { echo "REFUSED: pending-replies archive is unsafe" >&2; return 1; }
+    for archived in "$entry"/*; do
+      [ -e "$archived" ] || [ -L "$archived" ] || continue
+      [ -f "$archived" ] && [ ! -L "$archived" ] \
+        || { echo "REFUSED: pending-replies archive contains an unsafe recovery entry" >&2; return 1; }
+    done
+    return 0
+  fi
+  [ -f "$entry" ] && [ ! -L "$entry" ] \
+    || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
 }
 
 remote_pending_replies_cleanup() {
@@ -687,7 +706,10 @@ remote_pending_replies_cleanup() {
   (
     CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
     [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
-    for rec in ./*; do
+    # Settled records live in archive/ (bin/fm-pending-reply-lib.sh), so a
+    # retiring mate's records are removed from both the hot set and the archive.
+    for rec in ./* ./archive/*; do
+      [ "$rec" = ./archive ] && continue
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
       [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
