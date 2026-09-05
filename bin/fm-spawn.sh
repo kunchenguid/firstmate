@@ -1877,7 +1877,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     PROJECT_DEPTH_OUT=
     if ! PROJECT_DEPTH_OUT=$(fm_project_unshallow_if_needed "$PROJ_ABS"); then
-      echo "error: project $(basename "$PROJ_ABS") is shallow and could not be repaired: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
+      echo "error: project $(basename "$PROJ_ABS") depth repair failed: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
       exit 1
     fi
     if [ -n "$PROJECT_DEPTH_OUT" ]; then

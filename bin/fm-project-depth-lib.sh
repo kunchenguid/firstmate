@@ -13,8 +13,11 @@ fm_project_depth_first_line() {  # <text>
 }
 
 fm_project_depth_count() {  # <project-dir>
-  local project=$1 ref branch
+  local project=$1 ref branch count
   ref=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && ! git -C "$project" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+    ref=
+  fi
   if [ -z "$ref" ]; then
     for branch in main master; do
       if git -C "$project" rev-parse --verify --quiet "origin/$branch^{commit}" >/dev/null; then
@@ -23,8 +26,15 @@ fm_project_depth_count() {  # <project-dir>
       fi
     done
   fi
-  [ -n "$ref" ] || ref=HEAD
-  git -C "$project" rev-list --count "$ref" 2>/dev/null || printf 'unknown\n'
+  if [ -z "$ref" ] && git -C "$project" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
+    ref=HEAD
+  fi
+  [ -n "$ref" ] || return 1
+  count=$(git -C "$project" rev-list --count "$ref" 2>/dev/null) || return 1
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$count"
 }
 
 fm_project_unshallow_if_needed() {  # <project-dir>
@@ -43,7 +53,10 @@ fm_project_unshallow_if_needed() {  # <project-dir>
       ;;
   esac
 
-  before=$(fm_project_depth_count "$project")
+  if ! before=$(fm_project_depth_count "$project"); then
+    printf 'could not measure shallow repository history before repair\n'
+    return 1
+  fi
   # This repair is safe to run automatically: it only adds the missing history
   # objects, does not touch the worktree, move local branches, or discard
   # anything, and the shallow check makes repeated runs idempotent.
@@ -60,6 +73,9 @@ fm_project_unshallow_if_needed() {  # <project-dir>
     printf 'unshallow fetch finished but the repository is still shallow at %s commits\n' "$before"
     return 1
   fi
-  after=$(fm_project_depth_count "$project")
+  if ! after=$(fm_project_depth_count "$project"); then
+    printf 'repository was unshallowed but its completed history count could not be measured\n'
+    return 1
+  fi
   printf 'unshallowed repository history (%s -> %s commits)\n' "$before" "$after"
 }

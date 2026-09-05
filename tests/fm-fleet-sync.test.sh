@@ -521,6 +521,7 @@ test_shallow_clone_unshallows_and_reports() {
   local home clone out before_head before_branch
   home=$(new_home)
   clone=$(build_shallow_pair "$home" shallow-repair)
+  git -C "$clone" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/retired
   before_head=$(git -C "$clone" rev-parse HEAD)
   before_branch=$(git -C "$clone" symbolic-ref --short HEAD)
   [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
@@ -531,7 +532,9 @@ test_shallow_clone_unshallows_and_reports() {
   out=$(run_sync "$home")
 
   assert_contains "$out" "shallow-repair: recovered: unshallowed repository history (2 -> 6 commits)" \
-    "successful shallow repair did not report its before/after history count"
+    "shallow repair with stale origin/HEAD did not report measured history growth"
+  assert_not_contains "$out" "unknown" \
+    "successful shallow repair reported an unknown commit count"
   [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = false ] \
     || fail "fleet sync left the repaired clone shallow"
   [ "$(git -C "$clone" rev-list --count origin/main)" = 6 ] \

@@ -229,7 +229,7 @@ test_shallow_project_without_network_refuses_lane_loudly() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "spawn created a lane after shallow repair failed"
-  assert_contains "$out" "is shallow and could not be repaired: could not unshallow repository history at 2 commits:" \
+  assert_contains "$out" "depth repair failed: could not unshallow repository history at 2 commits:" \
     "spawn did not report why the shallow project could not be repaired"
   [ "$(git -C "$PROJECT_DIR" rev-parse --is-shallow-repository)" = true ] \
     || fail "failed spawn shallow repair changed the repository depth marker"
