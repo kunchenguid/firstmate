@@ -486,13 +486,21 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
+status_open_decisions() {  # <status-file> [<kind>]
+  local f=$1 kind=${2:-} line resolve held open='' verb
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    status_line_verb "$line" verb
+    case "$verb" in
+      done|failed) if [ -n "$kind" ] && [ "$kind" != secondmate ]; then open=''; fi ;;
+    esac
+    case "$verb" in
+      needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+        ;;
+    esac
   done < "$f"
   printf '%s' "$open"
 }
@@ -504,21 +512,9 @@ status_open_decisions() {  # <status-file>
 # within each kind the fold's most recently opened record supplies the detail.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local last open='' key verb note blocked='' decision='' line resolve held
+  local last open key verb note blocked='' decision=''
   last=$(last_status_line "$1")
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  if [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      status_line_verb "$line" verb
-      case "$verb" in
-        done|failed) [ "$2" = secondmate ] || open='' ;;
-        needs-decision|blocked|"$resolve"|"$held")
-          open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-          ;;
-      esac
-    done < "$1"
-  fi
+  open=$(status_open_decisions "$1" "$2")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in
       blocked) blocked="blocked [key=$key]: $note" ;;
