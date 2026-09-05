@@ -242,6 +242,14 @@ With the adapter wired, the same pane read `state: parked · source: pane · wai
 The gate therefore closes at the end of the approved tool call rather than at the keystroke that answered it, because Claude emits no hook for the answer itself.
 That window is bounded by the tool's own duration and always closes, on `PostToolUse` or on the turn's own `Stop`, and it over-reports rather than under-reports.
 
+Known limitation, reasoned from Claude's documented hook behaviour and not reproduced live: the resume half closes the gate on any `PostToolUse` payload, not only the one for the gated call.
+Hooks also fire for tool calls inside a subagent, and concurrency-safe tools run in parallel, so a subagent `Read` or a parallel sibling tool that finishes while the main thread still sits at the permission dialog writes `approval-answered` early; the record then reads `busy` again, `bin/fm-crew-state.sh` reports `working`, and the pane is absorbed until the stale threshold, exactly the pre-adapter reading.
+The follow-up is to tie the close to the `tool_use_id` of the gated call, which `PreToolUse`, `Notification`, and `PostToolUse` would have to be correlated on; until then the limitation is confined to turns that mix a permission-gated call with a subagent or a parallel batch.
+
+The workspace-trust half was read on the same Claude Code 2.1.261: a never-seen path raises the trust dialog at launch, and at that dialog the pane reads `state: working` with the composer classified `pending`.
+That reading is unchanged by this change, because the trust dialog is pre-session and emits no hook for the adapter to consume; it is covered by the spawn-time pre-registration in `bin/fm-claude-trust.sh` (#3663), which keeps the dialog from appearing on a spawned worker in the first place.
+The external `CLAUDE.md` import dialog behaves the same: pre-session, no hook, `working` with `pending` composer, and outside what the approval hook can see.
+
 Deterministic entry points:
 
 ```sh
