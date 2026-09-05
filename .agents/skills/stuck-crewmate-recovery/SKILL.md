@@ -5,6 +5,7 @@ description: >-
   Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

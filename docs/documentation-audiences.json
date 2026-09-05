@@ -429,6 +429,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/pi-skill-catalog.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },

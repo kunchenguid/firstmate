@@ -8,6 +8,7 @@ description: >-
   Also use on a "public-followup ..." check wake, and whenever a promised final public reply must be created, reconciled, or delivered.
   Loaded only when Relay is enabled.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

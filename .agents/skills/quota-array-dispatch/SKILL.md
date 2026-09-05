@@ -6,6 +6,7 @@ description: >-
   orthogonal gates.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

@@ -5,6 +5,7 @@ description: >-
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
   Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

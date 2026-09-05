@@ -11,6 +11,7 @@ description: >-
   rule, the precise durability boundary, and the Lavish adapter's loss
   limitation.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---
