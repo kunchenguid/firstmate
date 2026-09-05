@@ -33,7 +33,9 @@
 # Volume: poll surfaces at most FM_MAIL_POLL_MAX_WAKES messages per run
 # (default 20, valid 1..200); a larger flood is left unseen so the next poll
 # surfaces the next batch, keeping the durable wake queue bounded no matter how
-# much inbound mail arrives.
+# much inbound mail arrives. A header fetch that fails is still surfaced once
+# (degraded placeholders) and retried on later polls until the real metadata
+# lands; a persistently unfetchable uid is never skipped and never re-wakes.
 #
 # Deployment - credentials and endpoints live ONLY in the gitignored
 # $FM_HOME/.env (same convention as the Relay/FMX token). Add these four
@@ -49,8 +51,8 @@
 # and no default endpoint that could resolve against a wrong home; the four
 # FM_MAIL_* credential and endpoint values are always required, and
 # FM_MAIL_PASS is never logged. The wake library is sourced from next to this
-# script, not from $FM_HOME/bin; cursor, journal, and queue stay under
-# $FM_HOME/state.
+# script, not from $FM_HOME/bin; cursor, journal, retry set, and queue stay
+# under $FM_HOME/state.
 #
 # IMAP/SMTP work is delegated to bin/fm-mail.py (imaplib/smtplib, implicit TLS
 # on 993/465). STARTTLS and port 587 are not supported. BODY.PEEK is used on
@@ -149,6 +151,10 @@ CURSOR="$STATE_DIR/.mail-seen"
 # fm-mail's own record of emission and survives any drain ack, which makes
 # recovery exactly-once instead of racing the drain.
 WOKEN="$STATE_DIR/.mail-woken"
+# Generation-scoped retry set: a uid whose header fetch failed is recorded
+# here after its degraded wake so a later poll can fetch the real metadata.
+# Cleared with the cursor and journal on a UIDVALIDITY change.
+RETRY="$STATE_DIR/.mail-retry"
 
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
@@ -156,7 +162,8 @@ run_py() {
   FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
-  FM_MAIL_CURSOR="$CURSOR" FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
+  FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
+  FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
     "$PY" "$PY_BIN" "$@"
 }
 
@@ -172,6 +179,35 @@ EOF
 mail_seen() {
   # $1 = uid; returns 0 when the cursor already records the uid as surfaced.
   grep -Fqx "$1" "$CURSOR"
+}
+
+mail_retry_add() {
+  # $1 = uid; record that a degraded surfacing should be retried.
+  local id=$1
+  [ -n "$id" ] || return 1
+  if [ -f "$RETRY" ] && grep -Fqx "$id" "$RETRY"; then
+    return 0
+  fi
+  printf '%s\n' "$id" >> "$RETRY" || return 1
+  return 0
+}
+
+mail_retry_remove() {
+  # $1 = uid; drop a recovered uid from the retry set.
+  local id=$1 rc=0
+  [ -n "$id" ] || return 0
+  [ -f "$RETRY" ] || return 0
+  grep -vx -e "$id" "$RETRY" > "$RETRY.tmp.$$" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+    chmod 0600 "$RETRY.tmp.$$" 2>/dev/null || true
+    mv -f -- "$RETRY.tmp.$$" "$RETRY" || {
+      rm -f -- "$RETRY.tmp.$$"
+      return 1
+    }
+    return 0
+  fi
+  rm -f -- "$RETRY.tmp.$$"
+  return 1
 }
 
 mail_record_evidence() {
@@ -341,13 +377,15 @@ mail_heal() {
 }
 
 mail_poll() {
-  # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
-  # then diff against already-surfaced uids to find NEW messages and surface
-  # one wake each. Never marks anything read. Overlapping polls are serialized
-  # on the mail-seen lock; each poll first heals a run interrupted between its
-  # phases (mail_heal), so an overlapping poll or an interrupted run can never
-  # lose a mail or double-surface it.
-  local list generation uid _ fr subj woke=0
+  # List unseen mail (uid,date,from,subj,status) plus the mailbox generation
+  # guard, then diff against already-surfaced uids to find NEW messages and
+  # surface one wake each. status is ok, retry, or degraded; an empty status
+  # is treated as ok so a legacy four-field row still wakes. Never marks
+  # anything read. Overlapping polls are serialized on the mail-seen lock;
+  # each poll first heals a run interrupted between its phases (mail_heal), so
+  # an overlapping poll or an interrupted run can never lose a mail or
+  # double-surface it.
+  local list generation uid fr subj status woke=0 need_wake line
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -364,10 +402,11 @@ mail_poll() {
   # reused, so a stale cursor must not suppress its wake. Journal entries from
   # the old mailbox are equally stale: they describe wakes from before the
   # mailbox identity changed, so clear them rather than risk healing a reused
-  # uid into the new generation.
+  # uid into the new generation. The retry set is equally stale.
   if [ -n "$generation" ] && [ "$(mail_stored_generation)" != "$generation" ]; then
     printf 'uidvalidity=%s\n' "$generation" > "$CURSOR"
     : > "$WOKEN"
+    : > "$RETRY"
   fi
 
   if ! mail_heal "$generation"; then
@@ -376,9 +415,30 @@ mail_poll() {
     return 1
   fi
 
-  while IFS=$'\t' read -r uid _ fr subj; do
+  # cut -f keeps empty TSV fields; IFS-tab read would collapse the empty
+  # Date on a degraded row and shift status off the end.
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    uid=$(printf '%s\n' "$line" | cut -f1)
+    fr=$(printf '%s\n' "$line" | cut -f3)
+    subj=$(printf '%s\n' "$line" | cut -f4)
+    status=$(printf '%s\n' "$line" | cut -f5)
     [ -z "$uid" ] && continue
-    if ! mail_seen "$uid"; then
+    [ -z "$status" ] && status=ok
+    need_wake=0
+    case "$status" in
+      retry)
+        # Already cursor-recorded from the degraded wake; surface the recovered
+        # metadata without gating on mail_seen.
+        need_wake=1
+        ;;
+      *)
+        if ! mail_seen "$uid"; then
+          need_wake=1
+        fi
+        ;;
+    esac
+    if [ "$need_wake" -eq 1 ]; then
       # Wake first, then record: the wake append, journal, and cursor commit
       # together under the wake-queue lock inside wake_for (so no drain ack can
       # split them), and a failure stops the poll so the next run retries. A
@@ -394,6 +454,15 @@ mail_poll() {
       if wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}"; then
         echo "fm-mail: woke for $uid"
         woke=$((woke + 1))
+        if [ "$status" = degraded ]; then
+          if ! mail_retry_add "$uid"; then
+            echo "fm-mail: could not record retry for $uid; retried on next poll" >&2
+            fm_lock_release "$STATE_DIR/.mail-seen.lock"
+            return 1
+          fi
+        elif [ "$status" = retry ]; then
+          mail_retry_remove "$uid" || true
+        fi
       else
         echo "fm-mail: wake failed for $uid; retried on next poll" >&2
         fm_lock_release "$STATE_DIR/.mail-seen.lock"

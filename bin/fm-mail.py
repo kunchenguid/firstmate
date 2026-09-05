@@ -5,7 +5,8 @@
 #   read                   List unseen INBOX mail as a compact digest.
 #   send <to> <subj> <body | ->   Send one SMTP message; "-" reads stdin.
 #   poll_list              Emit unseen mail as tab-separated rows for the bash
-#                          poll, bounded to uids this home has not surfaced.
+#                          poll, bounded to uids this home has not surfaced,
+#                          plus a retry-set of previously unfetchable uids.
 #   seen <cursor>          Print a cursor file (used by `status`).
 #
 # All configuration arrives through the environment (FM_MAIL_*), never through
@@ -174,56 +175,99 @@ def load_cursor(cursor_path):
     return stored_gen, seen
 
 
+def load_retry(retry_path):
+    """Return (retry_set, retry_order) from the local retry file."""
+    retry = set()
+    ordered = []
+    if not retry_path or not os.path.exists(retry_path):
+        return retry, ordered
+    with open(retry_path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            uid = line.strip()
+            if not uid or uid in retry:
+                continue
+            retry.add(uid)
+            ordered.append(uid)
+    return retry, ordered
+
+
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
-    # cursor are considered, and a bounded window of candidates is scanned to
-    # fill the per-poll cap, so a large unseen backlog makes bounded progress
-    # every poll instead of re-fetching every unseen header and timing out the
-    # standing check.
+    # cursor are considered as new, then previously unfetchable retry-set uids
+    # (already in the cursor) are fetched again so a transient IMAP failure
+    # cannot permanently replace real metadata with degraded placeholders. A
+    # bounded window of candidates is scanned to fill the per-poll cap, new
+    # uids first so a large retry backlog can never starve new mail.
     cap = int(os.environ.get('FM_MAIL_POLL_MAX_WAKES') or '20')
     if cap < 1:
         cap = 20
     stored_gen, seen = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
+    retry, retry_order = load_retry(os.environ.get('FM_MAIL_RETRY', ''))
     try:
         m = connect_mailbox()
         m.select('INBOX')
         ur = m.untagged_responses.get('UIDVALIDITY')
         uidv = clean(ur[-1].decode()) if ur else ''
         typ, data = m.uid('search', None, 'UNSEEN')
-        ids = [x for x in (data[0] or b'').split()]
+        unseen = []
+        for x in (data[0] or b'').split():
+            uid = x.decode() if isinstance(x, bytes) else str(x)
+            unseen.append(uid)
         if uidv and uidv == stored_gen:
             # Same mailbox generation: skip uids this home already surfaced so
-            # the fetch budget goes to genuinely new mail. On a generation
-            # change the cursor is stale, so list everything and let the bash
-            # generation reset re-surface.
-            ids = [x for x in ids if x.decode() not in seen]
+            # the fetch budget goes to genuinely new mail. Retry-set uids are
+            # only meaningful for this generation.
+            new_uids = [u for u in unseen if u not in seen]
+        else:
+            # On a generation change the cursor and retry set are stale, so
+            # list everything as new and ignore retry membership; bash clears
+            # both files before the wake loop.
+            new_uids = list(unseen)
+            retry = set()
+            retry_order = []
+        candidates = []
+        seen_cand = set()
+        for u in new_uids:
+            if u in seen_cand:
+                continue
+            candidates.append(u)
+            seen_cand.add(u)
+        for u in retry_order:
+            if u in seen_cand:
+                continue
+            candidates.append(u)
+            seen_cand.add(u)
         # Scan a bounded window of candidates rather than exactly the cap, so a
         # repeatedly unfetchable uid (a corrupt message) cannot starve later
-        # mail. An unfetchable uid is still surfaced with a degraded row and
-        # recorded in the cursor, so it is never missed and the next poll moves
-        # past it; the loop keeps going until the cap fills or the window is
-        # exhausted.
+        # mail. A new unfetchable uid is still surfaced with a degraded row and
+        # recorded in the cursor, so it is never missed; a retry-set uid that
+        # fails again emits nothing and stays in the retry set.
         window = max(cap * 4, cap + 10)
         out = []
-        for i in ids[:window]:
+        for u in candidates[:window]:
             if len(out) >= cap:
                 break
-            typ, msg = m.uid('fetch', i, '(BODY.PEEK[HEADER])')
+            typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
-                uid = clean(i.decode())
-                out.append((uid, '', '(no header)', 'unfetchable header - see fm-mail read'))
+                if u in retry:
+                    continue
+                uid = clean(u)
+                out.append((uid, '', '(no header)',
+                            'unfetchable header - see fm-mail read', 'degraded'))
                 continue
             mi = email.message_from_bytes(msg[0][1])
-            uid = clean(i.decode())
+            uid = clean(u)
             idate = clean(dec(mi.get('Date')))
             subj = clean(dec(mi.get('Subject')))
             fr = clean(dec(mi.get('From')))
-            out.append((uid, idate, fr, subj))
-        # Emit the mailbox generation guard first, then each message's
-        # uid/date so the bash layer diffs against cursor.
+            status = 'retry' if u in retry else 'ok'
+            out.append((uid, idate, fr, subj, status))
+        # Emit the mailbox generation guard first, then each message row
+        # (uid, date, from, subject, status) so the bash layer diffs against
+        # the cursor and the retry set.
         print('uidvalidity\t%s' % uidv)
-        for uid, idate, fr, subj in out:
-            print('%s\t%s\t%s\t%s' % (uid, idate, fr, subj))
+        for uid, idate, fr, subj, status in out:
+            print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         m.logout()
         return 0
     except Exception as e:

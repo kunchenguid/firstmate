@@ -525,9 +525,115 @@ PYEOF
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
   expect_code 0 "$rc" "window poll must succeed"
   assert_contains "$out" "uidvalidity	90009" "poll emits the generation guard"
-  assert_contains "$out" $'1\t' "the unfetchable uid is still surfaced, not missed"
-  assert_contains "$out" $'2\t' "a later uid surfaces despite the failure"
+  assert_contains "$out" $'1\t\t(no header)\tunfetchable header - see fm-mail read\tdegraded' \
+    "the unfetchable uid is still surfaced degraded, not missed"
+  assert_contains "$out" $'2\t\ta@b.c\tgood\tok' \
+    "a later uid surfaces as ok despite the earlier failure"
   pass "fm-mail: an unfetchable uid is surfaced degraded and cannot starve later mail"
+}
+
+test_poll_retries_transient_fetch_and_surfaces_real_metadata() {
+  local fakebin homedir_bin real_py harness retry_home control out rc=0 wakeq
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  retry_home="$TMP_ROOT/retry-home"
+  homedir_bin="$retry_home/bin"
+  mkdir -p "$homedir_bin" "$retry_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+  real_py=$(command -v python3)
+  harness="$TMP_ROOT/retry-poll-harness.py"
+  control="$TMP_ROOT/retry-fetch-count"
+  printf '0' > "$control"
+
+  # Drive the real poll_list through a stubbed IMAP connection whose header
+  # fetch fails on the first two polls and succeeds on the third, proving a
+  # transient failure surfaces degraded once, does not re-wake while still
+  # failing, then recovers the real From/Subject and leaves the retry set.
+  cat > "$harness" <<'PYEOF'
+import imaplib, importlib.util, os, sys
+
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'41'])
+        if cmd == 'fetch':
+            n = int(open(os.environ['FM_MAIL_TEST_FETCH_COUNT']).read() or '0')
+            if n < 3:
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: Hello captain\r\nFrom: alice@example.com\r\nDate: 5 Sep 2026 00:00:00 +0000\r\n\r\n')])
+        return ('NO', None)
+    def logout(self):
+        pass
+
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if len(sys.argv) > 2 and sys.argv[2] == 'poll_list':
+    path = os.environ['FM_MAIL_TEST_FETCH_COUNT']
+    n = int(open(path).read() or '0')
+    open(path, 'w').write(str(n + 1))
+    sys.exit(mod.cmd_poll_list())
+sys.exit(1)
+PYEOF
+  cat > "$fakebin/python3" <<EOF
+#!/bin/bash
+exec "$real_py" "$harness" "\$@"
+EOF
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$retry_home/state/.mail-seen"
+  : > "$retry_home/state/.wake-queue"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$retry_home" PATH="$fakebin:$PATH" \
+    FM_MAIL_TEST_FETCH_COUNT="$control" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first poll of a failing fetch must succeed"
+  assert_contains "$out" "woke for 41" "failed fetch still wakes once, never missed"
+  assert_contains "$(cat "$retry_home/state/.wake-queue")" "(no header)" \
+    "first wake uses the degraded sender placeholder"
+  assert_contains "$(cat "$retry_home/state/.wake-queue")" "unfetchable header" \
+    "first wake uses the degraded subject placeholder"
+  assert_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null)" "41" \
+    "the uid is recorded for retry after the degraded wake"
+  assert_contains "$(cat "$retry_home/state/.mail-seen")" "41" \
+    "the degraded surfacing is still cursor-recorded"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$retry_home" PATH="$fakebin:$PATH" \
+    FM_MAIL_TEST_FETCH_COUNT="$control" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "still-failing retry poll must succeed"
+  assert_not_contains "$out" "woke for 41" "a still-unfetchable retry uid must not re-wake"
+  assert_contains "$out" "no new mail" "a still-unfetchable retry poll reports no new mail"
+  assert_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null)" "41" \
+    "the uid stays in the retry set while the fetch keeps failing"
+  wakeq=$(grep -c "check: mail" "$retry_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "still-failing retry must not append a second wake"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$retry_home" PATH="$fakebin:$PATH" \
+    FM_MAIL_TEST_FETCH_COUNT="$control" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "recovered fetch poll must succeed"
+  assert_contains "$out" "woke for 41" "recovered fetch wakes with the real metadata"
+  assert_contains "$(cat "$retry_home/state/.wake-queue")" "alice@example.com" \
+    "recovered wake names the real sender"
+  assert_contains "$(cat "$retry_home/state/.wake-queue")" "Hello captain" \
+    "recovered wake names the real subject"
+  assert_not_contains "$(cat "$retry_home/state/.mail-retry" 2>/dev/null || true)" "41" \
+    "the uid leaves the retry set after a successful fetch"
+  wakeq=$(grep -c "check: mail" "$retry_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 2 "$wakeq" "degraded then recovered metadata are two wakes"
+  pass "fm-mail: a transient fetch failure recovers real metadata on a later poll"
 }
 
 test_poll_keeps_journal_when_heal_cannot_record() {
@@ -906,6 +1012,7 @@ test_poll_caps_wakes_per_run
 test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
+test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain
