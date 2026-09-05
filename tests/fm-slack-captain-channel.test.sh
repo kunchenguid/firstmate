@@ -16,6 +16,27 @@ private_mode() {
   fi
 }
 
+private_inode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %i "$1"
+  else
+    stat -c %i "$1"
+  fi
+}
+
+# Publish a complete legacy board directory state/slack-board.meta/ holding a
+# synthetic identity (channel+ts) and a same-day or prior-day state, so a board
+# call exercises the lazy migration off the task-record namespace.
+make_legacy_board() {
+  local home=$1 channel=$2 ts=$3 date=$4 body=$5
+  mkdir -p "$home/state/slack-board.meta"
+  chmod 700 "$home/state/slack-board.meta"
+  printf 'channel=%s\nts=%s\n' "$channel" "$ts" > "$home/state/slack-board.meta/slack-board.meta"
+  chmod 600 "$home/state/slack-board.meta/slack-board.meta"
+  printf '{"date":"%s","body":%s}' "$date" "$(jq -Rs . <<<"$body")" > "$home/state/slack-board.meta/slack-board.state"
+  chmod 600 "$home/state/slack-board.meta/slack-board.state"
+}
+
 count_ack_reactions() {
   local log=$1
   awk 'index($0, "method=reactions.add") && index($0, "name=eyes") { n++ } END { print n + 0 }' "$log"
@@ -821,7 +842,7 @@ unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
 export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 ts=$(run_post "$home" "$fakebin" board "board v1")
 [ "$ts" = "1786735224.690829" ] || fail "board post must return ts"
-[ -f "$home/state/slack-board.meta/slack-board.meta" ] || fail "board meta must be recorded"
+[ -f "$home/state/slack-board/slack-board.meta" ] || fail "board meta must be recorded"
 ts2=$(run_post "$home" "$fakebin" board "board v2")
 [ "$ts2" = "1786735224.690829" ] || fail "board update must return same ts"
 pass "fm-slack-post board creates then updates in place"
@@ -837,53 +858,1447 @@ ts=$(run_post "$home" "$fakebin" board "board v1")
 [ -d "$home/state" ] || fail "board must recreate a missing state root"
 pass "fm-slack-post board initializes a missing state root before locking"
 
-home="$TMP_ROOT/board-initial-state-recovery"
+home="$TMP_ROOT/board-refuses-state-only-layout"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf '%s\n' '{"date":"2026-08-27","body":"stale"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-state-only")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+state_before=$(cat "$home/state/slack-board/slack-board.state")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/so.err"; then
+  fail "board must refuse a state-only layout (no identity, no recovery journal)"
+fi
+grep -Fq "a steady board requires both identity and daily state" "$home/so.err" \
+  || fail "state-only refusal must name the missing identity: $(cat "$home/so.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "state-only refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.state")" = "$state_before" ] \
+  || fail "state-only refusal must leave the state bytes unchanged"
+[ ! -e "$home/state/slack-board/slack-board.meta" ] \
+  || fail "state-only refusal must not create an identity"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] \
+  || fail "state-only refusal must not create a recovery journal"
+pass "fm-slack-post board refuses a state-only layout without a network call"
+
+home="$TMP_ROOT/board-refuses-identity-only-layout"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+fakebin=$(make_fake_curl "$home/fake-refuse-identity-only")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/io.err"; then
+  fail "board must refuse an identity-only layout (no daily state, no recovery journal)"
+fi
+grep -Fq "a steady board requires both identity and daily state" "$home/io.err" \
+  || fail "identity-only refusal must name the missing state: $(cat "$home/io.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "identity-only refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "identity-only refusal must leave the identity bytes unchanged"
+pass "fm-slack-post board refuses an identity-only layout without a network call"
+
+home="$TMP_ROOT/board-refuses-duplicate-ts-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\nts=1786735230.111111\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-dup-ts")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+state_before=$(cat "$home/state/slack-board/slack-board.state")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/dt.err"; then
+  fail "board must refuse an identity with a duplicate ts field"
+fi
+grep -Fq "invalid Slack board identity" "$home/dt.err" \
+  || fail "duplicate-ts refusal must name the invalid identity: $(cat "$home/dt.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "duplicate-ts refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "duplicate-ts refusal must leave the identity bytes unchanged"
+[ "$(cat "$home/state/slack-board/slack-board.state")" = "$state_before" ] \
+  || fail "duplicate-ts refusal must leave the state bytes unchanged"
+pass "fm-slack-post board refuses a duplicate-ts identity without a network call"
+
+home="$TMP_ROOT/board-refuses-duplicate-channel-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nchannel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-dup-chan")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/dc.err"; then
+  fail "board must refuse an identity with a duplicate channel field"
+fi
+grep -Fq "invalid Slack board identity" "$home/dc.err" \
+  || fail "duplicate-channel refusal must name the invalid identity: $(cat "$home/dc.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "duplicate-channel refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "duplicate-channel refusal must leave the identity bytes unchanged"
+pass "fm-slack-post board refuses a duplicate-channel identity without a network call"
+
+home="$TMP_ROOT/board-refuses-empty-ts-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-empty-ts")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/et.err"; then
+  fail "board must refuse an identity with an empty ts field"
+fi
+grep -Fq "invalid Slack board identity" "$home/et.err" \
+  || fail "empty-ts refusal must name the invalid identity: $(cat "$home/et.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "empty-ts refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "empty-ts refusal must leave the identity bytes unchanged"
+pass "fm-slack-post board refuses an empty-ts identity without a network call"
+
+home="$TMP_ROOT/board-refuses-malformed-ts-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=not-a-ts\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-malformed-ts")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/mt.err"; then
+  fail "board must refuse an identity with a malformed ts field"
+fi
+grep -Fq "invalid Slack board identity" "$home/mt.err" \
+  || fail "malformed-ts refusal must name the invalid identity: $(cat "$home/mt.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "malformed-ts refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "malformed-ts refusal must leave the identity bytes unchanged"
+pass "fm-slack-post board refuses a malformed-ts identity without a network call"
+
+home="$TMP_ROOT/board-refuses-extra-field-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\nbogus=field\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-extra-field")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/ef.err"; then
+  fail "board must refuse an identity with an extra unknown field"
+fi
+grep -Fq "invalid Slack board identity" "$home/ef.err" \
+  || fail "extra-field refusal must name the invalid identity: $(cat "$home/ef.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "extra-field refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "extra-field refusal must leave the identity bytes unchanged"
+pass "fm-slack-post board refuses an identity with an extra field without a network call"
+
+home="$TMP_ROOT/board-refuses-wrong-mode-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 644 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-wrong-mode")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/wm.err"; then
+  fail "board must refuse an identity file with the wrong mode"
+fi
+grep -Fq "invalid Slack board identity" "$home/wm.err" \
+  || fail "wrong-mode refusal must name the invalid identity: $(cat "$home/wm.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "wrong-mode refusal must not call Slack: $(cat "$log")"
+[ "$(stat -f %Lp "$home/state/slack-board/slack-board.meta" 2>/dev/null || stat -c %a "$home/state/slack-board/slack-board.meta")" = "644" ] \
+  || fail "wrong-mode refusal must leave the identity mode unchanged"
+pass "fm-slack-post board refuses a wrong-mode identity without a network call"
+
+home="$TMP_ROOT/board-refuses-nonregular-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+ln -s /dev/null "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-nonregular")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/nr.err"; then
+  fail "board must refuse a non-regular identity file"
+fi
+grep -Fq "invalid Slack board identity" "$home/nr.err" \
+  || fail "non-regular refusal must name the invalid identity: $(cat "$home/nr.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "non-regular refusal must not call Slack: $(cat "$log")"
+[ -L "$home/state/slack-board/slack-board.meta" ] \
+  || fail "non-regular refusal must leave the symlink unchanged"
+pass "fm-slack-post board refuses a non-regular identity without a network call"
+
+home="$TMP_ROOT/board-refuses-malformed-state"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf 'not-json' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-malformed-state")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+state_before=$(cat "$home/state/slack-board/slack-board.state")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/ms.err"; then
+  fail "board must refuse a malformed daily state file"
+fi
+grep -Fq "invalid Slack board daily state" "$home/ms.err" \
+  || fail "malformed-state refusal must name the invalid state: $(cat "$home/ms.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "malformed-state refusal must not call Slack: $(cat "$log")"
+[ "$(cat "$home/state/slack-board/slack-board.state")" = "$state_before" ] \
+  || fail "malformed-state refusal must leave the state bytes unchanged"
+pass "fm-slack-post board refuses a malformed daily state without a network call"
+
+home="$TMP_ROOT/board-refuses-legacy-state-only-layout"
 make_home "$home"
 mkdir "$home/state/slack-board.meta"
 chmod 700 "$home/state/slack-board.meta"
 printf '%s\n' '{"date":"2026-08-27","body":"stale"}' > "$home/state/slack-board.meta/slack-board.state"
-chmod 400 "$home/state/slack-board.meta/slack-board.state"
-fakebin=$(make_fake_curl "$home/fake-board-initial-state-recovery")
+chmod 600 "$home/state/slack-board.meta/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-legacy-state-only")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+state_before=$(cat "$home/state/slack-board.meta/slack-board.state")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/lso.err"; then
+  fail "board must refuse a legacy state-only layout before rename"
+fi
+grep -Fq "a steady board requires both identity and daily state" "$home/lso.err" \
+  || fail "legacy state-only refusal must name the missing identity: $(cat "$home/lso.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "legacy state-only refusal must not call Slack: $(cat "$log")"
+[ -d "$home/state/slack-board.meta" ] \
+  || fail "legacy state-only refusal must not remove the legacy directory"
+[ "$(cat "$home/state/slack-board.meta/slack-board.state")" = "$state_before" ] \
+  || fail "legacy state-only refusal must leave the state bytes unchanged"
+[ ! -e "$home/state/slack-board" ] \
+  || fail "legacy state-only refusal must not create the new directory"
+pass "fm-slack-post board refuses a legacy state-only layout without a network call"
+
+home="$TMP_ROOT/board-refuses-legacy-duplicate-ts-identity"
+make_home "$home"
+mkdir "$home/state/slack-board.meta"
+chmod 700 "$home/state/slack-board.meta"
+printf 'channel=%s\nts=1786735224.690829\nts=1786735230.111111\n' "$CHANNEL_ID" > "$home/state/slack-board.meta/slack-board.meta"
+chmod 600 "$home/state/slack-board.meta/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior"}' > "$home/state/slack-board.meta/slack-board.state"
+chmod 600 "$home/state/slack-board.meta/slack-board.state"
+fakebin=$(make_fake_curl "$home/fake-refuse-legacy-dup-ts")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/ldt.err"; then
+  fail "board must refuse a legacy identity with a duplicate ts field before rename"
+fi
+grep -Fq "invalid Slack board identity" "$home/ldt.err" \
+  || fail "legacy duplicate-ts refusal must name the invalid identity: $(cat "$home/ldt.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "legacy duplicate-ts refusal must not call Slack: $(cat "$log")"
+[ -d "$home/state/slack-board.meta" ] \
+  || fail "legacy duplicate-ts refusal must not remove the legacy directory"
+[ "$(cat "$home/state/slack-board.meta/slack-board.meta")" = "$meta_before" ] \
+  || fail "legacy duplicate-ts refusal must leave the identity bytes unchanged"
+[ ! -e "$home/state/slack-board" ] \
+  || fail "legacy duplicate-ts refusal must not create the new directory"
+pass "fm-slack-post board refuses a legacy duplicate-ts identity without a network call"
+
+home="$TMP_ROOT/board-initial-state-needs-write-recovery-completes"
+make_home "$home"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"phase":"initial-state-needs-write","date":"2026-08-27","body":"initialbody","today":"2026-08-27","new_body":"initialbody","live_ts":"1786735224.690829","snapshot_ts":"","channel":"%s"}' "$CHANNEL_ID" \
+  > "$home/state/slack-board/slack-board.pending"
+chmod 600 "$home/state/slack-board/slack-board.pending"
+fakebin=$(make_fake_curl "$home/fake-recovery-completes")
 log="$home/curl.log"
 : > "$log"
 export FM_SLACK_CURL_LOG="$log"
 unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
 export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
-if run_post "$home" "$fakebin" board "initialbody" >"$home/initial.out" 2>"$home/initial.err"; then
-  chmod 600 "$home/state/slack-board.meta/slack-board.state"
-  fail "initial state-write failure must exit non-zero"
-fi
-[ -f "$home/state/slack-board.meta/slack-board.meta" ] \
-  || fail "initial state-write failure must retain the posted live meta"
-[ -f "$home/state/slack-board.meta/slack-board.pending" ] \
-  || fail "initial state-write failure must retain its recovery journal"
-[ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
-  || fail "initial state-write failure must not update the live message"
-chmod 600 "$home/state/slack-board.meta/slack-board.state"
-export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
-export FAKE_SLACK_POST='{"ok":true,"ts":"1786735230.999999","channel":"C0BQ9K1TJKG"}'
-run_post "$home" "$fakebin" board "todaybody" >/dev/null \
-  || fail "initial state recovery must complete on the next board call"
-unset FAKE_SLACK_POST
-[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
-  || fail "initial state recovery must close the recovered active date once"
+ts=$(run_post "$home" "$fakebin" board "today body")
+[ "$ts" = "1786735224.690829" ] || fail "initial-state-needs-write recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] \
+  || fail "initial-state-needs-write recovery must clear its pending journal"
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-27" ] \
+  || fail "initial-state-needs-write recovery must write the state date"
 [ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
-  || fail "initial state recovery must update the live message after recovery"
-[ ! -e "$home/state/slack-board.meta/slack-board.pending" ] \
-  || fail "initial state recovery must clear its pending journal"
-[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
-  || fail "initial state recovery must advance the state date"
-pass "fm-slack-post board recovers an initial state-write failure"
+  || fail "initial-state-needs-write recovery must update the live message once: $(cat "$log")"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 0 ] \
+  || fail "initial-state-needs-write recovery must not post a replacement: $(cat "$log")"
+pass "fm-slack-post board completes an initial-state-needs-write recovery without a replacement post"
 unset FM_SLACK_BOARD_TODAY_OVERRIDE
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- round-three phase-aware validator: red-before-green refusal matrix -----
+
+# _r3_meta <home> <channel> <ts>  -- publish a private mode-600 board identity
+_r3_meta() {
+  printf 'channel=%s\nts=%s\n' "$2" "$3" \
+    | fmx_private_artifact_publish_stdin "$1/state/slack-board" "slack-board.meta" 600
+}
+# _r3_state <home> <date> <body>  -- publish a private mode-600 daily state
+_r3_state() {
+  printf '%s\n' "{\"date\":\"$2\",\"body\":\"$3\"}" \
+    | fmx_private_artifact_publish_stdin "$1/state/slack-board" "slack-board.state" 600
+}
+# _r3_pending <home> <phase> <date> <body> <today> <new_body> <live_ts> <snap_ts> <channel>
+_r3_pending() {
+  printf '{"phase":"%s","date":"%s","body":"%s","today":"%s","new_body":"%s","live_ts":"%s","snapshot_ts":"%s","channel":"%s"}' \
+    "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+    | fmx_private_artifact_publish_stdin "$1/state/slack-board" "slack-board.pending" 600
+}
+# _r3_once <home> <date> <ts>  -- publish a private mode-600 snapshot once-file
+_r3_once() {
+  printf '%s\n' "$3" \
+    | fmx_private_artifact_publish_stdin "$1/state/slack-board-snapshots" "$2" 600
+}
+# _r3_refuse <home> <errfile> <grep-fragment>  -- assert refusal + zero transport + preserved layout
+_r3_refuse() {
+  local home=$1 err=$2 frag=$3
+  if run_post "$home" "$(make_fake_curl "$home/fake-r3")" board "today body" >/dev/null 2>"$err"; then
+    fail "board must refuse this layout"
+  fi
+  grep -Fq "$frag" "$err" || fail "refusal must name the defect: $(cat "$err")"
+  [ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] \
+    || fail "refusal must not call Slack: $(cat "$home/curl.log")"
+}
+
+home="$TMP_ROOT/board-r3-malformed-channel"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "c0BQ9K1TJKG" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "stale"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board identity"
+pass "fm-slack-post board refuses a malformed channel in a complete identity"
+
+home="$TMP_ROOT/board-r3-two-dot-ts"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1.2.3"
+_r3_state "$home" "2026-08-27" "stale"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board identity"
+pass "fm-slack-post board refuses a two-dot timestamp through the helper and board command"
+
+home="$TMP_ROOT/board-r3-isnw-no-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-state-needs-write" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "initial-state-needs-write requires an identity"
+pass "fm-slack-post board refuses initial-state-needs-write without an identity"
+
+home="$TMP_ROOT/board-r3-snapshot-needed-no-artifacts"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "snapshot-needed" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "snapshot-needed requires an identity"
+pass "fm-slack-post board refuses a non-initial phase without identity or state"
+
+home="$TMP_ROOT/board-r3-empty-live-ts"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-posted" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "empty or malformed live_ts"
+pass "fm-slack-post board refuses an empty live_ts in the journal"
+
+home="$TMP_ROOT/board-r3-journal-ts-conflicts-identity"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735230.111111"
+_r3_pending "$home" "initial-state-needs-write" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "identity timestamp differs from journal live_ts"
+pass "fm-slack-post board refuses a journal live_ts that conflicts with the identity"
+
+home="$TMP_ROOT/board-r3-journal-date-conflicts-state"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-28" "initialbody"
+_r3_pending "$home" "initial-state-needs-write" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "initial-state-needs-write state date must equal journal today"
+pass "fm-slack-post board refuses a journal date that conflicts with the daily state"
+
+home="$TMP_ROOT/board-r3-snapshot-posting-no-once"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "snapshot-posting" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "snapshot-posting has no once-file"
+pass "fm-slack-post board refuses snapshot-posting without a matching once-file"
+
+home="$TMP_ROOT/board-r3-snapshot-posted-empty-snap-ts"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "snapshot-posted" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786735224.690829"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "empty or malformed snapshot_ts"
+pass "fm-slack-post board refuses snapshot-posted with an empty snapshot timestamp"
+
+home="$TMP_ROOT/board-r3-initial-meta-written-with-state"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "initialbody"
+_r3_pending "$home" "initial-meta-written" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "initial-meta-written must not yet have a daily state"
+pass "fm-slack-post board refuses a contradictory optional artifact for the phase"
+
+# --- positive phase fixtures: real recoverable states must still complete ---
+
+home="$TMP_ROOT/board-r3-initial-posted-recovers"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-posted" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r3-ip")" board "initialbody")
+[ "$ts" = "1786735224.690829" ] || fail "initial-posted recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "initial-posted recovery must clear its journal"
+[ "$(grep -c '^channel=' "$home/state/slack-board/slack-board.meta")" -eq 1 ] || fail "initial-posted recovery must write the identity"
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-27" ] || fail "initial-posted recovery must write the state date"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "initial-posted recovery must update the live message once: $(cat "$home/curl.log")"
+[ "$(grep -c '^method=chat.postMessage ' "$home/curl.log")" -eq 0 ] || fail "initial-posted recovery must not post a replacement"
+pass "fm-slack-post board completes an initial-posted recovery with one live update"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r3-snapshot-posted-recovers"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "snapshot-posted" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "1786740000.222222" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r3-sp")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "snapshot-posted recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "snapshot-posted recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "snapshot-posted recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 2 ] || fail "snapshot-posted recovery must update the live message twice (recovery plus final): $(cat "$home/curl.log")"
+[ "$(grep -c '^method=chat.postMessage ' "$home/curl.log")" -eq 0 ] || fail "snapshot-posted recovery must not post a replacement"
+pass "fm-slack-post board completes a snapshot-posted recovery with two live updates"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r3-state-needs-write-recovers"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "state-needs-write" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "1786740000.222222" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r3-snw")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "state-needs-write recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "state-needs-write recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "state-needs-write recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "state-needs-write recovery must update the live message once: $(cat "$home/curl.log")"
+[ "$(grep -c '^method=chat.postMessage ' "$home/curl.log")" -eq 0 ] || fail "state-needs-write recovery must not post a replacement"
+pass "fm-slack-post board completes a state-needs-write recovery with one live update"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r3-snapshot-needed-recovers"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "snapshot-needed" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r3-sn")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "snapshot-needed recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "snapshot-needed recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "snapshot-needed recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 2 ] || fail "snapshot-needed recovery must update the live message twice (recovery plus final): $(cat "$home/curl.log")"
+[ "$(grep -c '^method=chat.postMessage ' "$home/curl.log")" -eq 0 ] || fail "snapshot-needed recovery must not post a replacement"
+pass "fm-slack-post board completes a snapshot-needed recovery from a seeded once-file"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- round-four: extra positive variants for every writer-reachable boundary ---
+
+home="$TMP_ROOT/board-r4-initial-meta-written-no-meta"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-meta-written" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-imn")" board "initialbody")
+[ "$ts" = "1786735224.690829" ] || fail "initial-meta-written(no meta) recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "initial-meta-written(no meta) recovery must clear its journal"
+[ "$(grep -c '^channel=' "$home/state/slack-board/slack-board.meta")" -eq 1 ] || fail "initial-meta-written(no meta) recovery must write the identity"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "initial-meta-written(no meta) recovery must update the live message once"
+pass "fm-slack-post board completes an initial-meta-written recovery before the meta write"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-initial-meta-written-with-meta"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_pending "$home" "initial-meta-written" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-imw")" board "initialbody")
+[ "$ts" = "1786735224.690829" ] || fail "initial-meta-written(with meta) recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "initial-meta-written(with meta) recovery must clear its journal"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "initial-meta-written(with meta) recovery must update the live message once"
+pass "fm-slack-post board completes an initial-meta-written recovery after the meta write"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-initial-state-needs-write-with-state"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "initialbody"
+_r3_pending "$home" "initial-state-needs-write" "2026-08-27" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-isnw")" board "initialbody")
+[ "$ts" = "1786735224.690829" ] || fail "initial-state-needs-write(with state) recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "initial-state-needs-write(with state) recovery must clear its journal"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "initial-state-needs-write(with state) recovery must update the live message once"
+pass "fm-slack-post board completes an initial-state-needs-write recovery after the state write"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-live-needs-update-same-day"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "priorbody"
+_r3_pending "$home" "live-needs-update" "2026-08-27" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-lnu-sd")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "same-day live-needs-update recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "same-day live-needs-update recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "same-day live-needs-update recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 2 ] || fail "same-day live-needs-update recovery must update the live message twice: $(cat "$home/curl.log")"
+pass "fm-slack-post board completes a same-day live-needs-update recovery"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-live-needs-update-rollover"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "live-needs-update" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "1786740000.222222" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-lnu-rl")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "rollover live-needs-update recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "rollover live-needs-update recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "rollover live-needs-update recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 2 ] || fail "rollover live-needs-update recovery must update the live message twice: $(cat "$home/curl.log")"
+pass "fm-slack-post board completes a rollover live-needs-update recovery"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-state-needs-write-rollover-before"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "state-needs-write" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "1786740000.222222" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-snw-rl-b")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "rollover state-needs-write(before) recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "rollover state-needs-write(before) recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "rollover state-needs-write(before) recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "rollover state-needs-write(before) recovery must update the live message once: $(cat "$home/curl.log")"
+pass "fm-slack-post board completes a rollover state-needs-write recovery before the state write"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-r4-state-needs-write-rollover-after"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "newbody"
+_r3_pending "$home" "state-needs-write" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "1786740000.222222" "$CHANNEL_ID"
+_r3_once "$home" "2026-08-26" "1786740000.222222"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$(make_fake_curl "$home/fake-r4-snw-rl-a")" board "newbody")
+[ "$ts" = "1786735224.690829" ] || fail "rollover state-needs-write(after) recovery must keep the live ts, got $ts"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "rollover state-needs-write(after) recovery must clear its journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "newbody" ] || fail "rollover state-needs-write(after) recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$home/curl.log")" -eq 1 ] || fail "rollover state-needs-write(after) recovery must update the live message once: $(cat "$home/curl.log")"
+pass "fm-slack-post board completes a rollover state-needs-write recovery after the state write"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- round-four: required negatives ---
+
+home="$TMP_ROOT/board-r4-initial-date-mismatch"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-posted" "2026-08-20" "initialbody" "2026-08-27" "initialbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "initial-posted must have date equal to today"
+pass "fm-slack-post board refuses an initial phase whose date differs from today"
+
+home="$TMP_ROOT/board-r4-initial-body-mismatch"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_pending "$home" "initial-posted" "2026-08-27" "initialbody" "2026-08-27" "differentbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "initial-posted must have body equal to new_body"
+pass "fm-slack-post board refuses an initial phase whose body differs from new_body"
+
+home="$TMP_ROOT/board-r4-same-day-snapshot-needed"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-27" "priorbody"
+_r3_pending "$home" "snapshot-needed" "2026-08-27" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "snapshot-needed is rollover-only"
+pass "fm-slack-post board refuses a same-day snapshot-needed (rollover-only phase)"
+
+home="$TMP_ROOT/board-r4-trailing-newline-body-conflict"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+printf '%s\n' '{"date":"2026-08-26","body":"priorbody\n"}' \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.state" 600
+_r3_pending "$home" "snapshot-needed" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "state body must equal journal body"
+pass "fm-slack-post board refuses a trailing-newline body conflict (exact newline-safe comparison)"
+
+home="$TMP_ROOT/board-r4-malformed-once-file"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+_r3_pending "$home" "snapshot-posting" "2026-08-26" "priorbody" "2026-08-27" "newbody" "1786735224.690829" "" "$CHANNEL_ID"
+printf 'not-a-valid-ts' \
+  | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "2026-08-26" 600 \
+  || fail "malformed once-file seed failed"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "malformed or non-canonical bytes"
+[ "$(cat "$home/state/slack-board-snapshots/2026-08-26")" = "not-a-valid-ts" ] \
+  || fail "malformed once-file refusal must not overwrite the once-file"
+pass "fm-slack-post board refuses a malformed snapshot once-file without mutation"
+
+home="$TMP_ROOT/board-r4-malformed-channel-suffix-board"
+make_home "$home"
+mkdir "$home/state/slack-board"; chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+printf 'channel=C012345678/\nts=1786735224.690829\n' \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.meta" 600 \
+  || fail "malformed-channel meta seed failed"
+_r3_state "$home" "2026-08-27" "stale"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board identity"
+pass "fm-slack-post board refuses a malformed channel suffix through the board entry point"
+
+# Shared predicate + direct post/update entry points for a malformed channel suffix.
+# shellcheck source=bin/fm-slack-lib.sh
+. "$ROOT/bin/fm-slack-lib.sh"
+if fms_channel_id_valid "C012345678/" 2>/dev/null; then
+  fail "fms_channel_id_valid must reject a malformed channel suffix at the shared predicate"
+fi
+if fms_channel_id_valid "C0BQ9K1TJKG" 2>/dev/null; then :; else
+  fail "fms_channel_id_valid must still accept a valid channel id at the shared predicate"
+fi
+home="$TMP_ROOT/board-r4-malformed-channel-direct-post"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-r4-badchan-post")
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL="C012345678/"
+if run_post "$home" "$fakebin" message "hello" >/dev/null 2>&1; then
+  fail "direct post must refuse a malformed configured channel suffix"
+fi
+pass "fm-slack-post refuses a malformed channel suffix at the direct post entry point"
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+
+# --- round-four: writer-produced drift (pin validator and writer together) ---
+
+home="$TMP_ROOT/board-r4-writer-drift"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-r4-drift")
+log="$home/curl.log"
+: > "$log"; export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$fakebin" board "body1")
+[ "$ts" = "1786735224.690829" ] || fail "writer-drift setup must post the initial board"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "writer-drift setup must reach steady state"
+# Crash the writer mid same-day update so it leaves a REAL live-needs-update journal.
+export FAKE_SLACK_UPDATE='{"ok":false,"error":"chat_update_failed"}'
+if run_post "$home" "$fakebin" board "body2" >/dev/null 2>"$home/drift.err"; then
+  fail "writer-drift must crash when chat.update fails, leaving a real live-needs-update journal"
+fi
+[ -e "$home/state/slack-board/slack-board.pending" ] || fail "writer-drift must leave a pending journal after the crash"
+real_phase=$(jq -er '.phase' "$home/state/slack-board/slack-board.pending")
+[ "$real_phase" = "live-needs-update" ] || fail "writer-drift must leave a real live-needs-update journal, got $real_phase"
+[ "$(jq -er '.date' "$home/state/slack-board/slack-board.pending")" = "2026-08-27" ] || fail "writer-drift journal date must equal today"
+[ "$(jq -er '.snapshot_ts' "$home/state/slack-board/slack-board.pending")" = "" ] || fail "writer-drift same-day journal must have an empty snapshot_ts"
+# Re-run with chat.update succeeding: the validator must accept the writer-produced layout and recover.
+unset FAKE_SLACK_UPDATE
+ts2=$(run_post "$home" "$fakebin" board "body2")
+[ "$ts2" = "$ts" ] || fail "writer-drift recovery must keep the same live ts, got $ts2"
+[ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "writer-drift recovery must clear the real journal"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "body2" ] || fail "writer-drift recovery must write the new body"
+[ "$(grep -c '^method=chat.update ' "$log")" -ge 2 ] || fail "writer-drift recovery must retry the live update: $(cat "$log")"
+pass "fm-slack-post board accepts a writer-produced live-needs-update journal and recovers"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- round-four once-file axis: preflight through helper, bootstrap, and board
+# Prove malformed steady-state snapshot evidence refuses before any rename,
+# journal write, state write, or transport, through every entry point that can
+# reach the shared migration preflight. Each case builds a steady rollover home
+# (identity + daily state for a past date, no pending journal) with a malformed
+# snapshot once-file and asserts every entry point refuses nonzero, names the
+# defect, calls no transport, and leaves identity/state/once bytes unchanged.
+
+_r4_run_helper() {
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-slack-board-migrate.sh" --lock-held >/dev/null 2>"$2"
+}
+_r4_run_bootstrap() {
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>"$2"
+}
+_r4_run_board() {
+  : > "$1/curl.log"; export FM_SLACK_CURL_LOG="$1/curl.log"
+  unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+  run_post "$1" "$(make_fake_curl "$1/fake-r4")" board "today body" >/dev/null 2>"$2"
+}
+# _r4_refuse_three <label> <once-date> <printf-fmt>  -- refuse through all three
+_r4_refuse_three() {
+  local label=$1 once_date=$2 fmt=$3
+  local entries=(helper bootstrap board) i rc home err
+  for i in 0 1 2; do
+    home="$TMP_ROOT/board-r4-$label-${entries[$i]}"
+    make_home "$home"
+    mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+    chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+    _r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+    _r3_state "$home" "$once_date" "priorbody"
+    printf '%b' "$fmt" | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "$once_date" 600
+    # Independent canonical expected bytes, built by printf never by reading the
+    # artifact under test into a shell string (command substitution strips
+    # trailing LF and would miss a truncation/rewrite mutation).
+    printf '%b' "$fmt" > "$home/expected-once"
+    printf '{"date":"%s","body":"priorbody"}\n' "$once_date" > "$home/expected-state"
+    manifest "$home/state/slack-board" "$home/pre-b"
+    manifest "$home/state/slack-board-snapshots" "$home/pre-s"
+    err="$home/e.err"
+    case "$i" in
+      0) _r4_run_helper "$home" "$err"; rc=$? ;;
+      1) _r4_run_bootstrap "$home" "$err"; rc=$? ;;
+      2) _r4_run_board "$home" "$err"; rc=$? ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$label via ${entries[$i]} must refuse"
+    grep -Fq "malformed or non-canonical bytes" "$err" || fail "$label via ${entries[$i]} must name the defect: $(cat "$err")"
+    assert_bytes_eq "$home/expected-once" "$home/state/slack-board-snapshots/$once_date" \
+      || fail "$label via ${entries[$i]} must not alter once bytes"
+    assert_bytes_eq "$home/expected-state" "$home/state/slack-board/slack-board.state" \
+      || fail "$label via ${entries[$i]} must not alter state bytes"
+    grep -Fq "ts=1786735224.690829" "$home/state/slack-board/slack-board.meta" || fail "$label via ${entries[$i]} must not alter identity"
+    [ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "$label via ${entries[$i]} must not write a pending journal"
+    [ -d "$home/state/slack-board" ] || fail "$label via ${entries[$i]} must not rename the board directory"
+    [ ! -e "$home/state/slack-board.meta" ] || fail "$label via ${entries[$i]} must not create the legacy directory"
+    if [ "$i" -eq 2 ]; then
+      [ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "$label via board must not call Slack: $(cat "$home/curl.log")"
+    fi
+    manifest "$home/state/slack-board" "$home/post-b"
+    manifest "$home/state/slack-board-snapshots" "$home/post-s"
+    assert_bytes_eq "$home/pre-b" "$home/post-b" || fail "$label via ${entries[$i]} must leave the board manifest unchanged"
+    assert_bytes_eq "$home/pre-s" "$home/post-s" || fail "$label via ${entries[$i]} must leave the snapshot manifest unchanged"
+  done
+  pass "fm-slack-post board refuses a $label steady snapshot once-file through helper, bootstrap, and board"
+}
+
+_r4_refuse_three "not-a-ts" "2026-08-26" 'not-a-ts'
+_r4_refuse_three "two-lf" "2026-08-26" '1786735224.690829\n\n'
+_r4_refuse_three "no-lf" "2026-08-26" '1786735224.690829'
+
+# Canonical one-LF once-file is accepted and preserves snapshot dedupe: a steady
+# rollover with a pre-existing canonical once-file must skip the snapshot post
+# and still update the live message, proving the strict reader accepts exactly
+# one LF and reuses the recorded timestamp as delivery evidence.
+home="$TMP_ROOT/board-r4-canonical-one-lf"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-r4-canonical")
+log="$home/curl.log"; : > "$log"; export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+ts=$(run_post "$home" "$fakebin" board "closedbody")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+mkdir -p "$home/state/slack-board-snapshots"; chmod 700 "$home/state/slack-board-snapshots"
+printf '1786735230.111111\n' | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "2026-08-27" 600
+# Independent canonical expected bytes (printf, never read the artifact under test).
+printf '1786735230.111111\n' > "$home/expected-once"
+manifest "$home/state/slack-board-snapshots" "$home/pre-snap"
+ts2=$(run_post "$home" "$fakebin" board "todaybody")
+[ "$ts2" = "$ts" ] || fail "canonical one-LF once-file must preserve the live ts"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 1 ] || fail "canonical once-file must skip a duplicate snapshot post: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] || fail "canonical once-file must still update the live message: $(cat "$log")"
+assert_bytes_eq "$home/expected-once" "$home/state/slack-board-snapshots/2026-08-27" \
+  || fail "canonical once-file must not be overwritten (bytes must match exactly)"
+manifest "$home/state/slack-board-snapshots" "$home/post-snap"
+assert_bytes_eq "$home/pre-snap" "$home/post-snap" || fail "canonical once-file must leave the snapshot manifest unchanged"
+pass "fm-slack-post board accepts a canonical one-LF once-file and preserves snapshot dedupe"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# Unsafe snapshot directory: a group-readable snapshot dir is not private and
+# must refuse through the board entry point before any transport or mutation.
+home="$TMP_ROOT/board-r4-unsafe-snap-dir"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 750 "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "not a private mode-700 directory"
+[ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "unsafe snapshot dir must not call Slack"
+pass "fm-slack-post board refuses a non-private snapshot directory"
+
+# §3.3: a mode-0500 store is owner-only but not mode-700, so the one 700
+# predicate refuses it. The diagnostic must name the directory and its mode,
+# not the once-file entries (the old mode-&-077 check accepted 0500 and then
+# the per-entry reader failed with a misleading "malformed bytes" message).
+home="$TMP_ROOT/board-r5-snap-dir-mode-0500"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board"
+chmod 500 "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "mode 500, not a private mode-700 directory"
+grep -Fq "slack-board-snapshots" "$home/e.err" \
+  || fail "the 0500 refusal must name the snapshot directory: $(cat "$home/e.err")"
+[ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "a 0500 store must not call Slack"
+pass "fm-slack-post board refuses a mode-0500 snapshot store naming the directory and mode"
+
+# Unexpected snapshot entry: a non-date-shaped filename must refuse.
+home="$TMP_ROOT/board-r4-unexpected-snap-entry"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+printf '1786735230.222222\n' | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "not-a-date" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "unexpected filename"
+[ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "unexpected snapshot entry must not call Slack"
+pass "fm-slack-post board refuses an unexpected snapshot entry filename"
+
+# Malformed snapshot entry: a directory at a date-shaped name is not a regular
+# once-file and must refuse.
+home="$TMP_ROOT/board-r4-snap-entry-is-dir"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+mkdir "$home/state/slack-board-snapshots/2026-08-26"; chmod 600 "$home/state/slack-board-snapshots/2026-08-26"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "malformed or non-canonical bytes"
+[ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "directory snapshot entry must not call Slack"
+pass "fm-slack-post board refuses a non-regular snapshot entry"
+
+# --- §7.3 new end-to-end refusal cases through the board entry point --------
+# Each closes a §3 gap end-to-end: nonzero status, zero transport, no journal,
+# and (for the layout-mutating candidates) a byte-identical pre/post manifest
+# of both the board and snapshot directories via the §7.1 helpers.
+
+# §5.5 orphan store: a snapshot store with no board directory refuses, naming
+# the store and its remediation.
+home="$TMP_ROOT/board-r5-orphan-store"
+make_home "$home"
+mkdir "$home/state/slack-board-snapshots"; chmod 700 "$home/state/slack-board-snapshots"
+_r3_once "$home" "2026-08-26" "1786735224.690829"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+manifest "$home/state/slack-board-snapshots" "$home/pre-snap"
+if run_post "$home" "$(make_fake_curl "$home/fake-r3")" board "today body" >/dev/null 2>"$home/e.err"; then
+  fail "board must refuse an orphan snapshot store"
+fi
+grep -Fq "orphan Slack board snapshot store" "$home/e.err" \
+  || fail "orphan refusal must name the orphan store: $(cat "$home/e.err")"
+grep -Fq "move" "$home/e.err" \
+  || fail "orphan refusal must name its remediation: $(cat "$home/e.err")"
+[ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "orphan store must not call Slack"
+[ ! -e "$home/state/slack-board" ] || fail "orphan refusal must not create a board directory"
+manifest "$home/state/slack-board-snapshots" "$home/post-snap"
+assert_bytes_eq "$home/pre-snap" "$home/post-snap"
+pass "fm-slack-post board refuses an orphan snapshot store with remediation text"
+
+# §3.1 fresh-path hole: a canonical board directory (slack-board/) is present
+# AND a malformed once-file sits in the snapshot store. The old code skipped the
+# snapshot preflight on the canonical branch; the one owner entry sequence
+# validates the store before the board-directory branch, so this now refuses.
+home="$TMP_ROOT/board-r5-fresh-path-malformed-once"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+printf 'not-a-ts\n' | fmx_private_artifact_publish_stdin "$home/state/slack-board-snapshots" "2026-08-26" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "malformed or non-canonical bytes"
+pass "fm-slack-post board refuses a malformed snapshot once-file with a canonical board present (§3.1)"
+
+# §3.3 other directory: a mode-0500 board directory refuses, naming the
+# directory and its mode (the one 700 predicate, applied to the board directory).
+home="$TMP_ROOT/board-r5-board-dir-mode-0500"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 500 "$home/state/slack-board"
+chmod 700 "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "mode 500, not a private mode-700 directory"
+grep -Fq "slack-board " "$home/e.err" || grep -Fq "slack-board$" "$home/e.err" \
+  || fail "the 0500 board refusal must name the board directory: $(cat "$home/e.err")"
+pass "fm-slack-post board refuses a mode-0500 board directory naming the directory and mode"
+
+# §3.7 end-to-end: a two-JSON-value slack-board.state refuses through the board
+# entry point (the single-value validator, not just the unit test).
+home="$TMP_ROOT/board-r5-two-value-state"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+printf '{"date":"2026-08-26","body":"a"}\n{"date":"2026-08-27","body":"b"}\n' \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.state" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board daily state"
+pass "fm-slack-post board refuses a two-JSON-value slack-board.state (§3.7)"
+
+# §3.7 second site: a two-JSON-value slack-board.pending refuses end-to-end.
+home="$TMP_ROOT/board-r5-two-value-pending"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+printf '{"phase":"snapshot-needed","date":"2026-08-26","today":"2026-09-04","body":"a","new_body":"b","live_ts":"1786735224.690829","snapshot_ts":"","channel":"%s"}\n{"phase":"snapshot-needed","date":"2026-08-27","today":"2026-09-04","body":"c","new_body":"d","live_ts":"1786735224.690829","snapshot_ts":"","channel":"%s"}\n' \
+  "$CHANNEL_ID" "$CHANNEL_ID" \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.pending" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board pending journal"
+pass "fm-slack-post board refuses a two-JSON-value slack-board.pending (§3.7)"
+
+# §3.5 board-directory inventory: an unexpected regular file inside
+# state/slack-board/ refuses (the inventory's unknown class, end-to-end).
+home="$TMP_ROOT/board-r5-unexpected-board-entry"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+printf 'x\n' | fmx_private_artifact_publish_stdin "$home/state/slack-board" "unexpected" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "unexpected filename"
+pass "fm-slack-post board refuses an unexpected entry inside the board directory (§3.5)"
+
+# §3.4 second site: a calendar-invalid date in slack-board.state refuses
+# end-to-end (the calendar oracle, not just the unit test).
+home="$TMP_ROOT/board-r5-calendar-invalid-state"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+printf '{"date":"2026-99-99","body":"b"}\n' \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.state" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "invalid Slack board daily state"
+pass "fm-slack-post board refuses a calendar-invalid slack-board.state date (§3.4)"
+
+# §3.2 sentinel + lexical-hiding: a dangling symlink at 2026-09-01 followed by
+# a malformed once-file at 2026-09-02. find -mindepth 1 -maxdepth 1 -print0 sees
+# both (the dangling symlink is enumerated, not a sentinel the glob skips), so
+# the once-file validator refuses on the dangling symlink. This is the §7.4
+# inventory-mutant guard: the glob form (for entry in "$dir"/*) does not expand
+# a dangling symlink whose target is missing the same way and can hide the
+# malformed follower; the find-based inventory catches it.
+home="$TMP_ROOT/board-r5-sentinel-lexical-hiding"
+make_home "$home"
+mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+_r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+_r3_state "$home" "2026-08-26" "priorbody"
+ln -s missing "$home/state/slack-board-snapshots/2026-09-01"
+printf 'not-a-ts\n' | fmx_private_artifact_publish_stdin "$home/state/slack-board-snapshots" "2026-09-02" 600
+: > "$home/curl.log"; export FM_SLACK_CURL_LOG="$home/curl.log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE; export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+_r3_refuse "$home" "$home/e.err" "malformed or non-canonical bytes"
+pass "fm-slack-post board refuses a dangling-symlink sentinel and a malformed follower (§3.2/§7.4)"
+
+# --- P1 (round six) end-to-end: a temp-shaped invalid entry refuses through
+# helper, network-skipped bootstrap, and fake-transport board with zero
+# transport, no journal, and unchanged no-follow manifests of both stores.
+# A real publisher temp is tolerated; a dangling symlink / directory /
+# wrong-mode file under a temp-shaped name is not and must not reach rename
+# or transport.
+_r6_refuse_temp_three() {
+  local label=$1 kind=$2 rel=$3 maker=$4
+  local entries=(helper bootstrap board) i rc home err
+  for i in 0 1 2; do
+    home="$TMP_ROOT/board-r6-$label-${entries[$i]}"
+    make_home "$home"
+    mkdir "$home/state/slack-board" "$home/state/slack-board-snapshots"
+    chmod 700 "$home/state/slack-board" "$home/state/slack-board-snapshots"
+    _r3_meta "$home" "$CHANNEL_ID" "1786735224.690829"
+    _r3_state "$home" "2026-08-26" "priorbody"
+    # a real publisher temp is tolerated alongside the invalid candidate
+    printf 'partial' > "$home/state/slack-board/.slack-board.state.fm-x.q7Z8ez"; chmod 600 "$home/state/slack-board/.slack-board.state.fm-x.q7Z8ez"
+    printf 'partial' > "$home/state/slack-board-snapshots/.2026-08-26.fm-x.q7Z8ez"; chmod 600 "$home/state/slack-board-snapshots/.2026-08-26.fm-x.q7Z8ez"
+    eval "$maker"
+    manifest "$home/state/slack-board" "$home/pre-b"
+    manifest "$home/state/slack-board-snapshots" "$home/pre-s"
+    err="$home/e.err"
+    case "$i" in
+      0) _r4_run_helper "$home" "$err"; rc=$? ;;
+      1) _r4_run_bootstrap "$home" "$err"; rc=$? ;;
+      2) _r4_run_board "$home" "$err"; rc=$? ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$label via ${entries[$i]} must refuse"
+    grep -Fq "inspect before the next board or bootstrap call" "$err" || fail "$label via ${entries[$i]} must name the defect: $(cat "$err")"
+    [ -d "$home/state/slack-board" ] || fail "$label via ${entries[$i]} must not rename the board directory"
+    [ ! -e "$home/state/slack-board.meta" ] || fail "$label via ${entries[$i]} must not create the legacy directory"
+    [ ! -e "$home/state/slack-board/slack-board.pending" ] || fail "$label via ${entries[$i]} must not write a pending journal"
+    if [ "$i" -eq 2 ]; then
+      [ "$(grep -c '^method=' "$home/curl.log")" -eq 0 ] || fail "$label via board must not call Slack: $(cat "$home/curl.log")"
+    fi
+    manifest "$home/state/slack-board" "$home/post-b"
+    manifest "$home/state/slack-board-snapshots" "$home/post-s"
+    assert_bytes_eq "$home/pre-b" "$home/post-b"
+    assert_bytes_eq "$home/pre-s" "$home/post-s"
+  done
+  pass "fm-slack-post refuses a $label temp-shaped entry through helper, bootstrap, and board"
+}
+# The maker snippets intentionally defer $home expansion to eval so the probe
+# runs against each per-entry-point home; SC2016 is expected and suppressed.
+# shellcheck disable=SC2016
+_r6_refuse_temp_three "snap-temp-dangling" snapshots "" \
+  'ln -s missing "$home/state/slack-board-snapshots/.2026-09-01.fm-x.AAAAAA"'
+# shellcheck disable=SC2016
+_r6_refuse_temp_three "snap-temp-644" snapshots "" \
+  'printf p > "$home/state/slack-board-snapshots/.2026-09-02.fm-x.AAAAAA"; chmod 644 "$home/state/slack-board-snapshots/.2026-09-02.fm-x.AAAAAA"'
+# shellcheck disable=SC2016
+_r6_refuse_temp_three "board-temp-dir" board "" \
+  'mkdir "$home/state/slack-board/.slack-board.pending.fm-x.AAAAAA"; chmod 700 "$home/state/slack-board/.slack-board.pending.fm-x.AAAAAA"'
+
+# --- binary-safe helper self-test (§7.1) -----------------------------------
+# assert_bytes_eq and manifest are the evidence layer for every later red-green
+# slice in this redesign: byte equality must survive command substitution
+# stripping trailing newlines, and a directory inventory must see dotfiles,
+# dangling symlinks, and trailing bytes. Pin both properties here so a later
+# change cannot silently regress the helpers the assertions depend on.
+home="$TMP_ROOT/board-r5-binary-helpers"
+make_home "$home"
+hb="$home/h"; mkdir -p "$hb"; chmod 700 "$hb"
+printf 'channel=C0BQ9K1TJKG\nts=1786735224.690829\n' > "$hb/meta"; chmod 600 "$hb/meta"
+printf 'x' > "$hb/no-lf"; chmod 600 "$hb/no-lf"
+ln -s missing "$hb/dangling"
+manifest "$hb" "$home/m1"
+manifest "$hb" "$home/m2"
+assert_bytes_eq "$home/m1" "$home/m2"
+# A trailing newline is a real byte the inventory must distinguish.
+printf 'x\n' > "$hb/with-lf"; chmod 600 "$hb/with-lf"
+manifest "$hb" "$home/m3"
+if cmp -s "$home/m1" "$home/m3"; then fail "manifest must distinguish a trailing newline"; fi
+# assert_bytes_eq must fail the suite on differing bytes; prove it would fire by
+# checking the predicate directly (assert_bytes_eq exits on differ).
+printf 'y' > "$home/other"; chmod 600 "$home/other"
+if cmp -s "$hb/no-lf" "$home/other"; then fail "assert_bytes_eq must fail on differing bytes"; fi
+# The manifest must also distinguish a mode change and a type change on the
+# same content, not just trailing bytes: a future implementation that rewrites
+# a fixture without its LF, changes mode 600 to 644, or replaces a file with a
+# same-content symlink must leave the focused suite red.
+printf 'x' > "$hb/mode-probe"; chmod 600 "$hb/mode-probe"
+manifest "$hb" "$home/m-mode"
+chmod 644 "$hb/mode-probe"
+manifest "$hb" "$home/m-mode2"
+if cmp -s "$home/m-mode" "$home/m-mode2"; then fail "manifest must distinguish a mode change"; fi
+printf 'x' > "$hb/type-probe"; chmod 600 "$hb/type-probe"
+manifest "$hb" "$home/m-type"
+rm -f "$hb/type-probe"; ln -s "$hb/no-lf" "$hb/type-probe"
+manifest "$hb" "$home/m-type2"
+if cmp -s "$home/m-type" "$home/m-type2"; then fail "manifest must distinguish a type change"; fi
+rm -f "$hb/mode-probe" "$hb/type-probe"
+# Failing-mutation evidence for the round-five command-substitution oracle: a
+# two-LF once-file mutated to no-LF compares equal under $(cat) (both strip
+# trailing LF) but assert_bytes_eq detects it. This is the regression class the
+# preservation surface must lock down.
+printf '1786735230.111111\n\n' > "$home/two-lf"; chmod 600 "$home/two-lf"
+printf '1786735230.111111' > "$home/no-lf-mut"; chmod 600 "$home/no-lf-mut"
+if [ "$(cat "$home/two-lf")" != "$(cat "$home/no-lf-mut")" ]; then fail "the old \$(cat) oracle must miss the trailing-LF mutation (proof of why it was replaced)"; fi
+if cmp -s "$home/two-lf" "$home/no-lf-mut"; then fail "assert_bytes_eq must detect the trailing-LF mutation the old oracle missed"; fi
+pass "binary-safe helpers distinguish trailing bytes, mode, and type and see dotfiles and dangling symlinks"
+rm -rf "$home/h" "$home/m1" "$home/m2" "$home/m3" "$home/other" "$home/m-mode" "$home/m-mode2" "$home/m-type" "$home/m-type2"
+
+# --- fms_date_calendar_valid unit cases (§5.4, step 2) -----------------------
+# One calendar oracle for every YYYY-MM-DD in the contract. No callers yet;
+# pin the predicate directly so a later step that points the four call sites
+# (once-file name, state .date, journal .date, journal .today) at it
+# cannot silently change its behaviour.
+# shellcheck source=bin/fm-slack-lib.sh
+. "$ROOT/bin/fm-slack-lib.sh"
+for d in 2026-09-04 2024-02-29 2026-01-31 2026-12-31; do
+  fms_date_calendar_valid "$d" || fail "fms_date_calendar_valid must accept $d"
+done
+for d in 2026-99-99 2026-00-10 2026-13-01 2026-02-30 2026-02-29 2026-1-1 "" not-a-date 2026-09-4; do
+  if fms_date_calendar_valid "$d" 2>/dev/null; then fail "fms_date_calendar_valid must reject $d"; fi
+done
+pass "fms_date_calendar_valid accepts real dates and rejects impossible or normalising dates"
+
+# --- fms_board_state_valid / fms_board_journal_valid unit cases (§5.4, step 4)
+# The single-value enforcement (jq -es 'length == 1') is the §3.7 fix AND the
+# §7.4 value-predicate mutant guard: a two-value state or journal file passes
+# jq -e '…' (last value wins) but is not a layout the writer can produce, and
+# feeding it through the writer wedges the home. The mutant that replaces
+# jq -es 'length == 1 and …' with jq -e '…' must fail the two-value cases below
+# and the end-to-end two-value cases above. Pin both predicates directly; no
+# are deleted and callers re-pointed in later steps).
+_mkstate() { local d=$1; printf '{"date":"%s","body":"b"}\n' "$d"; }
+home="$TMP_ROOT/board-r5-state-journal"
+mkdir -p "$home"; chmod 700 "$home"
+# state: valid single value accepted
+_mkstate 2026-09-04 > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+fms_board_state_valid "$home" || fail "fms_board_state_valid must accept a single-value state"
+# state: two values refused (the §3.7 defect)
+printf '{"junk":1}\n{"date":"2026-09-04","body":"b"}\n' > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+if fms_board_state_valid "$home" 2>/dev/null; then fail "fms_board_state_valid must refuse a two-value state"; fi
+# state: calendar-invalid date refused (§3.4 second site)
+_mkstate 2026-99-99 > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+if fms_board_state_valid "$home" 2>/dev/null; then fail "fms_board_state_valid must refuse a calendar-invalid date"; fi
+# state: non-object refused
+printf '"scalar"\n' > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+if fms_board_state_valid "$home" 2>/dev/null; then fail "fms_board_state_valid must refuse a non-object state"; fi
+# state: trailing garbage refused
+printf '{"date":"2026-09-04","body":"b"}x' > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+if fms_board_state_valid "$home" 2>/dev/null; then fail "fms_board_state_valid must refuse trailing garbage"; fi
+# state: zero-byte refused
+: > "$home/slack-board.state"; chmod 600 "$home/slack-board.state"
+if fms_board_state_valid "$home" 2>/dev/null; then fail "fms_board_state_valid must refuse a zero-byte state"; fi
+pass "fms_board_state_valid accepts one value and refuses two-value, calendar-invalid, and garbage states"
+
+_mkpending() {
+  local phase=$1 date=$2 today=$3 chan=$4
+  printf '{"phase":"%s","date":"%s","today":"%s","body":"b","new_body":"n","live_ts":"1786735224.690829","snapshot_ts":"","channel":"%s"}\n' \
+    "$phase" "$date" "$today" "$chan"
+}
+# journal: valid single value accepted (channel required for every phase)
+_mkpending snapshot-needed 2026-09-03 2026-09-04 C0BQ9K1TJKG > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+fms_board_journal_valid "$home" || fail "fms_board_journal_valid must accept a single-value journal"
+# journal: two values refused (§3.7 second site)
+printf '{"junk":1}\n{"phase":"snapshot-needed","date":"2026-09-03","today":"2026-09-04","body":"b","new_body":"n","live_ts":"1786735224.690829","snapshot_ts":"","channel":"C0BQ9K1TJKG"}\n' > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+if fms_board_journal_valid "$home" 2>/dev/null; then fail "fms_board_journal_valid must refuse a two-value journal"; fi
+# journal: missing .channel on a non-initial phase refused (§4 drift, strict direction)
+printf '{"phase":"snapshot-needed","date":"2026-09-03","today":"2026-09-04","body":"b","new_body":"n","live_ts":"1786735224.690829","snapshot_ts":""}\n' > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+if fms_board_journal_valid "$home" 2>/dev/null; then fail "fms_board_journal_valid must require .channel on every phase"; fi
+# journal: calendar-invalid .today refused (§3.4 third/fourth site)
+_mkpending snapshot-needed 2026-09-03 2026-99-99 C0BQ9K1TJKG > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+if fms_board_journal_valid "$home" 2>/dev/null; then fail "fms_board_journal_valid must refuse a calendar-invalid today"; fi
+# journal: unknown phase refused
+_mkpending not-a-phase 2026-09-03 2026-09-04 C0BQ9K1TJKG > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+if fms_board_journal_valid "$home" 2>/dev/null; then fail "fms_board_journal_valid must refuse an unknown phase"; fi
+# journal: zero-byte refused
+: > "$home/slack-board.pending"; chmod 600 "$home/slack-board.pending"
+if fms_board_journal_valid "$home" 2>/dev/null; then fail "fms_board_journal_valid must refuse a zero-byte journal"; fi
+pass "fms_board_journal_valid accepts one value, requires channel, and refuses two-value and garbage journals"
+rm -rf "$home"
+
+# --- fms_board_identity_valid unit cases (§5.4, step 5) ----------------------
+# One identity owner, replacing the grep | tail -1 last-duplicate-wins readers.
+# The contract: exactly one channel= line, exactly one ts= line, no other
+# non-empty line; channel and ts valid; trailing blank lines tolerated.
+home="$TMP_ROOT/board-r5-identity"
+mkdir -p "$home"; chmod 700 "$home"
+# valid identity accepted, prints channel<TAB>ts
+printf 'channel=C0BQ9K1TJKG\nts=1786735224.690829\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+out=$(fms_board_identity_valid "$home") || fail "fms_board_identity_valid must accept a valid identity"
+[ "$out" = "$(printf 'C0BQ9K1TJKG\t1786735224.690829')" ] || fail "fms_board_identity_valid must print channel<TAB>ts"
+# trailing blank line tolerated (parse is total, grep -c '.' ignores blank lines)
+printf 'channel=C0BQ9K1TJKG\nts=1786735224.690829\n\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+fms_board_identity_valid "$home" >/dev/null || fail "fms_board_identity_valid must tolerate a trailing blank line"
+# field order is irrelevant
+printf 'ts=1786735224.690829\nchannel=C0BQ9K1TJKG\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+fms_board_identity_valid "$home" >/dev/null || fail "fms_board_identity_valid must tolerate field order"
+# duplicate channel refused (last-duplicate-wins is gone)
+printf 'channel=C0BQ9K1TJKG\nchannel=C0BQ9K1TJKG\nts=1786735224.690829\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse a duplicate channel"; fi
+# missing ts refused
+printf 'channel=C0BQ9K1TJKG\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse a missing ts"; fi
+# extra non-empty line refused
+printf 'channel=C0BQ9K1TJKG\nts=1786735224.690829\nbogus=1\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse an extra field"; fi
+# invalid channel refused
+printf 'channel=not-a-channel\nts=1786735224.690829\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse an invalid channel"; fi
+# invalid ts refused
+printf 'channel=C0BQ9K1TJKG\nts=not-a-ts\n' > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse an invalid ts"; fi
+# zero-byte refused
+: > "$home/slack-board.meta"; chmod 600 "$home/slack-board.meta"
+if fms_board_identity_valid "$home" 2>/dev/null; then fail "fms_board_identity_valid must refuse a zero-byte identity"; fi
+pass "fms_board_identity_valid accepts one channel+ts and refuses duplicates, missing fields, and extra lines"
+rm -rf "$home"
+
+# --- fms_board_dir_inventory_assert unit cases (§5.3, step 7) ----------------
+# Complete enumeration: find -print0 sees dotfiles and dangling symlinks and
+# has no early-termination sentinel, closing §3.2 (hidden/dangling/shape-only
+# entries) and §3.5 (the board directory had no inventory at all). Three entry
+# classes: artifact, temp (the publishers' own .fm-x.XXXXXX pattern, §3.6),
+# unknown (refuse). Pin both directories.
+home="$TMP_ROOT/board-r5-inventory"
+mkdir -p "$home"; chmod 700 "$home"
+# board directory: three named artifacts accepted
+hb="$home/board"; mkdir -p "$hb"; chmod 700 "$hb"
+printf 'channel=C0BQ9K1TJKG\nts=1786735224.690829\n' > "$hb/slack-board.meta"; chmod 600 "$hb/slack-board.meta"
+printf '{"date":"2026-09-04","body":"b"}\n' > "$hb/slack-board.state"; chmod 600 "$hb/slack-board.state"
+printf '{"phase":"snapshot-needed","date":"2026-09-03","today":"2026-09-04","body":"b","new_body":"n","live_ts":"1786735224.690829","snapshot_ts":"","channel":"C0BQ9K1TJKG"}\n' > "$hb/slack-board.pending"; chmod 600 "$hb/slack-board.pending"
+fms_board_dir_inventory_assert "$hb" board || fail "board inventory must accept the three named artifacts"
+# board directory: a publisher temp is ignored (writer-reachable, §3.6)
+printf 'partial' > "$hb/.slack-board.state.fm-x.q7Z8ez"; chmod 600 "$hb/.slack-board.state.fm-x.q7Z8ez"
+fms_board_dir_inventory_assert "$hb" board || fail "board inventory must ignore a publisher temp"
+# board directory: an unexpected file refuses (§3.5)
+printf 'x' > "$hb/unexpected"; chmod 600 "$hb/unexpected"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse an unexpected entry"; fi
+rm -f "$hb/unexpected"
+# board directory: a hidden dotfile that is not a temp refuses (§3.2 dotfile blindness)
+printf 'x' > "$hb/.2026-09-01"; chmod 600 "$hb/.2026-09-01"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse a hidden non-temp dotfile"; fi
+rm -f "$hb/.2026-09-01"
+# board directory: a dangling symlink is enumerated (not a sentinel), and as an unknown name refuses (§3.2)
+ln -s missing "$hb/dangling"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse a dangling symlink"; fi
+rm -f "$hb/dangling"
+pass "board directory inventory accepts artifacts+temps and refuses unknown, hidden, and dangling entries"
+
+# snapshot store: a calendar-valid once-file accepted; a temp ignored
+hs="$home/snaps"; mkdir -p "$hs"; chmod 700 "$hs"
+printf '1786735224.690829\n' > "$hs/2026-09-03"; chmod 600 "$hs/2026-09-03"
+fms_board_dir_inventory_assert "$hs" snapshots || fail "snapshot inventory must accept a calendar-valid once-file"
+printf 'partial' > "$hs/.2026-09-03.fm-x.q7Z8ez"; chmod 600 "$hs/.2026-09-03.fm-x.q7Z8ez"
+fms_board_dir_inventory_assert "$hs" snapshots || fail "snapshot inventory must ignore a publisher temp"
+# snapshot store: a calendar-invalid name refuses (§3.4)
+printf '1786735224.690829\n' > "$hs/2026-99-99"; chmod 600 "$hs/2026-99-99"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a calendar-invalid name"; fi
+rm -f "$hs/2026-99-99"
+# snapshot store: a hidden malformed dotfile refuses (§3.2)
+printf 'x' > "$hs/.2026-09-01"; chmod 600 "$hs/.2026-09-01"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a hidden non-temp dotfile"; fi
+rm -f "$hs/.2026-09-01"
+# snapshot store: a dangling symlink with a date-shaped name is a known artifact
+# name, so the inventory (classification only) accepts it; the value validator
+# fms_board_once_valid owns file-type/mode/bytes and refuses it (§3.2 sentinel).
+ln -s missing "$hs/2026-09-02"
+fms_board_dir_inventory_assert "$hs" snapshots || fail "snapshot inventory must accept a date-named dangling symlink (value validator owns refusal)"
+fms_board_once_valid "$hs" "2026-09-02" >/dev/null 2>&1 && fail "fms_board_once_valid must refuse a dangling symlink snapshot"
+rm -f "$hs/2026-09-02"
+# snapshot store: a non-date name refuses
+printf 'x' > "$hs/not-a-date"; chmod 600 "$hs/not-a-date"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a non-date name"; fi
+rm -f "$hs/not-a-date"
+pass "snapshot store inventory accepts calendar-valid once-files+temps and refuses invalid names"
+rm -rf "$home"
+
+# --- P1 (round six): temp-shaped entries must satisfy the publisher's filesystem
+# invariants, not just the name. A real interrupted-publisher temp is a private
+# regular non-symlink single-link mode-600 file on the store device; a dangling
+# symlink, directory, FIFO, hard link, or wrong-mode file under a temp-shaped
+# name cannot be left by the publisher and must refuse. Pin both stores.
+home="$TMP_ROOT/board-r6-temp-shape"
+mkdir -p "$home"; chmod 700 "$home"
+hb="$home/board"; mkdir -p "$hb"; chmod 700 "$hb"
+hs="$home/snaps"; mkdir -p "$hs"; chmod 700 "$hs"
+# valid real interrupted-publisher temps are accepted and never read or mutated.
+printf 'partial' > "$hb/.slack-board.state.fm-x.q7Z8ez"; chmod 600 "$hb/.slack-board.state.fm-x.q7Z8ez"
+printf 'partial' > "$hs/.2026-09-03.fm-x.q7Z8ez"; chmod 600 "$hs/.2026-09-03.fm-x.q7Z8ez"
+fms_board_dir_inventory_assert "$hb" board || fail "board inventory must accept a real publisher temp"
+fms_board_dir_inventory_assert "$hs" snapshots || fail "snapshot inventory must accept a real publisher temp"
+# board temp: dangling symlink refuses
+ln -s missing "$hb/.slack-board.pending.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse a dangling-symlink temp"; fi
+rm -f "$hb/.slack-board.pending.fm-x.AAAAAA"
+# board temp: a directory refuses
+mkdir "$hb/.slack-board.meta.fm-x.AAAAAA"; chmod 700 "$hb/.slack-board.meta.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse a directory temp"; fi
+rmdir "$hb/.slack-board.meta.fm-x.AAAAAA"
+# board temp: a wrong-mode (644) file refuses
+printf 'partial' > "$hb/.slack-board.state.fm-x.AAAAAA"; chmod 644 "$hb/.slack-board.state.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hb" board 2>/dev/null; then fail "board inventory must refuse a wrong-mode temp"; fi
+rm -f "$hb/.slack-board.state.fm-x.AAAAAA"
+# snapshot temp: dangling symlink refuses
+ln -s missing "$hs/.2026-09-01.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a dangling-symlink temp"; fi
+rm -f "$hs/.2026-09-01.fm-x.AAAAAA"
+# snapshot temp: a directory refuses
+mkdir "$hs/.2026-09-02.fm-x.AAAAAA"; chmod 700 "$hs/.2026-09-02.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a directory temp"; fi
+rmdir "$hs/.2026-09-02.fm-x.AAAAAA"
+# snapshot temp: a wrong-mode (644) file refuses
+printf 'partial' > "$hs/.2026-09-04.fm-x.AAAAAA"; chmod 644 "$hs/.2026-09-04.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a wrong-mode temp"; fi
+rm -f "$hs/.2026-09-04.fm-x.AAAAAA"
+# snapshot temp: a FIFO refuses
+mkfifo "$hs/.2026-09-05.fm-x.AAAAAA"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a FIFO temp"; fi
+rm -f "$hs/.2026-09-05.fm-x.AAAAAA"
+# snapshot temp: a hard link (nlink > 1) refuses
+printf 'partial' > "$hs/.2026-09-06.fm-x.AAAAAA"; chmod 600 "$hs/.2026-09-06.fm-x.AAAAAA"
+ln "$hs/.2026-09-06.fm-x.AAAAAA" "$hs/.2026-09-06.fm-x.BBBBBB"
+if fms_board_dir_inventory_assert "$hs" snapshots 2>/dev/null; then fail "snapshot inventory must refuse a hard-link temp"; fi
+rm -f "$hs/.2026-09-06.fm-x.AAAAAA" "$hs/.2026-09-06.fm-x.BBBBBB"
+pass "inventory temp entries must satisfy the publisher filesystem invariants"
+rm -rf "$home"
 
 home="$TMP_ROOT/board-initial-recovery-channel"
 make_home "$home"
-mkdir "$home/state/slack-board.meta"
-chmod 700 "$home/state/slack-board.meta"
-printf '%s\n' '{"phase":"initial-posted","date":"2026-08-27","body":"initialbody","today":"2026-08-27","new_body":"initialbody","live_ts":"1786735224.690829","snapshot_ts":"","channel":"C_WRONGCHAN"}' \
-  > "$home/state/slack-board.meta/slack-board.pending"
-chmod 600 "$home/state/slack-board.meta/slack-board.pending"
+mkdir "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf '%s\n' '{"phase":"initial-posted","date":"2026-08-27","body":"initialbody","today":"2026-08-27","new_body":"initialbody","live_ts":"1786735224.690829","snapshot_ts":"","channel":"C0BQ9K1TJ99"}' \
+  > "$home/state/slack-board/slack-board.pending"
+chmod 600 "$home/state/slack-board/slack-board.pending"
 fakebin=$(make_fake_curl "$home/fake-board-initial-recovery-channel")
 log="$home/curl.log"
 : > "$log"
@@ -896,7 +2311,7 @@ if run_post "$home" "$fakebin" board "todaybody" >/dev/null 2>"$home/channel.err
 fi
 grep -Fq "mismatched channel" "$home/channel.err" \
   || fail "initial recovery channel refusal must name the mismatch"
-[ ! -e "$home/state/slack-board.meta/slack-board.meta" ] \
+[ ! -e "$home/state/slack-board/slack-board.meta" ] \
   || fail "initial recovery channel refusal must not create live metadata"
 [ "$(grep -c '^method=' "$log")" -eq 0 ] \
   || fail "initial recovery channel refusal must not call Slack"
@@ -912,8 +2327,8 @@ unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
 export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 run_post "$home" "$fakebin" board "board v1" >/dev/null \
   || fail "board setup post must succeed"
-printf 'channel=C_WRONGCHAN\nts=1786735224.690829\n' \
-  | fmx_private_artifact_publish_stdin "$home/state/slack-board.meta" "slack-board.meta" 600 \
+printf 'channel=C0BQ9K1TJ99\nts=1786735224.690829\n' \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.meta" 600 \
   || fail "board channel mismatch setup failed"
 if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>&1; then
   fail "board update must refuse a mismatched stored channel"
@@ -931,13 +2346,13 @@ export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 run_post "$home" "$fakebin" board "board v1" >/dev/null \
   || fail "invalid-meta setup board post must succeed"
 printf 'channel=%s\n' "$CHANNEL_ID" \
-  | fmx_private_artifact_publish_stdin "$home/state/slack-board.meta" "slack-board.meta" 600 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board" "slack-board.meta" 600 \
   || fail "invalid-meta setup must publish malformed board metadata"
 if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>"$home/board.err"; then
   fail "malformed board metadata must refuse the update"
 fi
-grep -Fq "invalid board meta" "$home/board.err" \
-  || fail "malformed board metadata refusal must name the invalid metadata"
+grep -Fq "invalid Slack board identity" "$home/board.err" \
+  || fail "malformed board metadata refusal must name the invalid identity: $(cat "$home/board.err")"
 [ "$(grep -c '^method=' "$log")" -eq 1 ] \
   || fail "malformed board metadata must not call Slack again"
 pass "fm-slack-post board fails closed on malformed persisted metadata"
@@ -951,9 +2366,9 @@ export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 ts=$(run_post "$home" "$fakebin" board "board v1")
 [ "$ts" = "1786735224.690829" ] \
   || fail "board post must return ts under a public state parent"
-[ "$(private_mode "$home/state/slack-board.meta")" = 700 ] \
+[ "$(private_mode "$home/state/slack-board")" = 700 ] \
   || fail "board meta directory must be private under a public state parent"
-[ "$(private_mode "$home/state/slack-board.meta/slack-board.meta")" = 600 ] \
+[ "$(private_mode "$home/state/slack-board/slack-board.meta")" = 600 ] \
   || fail "board meta must be a private file under a public state parent"
 ts2=$(run_post "$home" "$fakebin" board "board v2")
 [ "$ts2" = "1786735224.690829" ] \
@@ -971,14 +2386,14 @@ export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
 run_post "$home" "$fakebin" board "board v1" >/dev/null \
   || fail "invalid-state setup board post must succeed"
-printf '%s\n' '{"date":"2026-08-27","body":' > "$home/state/slack-board.meta/slack-board.state"
-chmod 600 "$home/state/slack-board.meta/slack-board.state"
+printf '%s\n' '{"date":"2026-08-27","body":' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
 if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>"$home/board.err"; then
   fail "malformed board state must refuse the update"
 fi
-grep -Fq "invalid board state" "$home/board.err" \
-  || fail "malformed board state refusal must name the invalid state"
+grep -Fq "invalid Slack board daily state" "$home/board.err" \
+  || fail "malformed board state refusal must name the invalid state: $(cat "$home/board.err")"
 [ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 1 ] \
   || fail "malformed board state must not post a rollover snapshot"
 [ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
@@ -1077,11 +2492,11 @@ esac
   || fail "snapshot directory must be private"
 [ "$(private_mode "$home/state/slack-board-snapshots/2026-08-27")" = 600 ] \
   || fail "snapshot once-file must be private"
-[ "$(grep '^ts=' "$home/state/slack-board.meta/slack-board.meta" | cut -d= -f2)" = "$ts" ] \
+[ "$(grep '^ts=' "$home/state/slack-board/slack-board.meta" | cut -d= -f2)" = "$ts" ] \
   || fail "live board meta must keep its original ts through a rollover"
-[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-28" ] \
   || fail "board state date must advance to today after rollover"
-[ "$(jq -r '.body' "$home/state/slack-board.meta/slack-board.state")" = "todaybody" ] \
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "todaybody" ] \
   || fail "board state body must record today's applied text after rollover"
 pass "fm-slack-post board rollover posts one snapshot of the closed date then updates the live message"
 
@@ -1107,7 +2522,7 @@ export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
 ts=$(run_post "$home" "$fakebin" board "closedbody")
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
-printf 'seeded-snapshot-ts' \
+printf '1786735230.999999\n' \
   | fmx_private_artifact_publish_stdin_once "$home/state/slack-board-snapshots" "2026-08-27" 600 \
   || fail "dedupe once-file seed failed"
 ts2=$(run_post "$home" "$fakebin" board "todaybody")
@@ -1116,9 +2531,9 @@ ts2=$(run_post "$home" "$fakebin" board "todaybody")
   || fail "a pre-existing once-file must prevent a duplicate snapshot post: $(cat "$log")"
 [ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
   || fail "a dedupe-skipped rollover must still update the live message once: $(cat "$log")"
-[ "$(cat "$home/state/slack-board-snapshots/2026-08-27")" = "seeded-snapshot-ts" ] \
+[ "$(cat "$home/state/slack-board-snapshots/2026-08-27")" = "1786735230.999999" ] \
   || fail "a pre-existing once-file must not be overwritten"
-[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-28" ] \
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-28" ] \
   || fail "a dedupe-skipped rollover must still close the last active date"
 pass "fm-slack-post board skips a snapshot post when its once-file already exists"
 unset FM_SLACK_BOARD_TODAY_OVERRIDE
@@ -1135,22 +2550,221 @@ export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
 ts=$(run_post "$home" "$fakebin" board "closedbody")
 export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
 mkdir -p "$home/state/slack-board-snapshots"
-chmod 500 "$home/state/slack-board-snapshots"
+chmod 700 "$home/state/slack-board-snapshots"
+# Inject a once-file publish failure without violating the mode-700 store
+# invariant: a fake ln that fails only for the snapshot once-file publish
+# (a date-shaped destination under slack-board-snapshots), so the store stays
+# a valid mode-700 directory and the publish itself fails after preflight.
+cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+last="${@: -1}"
+base="${last##*/}"
+case "$base" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) exit 1 ;;
+esac
+self="$0"; selfdir=$(dirname "$self")
+IFS=: read -ra P <<< "$PATH"
+for d in "${P[@]}"; do
+  [ "$d" = "$selfdir" ] && continue
+  [ -x "$d/ln" ] && exec "$d/ln" "$@"
+done
+exit 1
+SH
+chmod +x "$fakebin/ln"
 err_out="$home/board.err"
 if run_post "$home" "$fakebin" board "todaybody" >"$home/board.out" 2>"$err_out"; then
-  chmod 700 "$home/state/slack-board-snapshots"
   fail "a failed snapshot dedupe write must exit non-zero"
 fi
-chmod 700 "$home/state/slack-board-snapshots"
+rm -f "$fakebin/ln"
 grep -Fq "board snapshot posted at" "$err_out" \
   || fail "a failed snapshot dedupe write must name the created snapshot ts: $(cat "$err_out")"
 [ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 2 ] \
   || fail "the snapshot must still post once even though its dedupe write failed: $(cat "$log")"
 [ "$(grep -c '^method=chat.update ' "$log")" -eq 0 ] \
   || fail "a failed snapshot dedupe write must not advance the live message: $(cat "$log")"
-[ "$(jq -r '.date' "$home/state/slack-board.meta/slack-board.state")" = "2026-08-27" ] \
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-27" ] \
   || fail "a failed snapshot dedupe write must not advance the stored active date"
 pass "fm-slack-post board dies naming the snapshot ts when its dedupe write fails, without advancing live state"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+# --- board namespace migration (state/slack-board.meta/ -> state/slack-board/) ---
+
+home="$TMP_ROOT/board-migrate-legacy-same-day"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-same-day")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+make_legacy_board "$home" "$CHANNEL_ID" "1786735224.690829" "2026-08-27" "prior body"
+meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
+inode_meta_before=$(private_inode "$home/state/slack-board.meta/slack-board.meta")
+ts=$(run_post "$home" "$fakebin" board "today body")
+[ "$ts" = "1786735224.690829" ] || fail "same-day migration must return the preserved live ts, got $ts"
+[ ! -e "$home/state/slack-board.meta" ] || fail "migration must remove the legacy directory from the task namespace"
+[ -d "$home/state/slack-board" ] || fail "migration must create the new board directory"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "migration must preserve the identity bytes"
+[ "$(jq -r '.date' "$home/state/slack-board/slack-board.state")" = "2026-08-27" ] \
+  || fail "same-day migration must keep the stored date"
+[ "$(jq -r '.body' "$home/state/slack-board/slack-board.state")" = "today body" ] \
+  || fail "same-day migration must still apply today's body to the state"
+[ "$(private_mode "$home/state/slack-board/slack-board.meta")" = 600 ] \
+  || fail "migration must preserve the identity file mode"
+[ "$(private_inode "$home/state/slack-board/slack-board.meta")" = "$inode_meta_before" ] \
+  || fail "migration must preserve the identity file inode"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "same-day migration must issue exactly one chat.update with the preserved ts: $(cat "$log")"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 0 ] \
+  || fail "same-day migration must not post a replacement live message: $(cat "$log")"
+grep -Fq "ts=1786735224.690829" "$log" \
+  || fail "same-day migration must update the same live ts: $(cat "$log")"
+pass "fm-slack-post board migrates a legacy directory and updates the same live ts with no replacement post"
+
+home="$TMP_ROOT/board-migrate-legacy-rollover"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-rollover")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+make_legacy_board "$home" "$CHANNEL_ID" "1786735224.690829" "2026-08-27" "closed body"
+meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-28
+export FAKE_SLACK_POST='{"ok":true,"ts":"1786735230.999999","channel":"C0BQ9K1TJKG"}'
+ts=$(run_post "$home" "$fakebin" board "today body")
+unset FAKE_SLACK_POST
+[ "$ts" = "1786735224.690829" ] || fail "rollover migration must keep the original live ts, got $ts"
+[ ! -e "$home/state/slack-board.meta" ] || fail "rollover migration must remove the legacy directory"
+[ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+  || fail "rollover migration must preserve the live identity bytes"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 1 ] \
+  || fail "rollover migration must post exactly one archival snapshot: $(cat "$log")"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "rollover migration must update the live message exactly once: $(cat "$log")"
+if ! grep -Fq "method=chat.update" "$log" || ! grep -Fq "ts=1786735224.690829" "$log"; then
+  fail "rollover migration must update the original live ts: $(cat "$log")"
+fi
+pass "fm-slack-post board migrates a legacy directory through rollover with one snapshot plus one update of the same live ts"
+unset FM_SLACK_BOARD_TODAY_OVERRIDE
+
+home="$TMP_ROOT/board-migrate-refuse-both"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-both")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+make_legacy_board "$home" "$CHANNEL_ID" "1786735224.690829" "2026-08-27" "prior body"
+mkdir -p "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/both.err"; then
+  fail "board must refuse when both legacy and new board directories exist"
+fi
+grep -Fq "ambiguous Slack board state" "$home/both.err" \
+  || fail "both-paths refusal must name the ambiguity: $(cat "$home/both.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "both-paths refusal must not call Slack: $(cat "$log")"
+[ -e "$home/state/slack-board.meta" ] || fail "both-paths refusal must not delete the legacy directory"
+[ -e "$home/state/slack-board" ] || fail "both-paths refusal must not delete the new directory"
+pass "fm-slack-post board refuses ambiguous legacy and new board directories without a network call"
+
+home="$TMP_ROOT/board-migrate-refuse-symlink"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-symlink")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+mkdir -p "$home/state/slack-target"
+chmod 700 "$home/state/slack-target"
+ln -s "$home/state/slack-target" "$home/state/slack-board.meta"
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/sym.err"; then
+  fail "board must refuse a legacy board directory that is a symlink"
+fi
+grep -Fq "invalid Slack board state directory" "$home/sym.err" \
+  || fail "symlink refusal must name the invalid directory: $(cat "$home/sym.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "symlink refusal must not call Slack: $(cat "$log")"
+[ -L "$home/state/slack-board.meta" ] || fail "symlink refusal must not delete the symlink"
+pass "fm-slack-post board refuses a symlinked legacy board directory without a network call"
+
+home="$TMP_ROOT/board-migrate-refuse-initial-posting"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-initial-posting")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+mkdir -p "$home/state/slack-board.meta"
+chmod 700 "$home/state/slack-board.meta"
+printf '{"phase":"initial-posting","date":"2026-08-27","body":"pending","today":"2026-08-27","new_body":"pending","live_ts":"","snapshot_ts":"","channel":"%s"}' "$CHANNEL_ID" \
+  > "$home/state/slack-board.meta/slack-board.pending"
+chmod 600 "$home/state/slack-board.meta/slack-board.pending"
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/ip.err"; then
+  fail "board must refuse a legacy directory with an initial-posting pending journal"
+fi
+grep -Fq "initial-posting pending has an unknown delivery outcome" "$home/ip.err" \
+  || fail "initial-posting refusal must name the unknown outcome: $(cat "$home/ip.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "initial-posting refusal must not call Slack: $(cat "$log")"
+[ -e "$home/state/slack-board.meta" ] || fail "initial-posting refusal must not delete the legacy directory"
+pass "fm-slack-post board refuses an ambiguous initial-posting legacy journal without a network call"
+
+home="$TMP_ROOT/board-migrate-refuse-malformed-pending"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-malformed-pending")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+mkdir -p "$home/state/slack-board.meta"
+chmod 700 "$home/state/slack-board.meta"
+printf 'not-json' > "$home/state/slack-board.meta/slack-board.pending"
+chmod 600 "$home/state/slack-board.meta/slack-board.pending"
+if run_post "$home" "$fakebin" board "today body" >/dev/null 2>"$home/mp.err"; then
+  fail "board must refuse a legacy directory with a malformed pending journal"
+fi
+grep -Fq "invalid Slack board pending journal" "$home/mp.err" \
+  || fail "malformed-pending refusal must name the invalid journal: $(cat "$home/mp.err")"
+[ "$(grep -c '^method=' "$log")" -eq 0 ] \
+  || fail "malformed-pending refusal must not call Slack: $(cat "$log")"
+[ -e "$home/state/slack-board.meta" ] || fail "malformed-pending refusal must not delete the legacy directory"
+pass "fm-slack-post board refuses a malformed legacy pending journal without a network call"
+
+home="$TMP_ROOT/board-migrate-already-migrated"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-migrate-already")
+log="$home/curl.log"
+: > "$log"
+export FM_SLACK_CURL_LOG="$log"
+unset FAKE_SLACK_POST FAKE_SLACK_UPDATE
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-27
+mkdir -p "$home/state/slack-board"
+chmod 700 "$home/state/slack-board"
+printf 'channel=%s\nts=1786735224.690829\n' "$CHANNEL_ID" > "$home/state/slack-board/slack-board.meta"
+chmod 600 "$home/state/slack-board/slack-board.meta"
+printf '{"date":"2026-08-27","body":"prior body"}' > "$home/state/slack-board/slack-board.state"
+chmod 600 "$home/state/slack-board/slack-board.state"
+ts=$(run_post "$home" "$fakebin" board "today body")
+[ "$ts" = "1786735224.690829" ] || fail "an already-migrated home must keep its live ts"
+[ ! -e "$home/state/slack-board.meta" ] || fail "an already-migrated home must not recreate the legacy directory"
+[ "$(grep -c '^method=chat.update ' "$log")" -eq 1 ] \
+  || fail "an already-migrated home must update the live message once: $(cat "$log")"
+[ "$(grep -c '^method=chat.postMessage ' "$log")" -eq 0 ] \
+  || fail "an already-migrated home must not post a replacement: $(cat "$log")"
+pass "fm-slack-post board treats an already-migrated home as idempotent"
 unset FM_SLACK_BOARD_TODAY_OVERRIDE
 
 # --- invalid thread ts ------------------------------------------------------

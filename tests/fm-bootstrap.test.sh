@@ -1354,6 +1354,77 @@ EOF
   pass "bootstrap emits only parsed threatening memory-doctor advisories"
 }
 
+test_bootstrap_migrates_legacy_slack_board_before_task_scan() {
+  local case_dir home fakebin out rc meta_before state_before
+  case_dir="$TMP_ROOT/bootstrap-migrate-legacy-board"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state/slack-board.meta"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  chmod 700 "$home/state/slack-board.meta"
+  printf 'channel=%s\nts=1786735224.690829\n' "C0BQ9K1TJKG" > "$home/state/slack-board.meta/slack-board.meta"
+  chmod 600 "$home/state/slack-board.meta/slack-board.meta"
+  printf '{"date":"2026-08-27","body":"prior body"}' > "$home/state/slack-board.meta/slack-board.state"
+  chmod 600 "$home/state/slack-board.meta/slack-board.state"
+  meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
+  state_before=$(cat "$home/state/slack-board.meta/slack-board.state")
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" orca
+  add_real_jq "$fakebin"
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "bootstrap must migrate a complete legacy board before the task scan and exit 0, got $rc: $out"
+  assert_not_contains "$out" "unsafe worker record" "bootstrap must not scan the legacy board directory as a phantom task record"
+  [ ! -e "$home/state/slack-board.meta" ] || fail "bootstrap migration must remove the legacy directory from the task namespace"
+  [ -d "$home/state/slack-board" ] || fail "bootstrap migration must create the new board directory"
+  [ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
+    || fail "bootstrap migration must preserve the identity bytes"
+  [ "$(cat "$home/state/slack-board/slack-board.state")" = "$state_before" ] \
+    || fail "bootstrap migration must preserve the daily-state bytes"
+  [ "$(stat -f %Lp "$home/state/slack-board" 2>/dev/null || stat -c %a "$home/state/slack-board")" = "700" ] \
+    || fail "bootstrap migration must preserve the board directory mode"
+  [ "$(stat -f %Lp "$home/state/slack-board/slack-board.meta" 2>/dev/null || stat -c %a "$home/state/slack-board/slack-board.meta")" = "600" ] \
+    || fail "bootstrap migration must preserve the identity file mode"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --local-json) \
+    || fail "fleet snapshot should succeed after bootstrap migration"
+  printf '%s' "$out" | jq -e '(.tasks | length) == 0' >/dev/null \
+    || fail "fleet snapshot must not report a phantom slack-board task after migration: $out"
+  pass "bootstrap migrates a complete legacy Slack board before the task scan and leaves no phantom task"
+}
+
+test_bootstrap_refuses_invalid_legacy_slack_board_without_mutation() {
+  local case_dir home fakebin out rc state_before
+  case_dir="$TMP_ROOT/bootstrap-refuse-invalid-legacy-board"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state/slack-board.meta"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  chmod 700 "$home/state/slack-board.meta"
+  printf '{"date":"2026-08-27","body":"stale"}' > "$home/state/slack-board.meta/slack-board.state"
+  chmod 600 "$home/state/slack-board.meta/slack-board.state"
+  state_before=$(cat "$home/state/slack-board.meta/slack-board.state")
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" orca
+  add_real_jq "$fakebin"
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bootstrap must refuse an invalid legacy board layout instead of entering task reconciliation"
+  assert_contains "$out" "could not migrate the Slack board state directory" "bootstrap must name the migration failure"
+  assert_not_contains "$out" "unsafe worker record" "bootstrap must not reach the task scan for an invalid legacy board"
+  [ -d "$home/state/slack-board.meta" ] || fail "bootstrap must not delete the legacy directory on refusal"
+  [ "$(cat "$home/state/slack-board.meta/slack-board.state")" = "$state_before" ] \
+    || fail "bootstrap must leave the legacy state bytes unchanged on refusal"
+  [ ! -e "$home/state/slack-board" ] || fail "bootstrap must not create the new directory on refusal"
+  pass "bootstrap refuses an invalid legacy Slack board without mutation"
+}
 test_firstmate_fork_stalled_remote_is_bounded
 test_firstmate_fork_sync_report
 test_bootstrap_reporting
@@ -1386,3 +1457,5 @@ test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_advisory_memory_doctor_does_not_wedge_bootstrap
+test_bootstrap_migrates_legacy_slack_board_before_task_scan
+test_bootstrap_refuses_invalid_legacy_slack_board_without_mutation

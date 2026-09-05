@@ -1635,6 +1635,20 @@ fi
 # sessions never touch state, and the deferred network pass never repeats it:
 # the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
+  # Migrate any legacy Slack board directory state/slack-board.meta/ to
+  # state/slack-board/ before the first state/*.meta enumeration below. The
+  # legacy directory name matches the task-record glob state/*.meta, so an
+  # unmigrated board would be scanned as a phantom task record and refuse
+  # bootstrap. The shared no-network owner validates one coherent board
+  # layout under .slack-board.lock and refuses partial, duplicate, malformed,
+  # wrong-mode, non-regular, or both-paths layouts and any move failure without
+  # mutation, so an invalid legacy board fails bootstrap explicitly rather than
+  # entering task reconciliation. Scanners stay strict: bootstrap owns the move
+  # once for every consumer rather than teaching any scanner to ignore it.
+  if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-slack-board-migrate.sh"; then
+    echo "error: bootstrap could not migrate the Slack board state directory; inspect $STATE/slack-board.meta or $STATE/slack-board before the next bootstrap call" >&2
+    exit 1
+  fi
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     if ! fm_backlog_directory_present "$STATE" "state directory"; then

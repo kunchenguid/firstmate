@@ -6,17 +6,56 @@
 # a hard no-op. Never enumerate conversations; every read and post path takes the
 # configured channel id and refuses a mismatch.
 #
+# This file is the single authoritative owner of the Slack board store contract.
+# The board keeps one permanent live status message under state/slack-board/
+# (identity slack-board.meta, daily state slack-board.state, recovery journal
+# slack-board.pending) and dated snapshot once-files under
+# state/slack-board-snapshots/. The contract, in dependency order:
+#   - fms_date_calendar_valid: the one YYYY-MM-DD oracle (round-trips through
+#     jq strptime/strftime, rejecting impossible and normalizing dates).
+#   - fms_board_once_valid: the canonical once-file reader — exactly one valid
+#     message timestamp, one LF, immediate EOF, proved by exact-byte comparison.
+#   - fms_board_identity_valid: exactly one channel= and one ts= line.
+#   - fms_board_state_valid / fms_board_journal_valid: single-value JSON
+#     (jq -es 'length == 1 and …') with calendar-valid dates; a two-value file
+#     refuses (last-value-wins wedges the home).
+#   - fms_board_dir_inventory_assert: classifies every directory entry as
+#     artifact, temp, or unknown by name and refuses unknown (dotfiles, dangling
+#     symlinks, non-date names); file-type/mode and value contracts stay with
+#     the value validators above.
+#   - fms_board_layout_assert: the phase model — which of identity, daily state,
+#     and snapshot once-file must be present given the journal phase and the
+#     same-day versus rollover discriminator (date == today).
+#   - fms_board_store_assert: the one owner entry sequence — probe
+#     legacy/canonical/snapshot presence, refuse ambiguous and orphan-store
+#     states (a snapshot store with no board directory refuses with
+#     remediation text), enforce directory rules (real, non-symlink, mode 700),
+#     run the complete directory inventory before any board-directory branch,
+#     validate snapshot once-file bytes, assert the phase layout, then perform
+#     the single atomic rename (the only mutation). Every refusal is nonzero
+#     status, zero network calls, and bytes unchanged; only the absence of both
+#     board directories is a fresh-create state.
+# bin/fm-slack-board-migrate.sh is reduced to argument parsing, lock
+# acquisition, calling fms_board_store_assert, and diagnostics. See
+# docs/configuration.md for the deployment migration ordering.
+#
 # This file is sourced, never executed.
 # shellcheck source=bin/fm-x-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-x-lib.sh"
 
 fms_channel_id_valid() {
-  local id=$1
+  local id=$1 rest
   case "$id" in
-    C[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]*) return 0 ;;
-    G[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]*) return 0 ;;
+    C[A-Z0-9]*) ;;
+    G[A-Z0-9]*) ;;
     *) return 1 ;;
   esac
+  rest=${id#?}
+  case "$rest" in
+    *[!A-Z0-9]*) return 1 ;;
+  esac
+  [ "${#rest}" -ge 9 ] || return 1
+  return 0
 }
 
 fms_user_id_valid() {
@@ -272,11 +311,518 @@ fms_bot_user_id_load() {
 }
 
 fms_message_ts_valid() {
+  # A Slack message timestamp is exactly one dot with nonempty all-digit
+  # segments on both sides (e.g. 1786735224.690829). Reject empty segments
+  # (5. or .5), two or more dots (1.2.3), signs, spaces, and non-digits. This
+  # is the single predicate shared by migration, identity/journal parsing, and
+  # outbound delivery so local acceptance cannot diverge from chat.update.
   case "$1" in
     ''|.*|*/*|*[!0-9.]*|*.*.*.*) return 1 ;;
-    [0-9]*.[0-9]*) return 0 ;;
+    [0-9]*.[0-9]*) ;;
     *) return 1 ;;
   esac
+  case "${1#*.}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "${1%%.*}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Calendar validity oracle for every YYYY-MM-DD in the board contract (once-file
+# name, daily-state .date, journal .date, journal .today). One predicate,
+# four call sites. A date is valid iff it is shaped YYYY-MM-DD and the jq
+# round-trip strptime("%Y-%m-%d")|mktime|strftime("%Y-%m-%d") returns the
+# input unchanged: a real date returns itself, an impossible date (2026-99-99,
+# 2026-00-10, 2026-13-01) errors to "ERR", and a syntactically valid but
+# non-existent date (2026-02-30, 2026-02-29 in a non-leap year) normalises to a
+# different string. jq is already a hard dependency of every path that needs
+# this, so no hand-rolled leap-year arithmetic and no new dependency.
+fms_date_calendar_valid() {
+  local d=$1 round
+  [ -n "$d" ] || return 1
+  case "$d" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  round=$(jq -rn --arg d "$d" \
+    'try ($d|strptime("%Y-%m-%d")|mktime|strftime("%Y-%m-%d")) catch "ERR"' \
+    2>/dev/null) || return 1
+  [ "$round" = "$d" ] || return 1
+  return 0
+}
+
+# recovery. <snapshots_dir> is the private state/slack-board-snapshots root,
+# <date> is the closing date. The canonical form is exactly one valid Slack
+# message timestamp followed by exactly one LF byte, then EOF: no leading or
+# trailing spaces, no second newline, no NUL or extra bytes. This is the
+# encoding the production writer already emits (printf '%s\n' "$ts"). The
+# reader never normalizes trailing newlines through command substitution: it
+# extracts the candidate first line only to validate and print it, then proves
+# the complete file is exactly <ts>\n by exact-byte comparison against a
+# canonical reconstruction built inline with process substitution, the idiom
+# already used at bin/fm-x-lib.sh:286. Prints the timestamp on stdout when
+# valid. Never calls Slack.
+fms_board_once_valid() {
+  local dir=$1
+  local date=$2
+  local file="$dir/$date"
+  local ts
+  fmx_private_artifact_file_valid "$dir" "$date" 600 2>/dev/null || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  ts=$(head -n1 "$file" 2>/dev/null) || return 1
+  [ -n "$ts" ] || return 1
+  fms_message_ts_valid "$ts" || return 1
+  if cmp -s "$file" <(printf '%s\n' "$ts"); then :; else return 1; fi
+  printf '%s\n' "$ts"
+}
+
+# Daily state validator: the board contract requires exactly one JSON value
+# (jq -es 'length == 1'), not merely a well-formed last value. A two-value state
+# file passes jq -e (the last value wins) but is not a state the writer can
+# produce, and feeding it through the writer wedges the home permanently
+# (report §3.7). Schema: object, .date a calendar-valid YYYY-MM-DD (the jq
+# round-trip oracle, not a shape test), .body a string. Returns 0 when valid.
+fms_board_state_valid() {
+  local dir=$1
+  local file=$dir/slack-board.state
+  fmx_private_artifact_file_valid "$dir" "slack-board.state" 600 2>/dev/null || return 1
+  jq -es '
+    length == 1
+    and (.[0] as $o | $o | type == "object"
+      and ($o.date | type == "string")
+      and (($o.date | try (strptime("%Y-%m-%d")|mktime|strftime("%Y-%m-%d")) catch "ERR") == $o.date)
+      and ($o.body | type == "string"))
+  ' "$file" >/dev/null 2>&1
+}
+
+# Recovery journal validator: exactly one JSON value (jq -es 'length == 1'),
+# closing §3.7 at the second site. Schema: object; .phase in the nine-phase set;
+# .date and .today calendar-valid YYYY-MM-DD (jq round-trip, not shape); .body,
+# .new_body, .live_ts, .snapshot_ts, .channel strings. .channel is required for
+# every phase: the writer emits it for every phase (bin/fm-slack-post.sh:283-289),
+# so the stricter of the two drifted copies is correct and the divergence
+# disappears with the second copy (report §4, §5.4). initial-posting is
+# syntactically recognized but refused by the layout validator. Returns 0 valid.
+fms_board_journal_valid() {
+  local dir=$1
+  local file=$dir/slack-board.pending
+  fmx_private_artifact_file_valid "$dir" "slack-board.pending" 600 2>/dev/null || return 1
+  jq -es '
+    length == 1
+    and (.[0] as $o | $o | type == "object"
+      and ($o.phase == "initial-posting" or $o.phase == "initial-posted"
+        or $o.phase == "initial-meta-written" or $o.phase == "initial-state-needs-write"
+        or $o.phase == "snapshot-needed" or $o.phase == "snapshot-posting"
+        or $o.phase == "snapshot-posted" or $o.phase == "live-needs-update"
+        or $o.phase == "state-needs-write")
+      and ($o.date | type == "string")
+      and (($o.date | try (strptime("%Y-%m-%d")|mktime|strftime("%Y-%m-%d")) catch "ERR") == $o.date)
+      and ($o.today | type == "string")
+      and (($o.today | try (strptime("%Y-%m-%d")|mktime|strftime("%Y-%m-%d")) catch "ERR") == $o.today)
+      and ($o.body | type == "string")
+      and ($o.new_body | type == "string")
+      and ($o.live_ts | type == "string")
+      and ($o.snapshot_ts | type == "string")
+      and ($o.channel | type == "string"))
+  ' "$file" >/dev/null 2>&1
+}
+
+# Identity record validator: the board contract for slack-board.meta is
+# exactly one channel= line and exactly one ts= line, with no other non-empty
+# line; channel satisfies fms_channel_id_valid and ts satisfies
+# fms_message_ts_valid. Field order and trailing blank lines are tolerated
+# (the parse is total and order-insensitive via grep, and grep -c '.' counts
+# only non-empty lines, so a trailing blank line does not change the count).
+# Prints "channel\tts" on stdout when valid. One owner, replacing the
+# grep | tail -1 last-duplicate-wins readers in fm-slack-post.sh and the
+# duplicate board_identity_valid in fm-slack-board-migrate.sh (report §4).
+fms_board_identity_valid() {
+  local dir=$1
+  local meta=$dir/slack-board.meta channel ts chan_lines ts_lines total
+  fmx_private_artifact_file_valid "$dir" "slack-board.meta" 600 2>/dev/null || return 1
+  chan_lines=$(grep -c '^channel=' "$meta" 2>/dev/null || printf 0)
+  ts_lines=$(grep -c '^ts=' "$meta" 2>/dev/null || printf 0)
+  total=$(grep -c '.' "$meta" 2>/dev/null || printf 0)
+  [ "$chan_lines" -eq 1 ] || return 1
+  [ "$ts_lines" -eq 1 ] || return 1
+  [ "$total" -eq 2 ] || return 1
+  channel=$(grep '^channel=' "$meta" | cut -d= -f2-)
+  ts=$(grep '^ts=' "$meta" | cut -d= -f2-)
+  [ -n "$channel" ] || return 1
+  [ -n "$ts" ] || return 1
+  fms_channel_id_valid "$channel" || return 1
+  fms_message_ts_valid "$ts" || return 1
+  printf '%s\t%s\n' "$channel" "$ts"
+}
+
+# Complete directory enumeration for the board contract (report §5.3). Prints
+# every entry in <dir> as a NUL-separated path via find -mindepth 1 -maxdepth 1
+# -print0, never a glob: this sees dotfiles, sees dangling symlinks, and has no
+# early-termination sentinel, closing the three enumeration gaps of §3.2. An
+# absent directory prints nothing and returns 0 (no entries to classify).
+fms_board_dir_entries() {
+  local dir=$1
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -print0
+}
+
+# Classify one entry name in a board directory (slack-board/ or slack-board.meta/)
+# as artifact, temp, or unknown. Artifacts are the three named records; temps
+# are the publishers' own .slack-board.{meta,state,pending}.fm-x.XXXXXX pattern
+# (bin/fm-x-lib.sh); everything else is unknown and refuses.
+_fms_board_classify_board() {
+  local name=$1
+  case "$name" in
+    slack-board.meta|slack-board.state|slack-board.pending) printf 'artifact\n' ;;
+    .slack-board.meta.fm-x.??????|.slack-board.state.fm-x.??????|.slack-board.pending.fm-x.??????) printf 'temp\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Classify one entry name in the snapshot store (slack-board-snapshots/). An
+# artifact is a calendar-valid YYYY-MM-DD (the jq round-trip oracle, closing
+# §3.4); a temp is .<calendar-valid date>.fm-x.XXXXXX; a date-shaped but
+# calendar-invalid name, a non-date name, a dotfile, or a dangling symlink is
+# unknown and refuses. The temp's embedded date must be calendar-valid because
+# the writer only ever produces calendar-valid dates.
+_fms_board_classify_snapshots() {
+  local name=$1 d
+  case "$name" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      if fms_date_calendar_valid "$name"; then printf 'artifact\n'; else printf 'unknown\n'; fi ;;
+    .[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].fm-x.??????)
+      d=${name#.}; d=${d%.fm-x.??????}
+      if fms_date_calendar_valid "$d"; then printf 'temp\n'; else printf 'unknown\n'; fi ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Assert every entry in <dir> is classified into artifact, temp, or unknown and
+# every unknown entry refuses, naming the entry path. <kind> is "board" or
+# "snapshots". Classification is by name only: the file-type, mode, and value
+# contract for an artifact-named entry are owned by the value validators
+# (fms_board_identity_valid / fms_board_state_valid / fms_board_journal_valid
+# in the layout assert, and fms_board_once_valid in the store assert), which
+# already call fmx_private_artifact_file_valid. This keeps the inventory the
+# one owner of "what is here?" and the value validators the one owner of "is
+# this artifact well-formed?", so a wrong-mode or wrong-content artifact is
+# refused by its value validator with the existing diagnostic. A temp-named
+# entry is tolerated writer residue only when it has the exact filesystem
+# shape the publisher leaves (bin/fm-x-lib.sh mktemp under umask 077): a
+# private regular non-symlink single-link mode-600 file on the store device,
+# validated with fmx_single_link_file_mode_valid. A dangling symlink,
+# directory, FIFO, hard link, or wrong-mode file under a temp-shaped name
+# cannot be left by the publisher and refuses, so name imitation cannot bypass
+# the type/mode checks. The temp is never read or deleted. Returns 0 valid;
+# returns 1 after printing a diagnostic on an unknown or invalid temp entry.
+fms_board_dir_inventory_assert() {
+  local dir=$1 kind=$2 p name class device
+  [ -d "$dir" ] || return 0
+  device=$(fmx_private_artifact_dir_device "$dir" 2>/dev/null || true)
+  while IFS= read -r -d '' p; do
+    name=${p#"$dir"/}
+    if [ "$kind" = board ]; then
+      class=$(_fms_board_classify_board "$name")
+    else
+      class=$(_fms_board_classify_snapshots "$name")
+    fi
+    case "$class" in
+      artifact) ;;
+      temp)
+        fmx_single_link_file_mode_valid "$p" 600 "$device" 2>/dev/null || {
+          printf 'error: invalid Slack board temp entry %s/%s (not a private regular single-link mode-600 file on the store device); inspect before the next board or bootstrap call\n' "$dir" "$name" >&2
+          return 1
+        } ;;
+      unknown)
+        printf 'error: invalid Slack board entry %s/%s (unexpected filename); inspect before the next board or bootstrap call\n' "$dir" "$name" >&2
+        return 1 ;;
+    esac
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0)
+  return 0
+}
+
+
+fms_board_jq_eq() {
+  jq -e --rawfile b "$3" --arg fa "$2" --arg fb "$4" \
+    '.[$fa] == ($b|fromjson)[$fb]' "$1" >/dev/null 2>&1
+}
+
+fms_board_layout_assert() {
+  local dir=$1
+  local have_id=0 have_state=0 have_pending=0
+  local phase date today live_ts snapshot_ts channel
+  local id_line id_channel id_ts once_ts
+  [ -e "$dir/slack-board.meta" ] || [ -L "$dir/slack-board.meta" ] && have_id=1
+  [ -e "$dir/slack-board.state" ] || [ -L "$dir/slack-board.state" ] && have_state=1
+  [ -e "$dir/slack-board.pending" ] || [ -L "$dir/slack-board.pending" ] && have_pending=1
+
+  if [ "$have_pending" -eq 0 ]; then
+    [ "$have_id" -eq 1 ] && [ "$have_state" -eq 1 ] \
+      || die "invalid Slack board layout at $dir: a steady board requires both identity and daily state; inspect before the next board or bootstrap call"
+    fms_board_identity_valid "$dir" >/dev/null \
+      || die "invalid Slack board identity at $dir/slack-board.meta (duplicate, malformed, or wrong-mode); inspect before the next board or bootstrap call"
+    fms_board_state_valid "$dir" \
+      || die "invalid Slack board daily state at $dir/slack-board.state; inspect before the next board or bootstrap call"
+    return 0
+  fi
+
+  fms_board_journal_valid "$dir" \
+    || die "invalid Slack board pending journal at $dir/slack-board.pending; inspect before the next board or bootstrap call"
+  phase=$(jq -er '.phase' "$dir/slack-board.pending" 2>/dev/null) || phase=
+  date=$(jq -er '.date' "$dir/slack-board.pending" 2>/dev/null) || date=
+  today=$(jq -er '.today' "$dir/slack-board.pending" 2>/dev/null) || today=
+  live_ts=$(jq -er '.live_ts' "$dir/slack-board.pending" 2>/dev/null) || live_ts=
+  snapshot_ts=$(jq -er '.snapshot_ts' "$dir/slack-board.pending" 2>/dev/null) || snapshot_ts=
+  channel=$(jq -er '.channel' "$dir/slack-board.pending" 2>/dev/null) || channel=
+  [ -n "$phase" ] || die "invalid Slack board pending journal at $dir/slack-board.pending; inspect before the next board or bootstrap call"
+  fms_channel_id_valid "$channel" \
+    || die "invalid Slack board pending journal at $dir/slack-board.pending: malformed channel; inspect before the next board or bootstrap call"
+  [ "$snapshot_ts" = "" ] || fms_message_ts_valid "$snapshot_ts" \
+    || die "invalid Slack board pending journal at $dir/slack-board.pending: malformed snapshot timestamp; inspect before the next board or bootstrap call"
+
+  if [ "$have_id" -eq 1 ]; then
+    id_line=$(fms_board_identity_valid "$dir" 2>/dev/null) \
+      || die "invalid Slack board identity at $dir/slack-board.meta (duplicate, malformed, or wrong-mode); inspect before the next board or bootstrap call"
+    id_channel=${id_line%%	*}
+    id_ts=${id_line#*	}
+    [ "$id_channel" = "$channel" ] \
+      || die "conflicting Slack board layout at $dir: identity channel differs from journal; inspect before the next board or bootstrap call"
+    [ "$id_ts" = "$live_ts" ] \
+      || die "conflicting Slack board layout at $dir: identity timestamp differs from journal live_ts; inspect before the next board or bootstrap call"
+  fi
+  if [ "$have_state" -eq 1 ]; then
+    fms_board_state_valid "$dir" \
+      || die "invalid Slack board daily state at $dir/slack-board.state; inspect before the next board or bootstrap call"
+  fi
+
+  case "$phase" in
+    initial-posting)
+      die "ambiguous Slack board state at $dir: initial-posting pending has an unknown delivery outcome; inspect the live board and clear $dir/slack-board.pending before the next board or bootstrap call"
+      ;;
+    initial-posted)
+      [ "$date" = "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-posted must have date equal to today; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.pending" body "$dir/slack-board.pending" new_body \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-posted must have body equal to new_body; inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$snapshot_ts" = "" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-posted must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 0 ] \
+        || die "conflicting Slack board layout at $dir: initial-posted must not yet have an identity; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 0 ] \
+        || die "conflicting Slack board layout at $dir: initial-posted must not yet have a daily state; inspect before the next board or bootstrap call"
+      ;;
+    initial-meta-written)
+      [ "$date" = "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-meta-written must have date equal to today; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.pending" body "$dir/slack-board.pending" new_body \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-meta-written must have body equal to new_body; inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$snapshot_ts" = "" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-meta-written must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 0 ] \
+        || die "conflicting Slack board layout at $dir: initial-meta-written must not yet have a daily state; inspect before the next board or bootstrap call"
+      ;;
+    initial-state-needs-write)
+      [ "$date" = "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-state-needs-write must have date equal to today; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.pending" body "$dir/slack-board.pending" new_body \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-state-needs-write must have body equal to new_body; inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$snapshot_ts" = "" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: initial-state-needs-write must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: initial-state-needs-write requires an identity (the writer only reaches this phase after board_meta_write succeeds); inspect before the next board or bootstrap call"
+      if [ "$have_state" -eq 1 ]; then
+        [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$today" ] \
+          || die "conflicting Slack board layout at $dir: initial-state-needs-write state date must equal journal today; inspect before the next board or bootstrap call"
+        fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" new_body \
+          || die "conflicting Slack board layout at $dir: initial-state-needs-write state body must equal journal new_body; inspect before the next board or bootstrap call"
+      fi
+      ;;
+    snapshot-needed)
+      [ "$date" != "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: snapshot-needed is rollover-only (date must differ from today); inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$snapshot_ts" = "" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: snapshot-needed must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-needed requires an identity; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-needed requires the prior daily state; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" body \
+        || die "conflicting Slack board layout at $dir: snapshot-needed state body must equal journal body; inspect before the next board or bootstrap call"
+      [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$date" ] \
+        || die "conflicting Slack board layout at $dir: snapshot-needed state date must equal journal date; inspect before the next board or bootstrap call"
+      if [ -e "$BOARD_SNAPSHOTS/$date" ] || [ -L "$BOARD_SNAPSHOTS/$date" ]; then
+        fms_board_once_valid "$BOARD_SNAPSHOTS" "$date" >/dev/null \
+          || die "invalid Slack board layout at $dir: snapshot-needed has a malformed once-file for $date; inspect before the next board or bootstrap call"
+      fi
+      ;;
+    snapshot-posting)
+      [ "$date" != "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: snapshot-posting is rollover-only (date must differ from today); inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$snapshot_ts" = "" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: snapshot-posting must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-posting requires an identity; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-posting requires the prior daily state; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" body \
+        || die "conflicting Slack board layout at $dir: snapshot-posting state body must equal journal body; inspect before the next board or bootstrap call"
+      [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$date" ] \
+        || die "conflicting Slack board layout at $dir: snapshot-posting state date must equal journal date; inspect before the next board or bootstrap call"
+      once_ts=$(fms_board_once_valid "$BOARD_SNAPSHOTS" "$date" 2>/dev/null) \
+        || die "ambiguous Slack board state at $dir: snapshot-posting has no once-file for $date so its delivery outcome is unknown; seed $BOARD_SNAPSHOTS/$date with its ts before the next board or bootstrap call"
+      ;;
+    snapshot-posted)
+      [ "$date" != "$today" ] \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: snapshot-posted is rollover-only (date must differ from today); inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      fms_message_ts_valid "$snapshot_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed snapshot_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-posted requires an identity; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: snapshot-posted requires the prior daily state; inspect before the next board or bootstrap call"
+      fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" body \
+        || die "conflicting Slack board layout at $dir: snapshot-posted state body must equal journal body; inspect before the next board or bootstrap call"
+      [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$date" ] \
+        || die "conflicting Slack board layout at $dir: snapshot-posted state date must equal journal date; inspect before the next board or bootstrap call"
+      once_ts=$(fms_board_once_valid "$BOARD_SNAPSHOTS" "$date" 2>/dev/null) \
+        || die "invalid Slack board layout at $dir: snapshot-posted requires a valid once-file for $date; inspect before the next board or bootstrap call"
+      [ "$once_ts" = "$snapshot_ts" ] \
+        || die "conflicting Slack board layout at $dir: snapshot-posted snapshot timestamp differs from once-file; inspect before the next board or bootstrap call"
+      ;;
+    live-needs-update|state-needs-write)
+      fms_message_ts_valid "$live_ts" \
+        || die "invalid Slack board pending journal at $dir/slack-board.pending: empty or malformed live_ts; inspect before the next board or bootstrap call"
+      [ "$have_id" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: $phase requires an identity; inspect before the next board or bootstrap call"
+      [ "$have_state" -eq 1 ] \
+        || die "invalid Slack board layout at $dir: $phase requires the daily state; inspect before the next board or bootstrap call"
+      if [ "$date" = "$today" ]; then
+        [ "$snapshot_ts" = "" ] \
+          || die "invalid Slack board pending journal at $dir/slack-board.pending: same-day $phase must have an empty snapshot_ts; inspect before the next board or bootstrap call"
+        [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$today" ] \
+          || die "conflicting Slack board layout at $dir: same-day $phase state date must equal today; inspect before the next board or bootstrap call"
+        if [ "$phase" = "state-needs-write" ] \
+          && fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" new_body; then
+          :
+        else
+          fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" body \
+            || die "conflicting Slack board layout at $dir: same-day $phase state body must equal journal body (or new_body after the state write for state-needs-write); inspect before the next board or bootstrap call"
+        fi
+      else
+        fms_message_ts_valid "$snapshot_ts" \
+          || die "invalid Slack board pending journal at $dir/slack-board.pending: rollover $phase must have a valid snapshot_ts; inspect before the next board or bootstrap call"
+        if [ "$phase" = "state-needs-write" ] \
+          && [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$today" ] \
+          && fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" new_body; then
+          :
+        else
+          fms_board_jq_eq "$dir/slack-board.state" body "$dir/slack-board.pending" body \
+            || die "conflicting Slack board layout at $dir: rollover $phase state body must equal journal body (or new_body after the state write for state-needs-write); inspect before the next board or bootstrap call"
+          [ "$(jq -er '.date' "$dir/slack-board.state" 2>/dev/null)" = "$date" ] \
+            || die "conflicting Slack board layout at $dir: rollover $phase state date must equal journal date; inspect before the next board or bootstrap call"
+        fi
+        once_ts=$(fms_board_once_valid "$BOARD_SNAPSHOTS" "$date" 2>/dev/null) \
+          || die "invalid Slack board layout at $dir: rollover $phase requires a valid once-file for $date; inspect before the next board or bootstrap call"
+        [ "$once_ts" = "$snapshot_ts" ] \
+          || die "conflicting Slack board layout at $dir: rollover $phase snapshot timestamp differs from once-file; inspect before the next board or bootstrap call"
+      fi
+      ;;
+    *)
+      die "invalid Slack board pending journal at $dir/slack-board.pending: unknown phase $phase; inspect before the next board or bootstrap call"
+      ;;
+  esac
+  return 0
+}
+
+# Portable mode-of-a-path reader (Darwin %Lp, Linux %a); empty on failure.
+_fms_board_mode_of() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+# The one owner entry sequence for the Slack board store (report §5.6). Read-only
+# validation (steps 1-8) then the single whole-directory rename (step 9), the
+# only mutation the owner ever performs. Called under .slack-board.lock by the
+# migration helper. Uses the BOARD_DIR (canonical C), BOARD_DIR_LEGACY (L),
+# BOARD_SNAPSHOTS (S), and STATE globals set by the caller. The store inventory
+# (step 6) runs before any branch on board-directory presence, closing §3.1's
+# fresh-path hole; the orphan-store rule (step 5) refuses a store with no board
+# directory and names its remediation. Dies on any refusal; returns 0 valid.
+fms_board_store_assert() {
+  local old=$BOARD_DIR_LEGACY new=$BOARD_DIR snap=$BOARD_SNAPSHOTS
+  local old_present=0 new_present=0 snap_present=0 entry name mode
+  [ -e "$old" ] || [ -L "$old" ] && old_present=1
+  [ -e "$new" ] || [ -L "$new" ] && new_present=1
+  [ -e "$snap" ] || [ -L "$snap" ] && snap_present=1
+
+  if [ "$old_present" -eq 1 ] && [ "$new_present" -eq 1 ]; then
+    die "ambiguous Slack board state: both $old and $new exist; resolve to one before the next board or bootstrap call"
+  fi
+
+  if [ "$snap_present" -eq 1 ] && [ "$old_present" -eq 0 ] && [ "$new_present" -eq 0 ]; then
+    die "orphan Slack board snapshot store at $snap with no board directory; move $snap aside and let the next board call initialise the board, then reseed snapshots if needed"
+  fi
+
+  if [ "$snap_present" -eq 1 ]; then
+    [ -d "$snap" ] && [ ! -L "$snap" ] \
+      || die "invalid Slack board snapshot directory at $snap (not a regular directory); inspect before the next board or bootstrap call"
+    fmx_private_artifact_dir_device "$snap" >/dev/null 2>&1 \
+      || { mode=$(_fms_board_mode_of "$snap"); die "invalid Slack board snapshot directory at $snap (mode ${mode:-?}, not a private mode-700 directory); inspect before the next board or bootstrap call"; }
+    fms_board_dir_inventory_assert "$snap" snapshots \
+      || die "invalid Slack board snapshot store at $snap; see the entry diagnostic above; inspect before the next board or bootstrap call"
+    while IFS= read -r -d '' entry; do
+      name=${entry##"$snap/"}
+      case "$name" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+          fms_board_once_valid "$snap" "$name" >/dev/null 2>&1 \
+            || die "invalid Slack board snapshot once-file at $entry (malformed or non-canonical bytes); inspect before the next board or bootstrap call"
+          ;;
+      esac
+    done < <(find "$snap" -mindepth 1 -maxdepth 1 -print0)
+  fi
+
+  if [ "$old_present" -eq 1 ]; then
+    [ -d "$old" ] && [ ! -L "$old" ] \
+      || die "invalid Slack board state directory at $old (not a regular directory); inspect before the next board or bootstrap call"
+    fmx_private_artifact_dir_device "$old" >/dev/null 2>&1 \
+      || { mode=$(_fms_board_mode_of "$old"); die "invalid Slack board state directory at $old (mode ${mode:-?}, not a private mode-700 directory); inspect before the next board or bootstrap call"; }
+    fms_board_dir_inventory_assert "$old" board \
+      || die "invalid Slack board state at $old; see the entry diagnostic above; inspect before the next board or bootstrap call"
+    fms_board_layout_assert "$old"
+    mv -- "$old" "$new" \
+      || die "could not migrate Slack board state from $old to $new; inspect before the next board or bootstrap call"
+    return 0
+  fi
+
+  if [ "$new_present" -eq 1 ]; then
+    [ -d "$new" ] && [ ! -L "$new" ] \
+      || die "invalid Slack board state directory at $new (not a regular directory); inspect before the next board or bootstrap call"
+    fmx_private_artifact_dir_device "$new" >/dev/null 2>&1 \
+      || { mode=$(_fms_board_mode_of "$new"); die "invalid Slack board state directory at $new (mode ${mode:-?}, not a private mode-700 directory); inspect before the next board or bootstrap call"; }
+    fms_board_dir_inventory_assert "$new" board \
+      || die "invalid Slack board state at $new; see the entry diagnostic above; inspect before the next board or bootstrap call"
+    fms_board_layout_assert "$new"
+    return 0
+  fi
+
+  return 0
 }
 
 fms_is_non_captain_message() {

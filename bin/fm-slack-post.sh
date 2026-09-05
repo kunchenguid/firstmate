@@ -8,15 +8,20 @@
 #   fm-slack-post.sh [--long <reason>] message <text> [thread_ts]
 #   fm-slack-post.sh [--long <reason>] update <message_ts> <text>
 #   fm-slack-post.sh [--long <reason>] decision <key> <text> [option...]
-#   fm-slack-post.sh board <text>   # chat.update when state/slack-board.meta/ exists,
+#   fm-slack-post.sh board <text>   # chat.update when state/slack-board/ exists,
 #                                   # otherwise chat.postMessage and record ts
 #
-# board keeps one permanent live message, identified by state/slack-board.meta/,
+# board keeps one permanent live message, identified by state/slack-board/,
 # and edits it in place. It also tracks the last applied date and body under
-# state/slack-board.meta/slack-board.state. On the first board call whose local
+# state/slack-board/slack-board.state. On the first board call whose local
 # date differs from that stored date, it posts exactly one ordinary unpinned
 # chat.postMessage snapshot of the previous date's body, deduped by a once-file
 # under state/slack-board-snapshots/<date>, before updating the live message.
+# A legacy home still using state/slack-board.meta/ is migrated to
+# state/slack-board/ by bin/fm-slack-board-migrate.sh, a shared no-network owner
+# invoked by bootstrap before its first state/*.meta scan and by the board
+# command under the board lock before the first network call; see
+# board_dir_migrate in this file.
 # Days with no board call get no synthetic snapshot. board never calls
 # pins.add, pins.remove, or chat.delete, and never edits or deletes a snapshot.
 #
@@ -70,7 +75,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 BOARD_LOCK="$STATE/.slack-board.lock"
-BOARD_PENDING="$STATE/slack-board.meta/slack-board.pending"
+# The board identity, daily state, and recovery journal live under a directory
+# whose name does NOT match the task-record glob state/*.meta. An earlier
+# revision used state/slack-board.meta/, which collided with that glob and made
+# bootstrap recovery, supervision, and the fleet snapshot treat the board as a
+# phantom task. bin/fm-slack-board-migrate.sh is the shared no-network owner that
+# moves any complete legacy directory to BOARD_DIR under .slack-board.lock;
+# bootstrap invokes it before its first state/*.meta scan, and board_dir_migrate
+# below invokes the same owner under the board lock before the first network call.
+BOARD_DIR="$STATE/slack-board"
+BOARD_PENDING="$BOARD_DIR/slack-board.pending"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -80,6 +94,19 @@ board_state_root_prepare() {
   else
     (umask 077; mkdir -p "$STATE") || die "could not create Slack board state directory"
   fi
+}
+
+# The lazy, idempotent, no-network migration of the legacy board directory
+# state/slack-board.meta/ to state/slack-board/ is owned by
+# bin/fm-slack-board-migrate.sh. It is the deployment migration owner: bootstrap
+# invokes it before its first state/*.meta scan, and this board command invokes
+# the same owner under the board lock before any network call. The owner
+# validates one coherent board layout (identity + daily state, or a valid
+# recovery journal) before any rename or return, refuses partial, duplicate,
+# malformed, wrong-mode, non-regular, or both-paths layouts and any move failure
+# with zero network calls and unchanged bytes, and never calls Slack.
+board_dir_migrate() {
+  FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-slack-board-migrate.sh" --lock-held
 }
 
 fms_load_config
@@ -149,21 +176,17 @@ update_message() {
 }
 
 board_meta_read() {
-  local meta=$STATE/slack-board.meta/slack-board.meta
-  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.meta" 600 2>/dev/null || return 1
-  grep '^ts=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-
+  fms_board_identity_valid "$BOARD_DIR" 2>/dev/null | cut -f2
 }
 
 board_meta_channel() {
-  local meta=$STATE/slack-board.meta/slack-board.meta
-  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.meta" 600 2>/dev/null || return 1
-  grep '^channel=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-
+  fms_board_identity_valid "$BOARD_DIR" 2>/dev/null | cut -f1
 }
 
 board_meta_write() {
   local ts=$1
   fms_message_ts_valid "$ts" || return 1
-  fmx_private_artifact_publish_stdin "$STATE/slack-board.meta" "slack-board.meta" 600 <<EOF
+  fmx_private_artifact_publish_stdin "$BOARD_DIR" "slack-board.meta" 600 <<EOF
 channel=$FMS_CHANNEL_ID
 ts=$ts
 EOF
@@ -183,29 +206,19 @@ board_today() {
 # A sibling to slack-board.meta, not a third field on it, because the body may
 # contain newlines a key=value grep parser cannot round-trip.
 board_state_present() {
-  local file=$STATE/slack-board.meta/slack-board.state
+  local file=$BOARD_DIR/slack-board.state
   [ -e "$file" ] || [ -L "$file" ]
 }
 
-board_state_valid() {
-  local file=$STATE/slack-board.meta/slack-board.state
-  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.state" 600 2>/dev/null || return 1
-  jq -e '
-    type == "object"
-    and (.date | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
-    and (.body | type == "string")
-  ' "$file" >/dev/null 2>&1
-}
-
 board_state_read_date() {
-  local file=$STATE/slack-board.meta/slack-board.state
-  board_state_valid || return 1
+  local file=$BOARD_DIR/slack-board.state
+  fms_board_state_valid "$BOARD_DIR" || return 1
   jq -er '.date' "$file" 2>/dev/null
 }
 
 board_state_read_body_file() {
-  local file=$STATE/slack-board.meta/slack-board.state dest=$1
-  board_state_valid || return 1
+  local file=$BOARD_DIR/slack-board.state dest=$1
+  fms_board_state_valid "$BOARD_DIR" || return 1
   jq -j '.body' "$file" > "$dest" 2>/dev/null
 }
 
@@ -213,7 +226,7 @@ board_state_write_file() {
   local date=$1 body_file=$2
   jq -n --arg date "$date" --rawfile body "$body_file" \
     '{date: $date, body: $body}' \
-    | fmx_private_artifact_publish_stdin "$STATE/slack-board.meta" "slack-board.state" 600
+    | fmx_private_artifact_publish_stdin "$BOARD_DIR" "slack-board.state" 600
 }
 
 board_state_write() {
@@ -226,27 +239,6 @@ board_pending_present() {
   [ -e "$BOARD_PENDING" ] || [ -L "$BOARD_PENDING" ]
 }
 
-board_pending_valid() {
-  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.pending" 600 2>/dev/null || return 1
-  jq -e '
-    type == "object"
-    and (.phase == "initial-posting" or .phase == "initial-posted" or
-         .phase == "initial-meta-written" or .phase == "initial-state-needs-write" or
-         .phase == "snapshot-needed" or .phase == "snapshot-posting" or
-         .phase == "snapshot-posted" or .phase == "live-needs-update" or
-         .phase == "state-needs-write")
-    and (.date | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
-    and (.today | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
-    and (.body | type == "string")
-    and (.new_body | type == "string")
-    and (.live_ts | type == "string")
-    and (.snapshot_ts | type == "string")
-    and (if (.phase == "initial-posting" or .phase == "initial-posted" or
-             .phase == "initial-meta-written" or .phase == "initial-state-needs-write")
-         then (.channel | type == "string") else true end)
-  ' "$BOARD_PENDING" >/dev/null 2>&1
-}
-
 board_pending_write() {
   local phase=$1 date=$2 body_file=$3 today=$4 new_body_file=$5 live_ts=$6 snapshot_ts=$7
   jq -n --arg phase "$phase" --arg date "$date" --rawfile body "$body_file" \
@@ -256,7 +248,7 @@ board_pending_write() {
     '{phase: $phase, date: $date, body: $body, today: $today,
       new_body: $new_body, live_ts: $live_ts, snapshot_ts: $snapshot_ts,
       channel: $channel}' \
-    | fmx_private_artifact_publish_stdin "$STATE/slack-board.meta" "slack-board.pending" 600
+    | fmx_private_artifact_publish_stdin "$BOARD_DIR" "slack-board.pending" 600
 }
 
 board_pending_copy_body() {
@@ -302,7 +294,7 @@ board_initial_pending_recover() {
   if ! board_pending_present; then
     return 0
   fi
-  board_pending_valid || die "invalid board pending journal at $BOARD_PENDING"
+  fms_board_journal_valid "$BOARD_DIR" || die "invalid board pending journal at $BOARD_PENDING"
   phase=$(jq -er '.phase' "$BOARD_PENDING") || die "invalid board pending journal at $BOARD_PENDING"
   case "$phase" in
     initial-*) ;;
@@ -360,7 +352,7 @@ board_pending_recover() {
   if ! board_pending_present; then
     return 0
   fi
-  board_pending_valid || die "invalid board pending journal at $BOARD_PENDING"
+  fms_board_journal_valid "$BOARD_DIR" || die "invalid board pending journal at $BOARD_PENDING"
   phase=$(jq -er '.phase' "$BOARD_PENDING") || die "invalid board pending journal at $BOARD_PENDING"
   date=$(jq -er '.date' "$BOARD_PENDING") || die "invalid board pending journal at $BOARD_PENDING"
   today=$(jq -er '.today' "$BOARD_PENDING") || die "invalid board pending journal at $BOARD_PENDING"
@@ -375,11 +367,12 @@ board_pending_recover() {
   while :; do
     case "$phase" in
       snapshot-needed)
-        if fmx_private_artifact_file_valid "$STATE/slack-board-snapshots" "$date" 600 2>/dev/null; then
-          snapshot_ts=$(cat "$STATE/slack-board-snapshots/$date") || die "could not read board snapshot once-file"
+        if snapshot_ts=$(fms_board_once_valid "$STATE/slack-board-snapshots" "$date" 2>/dev/null); then
           board_pending_write snapshot-posted "$date" "$BOARD_RECOVERY_BODY_FILE" "$today" \
             "$BOARD_RECOVERY_NEW_BODY_FILE" "$live_ts" "$snapshot_ts" \
             || die "board snapshot recovery journal could not be recorded"
+        elif [ -e "$STATE/slack-board-snapshots/$date" ] || [ -L "$STATE/slack-board-snapshots/$date" ]; then
+          die "board snapshot once-file for $date is malformed; inspect state/slack-board-snapshots/$date before the next board call"
         else
           board_pending_write snapshot-posting "$date" "$BOARD_RECOVERY_BODY_FILE" "$today" \
             "$BOARD_RECOVERY_NEW_BODY_FILE" "$live_ts" "" \
@@ -392,8 +385,7 @@ board_pending_recover() {
         phase='snapshot-posted'
         ;;
       snapshot-posting)
-        if fmx_private_artifact_file_valid "$STATE/slack-board-snapshots" "$date" 600 2>/dev/null; then
-          snapshot_ts=$(cat "$STATE/slack-board-snapshots/$date") || die "could not read board snapshot once-file"
+        if snapshot_ts=$(fms_board_once_valid "$STATE/slack-board-snapshots" "$date" 2>/dev/null); then
           board_pending_write snapshot-posted "$date" "$BOARD_RECOVERY_BODY_FILE" "$today" \
             "$BOARD_RECOVERY_NEW_BODY_FILE" "$live_ts" "$snapshot_ts" \
             || die "board snapshot recovery journal could not be recorded"
@@ -503,11 +495,12 @@ case "$cmd" in
     board_state_root_prepare
     fm_lock_acquire_wait "$BOARD_LOCK" || die "could not acquire board lock"
     BOARD_LOCK_HELD=1
-    if [ -e "$STATE/slack-board.meta/slack-board.meta" ] || [ -L "$STATE/slack-board.meta/slack-board.meta" ]; then
+    board_dir_migrate
+    if [ -e "$BOARD_DIR/slack-board.meta" ] || [ -L "$BOARD_DIR/slack-board.meta" ]; then
       existing=$(board_meta_read 2>/dev/null) \
-        || die "invalid board meta at $STATE/slack-board.meta/slack-board.meta"
+        || die "invalid board meta at $BOARD_DIR/slack-board.meta"
       [ -n "$existing" ] \
-        || die "invalid board meta at $STATE/slack-board.meta/slack-board.meta"
+        || die "invalid board meta at $BOARD_DIR/slack-board.meta"
     else
       existing=
     fi
@@ -516,15 +509,15 @@ case "$cmd" in
       [ "$stored_channel" = "$FMS_CHANNEL_ID" ] || die "refusing board update for mismatched channel"
     fi
     if board_pending_present; then
-      board_pending_valid || die "invalid board pending journal at $BOARD_PENDING"
+      fms_board_journal_valid "$BOARD_DIR" || die "invalid board pending journal at $BOARD_PENDING"
       pending_phase=$(jq -er '.phase' "$BOARD_PENDING") || die "invalid board pending journal at $BOARD_PENDING"
       case "$pending_phase" in
         initial-*)
           board_initial_pending_recover "$existing"
           existing=$(board_meta_read 2>/dev/null) \
-            || die "invalid board meta at $STATE/slack-board.meta/slack-board.meta"
+            || die "invalid board meta at $BOARD_DIR/slack-board.meta"
           [ -n "$existing" ] \
-            || die "invalid board meta at $STATE/slack-board.meta/slack-board.meta"
+            || die "invalid board meta at $BOARD_DIR/slack-board.meta"
           ;;
         *)
           [ -n "$existing" ] || die "board pending journal has no live board meta"
@@ -536,10 +529,10 @@ case "$cmd" in
       today=$(board_today)
       printf '%s' "$1" > "$TEXT_FILE" || die "could not prepare board text"
       if board_state_present; then
-        stored_date=$(board_state_read_date) || die "invalid board state at $STATE/slack-board.meta/slack-board.state"
+        stored_date=$(board_state_read_date) || die "invalid board state at $BOARD_DIR/slack-board.state"
         BOARD_INPUT_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-slack-board-body.XXXXXX") || exit 1
         board_state_read_body_file "$BOARD_INPUT_BODY_FILE" \
-          || die "invalid board state at $STATE/slack-board.meta/slack-board.state"
+          || die "invalid board state at $BOARD_DIR/slack-board.state"
       else
         stored_date=
         BOARD_INPUT_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-slack-board-body.XXXXXX") || exit 1

@@ -144,3 +144,75 @@ run_post() {
     PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-slack-post.sh" "$@"
 }
+
+# --- binary-safe assertions -------------------------------------------------
+# Command substitution strips trailing newlines, so byte equality for artifacts
+# whose trailing bytes carry meaning (the snapshot once-file, the identity record)
+# must use cmp, never [ "$(cat a)" = "$(cat b)" ]. assert_bytes_eq proves two
+# files hold identical bytes; the expected file is produced independently (a
+# printf into a file outside the fixture tree, or a byte literal), never by
+# reading the artifact under test.
+assert_bytes_eq() {
+  cmp -s "$1" "$2" || fail "bytes differ: $1 != $2"
+}
+
+# _fstat_mode <path> prints the numeric mode (e.g. 700) portably.
+_fstat_mode() {
+  local p=$1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$p" 2>/dev/null
+  else
+    stat -c %a "$p" 2>/dev/null
+  fi
+}
+
+# _fstat_type <path> prints a single token: link, dir, file, or other.
+_fstat_type() {
+  local p=$1
+  [ -L "$p" ] && { printf 'link\n'; return; }
+  [ -d "$p" ] && { printf 'dir\n'; return; }
+  [ -f "$p" ] && { printf 'file\n'; return; }
+  printf 'other\n'
+}
+
+# _fstat_nlink <path> prints the link count portably.
+_fstat_nlink() {
+  local p=$1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$p" 2>/dev/null
+  else
+    stat -c %h "$p" 2>/dev/null
+  fi
+}
+
+# manifest <dir> <out> records a complete, byte-stable inventory of a directory:
+# relative path, type, mode, size, link count, and a content digest (no
+# symlink following). find -mindepth 1 -maxdepth 1 sees dotfiles and dangling
+# symlinks and has no early-termination sentinel, so a pre/post manifest
+# comparison proves a refusal left every byte, type, mode, and link count
+# unchanged. Two manifests compared with assert_bytes_eq prove invariance.
+manifest() {
+  local dir=$1 out=$2 p rel mode type size nlink digest
+  {
+    find "$dir" -mindepth 1 -maxdepth 1 -print0 | sort -z \
+    | while IFS= read -r -d '' p; do
+        rel=${p#"$dir"/}
+        type=$(_fstat_type "$p")
+        mode=$(_fstat_mode "$p")
+        if [ "$(uname)" = Darwin ]; then
+          size=$(stat -f %z "$p" 2>/dev/null)
+        else
+          size=$(stat -c %s "$p" 2>/dev/null)
+        fi
+        nlink=$(_fstat_nlink "$p")
+        if [ "$type" = file ] && [ -L "$p" ]; then
+          digest='link'
+        elif [ "$type" = file ]; then
+          digest=$(shasum -a 256 "$p" 2>/dev/null | awk '{print $1}')
+        else
+          digest=$type
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rel" "$type" "$mode" "$size" "$nlink" "$digest"
+      done
+  } > "$out"
+}

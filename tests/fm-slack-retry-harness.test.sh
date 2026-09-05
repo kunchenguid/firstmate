@@ -92,24 +92,24 @@ test_public_board_does_not_orphan_state() {
     fail 'public board post should report the lost response'
   fi
   [ "$(wc -l < "$FM_SLACK_REMOTE_MUTATIONS" | tr -d ' ')" -eq 1 ] || fail 'public board path duplicated the post'
-  [ ! -e "$home/state/slack-board.meta/slack-board.meta" ] || fail 'board state was orphaned after ambiguous post'
+  [ ! -e "$home/state/slack-board/slack-board.meta" ] || fail 'board state was orphaned after ambiguous post'
   pass 'public board posting records no orphan after ambiguous success'
 }
 
 test_board_rollover_snapshot_does_not_orphan_state() {
   setup_env
   local home="$TMP_ROOT/rollover-home" meta_before state_before
-  mkdir -p "$home/config" "$home/state/slack-board.meta"
-  chmod 700 "$home/state" "$home/state/slack-board.meta"
+  mkdir -p "$home/config" "$home/state/slack-board"
+  chmod 700 "$home/state" "$home/state/slack-board"
   export FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$home/state"
   printf '%s\n' C0123456789 > "$home/config/slack-captain-channel"
   export FM_SLACK_BOT_TOKEN=xoxb-test-token
-  printf 'channel=C0123456789\nts=999.111\n' > "$home/state/slack-board.meta/slack-board.meta"
-  chmod 600 "$home/state/slack-board.meta/slack-board.meta"
-  printf '{"date":"2026-08-01","body":"prior body"}' > "$home/state/slack-board.meta/slack-board.state"
-  chmod 600 "$home/state/slack-board.meta/slack-board.state"
-  meta_before=$(cat "$home/state/slack-board.meta/slack-board.meta")
-  state_before=$(cat "$home/state/slack-board.meta/slack-board.state")
+  printf 'channel=C0123456789\nts=999.111\n' > "$home/state/slack-board/slack-board.meta"
+  chmod 600 "$home/state/slack-board/slack-board.meta"
+  printf '{"date":"2026-08-01","body":"prior body"}' > "$home/state/slack-board/slack-board.state"
+  chmod 600 "$home/state/slack-board/slack-board.state"
+  meta_before=$(cat "$home/state/slack-board/slack-board.meta")
+  state_before=$(cat "$home/state/slack-board/slack-board.state")
   export FM_SLACK_BOARD_TODAY_OVERRIDE=2026-08-02
   if "$ROOT/bin/fm-slack-post.sh" board 'today text' >/dev/null 2>&1; then
     unset FM_SLACK_BOARD_TODAY_OVERRIDE
@@ -118,9 +118,9 @@ test_board_rollover_snapshot_does_not_orphan_state() {
   unset FM_SLACK_BOARD_TODAY_OVERRIDE
   [ "$(wc -l < "$FM_SLACK_REMOTE_MUTATIONS" | tr -d ' ')" -eq 1 ] || fail 'rollover snapshot path duplicated the post'
   [ ! -e "$home/state/slack-board-snapshots/2026-08-01" ] || fail 'snapshot once-file was recorded despite an ambiguous post'
-  [ "$(cat "$home/state/slack-board.meta/slack-board.meta")" = "$meta_before" ] \
+  [ "$(cat "$home/state/slack-board/slack-board.meta")" = "$meta_before" ] \
     || fail 'live board meta was mutated by an ambiguous snapshot'
-  [ "$(cat "$home/state/slack-board.meta/slack-board.state")" = "$state_before" ] \
+  [ "$(cat "$home/state/slack-board/slack-board.state")" = "$state_before" ] \
     || fail 'board state advanced despite an ambiguous snapshot'
   pass 'rollover snapshot posting records no orphan after ambiguous success'
 }
