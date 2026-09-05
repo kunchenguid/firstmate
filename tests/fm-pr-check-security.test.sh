@@ -174,10 +174,52 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # tea, reproducing the parts fm-pr-* use: "login list -o csv" (header plus one
+  # row per configured login), "api ... repos/<o>/<r>/pulls/<n>" (raw Gitea JSON
+  # on stdout, non-zero with no stdout on failure), and "pr merge" (records the
+  # invocation, exit governed by FM_TEST_TEA_MERGE_FAIL).
+  cat > "$fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "$1" in
+  login)
+    [ "$2" = list ] || exit 0
+    printf 'Name,URL,SSH Host,User,Default\n'
+    IFS=, read -ra _logins <<< "${FM_TEST_TEA_LOGINS-firstmate-alps}"
+    for _l in "${_logins[@]}"; do
+      [ -n "$_l" ] || continue
+      printf '%s,http://alps:3222,,firstmate,true\n' "$_l"
+    done
+    exit 0
+    ;;
+  api)
+    [ "${FM_TEST_TEA_API_FAIL:-0}" = 0 ] || exit 1
+    _merged=${FM_TEST_TEA_MERGED-false}
+    _state=${FM_TEST_TEA_STATE-open}
+    _mergeable=${FM_TEST_TEA_MERGEABLE-true}
+    _head=${FM_TEST_TEA_HEAD:-0123456789abcdef0123456789abcdef01234567}
+    [ "${FM_TEST_TEA_API_GARBAGE:-0}" = 0 ] || { printf 'not json\n'; exit 0; }
+    printf '{"state":"%s","merged":%s,"mergeable":%s,"head":{"sha":"%s"},"html_url":"http://alps:3222/o/r/pulls/1"}\n' \
+      "$_state" "$_merged" "$_mergeable" "$_head"
+    exit 0
+    ;;
+  pr|pulls)
+    case "$2" in
+      merge)
+        [ "${FM_TEST_TEA_MERGE_FAIL:-0}" = 0 ] || { echo "tea: merge failed" >&2; exit 1; }
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/tea"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/tea.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -207,6 +249,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -217,6 +260,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -376,6 +420,47 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  # Gitea/Forgejo: base URL kept whole as the host, owner/repo like GitHub,
+  # plural /pulls/. http and a non-default port are both legal in the shape.
+  while IFS='|' read -r url host path owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gitea pull request URL"
+    [ "$FM_PR_PROVIDER" = gitea ] || fail "parser did not tag a Gitea URL as gitea"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gitea URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gitea base URL"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gitea project path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Gitea owner"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Gitea repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gitea pull request number"
+    [ "$FM_PR_URL" = "$FM_PR_HOST/$FM_PR_PATH/pulls/$FM_PR_NUMBER" ] \
+      || fail "parsed Gitea identity does not reconstruct the stored URL"
+  done <<'EOF'
+http://alps:3222/babbarc/dotfiles/pulls/1|http://alps:3222|babbarc/dotfiles|babbarc|dotfiles|1
+https://gitea.example.com/org/repo-name_with.parts/pulls/123456|https://gitea.example.com|org/repo-name_with.parts|org|repo-name_with.parts|123456
+https://forgejo.internal:8443/team/tools/pulls/7|https://forgejo.internal:8443|team/tools|team|tools|7
+EOF
+  # A doctored Gitea URL whose parts would not reconstruct it is refused, as is
+  # every non-shape variant.
+  for row in \
+    'http://alps:3222/babbarc/dotfiles/pulls/01' \
+    'http://alps:3222/babbarc/dotfiles/pulls/0' \
+    'http://alps:3222/a/b/c/pulls/1' \
+    'http://alps:3222/babbarc/pulls/1' \
+    'http://github.com/o/r/pulls/1' \
+    'https://gitlab.com/o/r/pulls/1' \
+    'http://alps:99999/o/r/pulls/1' \
+    'http://alps:0/o/r/pulls/1' \
+    'http://alps:3222/o/r.git/pulls/1' \
+    'http://alps:3222/-o/r/pulls/1' \
+    'http://alps:3222/o/r/pulls/1/' \
+    'http://alps:3222/o/r/pulls/1?x=1' \
+    'http://alps:3222/o/r/pulls/1#f' \
+    'ftp://alps:3222/o/r/pulls/1' \
+    'http://ALPS:3222/o/r/pulls/1' \
+    'http://alps:3222//r/pulls/1'; do
+    ! fm_pr_url_parse "$row" || fail "parser accepted a rejected Gitea URL: $row"
+  done
+
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
@@ -678,6 +763,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TEA_LOG="$dir/tea.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1388,6 +1474,107 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+test_gitea_merge_watch() {
+  local dir state out rc url notea bindir entry name
+  dir=$(make_case gitea-merge-watch)
+  state="$dir/home/state"
+  url=http://alps:3222/babbarc/dotfiles/pulls/7
+  printf '%s\n' 'http://alps:3222' > "$dir/home/config/gitea-instances"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" http://alps:3222 babbarc/dotfiles 7 "$POLL" \
+    || fail "could not prepare a Gitea poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gitea poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gitea
+$url
+http://alps:3222
+babbarc/dotfiles
+7" ] || fail "published Gitea sidecar bytes were not exact"
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "published Gitea check was not byte-for-byte static"
+
+  # Only a top-level merged:true wakes firstmate; every other reading stays
+  # silent, including an unreadable pull request and non-JSON output.
+  out=$(FM_TEST_TEA_MERGED=false run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for an open pull request"
+  out=$(FM_TEST_TEA_API_FAIL=1 FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted after a tea failure"
+  out=$(FM_TEST_TEA_API_GARBAGE=1 FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for non-JSON tea output"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line for a merged pull request"
+
+  # tea is addressed by the derived login and the owner/repo slug, and the poll
+  # re-derives that login from the base URL rather than reading any config.
+  grep -qF -- 'api --login firstmate-alps repos/babbarc/dotfiles/pulls/7' "$dir/tea.log" \
+    || fail "Gitea poll did not address tea by the derived login and repo slug"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" http://evil.example:3222 babbarc/dotfiles 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose base URL was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" http://alps:3222 babbarc/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TEA_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose repo was swapped"
+
+  # Arming refuses when the instance is not allow-listed, when tea is absent,
+  # and when the derived login is not configured - the three ways the poll
+  # could otherwise be armed to watch nothing.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(run_check_entry "$dir" task-b "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "arming a Gitea watch failed with an allow-listed instance and configured login"
+  [ -e "$state/task-b.check.sh" ] || fail "armed Gitea watch left no poll"
+
+  write_task_meta "$dir" task-c
+  printf '%s\n' '# nothing allow-listed' > "$dir/home/config/gitea-instances"
+  set +e
+  out=$(run_check_entry "$dir" task-c "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded for a non-allow-listed instance"
+  case "$out" in *"not an allow-listed Gitea instance"*) ;; *) fail "non-allow-listed Gitea arming did not report the allow-list" ;; esac
+  [ ! -e "$state/task-c.check.sh" ] || fail "refused Gitea arming left a poll armed"
+  printf '%s\n' 'http://alps:3222' > "$dir/home/config/gitea-instances"
+
+  write_task_meta "$dir" task-d
+  set +e
+  out=$(FM_TEST_TEA_LOGINS=some-other-login run_check_entry "$dir" task-d "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with the derived login unconfigured"
+  case "$out" in *"needs a tea login named 'firstmate-alps'"*) ;; *) fail "unconfigured-login Gitea arming did not name the login" ;; esac
+  [ ! -e "$state/task-d.check.sh" ] || fail "login-refused Gitea arming left a poll armed"
+
+  notea="$dir/notea"
+  mkdir -p "$notea"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = tea ] && continue
+      [ -e "$notea/$name" ] || ln -s "$entry" "$notea/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  write_task_meta "$dir" task-e
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    PATH="$notea" "$PR_CHECK" task-e "$url" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with tea absent"
+  case "$out" in *"requires tea on PATH"*) ;; *) fail "tea-absent Gitea arming did not report the missing CLI" ;; esac
+  [ ! -e "$state/task-e.check.sh" ] || fail "tea-absent Gitea arming left a poll armed"
+
+  pass "Gitea pull requests are watched only when allow-listed and never wake falsely"
 }
 
 seed_canonical_poll() {
@@ -2123,6 +2310,7 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gitea_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

@@ -183,7 +183,8 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch to the \`origin\` remote and open a PR against \`origin\`, then append \`done: PR {url}\` to the status file and stop.
+Use \`gh-axi\` when \`origin\` is a GitHub repository and \`tea\` (\`tea pr create\`) when \`origin\` is a Gitea or Forgejo repository; never push to or open a PR against any read-only mirror remote (for example a GitHub mirror of a Gitea-hosted repo).
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;

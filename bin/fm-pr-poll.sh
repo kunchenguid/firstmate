@@ -4,8 +4,14 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI, gh for GitHub, glab for
+# GitLab, and tea for Gitea (which also covers API-compatible Forgejo), so an
+# upstream checkout needs no extra tooling to follow any of them.
+# For Gitea the sidecar "host" is the instance base URL ("<scheme>://<authority>")
+# because a self-hosted instance has no fixed domain, no guaranteed TLS, and
+# often a non-default port; the tea login is re-derived from that base URL as
+# "firstmate-<host>", identically to how the arming path derived it, so this
+# source needs no config read.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +110,54 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  gitea)
+    # host is the instance base URL: "<scheme>://<authority>", nothing else.
+    case "$host" in
+      http://*) rest=${host#http://} ;;
+      https://*) rest=${host#https://} ;;
+      *) exit 0 ;;
+    esac
+    case "$rest" in
+      */*|'') exit 0 ;;
+    esac
+    case "$rest" in
+      *:*) authority_host=${rest%:*}; port=${rest##*:} ;;
+      *) authority_host=$rest; port= ;;
+    esac
+    if [ -n "$port" ]; then
+      case "$port" in
+        ''|*[!0-9]*|0*) exit 0 ;;
+      esac
+      [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 0
+    fi
+    [ "${#authority_host}" -ge 1 ] && [ "${#authority_host}" -le 253 ] || exit 0
+    [ "$authority_host" != github.com ] && [ "$authority_host" != gitlab.com ] || exit 0
+    case "$authority_host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    # path is exactly "<owner>/<repo>", both Gitea-name-safe.
+    owner=${path%%/*}
+    repo=${path#*/}
+    case "$path" in
+      */*/*|*/) exit 0 ;;
+    esac
+    [ -n "$owner" ] && [ -n "$repo" ] || exit 0
+    [ "${#owner}" -le 100 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$owner" in .|..|-*|.*|*.git|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+    case "$repo" in .|..|-*|.*|*.git|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+    [ "$url" = "$host/$owner/$repo/pulls/$number" ] || exit 0
+    # tea reads the login from its own config by name; the name is re-derived
+    # from the same base URL the arming path used, so no login is stored here.
+    login=firstmate-${authority_host//./-}
+    case "$login" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+    # Only a top-level "merged": true wakes. tea api prints the raw Gitea JSON;
+    # the boolean is matched literally so a changed format or an unreadable
+    # pull request stays silent instead of reporting a merge. The closing quote
+    # before ":" keeps this off "merged_by" and "merged_commit_sha".
+    body=$(tea api --login "$login" "repos/$owner/$repo/pulls/$number" 2>/dev/null) || exit 0
+    printf '%s' "$body" | grep -Eq '"merged"[[:space:]]*:[[:space:]]*true([[:space:],}]|$)' \
+      && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac
