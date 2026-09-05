@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# Unified axiom-style wrapper for Gitea and Forgejo (sibling forks with largely
+# compatible API surfaces).
+#
+# Prefers `forgejo-axi` when on PATH (full pr view/merge/merged/checks surface);
+# falls back to `tea` (the official Gitea CLI) for the operations tea actually
+# documents. Per-operation fallback matrix:
+#
+#   operation        forgejo-axi            tea
+#   --------         -----------             ---
+#   pr view          forgejo-axi pr view    (refused; tea has no pulls view)
+#   pr head          forgejo-axi pr view    (refused; same reason)
+#   pr checks        forgejo-axi pr checks  (refused; tea has no pulls checks)
+#   pr merged        forgejo-axi pr merged  (refused; use pr view state field)
+#   pr merge         forgejo-axi pr merge   tea pulls merge
+#   pr list          forgejo-axi pr list    tea pulls list
+#   pr find          forgejo-axi pr find    (refused; tea has no equivalent)
+#   issue list        forgejo-axi issue list  tea issues list
+#   repo view        forgejo-axi repo view  tea repo view
+#   api              forgejo-axi api        tea api
+#
+# Connection precedence (highest first):
+#   --base-url <URL>    explicit URL wins over every other source
+#   $GITEA_BASE_URL / $FORGEJO_BASE_URL   env var
+#   git remote get-url origin    auto-derived from inside a project worktree
+#
+# Token precedence (highest first):
+#   --token-env <NAME>   explicit env-var name wins
+#   $GITEA_TOKEN_ENV / $FORGEJO_TOKEN_ENV   default env var name holding the token
+#   $GITEA_TOKEN / $FORGEJO_TOKEN   direct token value (rarely set)
+#
+# The shim is non-interactive: it never prompts, never asks for confirmation,
+# and exits non-zero on any error so callers can refuse rather than proceed.
+#
+# Usage:
+#   fm-gitea-axi [--base-url URL] [--token-env NAME] <command> [args...]
+#
+# Example:
+#   fm-gitea-axi --base-url https://git.example.com pr list --repo owner/repo
+#   fm-gitea-axi --token-env GITEA_TOKEN pr merged 42
+
+set -eu
+
+PROG=${0##*/}
+SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log_err() { printf 'error: %s\n' "$*" >&2; }
+
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+resolve_base_url() {
+  if [ -n "${SHIM_BASE_URL:-}" ]; then
+    printf '%s\n' "$SHIM_BASE_URL"
+    return 0
+  fi
+  if [ -n "${GITEA_BASE_URL:-}${FORGEJO_BASE_URL:-}" ]; then
+    printf '%s\n' "${GITEA_BASE_URL:-}${FORGEJO_BASE_URL:-}"
+    return 0
+  fi
+  if git -C "${PWD}" rev-parse --git-dir >/dev/null 2>&1; then
+    local remote_url
+    remote_url=$(git -C "${PWD}" remote get-url origin 2>/dev/null || true)
+    if [ -n "$remote_url" ]; then
+      # Convert ssh://git@host/owner/repo.git or git@host:owner/repo.git to https URL.
+      if [[ "$remote_url" =~ ^git@([^:]+):(.+)\.git$ ]]; then
+        printf 'https://%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+      fi
+      if [[ "$remote_url" =~ ^ssh://git@([^/]+)/(.+)\.git$ ]]; then
+        printf 'https://%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+      fi
+      if [[ "$remote_url" =~ ^https:// ]]; then
+        printf '%s\n' "${remote_url%.git}"
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+resolve_token_env() {
+  if [ -n "${SHIM_TOKEN_ENV:-}" ]; then
+    printf '%s\n' "$SHIM_TOKEN_ENV"
+    return 0
+  fi
+  if [ -n "${GITEA_TOKEN_ENV:-}${FORGEJO_TOKEN_ENV:-}" ]; then
+    printf '%s\n' "${GITEA_TOKEN_ENV:-}${FORGEJO_TOKEN_ENV:-}"
+    return 0
+  fi
+  printf '%s\n' "${GITEA_TOKEN_ENV:-${FORGEJO_TOKEN_ENV:-GITEA_TOKEN}}"
+}
+
+dispatch_forgejo_axi() {
+  local base_url token_env
+  base_url=$(resolve_base_url) || {
+    log_err "could not resolve a Gitea/Forgejo base URL; pass --base-url or set GITEA_BASE_URL or run from inside a git worktree whose origin points at the instance"
+    return 2
+  }
+  token_env=$(resolve_token_env) || true
+  local -a args=(pr "$@" --base-url "$base_url")
+  [ -n "$token_env" ] && args+=(--token-env "$token_env")
+  forgejo-axi "${args[@]}"
+}
+
+dispatch_tea() {
+  tea "$@"
+}
+
+SHIM_BASE_URL=
+SHIM_TOKEN_ENV=
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base-url)
+      [ $# -ge 2 ] || { log_err "--base-url requires a value"; exit 2; }
+      SHIM_BASE_URL=$2
+      shift 2
+      ;;
+    --base-url=*)
+      SHIM_BASE_URL=${1#--base-url=}
+      shift
+      ;;
+    --token-env)
+      [ $# -ge 2 ] || { log_err "--token-env requires a value"; exit 2; }
+      SHIM_TOKEN_ENV=$2
+      shift 2
+      ;;
+    --token-env=*)
+      SHIM_TOKEN_ENV=${1#--token-env=}
+      shift
+      ;;
+    --help|-h)
+      sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    --version|-V)
+      printf 'fm-gitea-axi 1.0.0 (forgejo-axi preferred; tea fallback per-operation)\n'
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      log_err "unknown flag: $1"
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[ $# -ge 1 ] || { log_err "usage: $PROG [--base-url URL] [--token-env NAME] <command> [args...]"; exit 2; }
+
+command=$1
+shift
+
+case "$command" in
+  pr)
+    [ $# -ge 1 ] || { log_err "usage: $PROG pr <subcommand> [args...]"; exit 2; }
+    sub=$1
+    shift
+    case "$sub" in
+      view|head|checks|find|merged)
+        if has_cmd forgejo-axi; then
+          dispatch_forgejo_axi "$sub" "$@"
+        else
+          log_err "'pr $sub' requires forgejo-axi on PATH; install with: npx -y forgejo-axi"
+          exit 3
+        fi
+        ;;
+      list)
+        if has_cmd forgejo-axi; then
+          dispatch_forgejo_axi list "$@"
+        elif has_cmd tea; then
+          dispatch_tea pulls list "$@"
+        else
+          log_err "'pr list' requires either forgejo-axi or tea on PATH"
+          exit 3
+        fi
+        ;;
+      merge)
+        if has_cmd forgejo-axi; then
+          dispatch_forgejo_axi merge "$@"
+        elif has_cmd tea; then
+          dispatch_tea pulls merge "$@"
+        else
+          log_err "'pr merge' requires either forgejo-axi or tea on PATH"
+          exit 3
+        fi
+        ;;
+      *)
+        log_err "unknown 'pr' subcommand: $sub"
+        exit 2
+        ;;
+    esac
+    ;;
+  issue)
+    [ $# -ge 1 ] || { log_err "usage: $PROG issue <subcommand> [args...]"; exit 2; }
+    sub=$1
+    shift
+    case "$sub" in
+      list)
+        if has_cmd forgejo-axi; then
+          forgejo-axi issue list --base-url "$(resolve_base_url)" --token-env "$(resolve_token_env)" "$@"
+        elif has_cmd tea; then
+          dispatch_tea issues list "$@"
+        else
+          log_err "'issue list' requires either forgejo-axi or tea on PATH"
+          exit 3
+        fi
+        ;;
+      *)
+        log_err "unknown 'issue' subcommand: $sub"
+        exit 2
+        ;;
+    esac
+    ;;
+  repo)
+    [ $# -ge 1 ] || { log_err "usage: $PROG repo <subcommand> [args...]"; exit 2; }
+    sub=$1
+    shift
+    case "$sub" in
+      view)
+        if has_cmd forgejo-axi; then
+          forgejo-axi repo view --base-url "$(resolve_base_url)" --token-env "$(resolve_token_env)" "$@"
+        elif has_cmd tea; then
+          dispatch_tea repo view "$@"
+        else
+          log_err "'repo view' requires either forgejo-axi or tea on PATH"
+          exit 3
+        fi
+        ;;
+      *)
+        log_err "unknown 'repo' subcommand: $sub"
+        exit 2
+        ;;
+    esac
+    ;;
+  api)
+    if has_cmd forgejo-axi; then
+      forgejo-axi api --base-url "$(resolve_base_url)" --token-env "$(resolve_token_env)" "$@"
+    elif has_cmd tea; then
+      dispatch_tea api "$@"
+    else
+      log_err "'api' requires either forgejo-axi or tea on PATH"
+      exit 3
+    fi
+    ;;
+  *)
+    log_err "unknown command: $command"
+    exit 2
+    ;;
+esac

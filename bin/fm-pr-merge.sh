@@ -684,6 +684,38 @@ case "$PROVIDER" in
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
+  gitea)
+    # Gitea and Forgejo expose the same /pulls/<n> URL shape. The shim prefers
+    # forgejo-axi (which has a deterministic merge + verify surface) and falls
+    # back to tea when forgejo-axi is absent. Pre-merge state and merge-queue
+    # semantics are not modelled here yet; refuse loudly rather than report a
+    # misleading "verified" if the merge command itself fails.
+    gitea_shim="$SCRIPT_DIR/fm-gitea-axi"
+    if [ ! -x "$gitea_shim" ]; then
+      echo "error: fm-gitea-axi shim is missing or not executable at $gitea_shim" >&2
+      exit 1
+    fi
+    gitea_method_args=()
+    if ! caller_has_merge_method "$@"; then
+      gitea_method_args=(--style merge)
+    fi
+    if ! merge_output=$("$gitea_shim" --base-url "https://$FM_PR_HOST" \
+      pr merge "$PR_NUMBER" \
+      ${gitea_method_args+"${gitea_method_args[@]}"} "$@" 2>&1); then
+      merge_status=$?
+      [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+      # The shim is the data plane here; no separate outcome read yet. A failed
+      # merge command is reported and the script exits without claiming a
+      # landing.
+      exit "$merge_status"
+    fi
+    if "$gitea_shim" --base-url "https://$FM_PR_HOST" pr merged "$PR_NUMBER" >/dev/null 2>&1; then
+      printf 'verified: %s is merged\n' "$URL"
+    else
+      printf 'actionable: the merge command for %s returned but the pull request did not read back as merged; the merge poll remains armed\n' "$URL" >&2
+      exit 0
+    fi
+    ;;
   *)
     echo "error: invalid PR merge request" >&2
     exit 2
