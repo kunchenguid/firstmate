@@ -13,9 +13,9 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (b2) blocked log claiming the daemon/timeout while the run is fixing with
 #       fresh activity = superseded BECAUSE THE RUN IS ALIVE; the same claim
-#       over a quiet run, and an ordinary blocked log over a live run, both keep
-#       the generic superseded reading, and a genuine daemon-down claim with no
-#       run anywhere still reports blocked
+#       a genuine socket-refusal claim over a stale fixing record remains
+#       blocked, and an ordinary blocked log over a live run keeps the generic
+#       superseded reading
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
@@ -481,23 +481,23 @@ test_daemon_claim_over_live_run_reads_run_alive() {
   pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
 }
 
-# The recency half of that pair is load-bearing: the same claim over a run whose
-# active step has gone quiet keeps the plain superseded reading, so a run record
-# that outlives a genuinely dead daemon is never reported as alive.
-test_daemon_claim_over_quiet_run_keeps_plain_superseded() {
+# A genuine refused socket outranks the persisted fixing record, which can
+# survive after the daemon exits.
+test_socket_refusal_over_stale_fixing_run_reports_blocked() {
   reset_fakes
-  local d; d=$(new_case daemon-claim-quiet)
+  local d; d=$(new_case daemon-socket-refused)
   make_repo_on_branch "$d/wt" fm/feat-dq
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dq.meta" "window=fm:fm-feat-dq" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon unreachable, drive run: read response: i/o timeout\n' \
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
     > "$d/state/feat-dq.status"
   FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-dq)"
   local out; out=$(run_crew_state "$d" feat-dq)
-  assert_contains "$out" "state: working" "quiet run still supersedes a stale blocked log"
-  assert_contains "$out" "superseded by active run" "quiet run keeps the generic reading"
-  assert_not_contains "$out" "run alive" "a quiet run is never reported as alive"
-  pass "daemon claim over a quiet run keeps the plain superseded reading"
+  assert_contains "$out" "state: blocked" "socket refusal outranks a stale fixing record"
+  assert_contains "$out" "source: status-log" "socket refusal remains status-log evidence"
+  assert_contains "$out" "socket refused connections" "socket failure is preserved"
+  assert_not_contains "$out" "run alive" "stale fixing record is not reported alive"
+  pass "socket refusal over a stale fixing run reports blocked"
 }
 
 # And the claim half: an ordinary blocked line over the same live run keeps the
@@ -508,13 +508,13 @@ test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
   make_repo_on_branch "$d/wt" fm/feat-ob
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ob.meta" "window=fm:fm-feat-ob" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: need a credential for the staging registry\n' > "$d/state/feat-ob.status"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-ob.status"
   FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ob)"
   local out; out=$(run_crew_state "$d" feat-ob)
   assert_contains "$out" "state: working" "ordinary blocked log over an active run -> working"
   assert_contains "$out" "superseded by active run" "ordinary blocked keeps the generic reading"
-  assert_not_contains "$out" "run alive" "run-alive reading is reserved for a pipeline claim"
-  pass "ordinary blocked over a live run keeps the plain superseded reading"
+  assert_not_contains "$out" "run alive" "broken pipe is not a pipeline-unreachable alias"
+  pass "broken-pipe blocker over a live run keeps the plain superseded reading"
 }
 
 # The genuine daemon-down case still reaches the supervisor as blocked: the
@@ -1993,7 +1993,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
-test_daemon_claim_over_quiet_run_keeps_plain_superseded
+test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
