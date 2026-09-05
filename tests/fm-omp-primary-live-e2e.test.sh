@@ -27,9 +27,9 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   if [ -f "${RPC_LOG:-}" ]; then
     printf '# rpc frame types seen:\n' >&2
-    jq -r '[.type, (.toolName // .name // "")] | @tsv' "$RPC_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -40 >&2
-    printf '# frames mentioning the arm tool:\n' >&2
-    jq -c 'select(tostring | test("watcher: started|fm_watch_arm|fm-watch-arm")) | {type, toolName, role: (.message.role // null), head: (tostring | .[0:200])}' "$RPC_LOG" 2>/dev/null | head -20 >&2
+    jq -R -r 'fromjson? | [.type, (.toolName // .name // "")] | @tsv' "$RPC_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -40 >&2
+    printf '# guard spy log:\n' >&2
+    cat "${GUARD_SPY_LOG:-/dev/null}" 2>/dev/null | tail -12 >&2
     printf '# last stderr lines:\n' >&2
     tail -5 "${RPC_ERR:-/dev/null}" >&2
     if [ "${FM_OMP_LIVE_KEEP:-0}" = 1 ]; then
@@ -99,6 +99,22 @@ done <<EOF
 $(git -C "$ROOT" ls-files --modified --others --exclude-standard)
 EOF
 mkdir -p "$PROJECT/state" "$PROJECT/config" "$PROJECT/data"
+# A spy in front of the real turn-end guard: every invocation records the
+# payload the extension sent and the exit code the real guard returned, which
+# proves the compelled continuation (a payload with stop_hook_active true can
+# only come from a stop omp raised for the continuation itself) independently of
+# whether the rpc stream echoes additionalContext.
+GUARD_SPY_LOG="$LAB/guard-spy.log"
+mv "$PROJECT/bin/fm-turnend-guard.sh" "$PROJECT/bin/fm-turnend-guard.real.sh"
+cat > "$PROJECT/bin/fm-turnend-guard.sh" <<SH
+#!/usr/bin/env bash
+payload=\$(cat)
+printf '%s' "\$payload" | "\$(dirname "\$0")/fm-turnend-guard.real.sh" "\$@"
+rc=\$?
+printf 'rc=%s payload=%s\n' "\$rc" "\$payload" >> '$GUARD_SPY_LOG'
+exit "\$rc"
+SH
+chmod +x "$PROJECT/bin/fm-turnend-guard.sh"
 [ -f "$PROJECT/.omp/extensions/fm-primary-omp-watch.ts" ] || fail "lab checkout is missing the omp watch extension"
 [ -f "$PROJECT/.omp/extensions/fm-primary-turnend-guard.ts" ] || fail "lab checkout is missing the omp turn-end extension"
 
@@ -231,7 +247,16 @@ kill -TERM "$successor_pid" 2>/dev/null || true
 if [ -n "$arm_pid" ] && lab_pid_is_safe "$arm_pid"; then kill -TERM "$arm_pid" 2>/dev/null || true; fi
 sleep 2
 rpc_send '{"id":"p3","type":"prompt","message":"Reply with exactly GUARD_PROBE and nothing else. Do not call any tool unless a later instruction in this turn tells you supervision is off."}'
-wait_for_log "TURN WOULD END BLIND" 360 || fail "session_stop did not compel the turn-end guard continuation after the watcher was killed"
+# The guard must have refused a stop (rc=2) and omp must then have raised the
+# continuation's own stop with stop_hook_active true.
+i=0
+while [ "$i" -lt 360 ]; do
+  grep -q '^rc=2 ' "$GUARD_SPY_LOG" 2>/dev/null && grep -q 'stop_hook_active":true' "$GUARD_SPY_LOG" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+grep -q '^rc=2 ' "$GUARD_SPY_LOG" 2>/dev/null || fail "the turn-end guard never refused a stop after the watcher was killed (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"
+grep -q 'stop_hook_active":true' "$GUARD_SPY_LOG" 2>/dev/null || fail "omp did not raise the compelled continuation's own stop (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"
 i=0
 while [ "$i" -lt 360 ]; do
   [ "$(tool_call_count fm_watch_arm_omp)" -ge 2 ] && break
