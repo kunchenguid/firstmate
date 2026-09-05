@@ -1402,6 +1402,7 @@ EOF
 test_captain_approved_delivery_stays_in_landed() {
   local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
   local spoof_pr spoof_marker spoof_show spoof_body spoof_records none_marker prior_pr
+  local interrupted_pr interrupted_marker interrupted_show interrupted_rc
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1445,6 +1446,49 @@ test_captain_approved_delivery_stays_in_landed() {
     "approved merge backfill lost the recorded captain decision"
   assert_contains "$show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $pr\\\"} -->" \
     "approved merge backfill did not record completion provenance"
+  interrupted_pr="https://github.com/kunchenguid/firstmate/pull/1363"
+  "$TASKS_AXI_BIN" add interrupted-retain "Resume the shipped cleanup" --kind ship \
+    --repo firstmate --start --file "$backlog" >/dev/null \
+    || fail "could not create the interrupted retained-cleanup fixture"
+  fm_write_meta "$home/state/interrupted-retain.meta" \
+    "window=firstmate:fm-interrupted-retain" "endpoint_task_id=interrupted-retain" \
+    "worktree=$wt" "project=$repo" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "pr=$interrupted_pr" "spawn_gen=interrupted-retain-fixture"
+  record_claude_state "$home/state" interrupted-retain idle
+  printf 'done: shipped cleanup interrupted\n' > "$home/state/interrupted-retain.status"
+  "$TASKS_AXI_BIN" hold interrupted-retain --reason "shipped work awaits the captain answer" \
+    --kind captain --file "$backlog" >/dev/null \
+    || fail "could not hold the interrupted retained-cleanup fixture"
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = reopen ]; then
+  printf '%s\n' 'error: retained cleanup interrupted' >&2
+  exit 1
+fi
+exec "$TASKS_AXI_BIN" "\$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+  interrupted_rc=0
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" interrupted-retain >/dev/null 2>&1 || interrupted_rc=$?
+  [ "$interrupted_rc" -ne 0 ] \
+    || fail "the retained cleanup did not stop at the injected interruption"
+  rm -f "$fakebin/tasks-axi"
+  interrupted_marker="$home/state/interrupted-retain.backlog-close"
+  [ -f "$interrupted_marker" ] \
+    || fail "the interrupted retained cleanup did not preserve its completion"
+  printf 'Close the shipped work.\n' > "$home/interrupted-answer.txt"
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer interrupted-retain --decision-file "$home/interrupted-answer.txt" >/dev/null \
+    || fail "could not resume the interrupted retained cleanup through its answer"
+  interrupted_show=$("$TASKS_AXI_BIN" show interrupted-retain --full --file "$backlog") \
+    || fail "could not read the resumed retained-cleanup completion"
+  assert_contains "$interrupted_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $interrupted_pr\\\"} -->" \
+    "the resumed close lost the retained cleanup's shipped artifact"
   "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
     --start --file "$backlog" >/dev/null \
     || fail "could not create the local delivery fixture"
@@ -1642,6 +1686,7 @@ test_captain_approved_delivery_stays_in_landed() {
     | ([.backlog.records[] | select(.id == "reused-discard")][0]) as $reused
     | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
     | ([.backlog.records[] | select(.id == "spoofed-question")][0]) as $spoofed
+    | ([.backlog.records[] | select(.id == "interrupted-retain")][0]) as $interrupted
     | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
     | ([.backlog.records[] | select(.id == "prior-provenance-approved")][0]) as $prior
     | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
@@ -1654,6 +1699,7 @@ test_captain_approved_delivery_stays_in_landed() {
       and $rejected.report_path == null and $rejected.local_note == null
       and $spoofed.delivery_provenance == true and $spoofed.pr_url == null
       and $spoofed.report_path == null and $spoofed.local_note == null
+      and $interrupted.delivery_provenance == true and ($interrupted.pr_url | test("/pull/1363"))
       and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
       and $prior.delivery_provenance == true and ($prior.pr_url | test("/pull/1364"))
   ' >/dev/null || fail "completion provenance did not distinguish delivered, rejected, and legacy rows: $snap"
@@ -1664,6 +1710,7 @@ test_captain_approved_delivery_stays_in_landed() {
       and (.landed | any(.[]; .id == "legacy-approved" and (.artifact | test("/pull/1368"))))
       and (.landed | any(.[]; .id == "prior-provenance-approved" and (.artifact | test("/pull/1364"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
+      and (.landed | any(.[]; .id == "interrupted-retain" and (.artifact | test("/pull/1363"))))
       and (.landed | any(.[]; .id == "forced-rejected") | not)
       and (.landed | any(.[]; .id == "reused-discard") | not)
       and (.landed | any(.[]; .id == "rejected-merge") | not)
