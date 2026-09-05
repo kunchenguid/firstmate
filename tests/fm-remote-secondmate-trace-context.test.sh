@@ -33,7 +33,32 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# Stop the serving child and its restart supervisor before removing their root.
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+cleanup() {
+  local worker_pid=''
+  FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] || worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+  if [ -n "$worker_pid" ]; then
+    fm_remote_job_stop_worker_tree "$worker_pid" || {
+      printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
+      return 1
+    }
+  fi
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
+  rm -rf -- "$TMP_ROOT"
+}
+# A cleanup failure must fail even a suite that does not enable errexit.
+cleanup_exit() {
+  local test_status=$?
+  cleanup || exit 1
+  exit "$test_status"
+}
+trap cleanup_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The remote host's tracked code root is this branch, as a real git repository:
 # fm-on and the remote entrypoint both require the dispatched command to be

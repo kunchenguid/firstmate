@@ -115,9 +115,9 @@ pass "default queue and execution bounds independently cover long polls"
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 # shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
-export FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+export FM_REMOTE_JOB_QUEUE_TIMEOUT=$((5 * FM_TEST_TIMEOUT_SCALE))
 # shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
-export FM_REMOTE_JOB_TIMEOUT=5
+export FM_REMOTE_JOB_TIMEOUT=$((5 * FM_TEST_TIMEOUT_SCALE))
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
@@ -190,7 +190,7 @@ HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_P
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$TMP_ROOT/worker.out" 2> "$TMP_ROOT/worker.err" &
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$STATE_ROOT/worker.ready" ] && break
   sleep 0.05
 done
@@ -235,7 +235,7 @@ fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-delay-job.sh 4 "$ACTIVE_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
@@ -243,7 +243,7 @@ done
   || fail "the active-job readiness fixture did not begin running"
 ACTIVE_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 touch -t 200001010000 "$STATE_ROOT/worker.ready"
-for _ in $(seq 1 40); do
+for _ in $(seq 1 "$((40 * FM_TEST_TIMEOUT_SCALE))"); do
   fm_remote_job_probe "$ACCOUNT_HOME" && break
   sleep 0.05
 done
@@ -320,7 +320,7 @@ QUEUED_SIDE_EFFECT="$TMP_ROOT/queued-side-effect"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
@@ -345,7 +345,7 @@ fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-delay-job.sh 1.8 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
@@ -376,7 +376,7 @@ fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 30 < /dev/null > /dev/null
 POLL_JOB_ID=$FM_REMOTE_JOB_ID
 POLL_JOB_DIR="$STATE_ROOT/jobs/$POLL_JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ "$(fm_remote_job_read_state "$POLL_JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
@@ -419,7 +419,7 @@ fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 6 < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
@@ -446,14 +446,14 @@ FM_REMOTE_JOB_TIMEOUT=5
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-shutdown-job.sh "$STARTED" "$SHUTDOWN_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$STARTED" ] && break
   sleep 0.05
 done
 assert_present "$STARTED" "the shutdown fixture did not begin executing"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   kill -0 "$WORKER_PID" 2>/dev/null || break
   sleep 0.05
 done
@@ -461,7 +461,7 @@ kill -0 "$WORKER_PID" 2>/dev/null && fail "the worker did not finish its TERM sh
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=1 \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err" &
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$STATE_ROOT/worker.ready" ] && break
   sleep 0.05
 done
@@ -479,14 +479,14 @@ FM_REMOTE_JOB_TIMEOUT=5
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-shutdown-job.sh "$CRASH_STARTED" "$CRASH_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$CRASH_STARTED" ] && break
   sleep 0.05
 done
 assert_present "$CRASH_STARTED" "the crash fixture did not begin executing"
 CRASHED_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -KILL "$CRASHED_WORKER_PID"
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$((200 * FM_TEST_TIMEOUT_SCALE))"); do
   RESTARTED_WORKER_PID=$(cat "$STATE_ROOT/worker.pid" 2>/dev/null || true)
   [ -n "$RESTARTED_WORKER_PID" ] && [ "$RESTARTED_WORKER_PID" != "$CRASHED_WORKER_PID" ] && break
   sleep 0.05
@@ -563,7 +563,7 @@ fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-shutdown-job.sh "$QUARANTINE_STARTED" "$QUARANTINE_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$QUARANTINE_STARTED" ] && break
   sleep 0.05
 done
@@ -573,7 +573,7 @@ printf 'invalid\n' > "$JOB_DIR/.claim/group"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
 wait "$WORKER_PID" 2>/dev/null || true
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$STATE_ROOT/worker.lock/quarantine" ] && break
   sleep 0.05
 done
@@ -633,7 +633,7 @@ HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
 RECOVERY_WORKER_PID=$!
-for _ in $(seq 1 300); do
+for _ in $(seq 1 "$((300 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$RECOVERY_STATE/worker.ready" ] && break
   sleep 0.05
 done
@@ -674,12 +674,12 @@ HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$R
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   > "$TMP_ROOT/repeat-signal.out" 2> "$TMP_ROOT/repeat-signal.err" &
 REPEAT_WORKER_PID=$!
-for _ in $(seq 1 300); do
+for _ in $(seq 1 "$((300 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$REPEAT_STATE/worker.ready" ] && break
   sleep 0.05
 done
 assert_present "$REPEAT_STATE/worker.ready" "the repeated-signal worker did not become ready"
-REPEAT_DEADLINE=$((SECONDS + 30))
+REPEAT_DEADLINE=$((SECONDS + 30 * FM_TEST_TIMEOUT_SCALE))
 REPEAT_BURST=0
 while [ "$REPEAT_BURST" -lt 10 ]; do
   kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
@@ -705,7 +705,7 @@ HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$R
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   >> "$TMP_ROOT/repeat-signal.out" 2>> "$TMP_ROOT/repeat-signal.err" &
 REPEAT_WORKER_PID=$!
-for _ in $(seq 1 600); do
+for _ in $(seq 1 "$((600 * FM_TEST_TIMEOUT_SCALE))"); do
   [ -f "$REPEAT_STATE/worker.ready" ] && break
   sleep 0.05
 done
@@ -746,7 +746,7 @@ HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$RESTART_ROOT" \
   "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
   > "$TMP_ROOT/restart-supervisor.out" 2> "$TMP_ROOT/restart-supervisor.err" &
 RESTART_SUPERVISOR_PID=$!
-for _ in $(seq 1 300); do
+for _ in $(seq 1 "$((300 * FM_TEST_TIMEOUT_SCALE))"); do
   kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null || break
   sleep 0.1
 done

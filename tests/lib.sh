@@ -40,6 +40,9 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=tests/timing-helpers.sh
+. "$ROOT/tests/timing-helpers.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -93,6 +96,79 @@ fm_test_cleanup() {
       [ -n "$d" ] && rm -rf "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
+}
+
+# Worker shutdown can leave a reparented descendant finishing a fixture write.
+# Observe filesystem users independently of that worker's process ancestry.
+fm_test_fixture_quiet() {
+  local root=$1 proc targets cwd cmd parent pid busy=0
+  if [ -d /proc/self/fd ]; then
+    if [ -z "${2:-}" ]; then
+      # Batch readlink for routine polling: one subprocess per PID made the
+      # cleanup wait itself costly on a loaded host with hundreds of processes.
+      if find /proc -maxdepth 3 \
+        \( -path '/proc/[0-9]*/cwd' -o -path '/proc/[0-9]*/fd/*' \) \
+        -type l -exec readlink {} + 2>/dev/null |
+        awk -v root="$root" '$0 == root || index($0, root "/") == 1 { busy=1 } END { exit !busy }'; then
+        return 1
+      fi
+      return 0
+    fi
+    for proc in /proc/[0-9]*; do
+      targets=$(readlink "$proc/cwd" "$proc"/fd/* 2>/dev/null) || true
+      case $'\n'"$targets"$'\n' in
+        *$'\n'"$root"$'\n'*|*$'\n'"$root"/*)
+          busy=1
+          if [ -n "${2:-}" ]; then
+            cwd=$(readlink "$proc/cwd" 2>/dev/null) || cwd=unavailable
+            cmd=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null) || cmd=unavailable
+            parent=$(awk '/^PPid:/ {print $2}' "$proc/status" 2>/dev/null) || parent=unavailable
+            printf 'fixture cleanup %s: pid=%s ppid=%s cwd=%s cmdline=%s\n' \
+              "$2" "${proc##*/}" "$parent" "$cwd" "$cmd" >&2
+            case "$2" in
+              TERM|KILL) kill "-$2" "${proc##*/}" 2>/dev/null || true ;;
+            esac
+          fi
+          ;;
+      esac
+    done
+    [ "$busy" = 0 ]
+  else
+    # macOS has no procfs; lsof reports PID, command, cwd and open file names.
+    command -v lsof >/dev/null 2>&1 || {
+      printf 'not ok - fixture quiescence requires procfs or lsof\n' >&2
+      return 1
+    }
+    targets=$(lsof -nP +D "$root" 2>&1) || true
+    if [ -n "${2:-}" ] && [ -n "$targets" ]; then
+      printf 'fixture cleanup %s:\n%s\n' "$2" "$targets" >&2
+      case "$2" in
+        TERM|KILL)
+          for pid in $(lsof -t +D "$root" 2>/dev/null); do
+            ps -p "$pid" -o pid=,ppid=,command= >&2 || true
+            kill "-$2" "$pid" 2>/dev/null || true
+          done
+          ;;
+      esac
+    fi
+    [ -z "$targets" ]
+  fi
+}
+
+fm_test_wait_fixture_quiet() {
+  local root=$1 owner
+  # Only the creating test may stop this fixture's remaining filesystem users.
+  IFS= read -r owner < "$root/.fm-test-fixture" || return 1
+  [ "$owner" = "$$" ] || return 1
+  fm_test_wait_until 100 fm_test_fixture_quiet "$root" && return 0
+  fm_test_fixture_quiet "$root" TERM || true
+  fm_test_wait_until 20 fm_test_fixture_quiet "$root" && return 0
+  fm_test_fixture_quiet "$root" KILL || true
+  if ! fm_test_wait_until 20 fm_test_fixture_quiet "$root"; then
+    printf 'not ok - fixture users did not exit; fixture retained: %s\n' "$root" >&2
+    fm_test_fixture_quiet "$root" diagnostics || true
+    return 1
   fi
 }
 

@@ -76,6 +76,7 @@ wait_live() {
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   local state=$1 pid=$2 limit=${3:-300} beat first now i=0
+  limit=$((limit * FM_TEST_TIMEOUT_SCALE))
   beat="$state/.last-watcher-beat"
   rm -f "$beat"
   first=""
@@ -106,6 +107,7 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
 # exits still fails the assertion when the budget runs out.
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
+  limit=$((limit * FM_TEST_TIMEOUT_SCALE))
   while [ "$i" -lt "$limit" ]; do
     value=$(cat "$file" 2>/dev/null || true)
     case "$value" in
@@ -777,7 +779,7 @@ churn_config() {  # <dir> [off]
 # unchanging fixture pane could reach the stale backbone.
 wait_for_absorbed() {  # <state> <pid> <needle>
   local state=$1 pid=$2 needle=$3 i=0
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ]; do
     grep -Fq "$needle" "$state/.watch-triage.log" 2>/dev/null && return 0
     kill -0 "$pid" 2>/dev/null || return 1
     sleep 0.1
@@ -844,7 +846,7 @@ test_turn_ended_churn_resets_prior_stale_classification() {
   wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
     || { reap "$pid"; fail "a churning turn-end with prior stale state was not absorbed: $(cat "$out")"; }
   i=0
-  while [ "$i" -lt 100 ] && [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$active_hash" ]; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ] && [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$active_hash" ]; do
     kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited before recording the active pane"; }
     sleep 0.1
     i=$((i + 1))
@@ -2382,7 +2384,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ] && kill -0 "$pid" 2>/dev/null; do
     [ -e "$state/.paused-$key" ] && [ ! -e "$state/.stale-since-$key" ] && break
     sleep 0.1
     i=$((i + 1))
@@ -2403,7 +2405,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ] && kill -0 "$pid" 2>/dev/null; do
     [ ! -e "$state/.paused-$key" ] && [ -s "$state/.stale-since-$key" ] && break
     sleep 0.1
     i=$((i + 1))
@@ -2469,7 +2471,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pid=$!
   wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
-  sleep 2
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "authoritative working recheck did not finish"; }
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
     || { reap "$pid"; fail "repeat authoritative working recheck reset the wedge timer"; }
   reap "$pid"
@@ -3523,7 +3525,7 @@ SH
     reap "$pid"; fail "watcher exited for a benign signal while testing log capping: $(cat "$out")"
   fi
   i=0
-  while [ "$i" -lt 30 ]; do
+  while [ "$i" -lt "$((30 * FM_TEST_TIMEOUT_SCALE))" ]; do
     lines=$(awk 'END { print NR + 0 }' "$state/.watch-triage.log")
     [ "$lines" -le 2000 ] && break
     sleep 0.1
@@ -3561,7 +3563,7 @@ seed_captured_procevent_result() {  # <dir>
   pe_case "$dir" register lavish delivery-src -- \
     /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
   pe_case "$dir" reconcile >/dev/null || return 1
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ]; do
     [ -s "$dir/state/.wake-queue" ] && break
     sleep 0.1
     i=$((i + 1))
@@ -3822,7 +3824,7 @@ test_heartbeat_no_change_absorbed() {
   # FM_HEARTBEAT, which need not be the first completed cycle, so wait for the
   # absorbed heartbeat itself rather than assuming one cycle produced it.
   i=0
-  while [ "$i" -lt 200 ]; do
+  while [ "$i" -lt "$((200 * FM_TEST_TIMEOUT_SCALE))" ]; do
     [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1

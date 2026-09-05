@@ -27,6 +27,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
 fm_git_identity fmtest fmtest@example.com
@@ -70,7 +73,12 @@ case "${1:-}" in
           fi
           printf 'zsh' > "$D/command"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        *'encode launch-brief'*)
+          cat "$D/becomes" > "$D/command"
+          if [ -f "$D/persist-clock" ]; then
+            printf '%s\n' "$(( $(cat "$D/persist-clock") + 3 ))" > "$D/persist-clock"
+          fi
+          ;;
         'Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
@@ -230,9 +238,10 @@ arm_answer() {
 
 run_restart() {  # <case-dir> <args...>
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  fm_run_timed "$(fm_test_timeout 60)" env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_TEST_TIMING_HELPERS="$ROOT/tests/timing-helpers.sh" \
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
-    FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
+    FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-$(fm_test_timeout 30)}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     "$RESTART" "$@" 2>&1
@@ -431,7 +440,9 @@ case "${rargs[1]:-}" in
     case "${FM_FAKE_SSH_MODE:-ok}" in
       slow-relaunch)
         : > "$FM_FAKE_DIR/remote-relaunch-start"
-        /bin/sleep 2
+        . "$FM_TEST_TIMING_HELPERS"
+        # The fixture barrier uses real sampling, outside the accelerated sleep stub.
+        PATH=/bin:/usr/bin fm_test_wait_until 300 test -e "$FM_FAKE_RELAUNCH_RELEASE" || exit 1
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
@@ -457,7 +468,7 @@ test_remote_mate_restarts_over_the_transport_hop() {
   printf 'codex big-model high\n' > "$dir/home/config/secondmate-harness"
 
   out=$(run_restart "$dir" fm-sm2); rc=$?
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELAUNCH_RELEASE
 
   expect_code 0 "$rc" "a remote mate should restart over its transport hop"$'\n'"$out"
   assert_contains "$out" "restarted: sm2 on remote-mac (codex)" \
@@ -543,12 +554,22 @@ SH
 
 # --- T10: one unanswered mate does not hold a confirmed mate behind it -------
 test_persist_waits_are_polled_together() {
-  local dir out rc exit_line nudge_line
+  local dir out rc exit_line nudge_line real_date
   dir=$(new_case concurrent-waits)
   add_local_mate "$dir" sm1
   add_local_mate "$dir" sm2
   arm_answer "$dir" sm2
 
+  # Hold the deadline clock while the requests are delivered. The confirmed
+  # mate's observed relaunch advances it by exactly the three-second bound.
+  # Serial polling hangs against this clock and fails the real-time runner bound.
+  real_date=$(command -v date)
+  date +%s > "$dir/fake/persist-clock"
+  cat > "$dir/fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\$*" = +%s ]; then cat "$dir/fake/persist-clock"; else exec "$real_date" "\$@"; fi
+SH
+  chmod +x "$dir/fakebin/date"
   out=$(FM_TEST_PERSIST_WAIT=3 run_restart "$dir" sm1 sm2); rc=$?
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
@@ -583,6 +604,7 @@ test_relaunches_do_not_block_persist_polling() {
   local dir out rc
   dir=$(new_case relaunch-polling)
   setup_remote_case "$dir" sm1 slow-relaunch
+  export FM_FAKE_RELAUNCH_RELEASE="$dir/fake/local-relaunch-during-remote"
   add_local_mate "$dir" sm2
   printf -- '- sm2 - local domain (home: %s; scope: things; projects: p; added 2026-09-03)\n' \
     "$dir/sm2-home" >> "$dir/home/data/secondmates.md"
@@ -590,7 +612,7 @@ test_relaunches_do_not_block_persist_polling() {
   arm_answer "$dir" sm2
 
   out=$(FM_TEST_PERSIST_WAIT=5 run_restart "$dir" sm1 sm2); rc=$?
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELAUNCH_RELEASE
 
   expect_code 0 "$rc" "both confirmed mates should restart independently"$'\n'"$out"
   assert_present "$dir/fake/local-relaunch-during-remote" \
@@ -607,6 +629,7 @@ test_unpublished_worker_result_is_accounted_for() {
   local dir out rc_file driver i result_dir
   dir=$(new_case worker-result)
   setup_remote_case "$dir" sm1 slow-relaunch
+  export FM_FAKE_RELAUNCH_RELEASE="$dir/fake/remote-relaunch.release"
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
   out="$dir/restart.out"
   rc_file="$dir/restart.rc"
@@ -615,7 +638,7 @@ test_unpublished_worker_result_is_accounted_for() {
   driver=$!
   result_dir=
   i=0
-  while [ "$i" -lt 200 ]; do
+  while [ "$i" -lt "$((200 * FM_TEST_TIMEOUT_SCALE))" ]; do
     result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
     [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
     /bin/sleep 0.01
@@ -623,8 +646,9 @@ test_unpublished_worker_result_is_accounted_for() {
   done
   [ -n "$result_dir" ] || { kill "$driver" 2>/dev/null || true; fail "restart result directory never appeared"; }
   rm -rf -- "$result_dir"
+  touch "$FM_FAKE_RELAUNCH_RELEASE"
   i=0
-  while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 400 ]; do
+  while kill -0 "$driver" 2>/dev/null && [ "$i" -lt "$((400 * FM_TEST_TIMEOUT_SCALE))" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -634,7 +658,7 @@ test_unpublished_worker_result_is_accounted_for() {
     fail "a terminated restart worker left the parent hung"
   fi
   wait "$driver" 2>/dev/null || true
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELAUNCH_RELEASE
 
   [ "$(cat "$rc_file")" = 3 ] || fail "an unpublished worker result did not fail as accounted"
   assert_contains "$(cat "$out")" "restart worker exited before publishing an outcome" \
@@ -649,6 +673,7 @@ test_result_published_while_reaping_is_honored() {
   local dir out rc
   dir=$(new_case result-race)
   setup_remote_case "$dir" sm1 slow-relaunch
+  export FM_FAKE_RELAUNCH_RELEASE="$dir/fake/remote-relaunch.release"
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
   cat > "$dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -659,6 +684,7 @@ if [ -e "$FM_FAKE_DIR/remote-relaunch-start" ] && [ ! -e "$FM_FAKE_DIR/result-ra
     if [ -n "$result_dir" ]; then
       printf 'restarted: sm1 on remote-mac (claude)\n' > "$result_dir/0.result"
       : > "$FM_FAKE_DIR/result-race-injected"
+      : > "$FM_FAKE_RELAUNCH_RELEASE"
       printf 'Z\n'
       exit 0
     fi
@@ -669,7 +695,7 @@ SH
   chmod +x "$dir/fakebin/ps"
 
   out=$(run_restart "$dir" sm1); rc=$?
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELAUNCH_RELEASE
 
   expect_code 0 "$rc" "a result published while the worker is reaped must remain authoritative"$'\n'"$out"
   assert_contains "$out" "restarted: sm1 on remote-mac (claude)" \

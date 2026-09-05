@@ -17,6 +17,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 
 PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
@@ -53,13 +55,24 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      fm_remote_job_stop_worker_tree "$pid" || {
+        printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
+        return 1
+      }
+    fi
   fi
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   fm_test_cleanup
 }
-trap pf_test_cleanup EXIT
-trap 'pf_test_cleanup; exit 130' INT
-trap 'pf_test_cleanup; exit 143' TERM
+pf_test_cleanup_exit() {
+  local test_status=$?
+  pf_test_cleanup || exit 1
+  exit "$test_status"
+}
+trap pf_test_cleanup_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }

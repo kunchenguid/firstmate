@@ -537,3 +537,41 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Behavior-test timing and fixture cleanup
+
+The runner contracts were verified on 2026-09-05 with GNU Bash 5.3.9 on Linux 6.18.33.2-microsoft-standard-WSL2.
+The runner's [header and help](../../bin/fm-test-run.sh) own the timeout-scale setting and its bounds.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-test-run.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - fixture cleanup finds cwd and open-fd users, escalates to KILL, and preserves other fixtures
+ok - runner validates and propagates bounded fixture timeout scaling
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=130318
+```
+
+The cleanup regression starts TERM-resistant processes with either a fixture working directory or an open fixture file, verifies their removal, and verifies that another fixture's process remains alive.
+This run exercised the procfs cleanup path; the macOS lsof path was not reverified on this host.
+
+The restart and public-followup regressions were also verified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-secondmate-restart.test.sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-public-followup.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - T10 pending persist answers are polled as one fleet
+FM_TEST_END 2026-09-05T06:37:27Z tests/fm-secondmate-restart.test.sh exit=0 duration_ms=25567 gate_skip=false
+FM_TEST_END 2026-09-05T06:40:40Z tests/fm-public-followup.test.sh exit=0 duration_ms=143763 gate_skip=false
+```
+
+The concurrent-persistence case advances its fixture epoch after the confirmed mate's modeled relaunch, while a separate real-time process-group deadline detects a stalled polling loop.
+The public-followup run completed its assertions and quiesced the fixture workers before directory removal.

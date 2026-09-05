@@ -23,13 +23,25 @@ cleanup() {
   local worker_pid=''
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
-    worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    fm_remote_job_stop_worker_tree "$worker_pid" || true
+  [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] || worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+  if [ -n "$worker_pid" ]; then
+    fm_remote_job_stop_worker_tree "$worker_pid" || {
+      printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
+      return 1
+    }
   fi
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   rm -rf -- "$TMP_ROOT"
 }
-trap cleanup EXIT
+# A cleanup failure must fail even a suite that does not enable errexit.
+cleanup_exit() {
+  local test_status=$?
+  cleanup || exit 1
+  exit "$test_status"
+}
+trap cleanup_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
@@ -65,13 +77,13 @@ remote_env() {
   FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
-  FM_REMOTE_REPLY_WAIT_SECONDS=10 \
+  FM_REMOTE_REPLY_WAIT_SECONDS=$(fm_test_timeout 10) \
   "$@"
 }
 
 wait_for() {
   local path=$1
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 "$(fm_test_timeout 100)"); do
     [ -e "$path" ] && return 0
     sleep 0.05
   done
@@ -404,7 +416,7 @@ rm -f -- "$PARENT/state/remote-replies/ios.caught-up"
 remote_env "$ADAPTER" source ios > "$TMP_ROOT/preempted-source.out" 2>&1 &
 PREEMPTED_SOURCE=$!
 running_poll=''
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$(fm_test_timeout 100)"); do
   for job in "$TMP_ROOT"/remote-jobs/jobs/job-*; do
     [ -d "$job" ] || continue
     if [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ]; then

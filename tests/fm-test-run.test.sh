@@ -92,6 +92,7 @@ init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -392,6 +393,7 @@ PY
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$timeout_repo/tests/timing-helpers.sh"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   [ "$1" -eq 900 ] || return 99
@@ -499,6 +501,7 @@ test_family_proofs_run_in_separate_concurrent_phases() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -970,6 +973,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
@@ -1047,6 +1051,7 @@ test_per_script_timeout_bounds_a_hang() {
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
@@ -1110,6 +1115,7 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1174,6 +1180,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -1369,6 +1376,82 @@ assert len(doc["scripts"])==3
   rm -rf "$tmp"
   pass "aggregate-json merges lane timing artifacts"
 }
+
+test_fixture_timeout_scale() {
+  local tmp repo value rc
+  tmp=$(fm_test_tmproot fm-test-timeout-scale)
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
+  cat > "$repo/tests/fm-scale-fixture.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "$(dirname "$0")/timing-helpers.sh"
+[ "$FM_TEST_TIMEOUT_SCALE" = 3 ]
+[ "$(fm_test_timeout 7)" = 21 ]
+attempts=0
+third_attempt() { attempts=$((attempts + 1)); [ "$attempts" -eq 3 ]; }
+fm_test_wait_until 1 third_attempt
+[ "$attempts" -eq 3 ]
+attempts=0
+never_ready() { attempts=$((attempts + 1)); return 1; }
+if fm_test_wait_until 1 never_ready; then exit 1; fi
+[ "$attempts" -eq 4 ]
+printf 'ok - inherited scale preserves early completion and a finite failed wait\n'
+SH
+  FM_TEST_TIMEOUT_SCALE=3 "$repo/bin/fm-test-run.sh" tests/fm-scale-fixture.test.sh > "$tmp/out" \
+    || fail "runner did not propagate the fixture timeout scale"
+  assert_contains "$(cat "$tmp/out")" 'FM_TEST_SUMMARY total=1 failed=0' \
+    "scaled fixture did not complete successfully"
+  for value in 0 -1 1.5 101 nope; do
+    rc=0
+    FM_TEST_TIMEOUT_SCALE="$value" "$repo/bin/fm-test-run.sh" --list --all > "$tmp/invalid" 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "invalid timeout scale $value was accepted"
+  done
+  pass "runner validates and propagates bounded fixture timeout scaling"
+}
+
+test_fixture_cleanup_stops_only_its_own_users() {
+  bash -s -- "$ROOT" <<'SH' || fail "fixture cleanup did not isolate and stop its remaining users"
+set -eu
+. "$1/tests/lib.sh"
+fixture=$(fm_test_tmproot fm-cleanup-users)
+neighbor=$(fm_test_tmproot fm-cleanup-neighbor)
+cleanup_probe() {
+  kill -KILL "${cwd_pid:-}" "${fd_pid:-}" "${outside_pid:-}" 2>/dev/null || true
+  wait 2>/dev/null || true
+  fm_test_cleanup
+}
+trap cleanup_probe EXIT
+bash -c 'cd "$1"; trap "" TERM; touch cwd.ready; while :; do sleep 1; done' _ "$fixture" &
+cwd_pid=$!
+bash -c 'exec 9> "$1/open"; trap "" TERM; touch "$1/fd.ready"; while :; do sleep 1; done' _ "$fixture" &
+fd_pid=$!
+bash -c 'exec 9> "$1/open"; touch "$1/ready"; exec sleep 300' _ "$neighbor" &
+outside_pid=$!
+fm_test_wait_until 100 test -e "$fixture/cwd.ready"
+fm_test_wait_until 100 test -e "$fixture/fd.ready"
+fm_test_wait_until 100 test -e "$neighbor/ready"
+if fm_test_fixture_quiet "$fixture"; then exit 1; fi
+fm_test_wait_fixture_quiet "$fixture"
+rc=0
+wait "$cwd_pid" 2>/dev/null || rc=$?
+[ "$rc" -eq 137 ]
+cwd_pid=
+rc=0
+wait "$fd_pid" 2>/dev/null || rc=$?
+[ "$rc" -eq 137 ]
+fd_pid=
+kill -0 "$outside_pid"
+fm_test_fixture_quiet "$fixture"
+SH
+  pass "fixture cleanup finds cwd and open-fd users, escalates to KILL, and preserves other fixtures"
+}
+
+test_fixture_cleanup_stops_only_its_own_users
+
+test_fixture_timeout_scale
 
 test_list_all_exact_suite_coverage
 test_family_selection

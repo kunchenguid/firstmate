@@ -76,6 +76,17 @@
 #                   sinks that block finalization are explicitly out of scope.
 #   -h, --help      print this header
 #
+# Environment:
+#   FM_TEST_TIMEOUT_SCALE  integer 1..100 (default 1) multiplying cooperating
+#                          fixtures' condition-wait and operation budgets on
+#                          loaded runners. Poll cadence and production defaults
+#                          stay fixed; timeout-specific cases retain their
+#                          explicit deadlines. Set only from measured runner
+#                          slowdown (e.g. FM_TEST_TIMEOUT_SCALE=3), not to hide
+#                          a failing condition. The automatic --changed script
+#                          limit scales too. Explicit whole-script and wall
+#                          budgets remain independent hard limits.
+#
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
@@ -123,6 +134,9 @@ RUN_STARTED_MS=$(now_ms)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# shellcheck source=tests/timing-helpers.sh
+. "$ROOT/tests/timing-helpers.sh"
+
 MODE=
 LIST_ONLY=0
 LIST_SCHEDULED=0
@@ -152,7 +166,7 @@ PER_SCRIPT_TIMEOUT_SECS=0
 # stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
 # failure instead of an unbounded suite, which is the shape that silently
 # outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+CHANGED_DEFAULT_TIMEOUT_SECS=$((900 * FM_TEST_TIMEOUT_SCALE))
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
