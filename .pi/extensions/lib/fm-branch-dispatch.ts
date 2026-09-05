@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -54,6 +54,16 @@ export interface UnreadWakeScope {
    * either mode.
    */
   corrupted: boolean;
+  /**
+   * The exact "key" field of every decision-owned signal or stale row this
+   * scan excluded. Signal rows are marked by bin/fm-watch.sh; stale rows are
+   * decision-owned when their task has an open needs-decision or its current
+   * declaration is captain-held. fm-primary-pi-watch.ts cross-references these
+   * keys against the current trigger so its entire coalesced batch is forced
+   * to main.
+   */
+  needsDecisionKeys: string[];
+  taskByWakeKey: Record<string, string>;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -63,6 +73,8 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   eligibleSeqs: [],
   eligibleTasks: [],
   corrupted: false,
+  needsDecisionKeys: [],
+  taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -71,6 +83,8 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   eligibleSeqs: [],
   eligibleTasks: [],
   corrupted: true,
+  needsDecisionKeys: [],
+  taskByWakeKey: {},
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -85,6 +99,12 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // main, which is woken for it on that check's own watcher cycle
 // (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
 // starves by being left behind.
+//
+// A signal row whose payload is "needs-decision:"-prefixed, or a stale row
+// for a task with an open needs-decision or a current captain-held declaration,
+// gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
+// and forced to main on its own triggering close (fm-primary-pi-watch.ts's
+// offerWakeToBranch). Heartbeat handling remains independent.
 //
 // That applies to a heartbeat review too, and it is the whole point: a
 // heartbeat used to be deferred to main merely because some unrelated check
@@ -102,6 +122,71 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // this repo's fm_wake_append could never have produced (an unknown kind, or a
 // line that fails the structural tab-field check) also still vetoes the whole
 // scan - that is queue corruption, not an everyday mixed queue.
+function statusLineVerb(line: string): string {
+  const beforeColon = line.split(":", 1)[0].split("[", 1)[0].trim();
+  const words = beforeColon.split(/\s+/);
+  if (!words.some((word) => word.startsWith("corr="))) return beforeColon;
+  return words.filter((word, index) => index === 0 || !/^corr=[0-9a-f]{16}$/i.test(word)).join(" ");
+}
+
+function decisionKey(line: string): string | null {
+  const colon = line.indexOf(":");
+  const beforeColon = colon < 0 ? line : line.slice(0, colon);
+  const beforeMatch = beforeColon.match(/\[key=([^\]]*)\]/);
+  const noteMatch = beforeMatch || colon < 0 ? null : line.slice(colon + 1).trimStart().match(/^\[key=([^\]]*)\]/);
+  const key = (beforeMatch ?? noteMatch)?.[1] ?? "default";
+  return /^[A-Za-z0-9._-]+$/.test(key) ? key : null;
+}
+
+function statusLineNote(line: string): string {
+  const colon = line.indexOf(":");
+  if (colon < 0) return line;
+  const note = line.slice(colon + 1).trimStart();
+  if (/\[key=[^\]]*\]/.test(line.slice(0, colon))) return note;
+  const match = note.match(/^\[key=([A-Za-z0-9._-]+)\]/);
+  return match ? note.slice(match[0].length).trimStart() : note;
+}
+
+interface StaleDecisionCacheEntry {
+  version: string;
+  config: string;
+  decisionOwned: boolean;
+}
+
+const staleDecisionCache = new Map<string, StaleDecisionCacheEntry>();
+
+function statusFileVersion(path: string): string | null {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) throw new Error("status path is a symbolic link");
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function hasOpenNeedsDecision(
+  lines: readonly string[],
+  resolveVerb: string,
+  heldVerb: string,
+  reservedPrefixes: readonly string[],
+): boolean {
+  const open = new Map<string, "needs-decision" | "blocked">();
+  for (const line of lines) {
+    const verb = statusLineVerb(line);
+    if (!["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) continue;
+    const key = decisionKey(line);
+    if (!key) continue;
+    const note = statusLineNote(line);
+    const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
+    if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
+    if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
+    else open.delete(key);
+  }
+  return [...open.values()].includes("needs-decision");
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
   let queue = "";
   try {
@@ -128,6 +213,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       if (project) {
         metadata.set(task, project);
         taskByKey.set(task, task);
+        taskByKey.set(`${task}.status`, task);
+        taskByKey.set(`${task}.turn-ended`, task);
         if (window) {
           metadata.set(window, project);
           taskByKey.set(window, task);
@@ -140,6 +227,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
+  const needsDecisionKeys: string[] = [];
+  const staleDecisionOwnership = new Map<string, boolean>();
+  const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
+  const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
+  const reservedPrefixes = (process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES || "pending-reply-")
+    .split(/\s+/)
+    .filter(Boolean);
+  const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
   for (const line of rows) {
     const fields = line.split("\t");
     if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
@@ -159,11 +254,59 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     let project = "";
     let task = "";
     if (kind === "signal") {
+      const payload = fields[4] ?? "";
+      if (/^needs-decision:/.test(payload)) {
+        // Main-owned exactly like a check-kind row above: a needs-decision
+        // status append surfaced through the actionable signal path is
+        // excluded from what the branch may claim without vetoing the scan
+        // (docs/pi-supervision-branch.md "Autonomy").
+        needsDecisionKeys.push(key);
+        continue;
+      }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+      if (task) {
+        const statusPath = `${state}/${task}.status`;
+        if (!staleDecisionOwnership.has(statusPath)) {
+          let version: string | null;
+          try {
+            version = statusFileVersion(statusPath);
+          } catch {
+            return UNSAFE_SCOPE;
+          }
+          let decisionOwned = false;
+          if (version) {
+            const cached = staleDecisionCache.get(statusPath);
+            if (cached?.version === version && cached.config === decisionConfig) {
+              decisionOwned = cached.decisionOwned;
+            } else {
+              let statusLines: string[];
+              try {
+                statusLines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
+                if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
+              } catch {
+                return UNSAFE_SCOPE;
+              }
+              decisionOwned = hasOpenNeedsDecision(statusLines, resolveVerb, heldVerb, reservedPrefixes) ||
+                statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
+              staleDecisionCache.set(statusPath, { version, config: decisionConfig, decisionOwned });
+              if (staleDecisionCache.size > 512) {
+                staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
+              }
+            }
+          } else {
+            staleDecisionCache.delete(statusPath);
+          }
+          staleDecisionOwnership.set(statusPath, decisionOwned);
+        }
+        if (staleDecisionOwnership.get(statusPath)) {
+          needsDecisionKeys.push(key);
+          continue;
+        }
+      }
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
@@ -189,6 +332,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     eligibleSeqs,
     eligibleTasks: [...eligibleTasks],
     corrupted: false,
+    needsDecisionKeys,
+    taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }
 

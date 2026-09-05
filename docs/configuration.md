@@ -203,7 +203,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true`, pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI, and pins `commands.test` to `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` so the gate's test baseline runs through the repository's own runner instead of a hand-chained walk of `bash tests/*.test.sh`.
+The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true`, pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes, and pins `commands.test` to `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` so the gate's test baseline runs through the repository's own runner instead of a hand-chained walk of `bash tests/*.test.sh`.
 Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 `commands.test` stays changed-file-scoped and must never become a complete `tests/*.test.sh` walk: `--changed` selects only the families the branch's changed files map to, runs concurrency-admitted scripts with bounded concurrency, keeps every unproven stateful script serial, and applies its own generous per-script bound.
