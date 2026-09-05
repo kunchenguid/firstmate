@@ -19,7 +19,13 @@
 # Anything else is reported as "skipped: not a clone root" naming the repository
 # that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
-# worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# worktree, and a [gone] branch is deleted only when its tip has positive landed
+# proof: it is an ancestor of origin/<default>, or GitHub reports a merged pull
+# request whose head is that same tip commit. Neither proof means the remote
+# branch may have disappeared for a reason other than a merge (a PR closed
+# unmerged, a manual delete, a superseded branch), so it is left alone. gh is
+# required for the merged-PR-head check, so nothing is pruned at all when gh is
+# unavailable. Set FM_FLEET_PRUNE=0 to disable pruning entirely.
 # After a successful fast-forward (or recovery), fail-softly refreshes that
 # project's GitNexus main-index (bin/fm-gitnexus-reindex.sh owns the mirror,
 # flag, and never-mutate-the-clone contract); an index failure never fails a sync.
@@ -221,20 +227,37 @@ fetch_with_packed_refs_lock_guard() {
   return "$rc"
 }
 
-prune_gone_branches() {
-  # Delete local branches whose upstream tracking branch is gone - the remote
-  # branch was deleted, which in this fleet means its PR merged - as long as
-  # nothing still needs them. Never the checked-out branch, and never a branch
-  # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
-  # "no worktree" already proves the work landed: teardown removes a branch's
-  # worktree only after confirming the work reached the remote. We deliberately
-  # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
-  # this fleet are squash-merged, so a merged branch is never an ancestor and
-  # such a check would prune nothing. The no-worktree guard is the real safety
-  # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
-  [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
+# True when GitHub reports a merged pull request whose head branch was named
+# $1 and whose head commit was $2, in $PROJ's origin repo. GITHUB_TOKEN and
+# GH_TOKEN are unset so gh always authenticates from its own stored login
+# rather than a possibly scoped-down environment token, matching
+# bin/fm-pr-merge.sh's read. gh retains a merged pull request's headRefName and
+# headRefOid after the branch itself is deleted, so this still resolves once
+# the remote branch is gone.
+branch_head_of_merged_pr() {
+  local branch=$1 tip=$2 heads
+  heads=$(cd "$PROJ" && env -u GITHUB_TOKEN -u GH_TOKEN gh pr list \
+    --head "$branch" --state merged --limit 100 \
+    --json headRefOid --jq '.[].headRefOid' 2>/dev/null) || return 1
+  printf '%s\n' "$heads" | grep -Fxq -- "$tip"
+}
 
-  local worktree_branches current refline branch track
+prune_gone_branches() {
+  # Delete a local branch whose upstream tracking branch is gone only when its
+  # tip has positive landed proof: it is an ancestor of origin/<default>, or
+  # GitHub reports a merged pull request whose head is that same tip commit.
+  # A remote branch can disappear for a reason other than a merge - a PR closed
+  # unmerged and its branch deleted, a manual delete, a superseded branch - so
+  # "[gone] and no worktree" alone is not proof the work landed. Never the
+  # checked-out branch, and never a branch that still has a worktree (a live or
+  # not-yet-torn-down task). A branch with neither proof is left alone and
+  # reported once. gh is required for the merged-PR-head check - an ancestor
+  # check alone cannot rule out "closed unmerged" - so nothing is pruned at all
+  # when gh is unavailable. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
+  [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+
+  local worktree_branches current refline branch track tip
   worktree_branches=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null \
     | sed -n 's#^branch refs/heads/##p')
   current=$(git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -246,6 +269,12 @@ prune_gone_branches() {
     [ -n "$branch" ] || continue
     [ "$branch" != "$current" ] || continue
     if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
+      continue
+    fi
+    tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null) || continue
+    if ! git -C "$PROJ" merge-base --is-ancestor "$branch" "$BASE" 2>/dev/null \
+        && ! branch_head_of_merged_pr "$branch" "$tip"; then
+      echo "$label: kept: $branch (gone upstream, no landed proof)"
       continue
     fi
     if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
@@ -347,8 +376,6 @@ sync_project() {
     return 0
   fi
 
-  prune_gone_branches || true
-
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -358,6 +385,8 @@ sync_project() {
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+
+  prune_gone_branches || true
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no

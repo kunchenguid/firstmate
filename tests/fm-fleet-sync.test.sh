@@ -234,6 +234,78 @@ run_sync_guarded() {
     "$ROOT/bin/fm-fleet-sync.sh" "$@" >"$outf" 2>"$errf"
 }
 
+# --- prune_gone_branches fixtures --------------------------------------------
+#
+# create_gone_branch <clone> <branch> [<base>]: create <branch> in <clone> at
+# <base> (default HEAD), push it to origin as its own upstream (so the local
+# branch tracks it), then delete the remote branch. The next `fetch --prune`
+# (fm-fleet-sync's own fetch step) reads the local branch's tracking as [gone].
+create_gone_branch() {
+  local clone=$1 branch=$2 base=${3:-HEAD}
+  git -C "$clone" branch "$branch" "$base"
+  git -C "$clone" push -q -u origin "$branch":"$branch"
+  git -C "$clone" push -q origin --delete "$branch"
+}
+
+# land_branch_on_default <clone> <branch> <default>: fast-forward origin/<default>
+# directly onto <branch>'s tip, so that commit becomes a genuine ancestor of
+# <default> - simulating a real (non-squash) merge that keeps the branch's
+# original commit reachable, as opposed to a squash merge's new commit.
+land_branch_on_default() {
+  local clone=$1 branch=$2 default=$3
+  git -C "$clone" push -q origin "$branch":"$default"
+}
+
+# gh_stub_for_pr_list <fakebin>: gh mock answering the one call
+# branch_head_of_merged_pr makes - `pr list --head <branch> --state merged
+# --limit 100 --json headRefOid --jq '.[].headRefOid'` - from a per-branch
+# answer file under $FM_TEST_GH_ANSWERS (one SHA per line; absent or empty means
+# no matching merged pull request was found). Exits loudly if GITHUB_TOKEN or
+# GH_TOKEN is visible to it, so a regression that stops unsetting them before
+# the gh call is caught rather than silently passing.
+gh_stub_for_pr_list() {
+  local fakebin=$1
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
+  echo "gh stub: GITHUB_TOKEN or GH_TOKEN was visible to gh" >&2
+  exit 9
+fi
+head_branch=
+prev=
+for a in "$@"; do
+  [ "$prev" = --head ] && head_branch=$a
+  prev=$a
+done
+answer="$FM_TEST_GH_ANSWERS/$head_branch"
+[ -n "$head_branch" ] && [ -f "$answer" ] && cat "$answer"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+}
+
+# path_without_gh <dir>: a PATH covering every real tool already on PATH,
+# mirrored into <dir> by symlink, except gh - so "gh is unavailable" is genuine
+# even when the host actually has gh installed somewhere on PATH.
+path_without_gh() {
+  local dir=$1 bindir entry name
+  mkdir -p "$dir"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=${entry##*/}
+      [ "$name" = gh ] && continue
+      [ -e "$dir/$name" ] || ln -s "$entry" "$dir/$name" 2>/dev/null
+    done
+  done <<EOF
+$(printf '%s\n' "$PATH" | tr ':' '\n')
+EOF
+  ! PATH="$dir" command -v gh >/dev/null 2>&1 \
+    || fail "the gh-free search path still resolved gh"
+  printf '%s\n' "$dir"
+}
+
 # --- tests ------------------------------------------------------------------
 
 test_detached_clean_ancestor_recovers() {
@@ -694,6 +766,125 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+# --- prune_gone_branches tests -----------------------------------------------
+#
+# A [gone] branch with no worktree is deleted only when its tip has positive
+# landed proof: an ancestor of origin/<default>, or GitHub reporting a merged
+# pull request whose head is that same tip commit. Neither proof means the
+# remote branch may have disappeared for a reason other than a merge, so it is
+# left alone and reported once as "kept: ... no landed proof". gh must be on
+# PATH at all for any pruning to happen at all.
+
+test_gone_branch_proven_by_merged_pr_is_pruned() {
+  local home clone fakebin out tip
+  home=$(new_home)
+  clone=$(build_pair "$home" squashed-feature)
+  git -C "$clone" checkout -q -b squashed-feature
+  commit_file "$clone" squash.txt v1 "squash feature work"
+  tip=$(git -C "$clone" rev-parse squashed-feature)
+  git -C "$clone" push -q -u origin squashed-feature:squashed-feature
+  git -C "$clone" checkout -q main
+  # origin/main advances independently (the "squashed" commit has a different
+  # SHA than squashed-feature's tip), so squashed-feature is never an ancestor.
+  advance_origin "$home" squashed-feature C1
+  git -C "$clone" push -q origin --delete squashed-feature
+
+  fakebin="$home/fakebin-merged"; mkdir -p "$fakebin"
+  gh_stub_for_pr_list "$fakebin"
+  mkdir -p "$home/gh-answers"
+  printf '%s\n' "$tip" > "$home/gh-answers/squashed-feature"
+
+  # GITHUB_TOKEN/GH_TOKEN are set in the parent environment on purpose: the gh
+  # stub fails loudly if either is still visible when gh runs, so a successful
+  # prune here also proves the code unsets them before calling gh.
+  out=$(PATH="$fakebin:$PATH" GITHUB_TOKEN=leaked-token GH_TOKEN=leaked-token \
+    FM_TEST_GH_ANSWERS="$home/gh-answers" run_sync "$home" "$clone")
+
+  assert_contains "$out" "squashed-feature: pruned squashed-feature" \
+    "a [gone] branch proven by a merged PR's head commit is pruned"
+  ! git -C "$clone" rev-parse --verify --quiet squashed-feature >/dev/null \
+    || fail "squashed-feature should have been deleted"
+  pass "a [gone] branch whose tip is a merged pull request's head is pruned"
+}
+
+test_gone_branch_proven_by_ancestor_is_pruned() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" landed-ff)
+  git -C "$clone" checkout -q -b landed-ff
+  commit_file "$clone" landed.txt v1 "landed feature work"
+  git -C "$clone" push -q -u origin landed-ff:landed-ff
+  # Fast-forward origin/main directly onto landed-ff's tip, so that commit is a
+  # genuine ancestor of origin/main (a real, non-squash merge).
+  land_branch_on_default "$clone" landed-ff main
+  git -C "$clone" checkout -q main
+  git -C "$clone" push -q origin --delete landed-ff
+
+  fakebin="$home/fakebin-ancestor"; mkdir -p "$fakebin"
+  gh_stub_for_pr_list "$fakebin"
+  mkdir -p "$home/gh-answers"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_ANSWERS="$home/gh-answers" \
+    run_sync "$home" "$clone")
+
+  assert_contains "$out" "landed-ff: pruned landed-ff" \
+    "a [gone] branch proven by ancestry is pruned"
+  ! git -C "$clone" rev-parse --verify --quiet landed-ff >/dev/null \
+    || fail "landed-ff should have been deleted"
+  pass "a [gone] branch that is an ancestor of origin/<default> is pruned"
+}
+
+test_gone_branch_with_no_proof_is_kept() {
+  local home clone fakebin out
+  home=$(new_home)
+  clone=$(build_pair "$home" abandoned-branch)
+  git -C "$clone" checkout -q -b abandoned-branch
+  commit_file "$clone" abandoned.txt v1 "work that never landed"
+  git -C "$clone" push -q -u origin abandoned-branch:abandoned-branch
+  git -C "$clone" checkout -q main
+  git -C "$clone" push -q origin --delete abandoned-branch
+
+  fakebin="$home/fakebin-noproof"; mkdir -p "$fakebin"
+  gh_stub_for_pr_list "$fakebin"
+  mkdir -p "$home/gh-answers"
+  # No answer file for abandoned-branch: gh reports no matching merged PR.
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_GH_ANSWERS="$home/gh-answers" \
+    run_sync "$home" "$clone")
+
+  assert_contains "$out" "abandoned-branch: kept: abandoned-branch (gone upstream, no landed proof)" \
+    "a [gone] branch with neither proof is reported kept"
+  assert_not_contains "$out" "pruned abandoned-branch" \
+    "a [gone] branch with neither proof must never be pruned"
+  git -C "$clone" rev-parse --verify --quiet abandoned-branch >/dev/null \
+    || fail "abandoned-branch should not have been deleted"
+  pass "a [gone] branch with neither ancestor nor merged-PR proof is kept"
+}
+
+test_gh_absent_keeps_every_gone_branch() {
+  local home clone nogh out
+  home=$(new_home)
+  clone=$(build_pair "$home" nogh-landed)
+  git -C "$clone" checkout -q -b nogh-landed
+  commit_file "$clone" landed.txt v1 "would-be landed feature work"
+  git -C "$clone" push -q -u origin nogh-landed:nogh-landed
+  land_branch_on_default "$clone" nogh-landed main
+  git -C "$clone" checkout -q main
+  git -C "$clone" push -q origin --delete nogh-landed
+
+  nogh=$(path_without_gh "$home/no-gh-path")
+
+  out=$(PATH="$nogh" run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "pruned nogh-landed" \
+    "no pruning may happen at all when gh is unavailable"
+  assert_not_contains "$out" "kept: nogh-landed" \
+    "an unprovable-without-gh branch is silently left alone, not reported"
+  git -C "$clone" rev-parse --verify --quiet nogh-landed >/dev/null \
+    || fail "nogh-landed should not have been deleted while gh is unavailable"
+  pass "gh unavailable keeps every [gone] branch untouched, even an ancestor-provable one"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -719,3 +910,7 @@ test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
+test_gone_branch_proven_by_merged_pr_is_pruned
+test_gone_branch_proven_by_ancestor_is_pruned
+test_gone_branch_with_no_proof_is_kept
+test_gh_absent_keeps_every_gone_branch
