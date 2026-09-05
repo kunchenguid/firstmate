@@ -338,10 +338,9 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 }
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
-# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The markdown backend
-# keeps its explicit <data>/backlog.md file and presence requirement; every
-# other configured backend is addressed by the root's own tasks-axi
-# configuration, so passing the markdown-era path would write the wrong store.
+# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The home boundary is
+# authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
+# how the selected adapter is addressed (ADDRESSING above).
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   local data authorized_data=$1 verb=$2 id=$3 out command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
