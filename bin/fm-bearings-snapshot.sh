@@ -534,7 +534,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
-                            artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
+                            artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)

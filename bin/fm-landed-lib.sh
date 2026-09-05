@@ -21,17 +21,28 @@
 # whose artifact matches its merged, reported, or done completion verb is a
 # delivery whoever approved it. A captain question remains kind captain when it
 # closes, so it is never rendered as shipped work even when its text names an
-# artifact.
+# artifact. Older kindless local-only completions cannot be distinguished from
+# answered calls and stay out; merged PRs and reported scouts remain distinct.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
-  def landed_delivery:
-    if .kind == "captain" then false
-    elif (.pr_url // null) != null then .completion.verb == "merged"
-    elif (.report_path // null) != null then .completion.verb == "reported"
-    elif (.local_note // null) != null then .completion.verb == "done"
-    else false
+  def landed_artifact:
+    if .completion.verb == "merged" then (.pr_url // null)
+    elif .completion.verb == "reported" then (.report_path // null)
+    elif .completion.verb == "done" then (.local_note // null)
+    else null
     end;
+  def landed_delivery:
+    (.kind != "captain"
+      and .completion.verb == "merged"
+      and (.pr_url // null) != null)
+    or (.kind != "captain"
+      and .completion.verb == "reported"
+      and (.report_path // null) != null)
+    or ((.kind // null) != null
+      and .kind != "captain"
+      and .completion.verb == "done"
+      and (.local_note // null) != null);
   def landed_record:
     .state == "done" and .structured
     and (landed_delivery

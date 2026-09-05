@@ -763,10 +763,10 @@ command_hold() {
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     if [ -n "$body" ]; then
-      tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
+      tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"
     else
-      tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
+      tasks_axi add "$id" "$title" --kind captain --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
   fi
