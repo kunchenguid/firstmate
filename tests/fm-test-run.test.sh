@@ -1480,6 +1480,7 @@ test_herdr_leak_check() {
   mkdir -p "$repo/bin" "$repo/tests" "$tmp/fakebin" "$tmp/proc" \
     "$tmp/pre-existing-cwd" "$tmp/new-cwd" "$tmp/reused-cwd"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/timing-helpers.sh" "$repo/tests/timing-helpers.sh"
   cat > "$repo/tests/fm-fixture.test.sh" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_LEAK_RESTART_PID:-}" ]; then
