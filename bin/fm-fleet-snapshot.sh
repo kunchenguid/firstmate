@@ -1086,8 +1086,8 @@ case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECON
 # pollute arithmetic input before failing. Select the platform syntax once.
 if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
   SNAPSHOT_STAT_STYLE=bsd
-  file_mtime_epoch() { stat -f '%m' "$1" 2>/dev/null || true; }
-  file_mode_octal() { stat -f '%Lp' "$1" 2>/dev/null || true; }
+  file_mtime_epoch() { /usr/bin/stat -f '%m' "$1" 2>/dev/null || true; }
+  file_mode_octal() { /usr/bin/stat -f '%Lp' "$1" 2>/dev/null || true; }
 else
   SNAPSHOT_STAT_STYLE=gnu
   file_mtime_epoch() { stat -c '%Y' "$1" 2>/dev/null || true; }
@@ -1440,7 +1440,7 @@ bounded_parent_activities_json() {  # <status-file>
     stat_style=$6
     . "$classify"
     if [ "$stat_style" = bsd ]; then
-      size=$(stat -f "%z" "$f" 2>/dev/null) || exit 3
+      size=$(/usr/bin/stat -f "%z" "$f" 2>/dev/null) || exit 3
     else
       size=$(stat -c "%s" "$f" 2>/dev/null) || exit 3
     fi

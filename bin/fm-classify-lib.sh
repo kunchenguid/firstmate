@@ -644,9 +644,9 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    ident=$(LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
+    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   else
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
@@ -663,7 +663,7 @@ _fm_status_file_size() {  # <status-file>
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%z' "$f" 2>/dev/null
+    LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%s' "$f" 2>/dev/null
   fi
@@ -1063,7 +1063,7 @@ status_presentation_marker_parse() {
 
 _status_observed_path_state() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C stat -f '%HT:%p' "$1" 2>/dev/null
+    LC_ALL=C /usr/bin/stat -f '%HT:%p' "$1" 2>/dev/null
   else
     LC_ALL=C stat -c '%F:%f' "$1" 2>/dev/null
   fi

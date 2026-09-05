@@ -23,7 +23,7 @@ fm_startup_memory_budget_fail() {
 
 fm_startup_memory_budget_link_count() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
+    /usr/bin/stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
   fi

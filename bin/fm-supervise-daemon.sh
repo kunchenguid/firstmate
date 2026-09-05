@@ -236,7 +236,7 @@ _state_root() { printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}"; }
 
 # --- portable stat (same trap as fm-watch.sh: no `stat -f || stat -c`) -------
 if [ "$(uname)" = Darwin ]; then
-  _stat_file_mtime() { stat -f %m "$1" 2>/dev/null; }
+  _stat_file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
 else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi

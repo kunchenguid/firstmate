@@ -661,7 +661,7 @@ fm_backend_herdr_presentation_lock_namespace() {
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%Lp' "$1" 2>/dev/null
+    /usr/bin/stat -f '%Lp' "$1" 2>/dev/null
   else
     stat -c '%a' "$1" 2>/dev/null
   fi
@@ -669,7 +669,7 @@ fm_backend_herdr_presentation_lock_namespace_mode() {
 
 fm_backend_herdr_presentation_lock_namespace_uid() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%u' "$1" 2>/dev/null
+    /usr/bin/stat -f '%u' "$1" 2>/dev/null
   else
     stat -c '%u' "$1" 2>/dev/null
   fi

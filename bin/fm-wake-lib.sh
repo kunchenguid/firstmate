@@ -83,7 +83,7 @@ fm_pid_identity() {
 
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
+    /usr/bin/stat -f %m "$1" 2>/dev/null
   else
     stat -c %Y "$1" 2>/dev/null
   fi
@@ -1660,7 +1660,7 @@ fm_wake_signal_sig() {  # <file> -> reported-state signature
       status_observed_signature "$1"
       ;;
     *)
-      if [ "$_FM_UNAME" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+      if [ "$_FM_UNAME" = Darwin ]; then /usr/bin/stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
       ;;
   esac
 }
