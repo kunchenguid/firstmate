@@ -407,10 +407,10 @@ normalize_payload() { # <source> <destination>
 }
 
 # Adapter-authored escalations and notes marked new use fm-classify-lib.sh's
-# retry and emission-time contracts; unmarked ones use exact-byte append
-# suppression. Mirrored payload lines keep their source time (or its absence)
-# and use their pre-rewrite source identity in stage_mirror_lines instead,
-# because delivery state can change between replays.
+# retry and emission-time contracts. Unmarked appends compare exact bytes, so
+# mirrored payload lines keep their source time (or its absence); those lines
+# use their pre-rewrite source identity in stage_mirror_lines instead, because
+# delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line> [new]
   local line=$2

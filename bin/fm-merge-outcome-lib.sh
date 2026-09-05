@@ -9,8 +9,7 @@
 #
 # The destination is the home's role, never the caller's choice:
 #   - a secondmate home reports upward on its parent channel, resolved and
-#     appended through bin/fm-parent-channel-lib.sh in the same
-#     "<state> [key=<slug>]: <note>" shape the charter contract defines;
+#     appended through bin/fm-parent-channel-lib.sh under its channel contract;
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
