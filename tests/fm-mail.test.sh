@@ -645,6 +645,32 @@ PYEOF
   pass "fm-mail: a cap of one never suppresses new mail while retries exist"
 }
 
+test_poll_restores_retry_when_recovered_wake_cannot_append() {
+  local fakebin homedir_bin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  mkdir -p "$HOME_DIR/bin"
+  [ -e "$HOME_DIR/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '77\t\tfrom@x\tRe: hi\tretry\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n77\n' > "$HOME_DIR/state/.mail-seen"
+  rm -f "$HOME_DIR/state/.mail-retry"
+  printf '77\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.wake-queue.seq"
+  chmod 0000 "$HOME_DIR/state/.wake-queue.seq"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when the recovered wake cannot be appended"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-retry" 2>/dev/null)" "77" "the retry record is restored so the recovered metadata can be re-fetched"
+  chmod 0600 "$HOME_DIR/state/.wake-queue.seq"
+  pass "fm-mail: a recovered wake that cannot append restores the retry instead of stranding the metadata"
+}
+
 test_poll_fails_closed_when_poll_list_fails() {
   local fakebin out rc=0
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -702,6 +728,7 @@ SH
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "poll must fail when the retry record cannot be cleared"
   assert_not_contains "$out" "woke for 77" "no recovery wake is emitted before the retry is cleared"
+  chmod 0600 "$HOME_DIR/state/.mail-retry"
   pass "fm-mail: a failed retry clear fails the poll instead of duplicating the recovery wake"
 }
 
@@ -1438,6 +1465,7 @@ test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
 test_poll_fails_closed_when_retry_clear_fails
 test_poll_fails_closed_when_poll_list_fails
+test_poll_restores_retry_when_recovered_wake_cannot_append
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
