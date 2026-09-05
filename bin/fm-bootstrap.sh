@@ -343,7 +343,10 @@ fleet_sync() {
 }
 
 secondmate_sync() {
-  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  # fm-wake-lib.sh is a canonical lint root in its own right; this in-function
+  # load stays an analysis boundary (source-graph budget:
+  # .agents/skills/firstmate-coding-guidelines/SKILL.md).
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Placement-specific secondmate sync: EVERY home, local or remote, follows the
   # primary checkout's current default-branch commit. The local path is purely
@@ -1218,7 +1221,8 @@ backlog_record_reconcile() {
   fi
   # Keep the wake/lock library's source-time state-directory creation inside
   # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
-  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  # Analysis boundary, as in secondmate_sync above.
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
 
   # Finish any close an interrupted cleanup recorded but never landed.

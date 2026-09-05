@@ -2922,7 +2922,10 @@ fm_backend_herdr_kill() {  # <target>
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
   local lock_path attempt=0 lock_held=0
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
+    # fm-wake-lib.sh is a canonical lint root in its own right; this lazy fallback
+    # stays an analysis boundary (source-graph budget:
+    # .agents/skills/firstmate-coding-guidelines/SKILL.md).
+    # shellcheck source=/dev/null
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
   fi
   if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then

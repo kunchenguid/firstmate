@@ -18,17 +18,23 @@ mkdir -p "$STATE"
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.
 # Load the classifier only when a status presentation helper is actually used.
+# The classifier is a canonical lint root of its own, so this lazy load stays an
+# analysis boundary: ShellCheck inlines every followed source at every source
+# site, and following it here would copy the classifier graph into every
+# consumer of this library (source-graph budget:
+# .agents/skills/firstmate-coding-guidelines/SKILL.md).
 _fm_wake_require_classify() {
   command -v status_observed_signature >/dev/null 2>&1 && return 0
-  # shellcheck source=bin/fm-classify-lib.sh
+  # shellcheck source=/dev/null
   . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
 }
 
 # Load the bounded-execution owner only for callers that use the presentation
 # lock deadline. Most wake-library consumers need no timeout machinery.
+# Same analysis boundary as the classifier load above.
 _fm_wake_require_timeout() {
   command -v fm_run_timed >/dev/null 2>&1 && return 0
-  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck source=/dev/null
   . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
 }
 

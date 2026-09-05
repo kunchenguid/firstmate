@@ -124,7 +124,11 @@ mkdir -p "$STATE"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# This library is a canonical lint root in its own right and reaches the wake,
+# classifier, tmux, and backend libraries; keep it an analysis boundary here for
+# the same reason as the owners above (source-graph budget:
+# .agents/skills/firstmate-coding-guidelines/SKILL.md).
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"

@@ -222,9 +222,12 @@ main() {
   # The mutating begin/check paths need locks and the keyed status fold.
   # `guard` returned above without sourcing fm-wake-lib.sh, whose initialization
   # creates the state directory, so the advertised read-only guard is literal.
-  # shellcheck source=bin/fm-wake-lib.sh
+  # Both libraries are canonical lint roots in their own right; these in-function
+  # loads stay analysis boundaries (source-graph budget:
+  # .agents/skills/firstmate-coding-guidelines/SKILL.md).
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # shellcheck source=bin/fm-classify-lib.sh
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-classify-lib.sh"
 
   mkdir -p "$STATE" || return 1

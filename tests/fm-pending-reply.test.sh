@@ -609,6 +609,7 @@ test_delivery_confirmation_fallback_reconciles() {
     export FM_PENDING_REPLY_NOW=5750
     corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
     rec=$(fm_pending_reply_path "$state" "$corr")
+    # shellcheck disable=SC2329 # Invoked by the library's locked body under test.
     fm_pending_reply_mark_delivered() { return 1; }
     if fm_pending_reply_confirm_delivery "$state" "$corr"; then
       fail "primary delivery commit failure should be reported"
@@ -705,6 +706,7 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     calls="$home/mark-delivered.calls"
     entered="$home/mark-delivered.entered"
     release="$home/mark-delivered.release"
+    # shellcheck disable=SC2329 # Invoked by the library's locked body under test.
     fm_pending_reply_mark_delivered() {
       local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
       printf '%s\n' "${BASHPID:-$$}" >> "$calls"

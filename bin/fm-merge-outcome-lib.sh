@@ -72,8 +72,12 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
     destination=''
   fi
 
+  # shellcheck disable=SC2034 # Read by bin/fm-wake-lib.sh, loaded below behind an analysis boundary.
   STATE=$state
-  # shellcheck source=bin/fm-wake-lib.sh
+  # fm-wake-lib.sh is a canonical lint root in its own right; this per-call
+  # re-source stays an analysis boundary so ShellCheck does not inline that graph
+  # into every consumer (source-graph budget: .agents/skills/firstmate-coding-guidelines/SKILL.md).
+  # shellcheck source=/dev/null
   . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-wake-lib.sh"
   lock="$state/$id.pr-poll-merge-notified.lock"
   fm_lock_acquire_wait "$lock" || return 1

@@ -97,6 +97,48 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
+# Lazy library loads. bin/fm-wake-lib.sh is sourced inside the per-correlation
+# lock wrapper below, after it declares the wake library's globals local; bash's
+# dynamic scoping makes this one loader bind them exactly as an inline source in
+# the wrapper would, and the caller's positional parameters are passed through so
+# the sourced file sees the same "$@". The parent-channel owner is loaded lazily
+# the same way. Both libraries are canonical lint roots, so these loads are
+# analysis boundaries: ShellCheck inlines every followed source at every source
+# site, and one inlined copy per wrapper is what pushed every consumer of this
+# library past the lint memory cap (source-graph budget:
+# .agents/skills/firstmate-coding-guidelines/SKILL.md).
+_fm_pending_reply_load_wake_lib() {
+  # shellcheck source=/dev/null
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+}
+_fm_pending_reply_load_parent_channel_lib() {
+  # shellcheck source=/dev/null
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+}
+
+# Run one _locked body under the correlation's lock, serialized per correlation
+# so a resolution and an escalation cannot interleave; the body receives the
+# wrapper's own arguments. bin/fm-wake-lib.sh owns the lock primitives but
+# assigns its own globals when sourced, so they are declared local here: that
+# contains them to this call instead of leaking into every script that sources
+# this library, without the subshell that would make every later use of them read
+# as a lost write. The lock is released explicitly rather than from an EXIT trap,
+# because a trap in a plain function would clobber the caller's own.
+_fm_pending_reply_with_corr_lock() {  # <locked-function> <state-dir> <corr_id> [args...]
+  local _fm_pending_reply_locked_fn=$1
+  shift
+  local state=$1 corr=$2 lock rc=0
+  # shellcheck disable=SC2034 # Assigned by bin/fm-wake-lib.sh, loaded below behind an analysis boundary.
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  _fm_pending_reply_load_wake_lib "$@"
+  fm_lock_acquire_wait "$lock" || return 1
+  "$_fm_pending_reply_locked_fn" "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
@@ -384,15 +426,7 @@ fm_pending_reply_prepare_delivery() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_confirm_delivery_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_confirm_delivery_locked "$@"
 }
 
 _fm_pending_reply_confirm_delivery_locked() {  # <state-dir> <corr_id>
@@ -465,15 +499,7 @@ _fm_pending_reply_reconcile_delivery_locked() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_reconcile_delivery_locked "$@"
 }
 
 fm_pending_reply_delivery_attempt_unresolved() {  # <state-dir> <corr_id>
@@ -494,15 +520,7 @@ fm_pending_reply_delivery_attempt_unresolved() {  # <state-dir> <corr_id>
 # while the backend call was in flight, so both undelivered phases converge here
 # under the per-correlation lock; a confirmed delivery can never be reset.
 fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_reset_known_undelivered_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_reset_known_undelivered_locked "$@"
 }
 
 _fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
@@ -607,23 +625,7 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
-  # Serialized per correlation so a resolution and an escalation cannot interleave.
-  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
-  # sourced, so they are declared local here: that contains them to this call
-  # instead of leaking into every script that sources this library, without the
-  # subshell that would make every later use of them read as a lost write.
-  # The lock is released explicitly rather than from an EXIT trap, because a trap
-  # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_try_resolve_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_try_resolve_locked "$@"
 }
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
@@ -1097,23 +1099,7 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 # only while that exact keyed decision is still open in
 # bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
 fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
-  # Serialized per correlation so a resolution and an escalation cannot interleave.
-  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
-  # sourced, so they are declared local here: that contains them to this call
-  # instead of leaking into every script that sources this library, without the
-  # subshell that would make every later use of them read as a lost write.
-  # The lock is released explicitly rather than from an EXIT trap, because a trap
-  # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_close_escalation_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_close_escalation_locked "$@"
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
@@ -1163,23 +1149,7 @@ EOF
 # Escalate once after a missed recovery report or failed delivery outcome.
 # Retains the durable unresolved record. Never loops.
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
-  # Serialized per correlation so a resolution and an escalation cannot interleave.
-  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
-  # sourced, so they are declared local here: that contains them to this call
-  # instead of leaking into every script that sources this library, without the
-  # subshell that would make every later use of them read as a lost write.
-  # The lock is released explicitly rather than from an EXIT trap, because a trap
-  # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
+  _fm_pending_reply_with_corr_lock _fm_pending_reply_maybe_escalate_locked "$@"
 }
 
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
@@ -1269,8 +1239,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
     return 0
   fi
   sightings=$(fm_pending_reply_get "$rec" wrong_home_sightings)
-  # shellcheck source=bin/fm-parent-channel-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+  _fm_pending_reply_load_parent_channel_lib "$@"
   if fm_parent_channel_destination "$sm_home" "$sm_home/state" >/dev/null 2>&1 \
     && [ "$FM_PARENT_CHANNEL_ROUTE" = remote ]; then
     remote_parent_channel=1
@@ -1329,8 +1298,7 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   [ "$stranded" != "$parent_status" ] || return 1
   line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
   [ -n "$line" ] || return 1
-  # shellcheck source=bin/fm-parent-channel-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
+  _fm_pending_reply_load_parent_channel_lib "$@"
   fm_parent_channel_append_once "$parent_status" "$line"
 }
 
