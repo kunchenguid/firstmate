@@ -1088,6 +1088,58 @@ test_stale_beacon_holder_is_not_reported_as_a_failure() {
   pass "a live holder with an aged beacon is left alone: not stopped, not replaced, not reported failed"
 }
 
+test_busy_holder_replacement_stays_a_loud_failure() {
+  local dir state arm out status first second identity held second_alive=0
+  dir=$(make_case busy-holder-replacement)
+  state="$dir/state"
+  mkdir -p "$dir/bin"
+  cp "$WATCH_ARM" "$dir/bin/fm-watch-arm.sh"
+  cp "$LIB" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: busy holder pid=%s beacon=20s (grace 2s)\n' "$FM_TEST_FIRST"
+kill -TERM "$FM_TEST_FIRST" 2>/dev/null || true
+rm -rf "$FM_STATE_OVERRIDE/.watch.lock"
+mkdir "$FM_STATE_OVERRIDE/.watch.lock"
+printf '%s\n' "$FM_TEST_SECOND" > "$FM_STATE_OVERRIDE/.watch.lock/pid"
+touch -t 200001010000 "$FM_STATE_OVERRIDE/.last-watcher-beat"
+exit 64
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  sleep 60 &
+  first=$!
+  sleep 60 &
+  second=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$first") \
+    || fail "could not identify the original busy holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$first" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  arm="$dir/bin/fm-watch-arm.sh"
+  status=0
+  FM_TEST_FIRST="$first" FM_TEST_SECOND="$second" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_ARM_BUSY_HOLDER_WAIT_MAX=1 "$arm" > "$dir/arm.out" 2>&1 || status=$?
+  out=$(cat "$dir/arm.out")
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$second" && second_alive=1
+  kill "$first" "$second" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "an unidentified replacement holder closed the arm quietly: $out"
+  case "$out" in
+    *"watcher: FAILED"*) ;;
+    *) fail "an unidentified replacement holder was not reported loudly: $out" ;;
+  esac
+  [ "$held" = "$second" ] && [ "$second_alive" -eq 1 ] \
+    || fail "the replacement holder was signalled or displaced"
+  pass "a replacement holder must be reverified before a busy wait can close quietly"
+}
+
 test_recovering_holder_is_attached_to_not_replaced() {
   local dir state fakebin armout armpid watcher_pid i out second secondpid
   dir=$(make_case busy-holder-attach)
@@ -1411,6 +1463,7 @@ test_msys_pid_identity_uses_proc() {
 
 test_singleton_start
 test_stale_beacon_holder_is_not_reported_as_a_failure
+test_busy_holder_replacement_stays_a_loud_failure
 test_recovering_holder_is_attached_to_not_replaced
 test_frame_identity_is_per_subshell_and_stable
 test_lock_acquisition_refuses_unobtainable_frame_identity

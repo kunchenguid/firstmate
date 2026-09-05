@@ -1647,6 +1647,43 @@ test_archived_record_is_still_found_by_correlation_id() {
   pass "an archived record is still found, inert, and not reusable"
 }
 
+test_create_regenerates_an_archived_correlation_collision() {
+  local home state archive_dir fakebin count collision replacement corr archived
+  home=$(setup_parent retention-create-collision)
+  state="$home/state"
+  archive_dir=$(fm_pending_reply_archive_dir "$state")
+  fakebin="$home/fakebin"
+  count="$home/id-count"
+  collision=00000000000000aa
+  replacement=00000000000000bb
+  mkdir -p "$archive_dir" "$fakebin"
+  archived='corr_id=00000000000000aa
+task_id=old-task
+phase=resolved'
+  printf '%s\n' "$archived" > "$archive_dir/$collision"
+  printf '0\n' > "$count"
+  cat > "$fakebin/openssl" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$FM_TEST_ID_COUNT")
+if [ "$n" -eq 0 ]; then
+  printf '%s\n' "$FM_TEST_COLLISION"
+else
+  printf '%s\n' "$FM_TEST_REPLACEMENT"
+fi
+printf '%s\n' "$((n + 1))" > "$FM_TEST_ID_COUNT"
+SH
+  chmod +x "$fakebin/openssl"
+  corr=$(PATH="$fakebin:$PATH" FM_TEST_ID_COUNT="$count" \
+    FM_TEST_COLLISION="$collision" FM_TEST_REPLACEMENT="$replacement" \
+    fm_pending_reply_create "$home" "$state" new-task "new request") \
+    || fail "creation failed instead of regenerating an archived collision"
+  [ "$corr" = "$replacement" ] || fail "creation reused archived correlation $corr"
+  [ "$(cat "$archive_dir/$collision")" = "$archived" ] || fail "creation changed the archived record"
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$replacement")" task_id)" = new-task ] \
+    || fail "the replacement correlation did not publish the new expectation"
+  pass "pending reply creation regenerates collisions from the archive"
+}
+
 test_pre_existing_archive_is_adopted_not_clobbered() {
   local home state archive_dir corr legacy
   home=$(setup_parent retention-adopt)
@@ -1715,6 +1752,7 @@ test_settled_record_with_an_open_escalation_stays_hot() {
 test_settled_record_leaves_the_hot_set
 test_tick_scans_only_open_records
 test_archived_record_is_still_found_by_correlation_id
+test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
 test_settled_record_with_an_open_escalation_stays_hot

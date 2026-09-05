@@ -280,14 +280,14 @@ wait_for_healthy_successor() {
 # produces a fresh beat well inside it.
 #
 # Returns 0 having set HEALTHY_PID/HEALTHY_IDENTITY when the holder recovers.
-# Returns 1 when the wait expires OR when the holder exits on its own - and in
-# BOTH cases nothing has been signalled, killed or replaced. An expired wait is
-# reported, not acted on: age cannot prove a process is stuck, so terminating one
-# on that evidence is exactly what the captain ruled out on 2026-09-05. The next
-# turn end arms again through the ordinary path.
+# Returns 1 when the wait expires and 2 when ownership can no longer be verified.
+# Nothing is signalled, killed or replaced. An expired wait is reported, not
+# acted on: age cannot prove a process is stuck, so terminating one on that
+# evidence is exactly what the captain ruled out on 2026-09-05. The next turn
+# end arms again through the ordinary path.
 wait_for_busy_holder() {
-  local deadline holder budget
-  holder=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
+  local holder=$1 deadline budget
+  case "$holder" in ''|*[!0-9]*) return 2 ;; esac
   # Half the grace is the ceiling, but the wait is also capped outright: this
   # runs at a turn boundary, and a default 300s grace would otherwise hold the
   # turn for 150s. The cap is safe because the beacon is beaten at every PHASE
@@ -298,10 +298,12 @@ wait_for_busy_holder() {
   [ "$budget" -ge 1 ] || budget=1
   deadline=$(( $(date +%s) + budget + 1 ))
   while :; do
-    healthy_watcher && return 0
-    # The holder finished and released the lock: not our process to report on,
-    # and the next arm starts a fresh watcher through the ordinary path.
-    fm_pid_alive "$holder" || return 1
+    if healthy_watcher; then
+      [ "$HEALTHY_PID" = "$holder" ] && return 0
+      return 2
+    fi
+    fm_watcher_busy_holder "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 2
+    [ "$FM_WATCHER_BUSY_PID" = "$holder" ] || return 2
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 1
   done
@@ -528,7 +530,7 @@ cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {
-  local rc=$1 signal reason_type status
+  local rc=$1 signal reason_type status holder wait_status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
@@ -575,11 +577,14 @@ owned_child_finished() {
   # expired wait. When the wait expires the holder is simply reported, and the
   # next turn end tries again through the existing failure reporting.
   if [ "$rc" -eq "$FM_WATCHER_BUSY_HOLDER_STATUS" ]; then
+    holder=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) .*$/\1/p' "$child_out" | tail -n 1)
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    if wait_for_busy_holder; then
+    wait_status=0
+    wait_for_busy_holder "$holder" || wait_status=$?
+    if [ "$wait_status" -eq 0 ]; then
       cycle_log_append "$rc" "$signal" busy-holder-attached "attached:$HEALTHY_PID"
       cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
       report_attached
@@ -587,8 +592,13 @@ owned_child_finished() {
       attach_and_wait "$HEALTHY_PID"
       return $?
     fi
-    cycle_log_append "$rc" "$signal" busy-holder-still-running none
-    return 0
+    if [ "$wait_status" -eq 1 ]; then
+      cycle_log_append "$rc" "$signal" busy-holder-still-running none
+      return 0
+    fi
+    cycle_log_append "$rc" "$signal" busy-holder-ownership-changed none
+    fail_unexplained_cycle
+    return 1
   fi
 
   reason_type="nonzero-exit"
