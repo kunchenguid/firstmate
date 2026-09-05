@@ -23,6 +23,14 @@
 # is committed, so a failed commit stays eligible for at-least-once retry and
 # may rarely duplicate rather than leave a merge silent.
 #
+# A confirmed merge is also the moment a deploy-managed project can go live, so
+# this operation hands off to bin/fm-deploy-trigger.sh once the outcome is
+# recorded. That handoff runs after the lock is released, only on a first
+# observation, and never changes what this function returns: a caller that has
+# already merged reads a non-zero return as "the merge landed and the record did
+# not", which a failed deploy is not. A project with no deploy policy makes the
+# handoff a no-op, so this changes nothing for a home that deploys nothing.
+#
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
 
@@ -133,5 +141,8 @@ $frontier"
       "$provider" "$host" "$path" "$number" || status=1
   fi
   fm_lock_release "$lock"
+  if [ "$status" -eq 0 ] && [ -x "$_FM_MERGE_OUTCOME_LIB_DIR/fm-deploy-trigger.sh" ]; then
+    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-deploy-trigger.sh" "$home" "$state" "$id" || true
+  fi
   return "$status"
 }

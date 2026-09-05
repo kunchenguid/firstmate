@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Tests for what bin/fm-deploy.sh does when it does NOT refuse: the completed
+# deploy, the durable ledger it leaves, and the one-command rollback that ledger
+# makes possible.
+#
+# tests/fm-deploy-refusals.test.sh covers the refusals. This file exists because
+# a deploy tool whose refusals are all proved and whose success path is not can
+# still be one that never successfully deploys anything.
+#
+# The host is a fake `ssh` that records every command it is asked to run, so the
+# assertions are about the ORDER and CONTENT of what reached the machine, not
+# just an exit status.
+#
+# Matrix:
+#   (a) a clean auto-deployable range completes, and does so in the documented
+#       order: set the old version aside, stop, check out, install the bundle,
+#       reinstall the unit, verify the bundle, restart
+#   (b) the completed deploy is recorded in the ledger with where it came from,
+#       where it went, and under what authority
+#   (c) the previous version's front end is copied aside BEFORE anything stops,
+#       because the build that produced it may be past its retention by the time
+#       it is wanted back
+#   (d) `--rollback` needs no sha and no captain permission, targets exactly the
+#       version the last completed deploy came from, and puts back the front end
+#       set aside for it rather than a download that is no longer available
+#   (e) a restart that comes up unhealthy is reported as a failed deploy, with
+#       the rollback command, rather than reported as live
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-deploy-ledger-tests)
+rollback_root_for_test=/var/lib/demo-deploy/rollback
+
+git_c() { git -C "$REPO" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' "$@"; }
+
+commit_file() {
+  mkdir -p "$REPO/$(dirname "$1")"
+  printf '%s\n' "$2" > "$REPO/$1"
+  git_c add -A
+  git_c commit -qm "$3"
+}
+
+# Sets CASE_DIR, HOME_DIR, REPO, SSH_LOG, FAKEBIN, DEPLOYED, PLAIN as globals;
+# see the same note in tests/fm-deploy-refusals.test.sh.
+make_case() {
+  local name=$1 fakebin
+  CASE_DIR="$TMP_ROOT/$name"
+  HOME_DIR="$CASE_DIR/home"
+  REPO="$HOME_DIR/projects/demo"
+  SSH_LOG="$CASE_DIR/ssh.log"
+  mkdir -p "$HOME_DIR/config/deploy-policy" "$HOME_DIR/config/deploy-target" \
+    "$HOME_DIR/state" "$REPO"
+
+  git_c init -q -b main
+  commit_file README.md base "base"
+  DEPLOYED=$(git_c rev-parse HEAD)
+  commit_file src/engine.py engine "a plain code change"
+  PLAIN=$(git_c rev-parse HEAD)
+  git_c remote add origin git@github.com:example/demo.git
+  git_c update-ref refs/remotes/origin/main "$PLAIN"
+
+  printf 'dashboard/v2/src/**\n' > "$HOME_DIR/config/deploy-policy/demo"
+  cat > "$HOME_DIR/config/deploy-target/demo" <<'TGT'
+host=host.invalid
+user=deployer
+checkout=/opt/demo
+unit=demo-app
+python=/opt/demo/.venv/bin/python
+rollback_root=/var/lib/demo-deploy/rollback
+health_url=http://127.0.0.1:8765/api/health
+public_url=https://demo.invalid/
+public_expect=403
+bundle_path=dashboard/v2/dist
+bundle_artifact=demo-dist
+bundle_workflow=demo-ci.yml
+bundle_verify=deploy/verify_bundle.py
+run_lock=/var/lib/demo/runs/.lock
+TGT
+
+  fakebin=$(fm_fakebin "$CASE_DIR")
+  cat > "$fakebin/ssh" <<SH
+#!/usr/bin/env bash
+set -u
+cmd=\${!#}
+printf '%s\n' "\$cmd" >> '$SSH_LOG'
+case "\$cmd" in
+  *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
+  *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
+  *'http_code'*)      printf '%s\n' "\${FMTEST_HEALTH:-200}" ;;
+  # The set-aside copy of a version's front end is real state on this fake
+  # machine: only a version whose front end was actually copied aside answers
+  # yes when the deployer asks whether it still has one.
+  *'cp -a'*rollback*)
+    printf '%s' "\$cmd" | grep -o '/var/lib/demo-deploy/rollback/[0-9a-f]*/bundle' \
+      | head -1 >> '$CASE_DIR/aside.log' ;;
+  *'test -d '*'/bundle'*)
+    p=\$(printf '%s' "\$cmd" | grep -o '/var/lib/demo-deploy/rollback/[0-9a-f]*/bundle' | head -1)
+    grep -qxF "\$p" '$CASE_DIR/aside.log' 2>/dev/null || exit 1 ;;
+  # Only the bundle install is fed on stdin; draining it for every command
+  # would block on a pipe nothing ever closes.
+  *'-xzf -'*)         cat >/dev/null 2>&1 || true ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  run)
+    case "${2:-}" in
+      list)
+        printf '[{"databaseId":4242,"headSha":"%s"}]\n' "$FMTEST_TARGET_SHA"
+        ;;
+      download)
+        # A build is downloadable only briefly. FMTEST_GH_DOWNLOAD_FAILS is how
+        # a test says that window has closed for the commit being asked for.
+        [ -z "${FMTEST_GH_DOWNLOAD_FAILS:-}" ] || exit 1
+        out=''
+        while [ "$#" -gt 0 ]; do
+          [ "$1" = -D ] && { shift; out=$1; }
+          shift
+        done
+        mkdir -p "$out/assets" "$out/.vite"
+        printf 'built\n' > "$out/index.html"
+        printf '{}\n' > "$out/bundle-seal.json"
+        printf '{}\n' > "$out/.vite/manifest.json"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FMTEST_PUBLIC:-403}"
+exit 0
+SH
+  chmod +x "$fakebin/ssh" "$fakebin/gh" "$fakebin/curl"
+  FAKEBIN=$fakebin
+}
+
+run_deploy() {
+  ( PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FMTEST_TARGET_SHA="${FMTEST_TARGET_SHA:-$PLAIN}" \
+      "$ROOT/bin/fm-deploy.sh" "$@" 2>&1 )
+}
+
+# step_line <pattern>: the 1-based line number of the first transport command
+# matching <pattern>, or empty.
+step_line() { grep -n -- "$1" "$SSH_LOG" | head -1 | cut -d: -f1; }
+
+test_a_clean_range_deploys_in_the_documented_order() {
+  local out rc=0 aside stop checkout bundle unit verify restart
+  make_case clean-deploy
+  out=$(run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -eq 0 ] || fail "clean-deploy: an auto-deployable range failed: $out"
+  assert_contains "$out" "is live at $PLAIN" "clean-deploy"
+
+  aside=$(step_line 'rollback')
+  stop=$(step_line 'systemctl stop')
+  checkout=$(step_line 'checkout --detach')
+  bundle=$(step_line 'dashboard/v2/dist.incoming')
+  unit=$(step_line '/etc/systemd/system/demo-app.service')
+  verify=$(step_line 'deploy/verify_bundle.py')
+  restart=$(step_line 'systemctl restart')
+  for step in aside stop checkout bundle unit verify restart; do
+    [ -n "${!step}" ] || fail "clean-deploy: the $step step never reached the machine: $(tr '\n' '|' < "$SSH_LOG")"
+  done
+  [ "$aside" -lt "$stop" ] \
+    || fail "clean-deploy: the old version was set aside only after the app was stopped"
+  [ "$stop" -lt "$checkout" ] && [ "$checkout" -lt "$bundle" ] && [ "$bundle" -lt "$unit" ] \
+    && [ "$unit" -lt "$verify" ] && [ "$verify" -lt "$restart" ] \
+    || fail "clean-deploy: steps ran out of order: $(tr '\n' '|' < "$SSH_LOG")"
+
+  # The proxy and sign-in units are never touched. This is a standing safety
+  # boundary of the deployment posture, not an incidental property.
+  assert_no_grep 'oauth2-proxy' "$SSH_LOG" "clean-deploy: the sign-in unit was touched"
+  assert_no_grep 'caddy' "$SSH_LOG" "clean-deploy: the TLS unit was touched"
+  pass "a clean auto-deployable range deploys in the documented order and touches no other unit"
+}
+
+test_the_completed_deploy_is_recorded() {
+  local ledger
+  make_case recorded-deploy
+  run_deploy demo "$PLAIN" >/dev/null || fail "recorded-deploy: the deploy failed"
+  ledger="$HOME_DIR/state/deploy-ledger/demo.jsonl"
+  assert_present "$ledger" "recorded-deploy: no ledger was written"
+  assert_grep '"result":"deployed"' "$ledger" "recorded-deploy: the outcome was not recorded"
+  assert_grep "\"from\":\"$DEPLOYED\"" "$ledger" "recorded-deploy: the previous version was not recorded"
+  assert_grep "\"to\":\"$PLAIN\"" "$ledger" "recorded-deploy: the new version was not recorded"
+  assert_grep '"authority":"auto"' "$ledger" "recorded-deploy: the authority was not recorded"
+  pass "a completed deploy is recorded with where it came from, where it went, and under what authority"
+}
+
+test_rollback_targets_the_version_the_last_deploy_came_from() {
+  local out rc=0
+  make_case rollback
+  run_deploy demo "$PLAIN" >/dev/null || fail "rollback: the first deploy failed"
+  : > "$SSH_LOG"
+  # The machine now runs the new version, as it would after that deploy.
+  # The build that produced the previous front end is past its download window,
+  # which is the ordinary case: a rollback is wanted days after the deploy it
+  # undoes. The copy set aside on the machine is what makes this one command.
+  out=$(FMTEST_HOST_SHA="$PLAIN" FMTEST_GH_DOWNLOAD_FAILS=1 run_deploy demo --rollback) || rc=$?
+  [ "$rc" -eq 0 ] || fail "rollback: --rollback failed: $out"
+  assert_contains "$out" "$DEPLOYED" "rollback"
+  assert_grep "checkout --detach '$DEPLOYED'" "$SSH_LOG" \
+    "rollback: the machine was not returned to the version the last deploy came from"
+  # The direction matters: the read-only probe above and the aside copy of a
+  # later deploy both mention this path too. Only the restore copies FROM the
+  # set-aside bundle INTO the checkout.
+  assert_grep "cp -a \"$rollback_root_for_test/$DEPLOYED/bundle\" \"/opt/demo/dashboard/v2/dist\"" "$SSH_LOG" \
+    "rollback: the front end the previous version ran with was never put back"
+  assert_no_grep 'dist.incoming' "$SSH_LOG" \
+    "rollback: the front end was re-downloaded instead of restored from the copy kept for exactly this"
+  pass "--rollback needs no sha and no permission, and restores the version and front end the last deploy came from"
+}
+
+test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one() {
+  local out rc=0
+  make_case unhealthy-restart
+  out=$(FMTEST_HEALTH=503 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "unhealthy-restart: a version that never came up healthy was reported as live"
+  assert_not_contains "$out" "is live at" "unhealthy-restart"
+  assert_contains "$out" "--rollback" "unhealthy-restart"
+  assert_grep '"result":"failed"' "$HOME_DIR/state/deploy-ledger/demo.jsonl" \
+    "unhealthy-restart: the failure was not recorded"
+  pass "a restart that never comes up healthy is reported as a failed deploy with its rollback command"
+}
+
+test_a_clean_range_deploys_in_the_documented_order
+test_the_completed_deploy_is_recorded
+test_rollback_targets_the_version_the_last_deploy_came_from
+test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one

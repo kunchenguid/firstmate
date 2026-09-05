@@ -576,6 +576,9 @@ tests/fm-cursor-harness.test.sh 30103
 tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 54947
 tests/fm-daemon.test.sh 26870
+tests/fm-deploy-classify.test.sh 500
+tests/fm-deploy-ledger.test.sh 2500
+tests/fm-deploy-refusals.test.sh 1954
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-view.test.sh 8547

@@ -257,6 +257,33 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Deploy policy and target (config/deploy-policy, config/deploy-target, state/deploy-ledger)
+
+These three paths decide, for one project, what may go live without asking the captain and where it goes live.
+Both `config/` files are local, gitignored, and per home; a project with neither is simply not deploy-managed from this home, and every deploy entry point stays inert for it.
+Absence is the off switch, and it is never read as permission.
+
+`config/deploy-policy/<project>` lists the path patterns the captain reserves for himself, one per line, with `#` comments and blank lines ignored.
+A pattern is a bash pattern in which `*` matches any characters including `/`, so `dashboard/v2/src/**` covers that whole subtree and `openspec/changes/dashboard-v21-*` covers every file under every directory whose name starts that way.
+The classifier applies these patterns to the whole range's changed-path set, never to one commit at a time, because a merge commit's own diff is empty and a per-commit walk would report a merged design change as free to ship.
+Everything the policy does not name deploys automatically once it merges.
+
+`config/deploy-target/<project>` is a `key=value` file naming the machine that serves the project.
+It lives here rather than in a project repository because the host address, ssh user, and host paths belong in the operator's private record.
+Every value is data: a value carrying shell metacharacters, an unknown key, or a missing required key is refused rather than partly used, so this file can never become a way to run a command as the deploy user.
+Required keys are `host`, `user`, `checkout`, `unit`, `rollback_root`, `health_url`, `public_url`, and `public_expect`.
+Optional keys are `python` (default `<checkout>/.venv/bin/python`), `ssh_options`, `run_lock`, and the sealed-front-end set `bundle_path`, `bundle_artifact`, `bundle_workflow`, and `bundle_verify`.
+`bundle_path` requires `bundle_artifact` and `bundle_workflow` together, because a half-described bundle would deploy a version whose front end nobody obtained.
+`run_lock` names the file the application itself locks while a run is under way; deploys refuse while it is held, and the check reads `/proc/locks` rather than taking a lock of its own, so asking the question can never be what makes a starting run fail.
+
+`data/ops-facts.md` stays the narrative operational record a deploy or operations brief carries; `config/deploy-target/<project>` is the machine-read form the deploy path actually acts on, so a host that moves must be corrected in both.
+
+`state/deploy-ledger/<project>.jsonl` is the durable append-only record of every attempt, refusals included, with the commit it came from, the commit it went to, and the authority it acted under.
+`bin/fm-deploy.sh --rollback` reads it to find the version that was live before the last deploy.
+A rollback restores that version's front end from the copy set aside under `rollback_root` before the deploy, not from a build artifact, because artifact retention is short and a rollback is usually wanted long after it lapses.
+
+[`bin/fm-deploy-status.sh`](../bin/fm-deploy-status.sh), [`bin/fm-deploy.sh`](../bin/fm-deploy.sh), and [`bin/fm-deploy-trigger.sh`](../bin/fm-deploy-trigger.sh) own their exact commands, flags, and refusals in their own headers and `--help`.
+
 ## Concurrency cap (config/concurrency-cap)
 
 `config/concurrency-cap` is an optional local, gitignored file holding a bare integer that bounds how many workers this home runs at once.
