@@ -278,6 +278,25 @@ fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <a
   return "$status"
 }
 
+fm_procevent_registration_generation_valid() {  # <device:inode>
+  local device inode
+  case "$1" in
+    *:*) device=${1%%:*}; inode=${1#*:} ;;
+    *) return 1 ;;
+  esac
+  case "$device" in ''|*[!0-9]*) return 1 ;; esac
+  case "$inode" in ''|*[!0-9]*|*:* ) return 1 ;; esac
+}
+
+fm_procevent_registration_generation_locked() {  # <state> <source-id>
+  local registration generation
+  registration="$(fm_procevent_registry_dir "$1")/$2.source"
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  generation=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+  fm_procevent_registration_generation_valid "$generation" || return 1
+  printf '%s\n' "$generation"
+}
+
 fm_procevent_claim_load_locked() {  # <source-id>
   local claim home pid token identity reg_dir reg_identity terminal state_root state_device state_inode state_owner state_mode extra
   claim=$(fm_procevent_claim_path "$1")

@@ -45,7 +45,7 @@ StaticText "Applied the queued restart verification note."
 ```
 
 The portable `tests/fm-procevent.test.sh` regression drives the executable adapter and generic restart interface.
-It verifies private staging, blank-line append, stdin and file input, one multiline `--agent-reply` argv element, stable in-flight recovery after a pre-launch crash, append-safe stale recovery, restoration after termination inside the delivery grace window, removal after the grace window, final-session acknowledgement in the host status log, exact-registration restart, capture of the old child's final queued output, and immediate replacement of that runner generation.
+It verifies private generation-stamped staging, blank-line append, stdin and file input, one multiline `--agent-reply` argv element, stable in-flight recovery after a pre-launch crash, append-safe stale recovery, restoration after termination inside the delivery grace window, removal after the grace window, final-session acknowledgement in the host status log, refusal and status logging when terminal retirement is followed by an identical re-arm, exact-generation restart, capture of the old child's final queued output, and immediate replacement of that runner generation.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
 ## The published Lavish poll interface the adapter wraps

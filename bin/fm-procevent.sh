@@ -7,7 +7,8 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
-#   fm-procevent.sh restart <source-id> --if-matches <adapter> -- <argv>...
+#   fm-procevent.sh generation <source-id> --if-matches <adapter> -- <argv>...
+#   fm-procevent.sh restart <source-id> [--if-generation <device:inode>] --if-matches <adapter> -- <argv>...
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -42,11 +43,14 @@
 #            turn. After publishing, it asks the source's own adapter whether the
 #            captured result ends the source and retires the registration when it
 #            says so, so a source that has ended stops being restarted.
+# generation Print the current built-in registration generation after exact
+#            adapter and argv matching.
 # restart    Signal this home's runner-owned registered-command child, wait for
 #            the runner to drain and release it, then immediately launch the
 #            registered built-in command again.
 #            The complete registration must match the supplied adapter and argv,
-#            so an adapter cannot restart a replacement source by stale identity.
+#            and --if-generation additionally binds the exact registration, so
+#            an adapter cannot restart a replacement source by stale identity.
 #            This is a bounded control operation for adapter-owned state that
 #            must be picked up by a fresh child invocation, never a source poll.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
@@ -578,8 +582,8 @@ publish_pending() {  # [result-file-to-skip]
   printf '%s\n' "$published"
 }
 
-isolate_runner() {  # <wait|detach> <source-id>
-  local mode=$1 id=$2 program
+isolate_runner() {  # <wait|detach> <source-id> [registration-generation]
+  local mode=$1 id=$2 generation=${3-} program
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
     defined(my $pid = fork) or exit 125;
@@ -595,9 +599,9 @@ isolate_runner() {  # <wait|detach> <source-id>
     exit(128 + ($status & 127)) if $status & 127;
     exit($status >> 8);'
   if [ "$mode" = wait ]; then
-    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" "$generation"
   fi
-  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" "$generation" >/dev/null 2>&1 &
 }
 
 require_runner_group() {
@@ -619,7 +623,8 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
+  local id=${1-} expected_generation=${2-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
+  local current_generation
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -627,6 +632,20 @@ cmd_start() {
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     fm_procevent_source_lock_release "$id"
     die "source is not registered: $id"
+  fi
+  if [ -n "$expected_generation" ]; then
+    fm_procevent_registration_generation_valid "$expected_generation" || {
+      fm_procevent_source_lock_release "$id"
+      die "source registration generation is invalid: $expected_generation"
+    }
+    current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot read source registration generation: $id"
+    }
+    [ "$current_generation" = "$expected_generation" ] || {
+      fm_procevent_source_lock_release "$id"
+      die "source registration generation changed before start: $id"
+    }
   fi
   if ! adapter=$(read_adapter "$id"); then
     fm_procevent_source_lock_release "$id"
@@ -964,8 +983,8 @@ retire_owned_terminal_source() {  # <source-id>
 
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
-detach_runner() {  # <source-id>
-  isolate_runner detach "$1"
+detach_runner() {  # <source-id> [registration-generation]
+  isolate_runner detach "$1" "${2-}"
 }
 
 cmd_reconcile() {
@@ -1155,14 +1174,45 @@ runner_child_load_locked() {  # <source-id> <runner-pid> <claim-token>
   RUNNER_CHILD_PID=$child
 }
 
+cmd_generation() {
+  local id=${1-} condition=${2-} adapter=${3-} sep=${4-} generation
+  shift 4 2>/dev/null || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  [ "$condition" = --if-matches ] || usage
+  fm_procevent_adapter_valid "$adapter" \
+    || die "adapter name must be lowercase alphanumeric or dash: $adapter"
+  [ "$sep" = -- ] && [ "$#" -ge 1 ] || usage
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
+    fm_procevent_source_lock_release "$id"
+    die "source registration does not match the expected owner: $id"
+  fi
+  generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot read source registration generation: $id"
+  }
+  fm_procevent_source_lock_release "$id"
+  printf 'generation: %s\n' "$generation"
+}
+
 # Restart one exact built-in registration without waiting for the watcher cycle.
 # Signal only its registered-command child, then let the runner finish draining
 # and durably capture any result that had already arrived before replacement.
 cmd_restart() {
-  local id=${1-} condition=${2-} adapter=${3-} sep=${4-}
+  local id=${1-} expected_generation='' condition adapter sep generation
   local claim_state pid token child='' i=0 current_token
-  shift 4 2>/dev/null || usage
+  shift 1 2>/dev/null || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  if [ "${1-}" = --if-generation ]; then
+    expected_generation=${2-}
+    fm_procevent_registration_generation_valid "$expected_generation" \
+      || die "source registration generation is invalid: $expected_generation"
+    shift 2 2>/dev/null || usage
+  fi
+  condition=${1-}
+  adapter=${2-}
+  sep=${3-}
+  shift 3 2>/dev/null || usage
   [ "$condition" = --if-matches ] || usage
   fm_procevent_adapter_valid "$adapter" \
     || die "adapter name must be lowercase alphanumeric or dash: $adapter"
@@ -1172,6 +1222,14 @@ cmd_restart() {
   if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
     fm_procevent_source_lock_release "$id"
     die "source registration does not match the expected owner: $id"
+  fi
+  generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot read source registration generation: $id"
+  }
+  if [ -n "$expected_generation" ] && [ "$generation" != "$expected_generation" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "source registration generation changed while restarting: $id"
   fi
 
   fm_procevent_claim_state_locked "$id"
@@ -1199,9 +1257,24 @@ cmd_restart() {
           fm_procevent_source_lock_release "$id"
           die "source registration changed while restarting: $id"
         fi
+        generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
+          fm_procevent_source_lock_release "$id"
+          die "cannot read source registration generation: $id"
+        }
+        if [ -n "$expected_generation" ] && [ "$generation" != "$expected_generation" ]; then
+          fm_procevent_source_lock_release "$id"
+          die "source registration generation changed while restarting: $id"
+        fi
         if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
           fm_procevent_source_lock_release "$id"
-          detach_runner "$id" || die "cannot restart source: $id"
+          detach_runner "$id" "$expected_generation" || die "cannot restart source: $id"
+          if [ -n "$expected_generation" ]; then
+            fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+            generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+            fm_procevent_source_lock_release "$id"
+            [ "$generation" = "$expected_generation" ] \
+              || die "source registration generation changed while restarting: $id"
+          fi
           printf 'restarted: %s\n' "$id"
           return 0
         fi
@@ -1221,7 +1294,14 @@ cmd_restart() {
       ;;
     1)
       fm_procevent_source_lock_release "$id"
-      detach_runner "$id" || die "cannot restart source: $id"
+      detach_runner "$id" "$expected_generation" || die "cannot restart source: $id"
+      if [ -n "$expected_generation" ]; then
+        fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+        generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+        fm_procevent_source_lock_release "$id"
+        [ "$generation" = "$expected_generation" ] \
+          || die "source registration generation changed while restarting: $id"
+      fi
       printf 'restarted: %s\n' "$id"
       return 0
       ;;
@@ -1663,6 +1743,7 @@ case "${1-}" in
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;
+  generation)         shift; cmd_generation "$@" ;;
   restart)            shift; cmd_restart "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;
   classify)           shift; cmd_classify "$@" ;;

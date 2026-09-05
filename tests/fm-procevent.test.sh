@@ -1423,11 +1423,29 @@ cp "$ROOT/bin/fm-procevent-lavish.sh" "$ROOT/bin/fm-procevent-lib.sh" \
   "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$REPLY_RUNTIME/bin/"
 cat > "$REPLY_RUNTIME/bin/fm-procevent.sh" <<'SH'
 #!/usr/bin/env bash
+file_identity() {
+  if [ "$(uname)" = Darwin ]; then
+    printf '%s:%s\n' "$(stat -f %d "$1")" "$(stat -f %i "$1")"
+  else
+    printf '%s:%s\n' "$(stat -c %d "$1")" "$(stat -c %i "$1")"
+  fi
+}
 case "${1-}" in
+  generation)
+    source="$FM_HOME/state/procevent/$2.source"
+    [ -f "$source" ] && [ ! -L "$source" ] || exit 1
+    printf 'generation: %s\n' "$(file_identity "$source")"
+    ;;
   restart)
     printf '%s\n' "$*" >> "$RESTART_LOG"
-    if [ "${RESTART_RETIRE:-0}" = 1 ]; then
-      rm -f -- "$FM_HOME/state/procevent/$2.source"
+    source="$FM_HOME/state/procevent/$2.source"
+    if [ "${RESTART_REARM:-0}" = 1 ]; then
+      replacement=$(mktemp "$FM_HOME/state/procevent/.source.XXXXXX") || exit 1
+      cp -- "$source" "$replacement" && chmod 0600 "$replacement" \
+        && mv -f -- "$replacement" "$source" || exit 1
+    fi
+    if [ "${3-}" = --if-generation ] \
+      && [ "$(file_identity "$source")" != "${4-}" ]; then
       exit 1
     fi
     ;;
@@ -1458,6 +1476,7 @@ esac
 SH
 chmod +x "$REPLY_BIN/lavish-axi"
 REPLY_ART="$TMP_ROOT/reply-artifact.html"
+reply_status="$REPLY_HOME/state/reply-host.status"
 printf '<h1>reply fixture</h1>\n' > "$REPLY_ART"
 reply_id=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
@@ -1477,9 +1496,11 @@ assert_absent "$REPLY_HOME/state/procevent/$reply_id.pending-reply" \
 assert_absent "$RESTART_LOG" "newline-only reply input restarted the listener"
 
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" "First change applied." >/dev/null
 printf '\nSecond change applied.\nWith detail.\n' | \
   FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+    FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
     "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" >/dev/null
 pending_reply="$REPLY_HOME/state/procevent/$reply_id.pending-reply"
 inflight_reply="$REPLY_HOME/state/procevent/$reply_id.inflight-reply"
@@ -1497,7 +1518,8 @@ First change applied.
 Second change applied.
 With detail.
 EOF
-cmp -s "$TMP_ROOT/expected-pending-reply" "$pending_reply" \
+tail -n +4 "$pending_reply" > "$TMP_ROOT/pending-reply-body"
+cmp -s "$TMP_ROOT/expected-pending-reply" "$TMP_ROOT/pending-reply-body" \
   || fail "a second staged reply was not appended after one blank line"
 [ "$(wc -l < "$RESTART_LOG" | tr -d ' ')" -eq 2 ] \
   || fail "each reply did not request exactly one nonblocking listener restart"
@@ -1542,12 +1564,14 @@ cmp -s "$TMP_ROOT/expected-reply-argv" "$REPLY_LOG" \
 
 printf 'File-backed acknowledgement.\n' > "$TMP_ROOT/reply-text"
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" --file "$TMP_ROOT/reply-text" >/dev/null
 assert_contains "$(cat "$pending_reply")" "File-backed acknowledgement." \
   "reply --file did not stage its text"
 
 mv "$pending_reply" "$inflight_reply"
-printf 'Newer acknowledgement.\n' > "$pending_reply"
+sed -n '1,3p' "$inflight_reply" > "$pending_reply"
+printf 'Newer acknowledgement.\n' >> "$pending_reply"
 chmod 0600 "$pending_reply"
 REPLY_BEHAVIOR=fail PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" \
   FM_ROOT_OVERRIDE="$REPLY_RUNTIME" REPLY_LOG="$REPLY_LOG" \
@@ -1557,7 +1581,8 @@ File-backed acknowledgement.
 
 Newer acknowledgement.
 EOF
-cmp -s "$TMP_ROOT/expected-recovered-reply" "$pending_reply" \
+tail -n +4 "$pending_reply" > "$TMP_ROOT/recovered-reply-body"
+cmp -s "$TMP_ROOT/expected-recovered-reply" "$TMP_ROOT/recovered-reply-body" \
   || fail "stale in-flight recovery did not preserve older and newer replies in order"
 assert_absent "$inflight_reply" "early poll failure did not restore the in-flight reply"
 
@@ -1604,6 +1629,7 @@ FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
   "Reply staged after re-arm." >/dev/null
 : > "$RETIRE_RELEASE"
@@ -1613,7 +1639,7 @@ assert_contains "$(cat "$pending_reply")" "Reply staged after re-arm." \
 
 rm -f -- "$pending_reply"
 ended_status="$REPLY_HOME/state/reply-host.status"
-ended_reply_out=$(RESTART_RETIRE=1 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+ended_reply_out=$(RESTART_REARM=1 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   FM_LAVISH_HOST_STATUS_FILE="$ended_status" RESTART_LOG="$RESTART_LOG" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
   "Applied the final requested change." 2>&1) \
@@ -1623,18 +1649,30 @@ assert_contains "$ended_reply_out" "session ended; acknowledgement recorded in h
 assert_contains "$(cat "$ended_status")" \
   "note: Lavish session ended; acknowledgement: Applied the final requested change." \
   "retirement-racing reply did not append the acknowledgement to the host status log"
+assert_contains "$(cat "$ended_status")" \
+  "reason: source generation changed before delivery" \
+  "retirement-racing reply did not record why board delivery was refused"
 assert_absent "$pending_reply" "retirement-racing reply left an undeliverable pending acknowledgement"
 assert_absent "$inflight_reply" "retirement-racing reply left an undeliverable in-flight acknowledgement"
 
-FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
-  "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
-  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
 : > "$REPLY_LOG"
 PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   REPLY_LOG="$REPLY_LOG" "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
 if grep -Fq -- "Applied the final requested change." "$REPLY_LOG"; then
   fail "retirement-racing reply leaked into a later re-armed session"
 fi
+
+rm -f -- "$REPLY_HOME/state/procevent/$reply_id.source"
+closed_reply_out=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  FM_LAVISH_HOST_STATUS_FILE="$ended_status" RESTART_LOG="$RESTART_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Recorded after the board closed." 2>&1) \
+  || fail "reply rejected an acknowledgement after session retirement"
+assert_contains "$closed_reply_out" "session ended; acknowledgement recorded in host status log" \
+  "retired-session reply did not explain its successful fallback"
+assert_contains "$(cat "$ended_status")" \
+  "acknowledgement: Recorded after the board closed.; reason: source is no longer registered" \
+  "retired-session reply did not record the acknowledgement and fallback reason"
 pass "Lavish host replies survive crashes and early restarts with at-least-once delivery"
 
 # The generic control hook restarts the exact registered generation immediately
@@ -1651,9 +1689,14 @@ while :; do sleep 1; done
 SH
 chmod +x "$RESTART_BLOCKER"
 pe_register "$RESTART_HOME" lavish restart-src -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+restart_generation_out=$(pe "$RESTART_HOME" generation restart-src --if-matches lavish -- \
+  "$RESTART_BLOCKER" "$RESTART_STARTED") \
+  || fail "generation did not identify the exact registered source"
+restart_generation=${restart_generation_out#generation: }
 pe "$RESTART_HOME" reconcile >/dev/null
 wait_for_lines "$RESTART_STARTED" 1 || fail "restart fixture did not start its first generation"
-pe "$RESTART_HOME" restart restart-src --if-matches lavish -- \
+pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
+  --if-matches lavish -- \
   "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
 wait_for_lines "$RESTART_STARTED" 2 \
   || fail "restart did not launch a replacement generation immediately"
@@ -1665,6 +1708,13 @@ restart_bad_status=0
 pe "$RESTART_HOME" restart restart-src --if-matches lavish -- /bin/false >/dev/null 2>&1 \
   || restart_bad_status=$?
 [ "$restart_bad_status" -ne 0 ] || fail "restart accepted argv that did not match the registration"
+pe_register "$RESTART_HOME" lavish restart-src -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+restart_generation_status=0
+pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
+  --if-matches lavish -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null 2>&1 \
+  || restart_generation_status=$?
+[ "$restart_generation_status" -ne 0 ] \
+  || fail "restart accepted a replacement registration with identical adapter argv"
 pe "$RESTART_HOME" retire restart-src >/dev/null
 pass "the generic restart hook drains the old child and replaces only an exact owned registration"
 

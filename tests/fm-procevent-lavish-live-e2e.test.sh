@@ -76,7 +76,9 @@ done
 [ "$ready" -eq 1 ] || fail "the real Lavish listener did not publish its runner-owned child"
 
 token="listener-reply-live-$PPID-$$"
+host_status="$HOME_DIR/state/lavish-reply-live.status"
 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+  FM_LAVISH_HOST_STATUS_FILE="$host_status" \
   "$ROOT/bin/fm-procevent-lavish.sh" reply "$ARTIFACT" "$token" >/dev/null \
   || fail "the public reply command failed"
 

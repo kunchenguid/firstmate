@@ -42,6 +42,8 @@
 #            Set FM_LAVISH_HOST_STATUS_FILE to the host task's status log.
 #            A second reply staged before consumption is appended after one
 #            blank line, so concurrent host progress is not overwritten.
+#            Reply delivery is bound to the registration generation active when
+#            the acknowledgement was staged.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -213,7 +215,54 @@ pending_reply_is_private() {  # <path>
     && [ "$(fm_pr_file_link_count "$1" 2>/dev/null)" = 1 ]
 }
 
-append_reply_files() {  # <older-path> <newer-path> <output-path>
+host_status_path_validate() {  # <path>
+  local host_status=$1 status_key
+  case "$host_status" in
+    "$STATE/"*.status) ;;
+    *) return 1 ;;
+  esac
+  case "$host_status" in *$'\n'*) return 1 ;; esac
+  status_key=${host_status#"$STATE/"}
+  case "$status_key" in ''|*.status/*|*/?*|.status) return 1 ;; esac
+  if [ -e "$host_status" ] || [ -L "$host_status" ]; then
+    [ -f "$host_status" ] && [ ! -L "$host_status" ] \
+      && [ "$(fm_pr_file_link_count "$host_status" 2>/dev/null)" = 1 ] || return 1
+  fi
+}
+
+reply_record_write() {  # <generation> <status-path> <input-path> <output-path>
+  {
+    printf 'generation=%s\nstatus=%s\nreply:\n' "$1" "$2"
+    cat -- "$3"
+  } > "$4"
+}
+
+reply_record_load() {  # <path>
+  local path=$1 generation_line status_line marker extra
+  pending_reply_is_private "$path" || return 1
+  {
+    IFS= read -r generation_line \
+      && IFS= read -r status_line \
+      && IFS= read -r marker
+  } < "$path" || return 1
+  case "$generation_line" in generation=*) ;; *) return 1 ;; esac
+  case "$status_line" in status=*) ;; *) return 1 ;; esac
+  [ "$marker" = reply: ] || return 1
+  REPLY_RECORD_GENERATION=${generation_line#generation=}
+  REPLY_RECORD_STATUS=${status_line#status=}
+  fm_procevent_registration_generation_valid "$REPLY_RECORD_GENERATION" || return 1
+  host_status_path_validate "$REPLY_RECORD_STATUS" || return 1
+  extra=$(perl -0777 -ne 's/\A[^\n]*\n[^\n]*\nreply:\n// or exit 1; exit(length($_) ? 0 : 1)' "$path") \
+    || return 1
+  [ -z "$extra" ] || return 1
+}
+
+reply_record_body() {  # <path>
+  perl -0777 -ne 's/\A[^\n]*\n[^\n]*\nreply:\n// or exit 1; print' "$1"
+}
+
+append_reply_input() {  # <record-path> <new-input> <output-path> <generation> <status-path>
+  printf 'generation=%s\nstatus=%s\nreply:\n' "$4" "$5" > "$3" || return 1
   perl -0777 -e '
     use strict;
     use warnings;
@@ -223,53 +272,88 @@ append_reply_files() {  # <older-path> <newer-path> <output-path>
     local $/;
     my $old_text = <$old>;
     my $new_text = <$new>;
+    $old_text =~ s/\A[^\n]*\n[^\n]*\nreply:\n// or exit 1;
     $old_text =~ s/\n+\z//;
     $new_text =~ s/\A\n+//;
     print $old_text, "\n\n", $new_text;
-  ' "$1" "$2" > "$3"
+  ' "$1" "$2" >> "$3"
 }
 
-record_ended_reply_locked() {  # <reply-input>
-  local input=$1 host_status reply_text status_text status_key
-  host_status=${FM_LAVISH_HOST_STATUS_FILE-}
-  case "$host_status" in
-    "$STATE/"*.status) ;;
-    *) die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log" ;;
-  esac
-  status_key=${host_status#"$STATE/"}
-  case "$status_key" in
-    ''|*.status/*|*/?*|.status)
-      die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
-      ;;
-  esac
-  if [ -e "$host_status" ] || [ -L "$host_status" ]; then
-    [ -f "$host_status" ] && [ ! -L "$host_status" ] \
-      && [ "$(fm_pr_file_link_count "$host_status" 2>/dev/null)" = 1 ] \
-      || die "Lavish session has ended and the host status log is unsafe"
-  fi
-  reply_text=$(cat -- "$input") || die "cannot read reply text"
+merge_reply_records() {  # <older-record> <newer-record> <output-path> <generation> <status-path>
+  printf 'generation=%s\nstatus=%s\nreply:\n' "$4" "$5" > "$3" || return 1
+  perl -0777 -e '
+    use strict;
+    use warnings;
+    my ($old_path, $new_path) = @ARGV;
+    open my $old, "<", $old_path or exit 1;
+    open my $new, "<", $new_path or exit 1;
+    local $/;
+    my $old_text = <$old>;
+    my $new_text = <$new>;
+    $old_text =~ s/\A[^\n]*\n[^\n]*\nreply:\n// or exit 1;
+    $new_text =~ s/\A[^\n]*\n[^\n]*\nreply:\n// or exit 1;
+    $old_text =~ s/\n+\z//;
+    $new_text =~ s/\A\n+//;
+    print $old_text, "\n\n", $new_text;
+  ' "$1" "$2" >> "$3"
+}
+
+record_ended_reply_text_locked() {  # <reply-text> <status-path> <reason>
+  local reply_text=$1 host_status=$2 reason=$3 status_text reason_text
+  host_status_path_validate "$host_status" \
+    || die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
   status_text=$(printf '%s' "$reply_text" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  (umask 077; printf 'note: Lavish session ended; acknowledgement: %s\n' "$status_text" >> "$host_status") \
+  reason_text=$(printf '%s' "$reason" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  (umask 077; printf 'note: Lavish session ended; acknowledgement: %s; reason: %s\n' \
+    "$status_text" "$reason_text" >> "$host_status") \
     || die "Lavish session has ended but the acknowledgement could not be recorded"
-  printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
 }
 
-remove_reply_state_locked() {  # <source-id>
-  local id=$1 path label
+record_ended_reply_locked() {  # <reply-input> <status-path> <reason>
+  local reply_text
+  reply_text=$(cat -- "$1") || die "cannot read reply text"
+  record_ended_reply_text_locked "$reply_text" "$2" "$3"
+}
+
+fallback_reply_record_locked() {  # <record-path> <reason>
+  local path=$1 reason=$2 reply_text
+  reply_record_load "$path" || die "reply record is unreadable"
+  reply_text=$(reply_record_body "$path") || die "cannot read reply record"
+  record_ended_reply_text_locked "$reply_text" "$REPLY_RECORD_STATUS" "$reason"
+  rm -f -- "$path" || die "cannot remove stale reply record"
+}
+
+remove_reply_generation_locked() {  # <source-id> <generation> <reason>
+  local id=$1 generation=$2 reason=$3 path label
   for label in pending in-flight; do
     case "$label" in
       pending) path=$(pending_reply_path "$id") ;;
       in-flight) path=$(inflight_reply_path "$id") ;;
     esac
     [ -e "$path" ] || [ -L "$path" ] || continue
-    pending_reply_is_private "$path" \
-      || die "retired source left an unsafe $label reply path: $id"
-    rm -f -- "$path" || die "cannot remove retired $label reply: $id"
+    reply_record_load "$path" || die "$label reply record is unreadable: $id"
+    [ "$REPLY_RECORD_GENERATION" = "$generation" ] || continue
+    fallback_reply_record_locked "$path" "$reason"
+  done
+}
+
+discard_stale_reply_records_locked() {  # <source-id> <live-generation>
+  local id=$1 live_generation=$2 path label
+  for label in pending in-flight; do
+    case "$label" in
+      pending) path=$(pending_reply_path "$id") ;;
+      in-flight) path=$(inflight_reply_path "$id") ;;
+    esac
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    reply_record_load "$path" || die "$label reply record is unreadable: $id"
+    [ "$REPLY_RECORD_GENERATION" = "$live_generation" ] || \
+      fallback_reply_record_locked "$path" "source generation changed before delivery"
   done
 }
 
 cmd_reply() {
   local artifact=${1-} input real id reg registration pending staged cleanup_command
+  local generation_line generation='' current_generation host_status
   [ -n "$artifact" ] || usage
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
@@ -303,34 +387,61 @@ cmd_reply() {
   [ -d "$reg" ] && [ ! -L "$reg" ] || die "Lavish source is not armed: $id"
   registration="$reg/$id.source"
   pending=$(pending_reply_path "$id")
+  host_status=${FM_LAVISH_HOST_STATUS_FILE-}
+  host_status_path_validate "$host_status" \
+    || die "FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
+  generation_line=$("$SCRIPT_DIR/fm-procevent.sh" generation "$id" --if-matches lavish -- \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" 2>/dev/null) || generation_line=
+  case "$generation_line" in
+    'generation: '*) generation=${generation_line#generation: } ;;
+  esac
+  [ -z "$generation" ] || fm_procevent_registration_generation_valid "$generation" \
+    || die "cannot read Lavish source registration generation: $id"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if ! fm_procevent_registration_matches_locked "$STATE" lavish "$id" \
     "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"; then
     if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      record_ended_reply_locked "$input"
+      record_ended_reply_locked "$input" "$host_status" "source is no longer registered"
       fm_procevent_source_lock_release "$id"
+      printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
       return 0
     fi
     fm_procevent_source_lock_release "$id"
     die "Lavish source is not armed by this adapter: $id"
   fi
+  current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot read Lavish source registration generation: $id"
+  }
+  if [ -z "$generation" ] || [ "$current_generation" != "$generation" ]; then
+    record_ended_reply_locked "$input" "$host_status" "source generation changed before staging"
+    fm_procevent_source_lock_release "$id"
+    printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
+    return 0
+  fi
+  discard_stale_reply_records_locked "$id" "$generation"
   staged=$(umask 077; mktemp "$reg/.pending-reply.XXXXXX") || {
     fm_procevent_source_lock_release "$id"
     die "cannot stage reply"
   }
   if [ -e "$pending" ] || [ -L "$pending" ]; then
-    if ! pending_reply_is_private "$pending"; then
+    if ! reply_record_load "$pending"; then
       rm -f -- "$staged"
       fm_procevent_source_lock_release "$id"
-      die "pending reply is not a private regular file: $id"
+      die "pending reply record is unreadable: $id"
     fi
-    if ! append_reply_files "$pending" "$input" "$staged"; then
+    if [ "$REPLY_RECORD_STATUS" != "$host_status" ]; then
+      rm -f -- "$staged"
+      fm_procevent_source_lock_release "$id"
+      die "pending reply belongs to a different host status log: $id"
+    fi
+    if ! append_reply_input "$pending" "$input" "$staged" "$generation" "$host_status"; then
       rm -f -- "$staged"
       fm_procevent_source_lock_release "$id"
       die "cannot append pending reply"
     fi
   else
-    cp -- "$input" "$staged" || {
+    reply_record_write "$generation" "$host_status" "$input" "$staged" || {
       rm -f -- "$staged"
       fm_procevent_source_lock_release "$id"
       die "cannot stage reply"
@@ -348,13 +459,16 @@ cmd_reply() {
   }
   fm_procevent_source_lock_release "$id"
 
-  if ! "$SCRIPT_DIR/fm-procevent.sh" restart "$id" --if-matches lavish -- \
+  if ! "$SCRIPT_DIR/fm-procevent.sh" restart "$id" --if-generation "$generation" \
+    --if-matches lavish -- \
     "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" >/dev/null; then
     fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
-    if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      remove_reply_state_locked "$id"
-      record_ended_reply_locked "$input"
+    current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+    if [ "$current_generation" != "$generation" ]; then
+      remove_reply_generation_locked "$id" "$generation" \
+        "source generation changed before delivery"
       fm_procevent_source_lock_release "$id"
+      printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
       return 0
     fi
     fm_procevent_source_lock_release "$id"
@@ -364,21 +478,24 @@ cmd_reply() {
 }
 
 recover_inflight_reply_locked() {  # <source-id> <registry-dir>
-  local id=$1 reg=$2 pending inflight staged
+  local id=$1 reg=$2 pending inflight staged generation status
   pending=$(pending_reply_path "$id")
   inflight=$(inflight_reply_path "$id")
   [ -e "$inflight" ] || [ -L "$inflight" ] || return 0
-  pending_reply_is_private "$inflight" \
-    || die "in-flight reply is not a private regular file: $id"
+  reply_record_load "$inflight" || die "in-flight reply record is unreadable: $id"
+  generation=$REPLY_RECORD_GENERATION
+  status=$REPLY_RECORD_STATUS
   if [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
     mv -- "$inflight" "$pending" || die "cannot recover in-flight reply: $id"
     return 0
   fi
-  pending_reply_is_private "$pending" \
-    || die "pending reply is not a private regular file: $id"
+  reply_record_load "$pending" || die "pending reply record is unreadable: $id"
+  [ "$REPLY_RECORD_GENERATION" = "$generation" ] \
+    && [ "$REPLY_RECORD_STATUS" = "$status" ] \
+    || die "pending and in-flight replies belong to different source generations: $id"
   staged=$(umask 077; mktemp "$reg/.pending-reply.XXXXXX") \
     || die "cannot stage recovered reply: $id"
-  if ! append_reply_files "$inflight" "$pending" "$staged"; then
+  if ! merge_reply_records "$inflight" "$pending" "$staged" "$generation" "$status"; then
     rm -f -- "$staged"
     die "cannot append recovered reply: $id"
   fi
@@ -393,23 +510,36 @@ recover_inflight_reply_locked() {  # <source-id> <registry-dir>
   rm -f -- "$inflight" || die "cannot finish in-flight reply recovery: $id"
 }
 
-restore_inflight_reply() {  # <source-id>
-  local id=$1 reg
+restore_inflight_reply() {  # <source-id> <generation>
+  local id=$1 expected_generation=$2 reg live_generation
   reg=$(fm_procevent_registry_dir "$STATE")
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  live_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+  discard_stale_reply_records_locked "$id" "$live_generation"
+  if [ "$live_generation" != "$expected_generation" ]; then
+    fm_procevent_source_lock_release "$id"
+    return 0
+  fi
   recover_inflight_reply_locked "$id" "$reg"
   fm_procevent_source_lock_release "$id"
 }
 
-commit_inflight_reply() {  # <source-id>
-  local id=$1 inflight
+commit_inflight_reply() {  # <source-id> <generation>
+  local id=$1 expected_generation=$2 inflight live_generation
   inflight=$(inflight_reply_path "$id")
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  live_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+  discard_stale_reply_records_locked "$id" "$live_generation"
   if [ -e "$inflight" ] || [ -L "$inflight" ]; then
-    pending_reply_is_private "$inflight" || {
+    reply_record_load "$inflight" || {
       fm_procevent_source_lock_release "$id"
-      die "in-flight reply is not a private regular file: $id"
+      die "in-flight reply record is unreadable: $id"
     }
+    [ "$live_generation" = "$expected_generation" ] \
+      && [ "$REPLY_RECORD_GENERATION" = "$expected_generation" ] || {
+        fm_procevent_source_lock_release "$id"
+        die "in-flight reply generation changed before commit: $id"
+      }
     rm -f -- "$inflight" || {
       fm_procevent_source_lock_release "$id"
       die "cannot commit in-flight reply: $id"
@@ -419,9 +549,10 @@ commit_inflight_reply() {  # <source-id>
 }
 
 take_pending_reply() {  # <artifact>
-  local artifact=$1 id reg pending inflight
+  local artifact=$1 id reg pending inflight live_generation
   POLL_AGENT_REPLY=
   POLL_REPLY_SOURCE_ID=
+  POLL_REPLY_GENERATION=
   [ -e "$STATE" ] || return 1
   STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
   reg=$(fm_procevent_registry_dir "$STATE")
@@ -430,21 +561,28 @@ take_pending_reply() {  # <artifact>
   pending=$(pending_reply_path "$id")
   inflight=$(inflight_reply_path "$id")
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  live_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+  discard_stale_reply_records_locked "$id" "$live_generation"
   recover_inflight_reply_locked "$id" "$reg"
   if [ ! -e "$pending" ] && [ ! -L "$pending" ]; then
     fm_procevent_source_lock_release "$id"
     return 1
   fi
-  if ! pending_reply_is_private "$pending"; then
+  if ! reply_record_load "$pending"; then
     fm_procevent_source_lock_release "$id"
-    die "pending reply is not a private regular file: $id"
+    die "pending reply record is unreadable: $id"
   fi
+  if [ -z "$live_generation" ] || [ "$REPLY_RECORD_GENERATION" != "$live_generation" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "pending reply generation does not match the live source: $id"
+  fi
+  POLL_REPLY_GENERATION=$REPLY_RECORD_GENERATION
   if ! mv -- "$pending" "$inflight"; then
     fm_procevent_source_lock_release "$id"
     die "cannot claim pending reply"
   fi
   fm_procevent_source_lock_release "$id"
-  POLL_AGENT_REPLY=$(cat -- "$inflight") || die "cannot read claimed reply"
+  POLL_AGENT_REPLY=$(reply_record_body "$inflight") || die "cannot read claimed reply"
   [ -n "$POLL_AGENT_REPLY" ] || die "claimed reply text is empty"
   POLL_REPLY_SOURCE_ID=$id
   return 0
@@ -571,7 +709,8 @@ cmd_poll() {
       reply_claimed=1
     fi
     if [ -n "$restart_signal" ]; then
-      [ "$reply_claimed" -eq 0 ] || restore_inflight_reply "$POLL_REPLY_SOURCE_ID"
+      [ "$reply_claimed" -eq 0 ] \
+        || restore_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
       case "$restart_signal" in
         HUP) return 129 ;;
         INT) return 130 ;;
@@ -591,9 +730,9 @@ cmd_poll() {
       done
       if [ "$grace_tick" -eq "$POLL_REPLY_GRACE_TICKS" ] \
         && [ -z "$restart_signal" ] && kill -0 "$poll_pid" 2>/dev/null; then
-        commit_inflight_reply "$POLL_REPLY_SOURCE_ID"
+        commit_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
       else
-        restore_inflight_reply "$POLL_REPLY_SOURCE_ID"
+        restore_inflight_reply "$POLL_REPLY_SOURCE_ID" "$POLL_REPLY_GENERATION"
       fi
     fi
     wait "$poll_pid"
