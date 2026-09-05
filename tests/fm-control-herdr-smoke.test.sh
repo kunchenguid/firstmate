@@ -37,8 +37,10 @@ cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)

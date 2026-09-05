@@ -77,6 +77,17 @@ printf 'mutation\n' >> "$1"
 SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
 chmod +x "$REMOTE_ROOT/bin/tasks-axi"
+# The real worker reconstructs PATH from the account, bypassing FAKEBIN.
+# Keep its doctor status probe off the host's Herdr CLI.
+cat > "$REMOTE_ROOT/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'status --json --session fm-remote')
+    printf '{"server":{"running":false}}\n' ;;
+  *) printf 'unexpected fixture Herdr call: %s\n' "$*" >&2; exit 1 ;;
+esac
+SH
+chmod +x "$REMOTE_ROOT/bin/herdr"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -229,10 +240,12 @@ MANAGER_DIRS=(
   "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
   "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
-OPTIONAL_DIRS=(
+NIX_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
   /run/current-system/sw/bin
+)
+OPTIONAL_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
@@ -255,6 +268,12 @@ fi
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
 for candidate in "${MANAGER_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
+done
+for candidate in "${NIX_DIRS[@]}"; do
+  [ -d "$candidate" ] || continue
+  # Nix's bin itself can be a symlink; the child uses its physical target.
+  if [ -L "$candidate" ]; then candidate=$(cd "$candidate" && pwd -P); fi
+  expect_dir "$candidate"
 done
 for candidate in "${OPTIONAL_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
@@ -288,7 +307,12 @@ done
 pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
 WORKER_PID=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-kill -TERM "$WORKER_PID"
+# The recorded PID is the serving child; its supervisor would restart it.
+# Stop the complete tree to model an actually stopped worker.
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
+fm_remote_job_stop_worker_tree "$WORKER_PID" || fail "could not stop the worker tree"
 for _ in $(seq 1 100); do
   [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] && break
   sleep 0.05
@@ -328,6 +352,8 @@ DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"
 mkdir -p "$DOCTOR_BIN" "$DOCTOR_HOME"
 ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
+ln -sf "$(command -v jq)" "$DOCTOR_BIN/jq"
+ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
 # Report a non-darwin host so this file keeps testing tool resolution alone and
 # never reads or writes the real account's launch agents.
 cat > "$DOCTOR_BIN/uname" <<'SH'
@@ -349,6 +375,7 @@ ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
 # The direct doctor fixture needs the complete required tool set. These stubs
 # exercise resolution only; the dedicated doctor suite owns worker and Herdr
 # lifecycle behavior against controlled launchctl fixtures.
+rm "$DOCTOR_BIN/jq"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
 printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n"\n' > "$DOCTOR_BIN/herdr"
 cat > "$DOCTOR_BIN/tasks-axi" <<'SH'

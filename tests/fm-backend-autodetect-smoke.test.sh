@@ -59,7 +59,7 @@ herdr_forget_inherited_pane
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
   fail "could not generate an isolated Herdr lab session name"
@@ -81,6 +81,8 @@ on_exit() {
   exit "$status"
 }
 trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---

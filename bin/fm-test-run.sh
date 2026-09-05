@@ -29,6 +29,10 @@
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
+#   --check-herdr-leaks
+#                   after the suite, fail if this account still has an fm-remote
+#                   or fm-lab-* Herdr server. Read-only; never stops a server.
+#                   Use when no other lab suite is running on the account.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0
@@ -152,6 +156,7 @@ JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
+CHECK_HERDR_LEAKS=0
 JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
@@ -1737,6 +1742,10 @@ while [ "$#" -gt 0 ]; do
       EXCLUDE_FAMILIES+=("${1#--exclude-family=}")
       shift
       ;;
+    --check-herdr-leaks)
+      CHECK_HERDR_LEAKS=1
+      shift
+      ;;
     --fail-on-gate-skip)
       [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr not found')"
       FAIL_ON_GATE_SKIP=$2
@@ -2343,6 +2352,32 @@ if [ -n "$MAX_WALL_MS" ]; then
   printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
   if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
     log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
+fi
+
+if [ "$CHECK_HERDR_LEAKS" -eq 1 ]; then
+  # Kernel inventory does not contact Herdr or risk starting a server.
+  if ps -u "$(id -u)" -o pid=,stat=,args= > "$RUN_TMP/herdr-processes"; then
+    awk '
+      $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
+        for (i = 5; i <= NF; i++) {
+          name = ""
+          if ($i == "--session") name = $(i + 1)
+          else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+          if (name == "fm-remote" || name ~ /^fm-lab-/) print $1, name
+        }
+      }
+    ' "$RUN_TMP/herdr-processes" > "$RUN_TMP/herdr-leaks"
+    if [ -s "$RUN_TMP/herdr-leaks" ]; then
+      log "Herdr servers survived the suite (pid session):"
+      cat "$RUN_TMP/herdr-leaks" >&2
+      AGG_RC=1
+    else
+      log "no fm-remote or fm-lab-* Herdr server survived the suite"
+    fi
+  else
+    log "could not inspect Herdr server processes after the suite"
     AGG_RC=1
   fi
 fi

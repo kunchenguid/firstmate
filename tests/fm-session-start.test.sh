@@ -71,6 +71,10 @@ new_world() {
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
+  # Later cases replace this entry with a stub, so use a regular wrapper:
+  # writing through a symlink would try to overwrite the installed jq binary.
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v jq)" > "$fakebin/jq"
+  chmod +x "$fakebin/jq"
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
@@ -719,7 +723,7 @@ EOF
     and .home == $home
     and (.generated_epoch | type) == "number"
   ' "$home/state/home-summary.json" >/dev/null \
-    || fail "a locked session start did not publish the home summary ledger"
+    || fail "a locked session start did not publish the home summary ledger: $(cat "$home/state/.home-summary-refresh.log" 2>/dev/null)"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 

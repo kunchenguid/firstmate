@@ -60,17 +60,21 @@ PANE_ID=
 LOOP_SCRIPT=
 
 cleanup_all() {
+  local status=$?
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  herdr_safe_stop_and_delete "$SESSION" || status=1
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  return "$status"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null
@@ -532,5 +536,5 @@ echo "all real-herdr afk injection e2e tests passed"
 
 fm_backend_herdr_kill "$SUPERVISOR_TARGET" 2>/dev/null || true
 fm_backend_herdr_kill "$SESSION:$FAKE_CREW_PANE_ID" 2>/dev/null || true
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

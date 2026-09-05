@@ -234,6 +234,56 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+test_live_suite_exit_cleanup() {
+  local fixture suite mode rc out
+  fixture="$TMP_ROOT/lifecycle-helper"
+  fm_fake_exit0 "$FAKEBIN" treehouse pi claude
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  name) printf 'fm-lab-exit-fixture-%s\n' "$PPID" ;;
+  provision)
+    printf '%s\n' "$2" > "$FM_EXIT_TEST_STATE"
+    case "$FM_EXIT_TEST_MODE" in
+      failure) exit 1 ;;
+      INT|TERM) kill -"$FM_EXIT_TEST_MODE" "$PPID" ;;
+    esac
+    ;;
+  teardown)
+    [ "$(cat "$FM_EXIT_TEST_STATE")" = "$2" ] || exit 1
+    printf '%s\n' "$2" >> "$FM_EXIT_TEST_LOG"
+    ;;
+  *) exit 99 ;;
+esac
+SH
+  chmod +x "$fixture"
+  # These are the actual executable suites, interrupted at their provisioning
+  # boundary, before any real backend work. Their own EXIT/INT/TERM traps run.
+  for suite in fm-backend-herdr-smoke fm-backend-herdr-prune-safety-e2e \
+    fm-backend-herdr-respawn-idem-e2e fm-backend-herdr-workspace-per-home-e2e \
+    fm-control-herdr-smoke fm-backend-herdr-eventwait-smoke \
+    fm-backend-herdr-launcher-workspace-e2e fm-backend-autodetect-smoke \
+    fm-backend-herdr-focus-flash-e2e fm-herdr-session-cleanup-e2e \
+    fm-backend-herdr-presentation-e2e fm-afk-inject-herdr-e2e \
+    fm-afk-pi-herdr-return-e2e fm-herdr-submit-confirm-live-e2e \
+    fm-send-secondmate-marker-herdr-e2e; do
+    for mode in failure INT TERM; do
+      : > "$TMP_ROOT/exit-log"
+      rm -f "$TMP_ROOT/exit-state"
+      rc=0
+      out=$(PATH="$FAKEBIN:$PATH" HERDR_LAB_HELPER="$fixture" \
+        FM_AFK_PI_HERDR_E2E=1 FM_HERDR_SUBMIT_CONFIRM_LIVE=1 FM_SEND_MARKER_HERDR_E2E=1 \
+        FM_EXIT_TEST_MODE="$mode" FM_EXIT_TEST_STATE="$TMP_ROOT/exit-state" \
+        FM_EXIT_TEST_LOG="$TMP_ROOT/exit-log" \
+        bash "$ROOT/tests/$suite.test.sh" 2>&1) || rc=$?
+      [ "$rc" -ne 0 ] || fail "$suite ignored $mode during provisioning: $out"
+      [ -s "$TMP_ROOT/exit-log" ] || fail "$suite did not tear down after $mode: $out"
+    done
+  done
+  pass "real Herdr suite entry points tear down their lab on provisioning failure, INT, and TERM"
+}
+
+test_live_suite_exit_cleanup
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction

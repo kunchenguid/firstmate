@@ -51,6 +51,8 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 
 # Keep the lab helper as the only CLI transport. Production adapter calls have

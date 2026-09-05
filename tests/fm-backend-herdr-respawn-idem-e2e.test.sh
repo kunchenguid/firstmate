@@ -54,11 +54,13 @@ SESSION="fm-lab-respawn-idem-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-respawn-idem.XXXXXX")
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
+  herdr_safe_stop_and_delete "$SESSION" || return 1
   rm -rf "$SCRATCH"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -110,10 +112,10 @@ pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondm
 # underlying process (a fresh shell) and its agent_status to unknown - the
 # exact husk shape a restored task tab comes back in.
 
-fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
+"$HERDR_LAB_HELPER" stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart"
 sleep 0.5
-fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the restart"
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "the isolated session's server did not come back up after the restart"
 
 if ! herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'ID stability'), but it is gone"
@@ -178,5 +180,5 @@ pass "fixed: a genuinely live duplicate (a real registered agent) still refuses 
 fm_backend_herdr_kill "$SESSION:$NEW_CREW_PANE_ID"
 fm_backend_herdr_kill "$SESSION:$NEW_SM_PANE_ID"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

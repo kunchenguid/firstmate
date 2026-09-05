@@ -47,7 +47,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-launcher-e2e.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws) || {
   rm -rf "$TMP_ROOT"
   printf 'not ok - could not generate an isolated Herdr lab session name\n' >&2
@@ -72,7 +72,9 @@ cleanup_all() {
   rm -rf "$TMP_ROOT"
   return "$status"
 }
-trap cleanup_all EXIT
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
 
 lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }

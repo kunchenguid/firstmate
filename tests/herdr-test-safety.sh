@@ -11,6 +11,7 @@ set -u
 export FM_GATE_REFUSE_BYPASS=1
 
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh}
 # shellcheck source=/dev/null
 . "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
 
@@ -38,5 +39,9 @@ herdr_refuse_if_default() { # <session>
 }
 
 herdr_safe_stop_and_delete() { # <session>
-  fm_herdr_lab_teardown "$1"
+  # fail() and EXIT can both clean up; only a verified successful teardown
+  # earns the idempotent return, never a missing or failed fleet tripwire.
+  [ "${HERDR_TEST_CLEANED_SESSION:-}" != "$1" ] || return 0
+  "$HERDR_LAB_HELPER" teardown "$1" || return 1
+  HERDR_TEST_CLEANED_SESSION=$1
 }

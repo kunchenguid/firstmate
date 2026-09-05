@@ -39,8 +39,10 @@ cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -229,10 +231,10 @@ pass "real herdr: list_live stays scoped to each home's own workspace - neither 
 # still resolve, unchanged, after a `session stop` + fresh server restart, all
 # scoped to this suite's OWN isolated $SESSION - never the default session.
 
-fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 \
+"$HERDR_LAB_HELPER" stop "$SESSION" >/dev/null 2>&1 \
   || fail "could not stop the isolated session for the restart-stability check"
 sleep 0.5
-fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
 POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
@@ -351,5 +353,5 @@ pass "real herdr: list_live discovers a live task tab by fm-<id> label"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID2"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

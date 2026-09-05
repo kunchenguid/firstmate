@@ -948,6 +948,38 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### 2026-09-05 host portability and test cleanup
+
+Verified on WSL2 Linux x86_64 with Bash 5.3.9, jq 1.8.1, and Herdr 0.7.5 protocol 17.
+The remote fixtures exercise the installed Nix profile, a subreaper-adopted worker, and replacement of a stale worker launched through the production Linux process-group boundary.
+The startup fixture keeps the real summary-publication assertion while making jq available outside system directories.
+These fixture changes are independent of the primary agent harness.
+
+```sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-on.test.sh tests/fm-remote-job-orphan-reap.test.sh tests/fm-remote-doctor.test.sh tests/fm-herdr-lab.test.sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-session-start.test.sh
+bin/fm-test-run.sh tests/fm-test-run.test.sh
+```
+
+The corresponding summary lines were:
+
+```text
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=85649
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=152354
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=147368
+```
+
+Both invocations with the leak check reported:
+
+```text
+fm-test-run: no fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+`tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
+It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
+The runner regression separately proves that the process check rejects surviving test servers and unreadable inventories while accepting the default server, readers, and zombies.
+This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

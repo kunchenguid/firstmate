@@ -1453,6 +1453,45 @@ test_fixture_cleanup_stops_only_its_own_users
 
 test_fixture_timeout_scale
 
+test_herdr_leak_check() {
+  local tmp repo out rc row
+  tmp=$(fm_test_tmproot fm-test-run-herdr-leaks)
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests" "$tmp/fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/fm-fixture.test.sh"
+  cat > "$tmp/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_LEAK_PS_FAIL:-0}" = 0 ] || exit 1
+cat "$FM_LEAK_PS_ROWS"
+SH
+  chmod +x "$tmp/fakebin/ps"
+  for row in \
+    '42 S herdr server --session fm-remote' \
+    '43 S /nix/store/example/bin/herdr server --session=fm-lab-owned'; do
+    printf '%s\n' "$row" > "$tmp/rows"
+    rc=0
+    out=$(FM_LEAK_PS_ROWS="$tmp/rows" PATH="$tmp/fakebin:$PATH" \
+      "$repo/bin/fm-test-run.sh" --jobs 1 --check-herdr-leaks tests/fm-fixture.test.sh 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "a surviving Herdr test server passed: $row"
+    assert_contains "$out" 'Herdr servers survived the suite' "missing survivor diagnostic"
+  done
+  printf '%s\n' '44 S herdr server --session default' \
+    '45 S herdr status --session fm-lab-reader' \
+    '46 Z herdr server --session fm-lab-dead' > "$tmp/rows"
+  out=$(FM_LEAK_PS_ROWS="$tmp/rows" PATH="$tmp/fakebin:$PATH" \
+    "$repo/bin/fm-test-run.sh" --jobs 1 --check-herdr-leaks tests/fm-fixture.test.sh 2>&1) \
+    || fail "default, readers, or zombies were mistaken for a live test server: $out"
+  assert_contains "$out" 'no fm-remote or fm-lab-* Herdr server survived' "missing clean inventory result"
+  rc=0
+  out=$(FM_LEAK_PS_FAIL=1 FM_LEAK_PS_ROWS="$tmp/rows" PATH="$tmp/fakebin:$PATH" \
+    "$repo/bin/fm-test-run.sh" --jobs 1 --check-herdr-leaks tests/fm-fixture.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "unreadable process inventory passed the Herdr leak check"
+  assert_contains "$out" 'could not inspect Herdr server processes' "missing inventory failure diagnostic"
+  pass "Herdr leak check refuses live test servers and unreadable inventory without lifecycle calls"
+}
+
+test_herdr_leak_check
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
