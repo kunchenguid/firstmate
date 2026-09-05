@@ -550,6 +550,62 @@ SH
   pass "fm-mail: poll sanitizes tabs and newlines in header fields"
 }
 
+test_poll_bounded_fetch_progresses_large_backlog() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # Fake python3 emulating the bounded poll_list: read FM_MAIL_CURSOR, return
+  # only uids not already recorded in the cursor, capped at the poll cap. Five
+  # unseen messages with a cap of two must progress two per poll and finish
+  # cleanly, never stalling on the already-surfaced head of a large backlog.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+cursor="$FM_MAIL_CURSOR"
+cap="${FM_MAIL_POLL_MAX_WAKES:-20}"
+seen=""
+[ -f "$cursor" ] && seen="$(grep -v '^uidvalidity=' "$cursor" 2>/dev/null || true)"
+printf 'uidvalidity\t90009\n'
+count=0
+for u in 91 92 93 94 95; do
+  if printf '%s\n' "$seen" | grep -Fqx "$u"; then continue; fi
+  [ "$count" -ge "$cap" ] && break
+  printf '%s\t2026-09-05T00:00:00Z\talice@example.com\tM\n' "$u"
+  count=$((count + 1))
+done
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.wake-queue"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" FM_MAIL_POLL_MAX_WAKES=2 \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first bounded poll must succeed"
+  assert_contains "$out" "woke for 91" "first batch surfaces 91"
+  assert_contains "$out" "woke for 92" "first batch surfaces 92"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" FM_MAIL_POLL_MAX_WAKES=2 \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "second bounded poll must succeed"
+  assert_contains "$out" "woke for 93" "second batch surfaces 93"
+  assert_contains "$out" "woke for 94" "second batch surfaces 94"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" FM_MAIL_POLL_MAX_WAKES=2 \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "third bounded poll must succeed"
+  assert_contains "$out" "woke for 95" "tail batch surfaces 95"
+  assert_not_contains "$out" "woke for 91" "already-surfaced mail never re-wakes"
+  pass "fm-mail: bounded fetch makes progress through a large backlog without re-surfacing mail"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -568,3 +624,4 @@ test_poll_rolls_back_wake_without_durable_record
 test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake
 test_poll_caps_wakes_per_run
 test_poll_sanitizes_header_fields
+test_poll_bounded_fetch_progresses_large_backlog
