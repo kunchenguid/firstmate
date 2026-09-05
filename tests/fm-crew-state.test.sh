@@ -2235,6 +2235,55 @@ EOF
   pass "the coarse ledger route is withheld from an unbound co-branch crew while a sibling is bound"
 }
 
+# The sibling scan is scoped by the `project=` root bin/fm-spawn.sh records.
+# Two records of the SAME project sharing a branch: the bound sibling still
+# withholds the ledger's branch credit from the unbound crew.
+test_same_project_bound_sibling_withholds_coarse_credit() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case project-same fm/shared-project-same)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "project=$d/repo" "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000031"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "project=$d/repo" "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'paused: waiting on the captain\n' > "$d/state/other.status"
+  arm_idle_record "$d/state" other
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01NOBODYSRUN00000000000031)"
+  FM_FAKE_RUNS_LIST="  running    fm/shared-project-same $(git -C "$d/wt-other" rev-parse --short=7 HEAD)  2026-09-04 10:05"
+  out=$(run_crew_state "$d" other)
+  assert_not_contains "$out" "validating (background run)" \
+    "a bound sibling of the same project must still withhold the ledger's branch credit"
+  assert_not_contains "$out" "state: working" "the unbound crew must not read working on the sibling's run"
+  assert_contains "$out" "state: paused" "the unbound crew falls to its own declared wait"
+  pass "a same-project bound sibling on the branch withholds coarse credit"
+}
+
+# A bound record of ANOTHER project is never this branch's claimant, even when
+# its worktree happens to sit on a branch of the same name: it is skipped, and
+# the unbound crew keeps the ledger's branch credit.
+test_other_project_bound_sibling_is_ignored_by_the_coarse_gate() {
+  reset_fakes
+  local d out
+  d=$(make_shared_branch_case project-other fm/shared-project-other)
+  arm_shared_head "$d"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "project=$d/elsewhere-repo" "kind=ship" "mode=no-mistakes" "nm_run=01BOUNDRUN0000000000000032"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "project=$d/repo" "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'paused: waiting on the captain\n' > "$d/state/other.status"
+  arm_idle_record "$d/state" other
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/other-crew 01NOBODYSRUN00000000000032)"
+  FM_FAKE_RUNS_LIST="  running    fm/shared-project-other $(git -C "$d/wt-other" rev-parse --short=7 HEAD)  2026-09-04 10:05"
+  out=$(run_crew_state "$d" other)
+  assert_contains "$out" "validating (background run)" \
+    "a bound record of another project must not withhold this branch's ledger credit"
+  assert_contains "$out" "state: working" "the unbound crew keeps the branch's run"
+  pass "a bound sibling of another project is ignored by the coarse gate"
+}
+
 # A bound sibling holds the branch-level route only through its recorded
 # worktree: crew B bound its run on X and then detached its worktree
 # (mid-rebase, a checkout by sha). When `axi status` answers B's run directly,
@@ -2570,6 +2619,8 @@ test_no_bindings_on_the_branch_preserves_legacy_behaviour
 test_bound_crew_ignores_a_run_that_is_not_its_own
 test_bound_crew_finds_its_own_run_by_id_when_axi_answers_another_branch
 test_unbound_cobranch_crew_is_withheld_coarse_credit_while_a_sibling_is_bound
+test_same_project_bound_sibling_withholds_coarse_credit
+test_other_project_bound_sibling_is_ignored_by_the_coarse_gate
 test_detached_bound_sibling_owns_its_run_by_id_but_no_longer_holds_the_branch
 test_bound_crew_with_a_stale_own_run_is_not_credited_a_siblings_current_row
 test_bound_crew_whose_own_run_is_on_another_branch_takes_no_ledger_credit
