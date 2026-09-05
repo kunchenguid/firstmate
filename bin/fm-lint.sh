@@ -46,6 +46,22 @@
 #   fm-lint.sh --help                  print this usage
 set -u
 
+# fm-lint.sh is routinely invoked by tooling from a non-interactive shell with
+# no process group of its own (a worker's tool call, a background job).
+# Without isolation, it inherits whatever ambient process group its caller
+# happens to share with other processes, so that caller's own unrelated
+# cleanup (a process-group-wide signal to reap stray background jobs after
+# its own command finishes) can kill this script outright before it ever
+# prints its real verdict. Re-exec once through perl's setpgrp so this script
+# always owns its process group, the same isolation already given to each
+# ShellCheck worker below. FM_LINT_ISOLATED is also set by fm_lint_run_worker
+# for the private --internal-worker recursion, which is isolated by its
+# caller before it ever reaches this script.
+if [ "${FM_LINT_ISOLATED:-0}" != 1 ] && command -v perl >/dev/null 2>&1; then
+  FM_LINT_ISOLATED=1 exec perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+    -- "${BASH:-bash}" "$0" "$@"
+fi
+
 REQUIRED_SHELLCHECK=0.11.0
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
@@ -408,18 +424,18 @@ fm_lint_run_worker() {  # <worker-index>
     if [ "$(uname)" = Darwin ]; then
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_ISOLATED=1 \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_ISOLATED=1 \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_ISOLATED=1 \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }

@@ -923,6 +923,99 @@ SH
   pass "jobs=1 and jobs=2 stop complete worker trees with and without telemetry"
 }
 
+# test_survives_ambient_ancestor_group_signal reproduces the 2026-09-05
+# incident: a worker invoked fm-lint.sh from a non-interactive shell with no
+# setsid, so fm-lint.sh shared that caller's ambient process group. When the
+# caller later sent a process-group-wide SIGTERM (ordinary cleanup after its
+# own command, reaping any stray background jobs), fm-lint.sh had no process
+# group of its own to protect it and died with exit 143, never printing its
+# real verdict; wrapping the same invocation in setsid worked.
+#
+# The "ancestor" below stands in for that caller. It traps TERM with a real
+# no-op command handler, never the empty-string `trap ''`: POSIX shells make
+# an ignored (`trap ''`) signal disposition an inherited SIG_IGN that survives
+# into every subsequent child, which would also silently defang fm-lint.sh's
+# own TERM trap and invalidate this test. A caught handler resets to default
+# across exec like any other, so fm-lint.sh starts with an ordinary signal
+# disposition, exactly like the real incident.
+test_survives_ambient_ancestor_group_signal() {
+  local tmp fakebin fixture ready outfile rcfile ancestor ancestor_pid i
+  tmp=$(fm_test_tmproot fm-lint-ancestor-signal)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/good.sh"
+  ready="$tmp/shellcheck.ready"
+  outfile="$tmp/lint.out"
+  rcfile="$tmp/lint.rc"
+  ancestor="$tmp/ancestor.sh"
+
+  command -v perl >/dev/null 2>&1 || {
+    pass "SKIP (perl not available): ancestor process-group signal survival check"
+    return
+  }
+
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+printf '%s\n' "\$\$" > "$ready"
+sleep 1.5
+printf 'STUBSHELLCHECK_DONE\n'
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  cat > "$ancestor" <<SH
+#!/usr/bin/env bash
+trap ':' TERM
+PATH="$fakebin:$PATH" FM_LINT_JOBS=1 bash "$LINT" "$fixture" > "$outfile" 2>&1
+printf '%s\n' "\$?" > "$rcfile"
+SH
+  chmod +x "$ancestor"
+
+  perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' -- bash "$ancestor" &
+  ancestor_pid=$!
+
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -s "$ready" ]; do
+    kill -0 "$ancestor_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || {
+    kill -TERM -- "-$ancestor_pid" 2>/dev/null || true
+    wait "$ancestor_pid" 2>/dev/null || true
+    fail "ancestor-signal fixture did not start ShellCheck"
+  }
+
+  # The simulated caller's own post-command cleanup: a process-group-wide
+  # signal sent because, pre-fix, fm-lint.sh is still a member of that group.
+  kill -TERM -- "-$ancestor_pid" 2>/dev/null || {
+    wait "$ancestor_pid" 2>/dev/null || true
+    fail "could not signal the simulated ancestor's process group"
+  }
+
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -s "$rcfile" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  wait "$ancestor_pid" 2>/dev/null || true
+  [ -s "$rcfile" ] || fail "fm-lint.sh's ancestor never recorded a result"
+
+  [ "$(cat "$rcfile")" -eq 0 ] \
+    || fail "fm-lint.sh terminated with its ambient ancestor's process group (exit $(cat "$rcfile")) instead of completing"
+  assert_contains "$(cat "$outfile")" "STUBSHELLCHECK_DONE" \
+    "fm-lint.sh was cut off before its real verdict; it does not own its process group"
+  pass "fm-lint.sh survives a SIGTERM sent to an ambient ancestor process group it does not own"
+}
+
 test_seeded_module_boundary_parity() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
@@ -1014,6 +1107,7 @@ test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
+test_survives_ambient_ancestor_group_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
