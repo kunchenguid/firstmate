@@ -2128,30 +2128,49 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  local wt_git_dir proj_common
+
+# True when <path> is an isolated worktree of the spawning project: a real
+# directory that is its own worktree root, is not the spawning project itself,
+# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# left holding the worktree root the check read, for the refusal message.
+#
+# The worktree-discovery poll below reads this same predicate, so it can never
+# adopt a path the guard would then refuse. That matters because a pane's cwd
+# read is a snapshot of whatever process is in the foreground: while `treehouse
+# get` is still fetching and checking a slot out, it reports the REPOSITORY's
+# primary checkout as its own cwd. That path differs from a linked spawning
+# project, so a poll comparing only against the project accepted it, and the
+# guard then refused a launch whose slot treehouse went on to create normally.
+# A read like that is a transient, not a destination: the poll keeps waiting.
+SPAWN_WT_TOP=
+spawn_worktree_isolated() {  # <path>
+  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  SPAWN_WT_TOP=
   wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
+  if ! wt_real=$(cd "$path" 2>/dev/null && pwd -P); then
     wt_real=
   fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
+  if ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
   # The primary checkout uses the repository's common git dir as its own git
   # dir. A linked spawning home has a different top-level, but the same common
   # dir, so comparing only the two working directories cannot protect primary.
-  wt_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null) \
+  wt_git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) \
     && wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
   proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     && proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] \
-     || [ "$wt_real" = "$proj_real" ] || [ -z "$wt_git_dir" ] || [ -z "$proj_common" ] \
-     || [ "$wt_git_dir" = "$proj_common" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  [ -n "$wt_real" ] && [ -n "$wt_top_real" ] && [ "$wt_real" = "$wt_top_real" ] \
+    && [ "$wt_real" != "$PROJ_ABS_REAL" ] && [ -n "$wt_git_dir" ] && [ -n "$proj_common" ] \
+    && [ "$wt_git_dir" != "$proj_common" ]
+}
+
+validate_spawn_worktree() {  # <source> <inspect-target>
+  local source=$1 inspect_target=$2
+  if ! spawn_worktree_isolated "$WT"; then
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -2819,38 +2838,41 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+  # A single read that already looks isolated is not proof the pane settled
+  # there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
+  # stale path passes spawn_worktree_isolated too (it resolves to a real,
+  # distinct worktree top-level), so accepting it on one read alone silently
+  # records the wrong worktree= in state/<id>.meta. Require two consecutive
+  # reads to agree on the same isolated path before accepting it; a mismatch
+  # just becomes the new candidate rather than resetting the wait, so a pane
+  # that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # Every candidate is screened with the isolation guard's own predicate, so a
+  # read of the project itself or of the repository primary checkout is treated
+  # as the transient it is and the wait continues, instead of being adopted and
+  # then refused by the guard.
   candidate=""
+  last_seen=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
+    [ -z "$p" ] || last_seen="$p"
+    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_real"
     else
       candidate=""
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-unknown}'; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
