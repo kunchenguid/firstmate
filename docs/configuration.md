@@ -535,7 +535,10 @@ A budget that is not a whole number from 1 to 120 is still refused outright.
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
 Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
-Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed (only at worst surfaced twice under a triple write fault).
+Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
+A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
+IMAP and SMTP use implicit TLS on the default ports 993 and 465 (`IMAP4_SSL` / `SMTP_SSL`).
+STARTTLS and port 587 are not supported.
 It is off unless the home's gitignored `.env` provides the connection values.
 This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
 
@@ -548,7 +551,7 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 The per-poll wake cap bounds both the header fetches and the wakes of one `poll` run, and only uids this home has not already surfaced are fetched; a flood or large backlog therefore makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 
