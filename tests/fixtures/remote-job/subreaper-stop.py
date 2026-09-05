@@ -69,11 +69,16 @@ def wait_for(predicate, seconds=10):
     raise AssertionError("condition did not become true before deadline")
 
 
-def call(script, queue, timezone="UTC0"):
+def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
     env = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                FM_REMOTE_JOB_STATE_ROOT=str(queue), FM_REMOTE_JOB_PLATFORM_OVERRIDE="Linux", TZ=timezone,
+               LC_ALL=locale_name,
                PATH=f"{launch_bin}:{os.environ['PATH']}", FM_FIXTURE_NOHUP=real_nohup,
                FM_FIXTURE_LAUNCH_LOG=str(launch_log))
+    if locale_path:
+        env["LOCPATH"] = str(locale_path)
+    else:
+        env.pop("LOCPATH", None)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -132,11 +137,30 @@ done
     call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', other)
     wait_for(lambda: not processes())
     print("ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue")
+    call('''
+marker="$FM_REMOTE_JOB_STATE_ROOT/recycled"
+signal_log="$FM_REMOTE_JOB_STATE_ROOT/signalled"
+fm_remote_job_worker_process_group() { printf '424242\\n'; }
+fm_remote_job_process_scope() { return 1; }
+fm_remote_job_group_identity_snapshot() { touch "$marker"; printf '123\\toriginal\\n'; }
+fm_remote_job_group_running() { return 0; }
+fm_remote_job_process_start() { [ ! -e "$marker" ] && printf 'original\\n'; }
+kill() { touch "$signal_log"; }
+if fm_remote_job_stop_worker_tree 123; then exit 1; fi
+[ ! -e "$signal_log" ]
+''', queue)
+    print("ok - stop refuses to signal a reused group after captured ownership disappears")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
         shutil.copy2(repo / "bin" / name, root / "bin" / name)
-    call(start, queue, "EST5")
+    locale_root = fixture / "locales"
+    locale_root.mkdir()
+    locale_name = "fr_FR.UTF-8"
+    subprocess.run(["localedef", "--no-archive", "-i", "fr_FR", "-f", "UTF-8",
+                    str(locale_root / locale_name)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    call(start, queue, "EST5", locale_name, locale_root)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     original = set(processes())
     ensure = 'fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ]'
@@ -158,7 +182,11 @@ done
         pid = (lock / "pid").read_text().strip()
         kernel_identity = (lock / "start").read_text()
         legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
-                                         env=dict(os.environ, TZ="EST5", LC_ALL="C"), text=True)
+                                         env=dict(os.environ, TZ="EST5", LC_ALL=locale_name,
+                                                  LOCPATH=str(locale_root)), text=True)
+        canonical = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
+                                            env=dict(os.environ, TZ="EST5", LC_ALL="C"), text=True)
+        assert legacy != canonical, "fixture locale did not change the legacy timestamp"
         (lock / "start").write_text(legacy)
         call(ensure, queue, "JST-9")
         assert launch_log.read_text() == launches, "legacy identity launched another worker"

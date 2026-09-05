@@ -981,6 +981,7 @@ The runner regression separately proves that the process check rejects surviving
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
 The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, and independent restart supervisors from the same queue, plus a separate queue that must survive.
+It also verifies that cleanup refuses to signal after captured ownership disappears from a reused numeric group.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified sibling groups by executable and queue identity rather than adoption parent.
 The regression asserts both termination and absence of respawns after stop; it failed against the previous implementation and passed with the fix.
@@ -1014,7 +1015,7 @@ The native Pi cases ran; checks requiring the separately importable Pi SDK repor
 Repeated ensure calls also reproduced a live-owner rejection when the worker started under EST5 and a caller used JST-9.
 Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
 Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
-The subreaper regression records legacy ownership in the live worker's EST5 timezone, checks it from a JST-9 caller, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
+The subreaper regression records legacy ownership in the live worker's French locale and EST5 timezone, checks it from a C locale and JST-9 caller, pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
 The previous implementation fails that check; the corrected implementation reports:
 
 ```text

@@ -929,11 +929,14 @@ fm_remote_job_process_start() {
 }
 
 fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
-  local pid=$1 recorded=$2 actual=$3 ps_bin value entry process_timezone=''
+  local pid=$1 recorded=$2 actual=$3 ps_bin value entry
+  local process_timezone='' process_lc_all='' process_lc_time='' process_lang=''
+  local process_language='' process_locpath='' process_tzdir=''
+  local locale_environment=(env -i)
   [ "$recorded" = "$actual" ] && return 0
   # Accept existing lstart records while old workers/jobs drain during an
   # upgrade. New kernel identities never take this compatibility path.
-  case "$recorded" in ???\ ???\ *) ;; *) return 1 ;; esac
+  case "$recorded" in linux:*) return 1 ;; esac
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ "$recorded" = "$value" ] && return 0
@@ -941,13 +944,28 @@ fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
   [ "$recorded" = "$value" ] && return 0
   if [ -r "/proc/$pid/environ" ]; then
     while IFS= read -r -d '' entry; do
-      case "$entry" in TZ=*) process_timezone=${entry#*=}; break ;; esac
+      case "$entry" in
+        TZ=*) process_timezone=${entry#*=} ;;
+        LC_ALL=*) process_lc_all=${entry#*=} ;;
+        LC_TIME=*) process_lc_time=${entry#*=} ;;
+        LANG=*) process_lang=${entry#*=} ;;
+        LANGUAGE=*) process_language=${entry#*=} ;;
+        LOCPATH=*) process_locpath=${entry#*=} ;;
+        TZDIR=*) process_tzdir=${entry#*=} ;;
+      esac
     done < "/proc/$pid/environ" 2>/dev/null
-    case "$process_timezone" in *$'\n'*|*$'\r'*) return 1 ;; esac
-    if [ -n "$process_timezone" ]; then
-      value=$(LC_ALL=C TZ="$process_timezone" "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
-      [ "$recorded" = "$value" ] && return 0
-    fi
+    case "$process_timezone:$process_lc_all:$process_lc_time:$process_lang:$process_language:$process_locpath:$process_tzdir" in
+      *$'\n'*|*$'\r'*) return 1 ;;
+    esac
+    [ -z "$process_timezone" ] || locale_environment+=("TZ=$process_timezone")
+    [ -z "$process_lc_all" ] || locale_environment+=("LC_ALL=$process_lc_all")
+    [ -z "$process_lc_time" ] || locale_environment+=("LC_TIME=$process_lc_time")
+    [ -z "$process_lang" ] || locale_environment+=("LANG=$process_lang")
+    [ -z "$process_language" ] || locale_environment+=("LANGUAGE=$process_language")
+    [ -z "$process_locpath" ] || locale_environment+=("LOCPATH=$process_locpath")
+    [ -z "$process_tzdir" ] || locale_environment+=("TZDIR=$process_tzdir")
+    value=$("${locale_environment[@]}" "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+    [ "$recorded" = "$value" ] && return 0
   fi
   value=$(env -u TZ "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ "$recorded" = "$value" ]
@@ -1035,24 +1053,58 @@ fm_remote_job_group_running() { # <pgid>; zombies cannot execute or respawn
     awk -v group="$pgid" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'
 }
 
+fm_remote_job_group_identity_snapshot() { # <pgid>
+  local pgid=$1 snapshot member member_group status start found=1
+  snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 1
+  while read -r member member_group status; do
+    [ "$member_group" = "$pgid" ] && [[ "$status" != Z* ]] || continue
+    start=$(fm_remote_job_process_start "$member" 2>/dev/null) || continue
+    printf '%s\t%s\n' "$member" "$start"
+    found=0
+  done <<< "$snapshot"
+  return "$found"
+}
+
+fm_remote_job_group_has_owned_member() { # <pgid> <snapshot> <root> <state>
+  local pgid=$1 snapshot=$2 root=$3 state=$4 member recorded_start actual_start actual_group candidate
+  while IFS=$'\t' read -r member recorded_start; do
+    [ -n "$member" ] && [ -n "$recorded_start" ] || continue
+    actual_start=$(fm_remote_job_process_start "$member" 2>/dev/null || true)
+    [ "$actual_start" = "$recorded_start" ] || continue
+    actual_group=$(fm_remote_job_process_pgid "$member" 2>/dev/null || true)
+    [ "$actual_group" = "$pgid" ] && return 0
+  done <<< "$snapshot"
+  [ -n "$root" ] && [ -n "$state" ] || return 1
+  for candidate in /proc/[0-9]*; do
+    candidate=${candidate##*/}
+    actual_group=$(fm_remote_job_process_pgid "$candidate" 2>/dev/null || true)
+    [ "$actual_group" = "$pgid" ] || continue
+    fm_remote_job_process_scope "$candidate" 2>/dev/null || continue
+    [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
+      [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] && return 0
+  done
+  return 1
+}
+
 # Stop a worker and every descendant it leaked, TERM first and KILL only for a
 # survivor. Signals the isolated worker group when one is provable and the lone
 # process otherwise. Returns non-zero when any verified worker-group member is
 # still alive afterwards.
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 pgid i=0 candidate root='' state='' group start index alive signal
-  local groups=() starts=() witnesses=()
+  local pid=$1 pgid i=0 candidate root='' state='' group index alive signal status snapshot
+  local groups=() snapshots=() roots=() states=()
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
-  pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
-  if [ -n "$pgid" ]; then
-    start=$(fm_remote_job_process_start "$pid") || return 1
-    groups+=("$pgid")
-    starts+=("$start")
-    witnesses+=("$pid")
-  fi
   if fm_remote_job_process_scope "$pid"; then
     root=$FM_REMOTE_JOB_PROCESS_ROOT state=$FM_REMOTE_JOB_PROCESS_STATE
+  fi
+  pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
+  if [ -n "$pgid" ]; then
+    groups+=("$pgid")
+    roots+=("$root")
+    states+=("$state")
+  fi
+  if [ -n "$root" ] && [ -n "$state" ]; then
     # A stale serving-owner record can have admitted more than one supervisor.
     # Each has its own group even after adoption by a systemd user subreaper.
     for candidate in /proc/[0-9]*; do
@@ -1063,24 +1115,24 @@ fm_remote_job_stop_worker_tree() { # <pid>
       group=$(fm_remote_job_worker_process_group "$candidate" 2>/dev/null || true)
       [ -n "$group" ] || continue
       case " ${groups[*]:-} " in *" $group "*) continue ;; esac
-      start=$(fm_remote_job_process_start "$candidate") || return 1
-      groups+=("$group") starts+=("$start") witnesses+=("$candidate")
+      groups+=("$group") roots+=("$root") states+=("$state")
     done
   fi
   if [ "${#groups[@]}" -gt 0 ]; then
-    # Check the captured leader identity immediately before each signal. A
-    # recycled PID must never turn fixture cleanup into an unrelated group kill.
+    for group in "${groups[@]}"; do
+      snapshot=$(fm_remote_job_group_identity_snapshot "$group") || return 1
+      snapshots+=("$snapshot")
+    done
     for signal in TERM KILL; do
       index=0
       for group in "${groups[@]}"; do
-        start=$(fm_remote_job_process_start "${witnesses[$index]}" 2>/dev/null || true)
-        if [ -n "$start" ]; then
-          [ "$start" = "${starts[$index]}" ] || return 1
-        fi
         if fm_remote_job_group_running "$group"; then
+          fm_remote_job_group_has_owned_member "$group" "${snapshots[$index]}" \
+            "${roots[$index]}" "${states[$index]}" || return 1
           kill -"$signal" -- "-$group" 2>/dev/null || true
         else
-          [ "$?" -eq 1 ] || return 1
+          status=$?
+          [ "$status" -eq 1 ] || return 1
         fi
         index=$((index + 1))
       done
