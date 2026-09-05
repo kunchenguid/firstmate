@@ -3429,9 +3429,7 @@ def exact_empty_execute_command(live):
         str(properties.get("provisioningState") or live.get("provisioningState", "")).lower()
         == "succeeded"
         and run_command_execution_binding(live) is None
-        and all(source.get(field) in (None, "") for field in (
-            "script", "scriptUri", "scriptURI", "commandId",
-        ))
+        and all(value in (None, "") for value in source.values())
         and all(properties.get(field) in (None, "") for field in (
             "commandId", "script", "scriptUri", "scriptURI",
         ))
@@ -3439,6 +3437,73 @@ def exact_empty_execute_command(live):
             "commandId", "script", "scriptUri", "scriptURI",
         ))
     )
+
+
+def exact_dark_execute_power(resources):
+    power = str((resources.get("vm") or {}).get("power_state", "")).lower()
+    return "deallocated" in power or "stopped" in power
+
+
+def exact_abandon_claim_resources(action):
+    claimed = action.get("resources") or {}
+    if set(claimed) != set(REQUIRED_RESOURCE_KINDS):
+        raise ProviderError("execute abandonment action resource identity is incomplete")
+    resource_ids = []
+    for kind in REQUIRED_RESOURCE_KINDS:
+        resource = claimed.get(kind)
+        if (
+            not isinstance(resource, dict)
+            or not isinstance(resource.get("id"), str)
+            or not resource["id"]
+            or not isinstance(resource.get("immutable_id"), str)
+            or not resource["immutable_id"]
+        ):
+            raise ProviderError(
+                "execute abandonment action {} identity is incomplete".format(kind)
+            )
+        resource_ids.append(resource["id"].lower())
+    if len(resource_ids) != len(set(resource_ids)):
+        raise ProviderError("execute abandonment action resource identity is duplicated")
+
+
+def execute_abandon_snapshot(controller, action, require_marker=False):
+    snapshot = inventory_slot(controller, action["slot"])
+    if snapshot.get("conflicts"):
+        raise ProviderError("execute abandonment found an ambiguous or foreign slot resource")
+    worker = worker_by_slot(snapshot, action["slot"])
+    if worker is None:
+        raise ProviderError("execute abandonment lost exact retained worker ownership")
+    resources = recorded_exact(action, worker, require_ready_children=False)
+    if not exact_dark_execute_power(resources):
+        raise ProviderError("execute abandonment requires exact deallocated or stopped compute")
+    if not initial_execute_staging_is_exact(action, resources):
+        raise ProviderError("execute abandonment staging is not the exact initial assignment")
+    marker = (resources.get("state-container") or {}).get("tags", {}).get(
+        EXECUTE_ABANDON_MARKER
+    )
+    if marker not in (None, action["idempotency_key"]):
+        raise ProviderError("execute abandonment found a foreign durable cleanup marker")
+    if require_marker and marker != action["idempotency_key"]:
+        raise ProviderError("execute-abandon marker did not remain durable")
+    return worker, resources, marker == action["idempotency_key"]
+
+
+def execute_abandon_observation(resources, live, view):
+    stable_resources = {}
+    for kind, resource in resources.items():
+        stable = dict(resource)
+        if kind == "state-container":
+            stable.pop("etag", None)
+            stable.pop("last_modified", None)
+            tags = dict(stable.get("tags") or {})
+            tags.pop(EXECUTE_ABANDON_MARKER, None)
+            stable["tags"] = tags
+        stable_resources[kind] = stable
+    return {
+        "resources": stable_resources,
+        "task-command": live,
+        "instance-view": view,
+    }
 
 
 def retired_execute_result(action, task_command_id):
@@ -3459,39 +3524,29 @@ def abandon_execute(controller, action):
 
     This is intentionally not an ordinary execute replay. It is reachable only
     from the operator-confirmed abandon lane, and only while the VM is dark,
-    the assignment blobs remain at their initial values, and two fresh Azure
-    views prove that the empty Run Command never started. The durable marker
-    permanently fences every future execute until ordinary VM cleanup cascades
-    the child, so a crash at either side converges without powering the VM on.
+    the assignment blobs remain at their initial values, and two stable Azure
+    views prove that the empty Run Command never started. Sibling monitor and
+    bootstrap readiness is irrelevant only inside this complete proof. The
+    durable marker permanently fences every future execute until ordinary VM
+    cleanup cascades the child, so a crash at either side converges without
+    powering the VM on.
     """
     if validate_mutation_action(controller, action) != "execute":
         raise ProviderError("execute abandonment requires an exact execute action")
-    expected_task = ((action.get("resources") or {}).get("task-command") or {}).get("id")
-    if not isinstance(expected_task, str) or not expected_task:
-        raise ProviderError("execute abandonment action carries no exact task-command identity")
+    exact_abandon_claim_resources(action)
+    expected_task = action["resources"]["task-command"]["id"]
 
-    worker = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
-    if worker is None:
-        raise ProviderError("execute abandonment lost exact retained worker ownership")
-    current = worker.get("resources") or {}
-    container = current.get("state-container")
-    marked = container is not None and cleanup_marker(
-        container, EXECUTE_ABANDON_MARKER, action["idempotency_key"]
-    )
-    if current.get("task-command") is None:
-        raise ProviderError("execute abandonment lost the exact empty task Run Command")
-
-    resources = recorded_exact(action, worker, require_ready_children=False)
+    worker, resources, marked = execute_abandon_snapshot(controller, action)
     task_command = resources["task-command"]
     if task_command.get("id") != expected_task:
         raise ProviderIdentityRefusal(
             "task-command resource ID differs from the abandoned execute action"
         )
-    if "deallocated" not in str(resources["vm"].get("power_state", "")).lower():
-        raise ProviderError("execute abandonment requires exact deallocated compute")
-    if not initial_execute_staging_is_exact(action, resources):
-        raise ProviderError("execute abandonment staging is not the exact initial assignment")
     live = show_full(controller, expected_task)
+    if live.get("id") != expected_task:
+        raise ProviderIdentityRefusal(
+            "task-command provider view differs from the abandoned execute action"
+        )
     if not exact_empty_execute_command(live):
         raise ProviderError("execute abandonment found a submitted or ambiguous task Run Command")
     first_view = run_command_instance_view(
@@ -3500,21 +3555,20 @@ def abandon_execute(controller, action):
     )
     if not exact_unstarted_execute_view(first_view):
         raise ProviderError("execute abandonment first view is not the exact never-started state")
+    first_observation = execute_abandon_observation(resources, live, first_view)
 
     if not marked:
         mark_cleanup_container(
             controller, action, EXECUTE_ABANDON_MARKER, action["idempotency_key"]
         )
-    bracketed = worker_by_slot(inventory_slot(controller, action["slot"]), action["slot"])
-    bracketed_resources = recorded_exact(
-        action, bracketed, skip_immutable=("state-container",), require_ready_children=False,
+    bracketed, bracketed_resources, _marked = execute_abandon_snapshot(
+        controller, action, require_marker=True
     )
-    if not cleanup_marker(
-        bracketed_resources["state-container"], EXECUTE_ABANDON_MARKER,
-        action["idempotency_key"],
-    ):
-        raise ProviderError("execute-abandon marker did not become durable")
     live = show_full(controller, expected_task)
+    if live.get("id") != expected_task:
+        raise ProviderIdentityRefusal(
+            "task-command provider view changed from the abandoned execute action"
+        )
     if not exact_empty_execute_command(live):
         raise ProviderError("execute abandonment changed while its marker was landing")
     second_view = run_command_instance_view(
@@ -3523,13 +3577,21 @@ def abandon_execute(controller, action):
     )
     if not exact_unstarted_execute_view(second_view):
         raise ProviderError("execute abandonment second view is not the exact never-started state")
+    second_observation = execute_abandon_observation(
+        bracketed_resources, live, second_view
+    )
+    if second_observation != first_observation:
+        raise ProviderError("execute abandonment provider observations changed; retry")
 
-    if "deallocated" not in str(bracketed_resources["vm"].get("power_state", "")).lower():
-        raise ProviderError("execute abandonment changed worker power state")
+    final, final_resources, _marked = execute_abandon_snapshot(
+        controller, action, require_marker=True
+    )
+    if execute_abandon_observation(final_resources, live, second_view) != second_observation:
+        raise ProviderError("execute abandonment provider resources changed after proof; retry")
     return {
         "idempotency_key": action["idempotency_key"],
         "action": "abandon-execute",
-        "worker": bracketed,
+        "worker": final,
         "execution": retired_execute_result(action, expected_task),
     }
 
@@ -3687,7 +3749,11 @@ def persist_execute_result(controller, action, names, tags, execution):
 def mutate_execute(controller, action):
     snapshot = inventory_slot(controller, action["slot"])
     worker = worker_by_slot(snapshot, action["slot"])
-    resources = recorded_exact(action, worker)
+    # Readiness owns ordinary submission, not the permanent retired-key fence.
+    # Bind every resource first while tolerating only that one mutable signal,
+    # refuse a retired command before it could run, then apply the unchanged
+    # readiness gate to every non-retired execute below.
+    resources = recorded_exact(action, worker, require_ready_children=False)
     durable_retired_key = action.get("retired_execute_key")
     marker_retired_key = (resources.get("state-container") or {}).get("tags", {}).get(
         EXECUTE_ABANDON_MARKER
@@ -3711,6 +3777,7 @@ def mutate_execute(controller, action):
         raise ProviderError(
             "worker execution is fenced by retired never-started claim {}".format(retired_key)
         )
+    resources = recorded_exact(action, worker)
     request = action.get("request")
     if not isinstance(request, dict) or request.get("request_digest") != action.get("request_digest"):
         raise ProviderError("execution request identity is not exact")

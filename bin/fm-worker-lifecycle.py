@@ -537,6 +537,22 @@ def provider_mutate(env, action, lease):
     return result
 
 
+def execute_abandon_power_is_dark(resources):
+    power = str((resources.get("vm") or {}).get("power_state", "")).lower()
+    return "deallocated" in power or "stopped" in power
+
+
+def validate_abandon_execute_controller_evidence(state, action, worker):
+    if not isinstance(worker, dict):
+        raise LifecycleError("durable worker for execute abandonment is absent")
+    request_digest = action.get("request_digest")
+    execution = (state.get("executions") or {}).get(request_digest)
+    if execution is not None:
+        raise LifecycleError(
+            "execute abandonment refuses a durable result for the exact request"
+        )
+
+
 def validate_abandon_execute_result(action, result):
     expected_task_command_id = (
         ((action.get("resources") or {}).get("task-command") or {}).get("id")
@@ -567,7 +583,7 @@ def validate_abandon_execute_result(action, result):
         or not isinstance(resources, dict)
         or set(resources) != expected_resource_kinds
         or (resources.get("task-command") or {}).get("id") != expected_task_command_id
-        or "deallocated" not in str((resources.get("vm") or {}).get("power_state", "")).lower()
+        or not execute_abandon_power_is_dark(resources)
         or (resources.get("state-container") or {}).get("tags", {}).get(
             EXECUTE_ABANDON_MARKER
         ) != action.get("idempotency_key")
@@ -6035,10 +6051,30 @@ def command_abandon_claim(env, args):
         except LifecycleError as exc:
             replay_failure = exc
         if replay_failure is not None and action.get("type") == "execute":
+            with controller_lock(env):
+                proof_state = load_state(env)
+                proof_action = (proof_state.get("pending_actions") or {}).get(slot)
+                if (
+                    not isinstance(proof_action, dict)
+                    or proof_action.get("idempotency_key") != action["idempotency_key"]
+                ):
+                    raise LifecycleError(
+                        "slot {} claim changed while abandoning; retry".format(slot)
+                    )
+                validate_abandon_execute_controller_evidence(
+                    proof_state, action, proof_state.get("workers", {}).get(slot)
+                )
             try:
                 result = provider_abandon_execute(env, action, lease)
-            except (LifecycleError, ProviderIdentityRefused):
-                raise replay_failure
+            except (LifecycleError, ProviderIdentityRefused) as proof_failure:
+                # The old path re-raised only replay_failure, so an ordinary
+                # child-readiness refusal hid the distinct abandonment-proof
+                # failure and made a reached fallback look unreached.
+                raise LifecycleError(
+                    "{}; exact never-started abandonment proof also refused: {}".format(
+                        replay_failure, proof_failure
+                    )
+                ) from proof_failure
             validate_abandon_execute_result(action, result)
             with controller_lock(env):
                 clean = load_state(env)
@@ -6051,6 +6087,7 @@ def command_abandon_claim(env, args):
                         "slot {} claim changed while abandoning; retry".format(slot)
                     )
                 worker = clean["workers"].get(slot)
+                validate_abandon_execute_controller_evidence(clean, action, worker)
                 validate_durable_abandon_execute_worker(action, worker)
                 worker["retired_execute_key"] = action["idempotency_key"]
                 record_refusal(clean, worker, LifecycleError(

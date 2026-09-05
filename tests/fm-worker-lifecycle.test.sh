@@ -1247,7 +1247,7 @@ real_az = module.az
 module.inventory = lambda *_args, **_kwargs: {"workers": [worker]}
 module.worker_by_slot = lambda _snapshot, _slot: worker
 active_resources = {"value": worker["resources"]}
-module.recorded_exact = lambda _action, _worker: active_resources["value"]
+module.recorded_exact = lambda _action, _worker, **_kwargs: active_resources["value"]
 updates = []
 def forbidden_update(*_args, **_kwargs):
     updates.append("update")
@@ -2558,6 +2558,8 @@ transient_abandon = subprocess.run(
     env=transient_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
 )
 assert transient_abandon.returncode != 0, transient_abandon
+assert "exact never-started abandonment proof also refused" in transient_abandon.stderr, (
+    transient_abandon.stderr)
 after_transient = controller_state()
 assert after_transient["pending_actions"][skew_slot]["idempotency_key"] == skew_claim["idempotency_key"]
 assert after_transient["cleanup_refusals"] == before_refusals, after_transient["cleanup_refusals"]
@@ -2611,6 +2613,8 @@ bound_abandon = subprocess.run(
     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
 )
 assert bound_abandon.returncode != 0 and "remains bound" in bound_abandon.stderr, bound_abandon.stderr
+assert "exact never-started abandonment proof also refused" in bound_abandon.stderr, (
+    bound_abandon.stderr)
 after_bound_abandon = controller_state()
 assert after_bound_abandon["pending_actions"][bound_slot]["idempotency_key"] == bound_claim["idempotency_key"]
 bound_fixture = fixture_state()
@@ -8998,12 +9002,14 @@ compartment_payload_contract() {
   # instead of a booted VM that cannot work.
   python3 - "$CONTROLLER" "$ROOT/bin/fm-spawn.sh" "$ROOT/bin/fm-secondmate-cloud-monitor.sh" \
     <<'PY' || fail "compartment payload contract failed"
+import contextlib
 import hashlib
 import importlib.util
 import re
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location("lifecycle", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -9188,6 +9194,11 @@ for kind in ("monitor-extension", "bootstrap-command", "task-command", "ttl-sche
     resources[kind]["attached_to"] = resources["vm"]["id"]
 for kind in ("monitor-extension", "bootstrap-command", "task-command"):
     resources[kind]["provisioning_state"] = "Succeeded"
+# Exact never-started abandonment is the one narrow lane where failed sibling
+# readiness cannot hide the stronger dark-compute, staging, command and marker
+# proof. Ordinary execute readiness remains strict below.
+resources["monitor-extension"]["provisioning_state"] = "Failed"
+resources["bootstrap-command"]["provisioning_state"] = "Updating"
 resources["ttl-schedule"].update({"status": "Enabled", "deadline": "2359"})
 for kind, payload in provider.initial_execute_staging_pair(action).items():
     body = provider.canonical_bytes(payload) + b"\n"
@@ -9206,26 +9217,41 @@ for resource in resources.values():
     resource["tags"] = dict(tags)
 worker = {"slot": 6, "resources": resources}
 original_worker = copy.deepcopy(worker)
-state = {"worker": worker, "views": 0, "marks": 0, "deletes": 0}
-
-provider.inventory = lambda *_args, **_kwargs: {
-    "workers": [copy.deepcopy(state["worker"])], "conflicts": [], "metrics": {},
-}
-provider.show_full = lambda *_args, **_kwargs: {
+initial_live = {
     "id": action["resources"]["task-command"]["id"],
     "properties": {"source": None, "provisioningState": "Succeeded"},
     "tags": dict(tags),
 }
+state = {
+    "worker": worker, "live": copy.deepcopy(initial_live), "conflicts": [],
+    "views": 0, "marks": 0, "deletes": 0, "inventory_reads": 0,
+    "vary_view": False, "drop_marker_read": None,
+}
+
+def inventory(*_args, **_kwargs):
+    state["inventory_reads"] += 1
+    if state["drop_marker_read"] == state["inventory_reads"]:
+        state["worker"]["resources"]["state-container"]["tags"].pop(
+            provider.EXECUTE_ABANDON_MARKER, None)
+    return {
+        "workers": [copy.deepcopy(state["worker"])],
+        "conflicts": copy.deepcopy(state["conflicts"]), "metrics": {},
+    }
+provider.inventory = inventory
+provider.show_full = lambda *_args, **_kwargs: copy.deepcopy(state["live"])
 def pending_view(*_args, **_kwargs):
     state["views"] += 1
-    return {
+    view = {
         "executionState": "Pending", "exitCode": 0, "startTime": None,
         "endTime": None, "output": "", "error": "", "executionMessage": None,
     }
+    if state["vary_view"]:
+        view["providerSequence"] = state["views"]
+    return view
 provider.run_command_instance_view = pending_view
-def mark(_controller, _action, key, value):
+def mark(_controller, marked_action, key, value):
     assert key == provider.EXECUTE_ABANDON_MARKER
-    assert value == action["idempotency_key"]
+    assert value == marked_action["idempotency_key"]
     state["marks"] += 1
     state["worker"]["resources"]["state-container"]["tags"][key] = value
 provider.mark_cleanup_container = mark
@@ -9233,7 +9259,8 @@ provider.conditional_delete = lambda *_args, **_kwargs: (_ for _ in ()).throw(
     AssertionError("never-started retirement tried to mutate a deallocated VM child"))
 
 result = provider.abandon_execute(controller, action)
-assert state == {"worker": state["worker"], "views": 2, "marks": 1, "deletes": 0}, state
+assert state["views"] == 2 and state["marks"] == 1 and state["deletes"] == 0, state
+assert state["inventory_reads"] == 3, state
 assert result["action"] == "abandon-execute"
 assert result["execution"]["disposition"] == "provider-never-started-retired"
 assert result["worker"]["resources"]["task-command"]["id"] == (
@@ -9290,9 +9317,133 @@ replayed = provider.abandon_execute(controller, action)
 assert replayed["execution"] == result["execution"]
 assert state["views"] == 4 and state["marks"] == 1 and state["deletes"] == 0, state
 
+
+def reset_abandon_fixture():
+    state.update({
+        "worker": copy.deepcopy(original_worker),
+        "live": copy.deepcopy(initial_live),
+        "conflicts": [], "views": 0, "marks": 0, "deletes": 0,
+        "inventory_reads": 0, "vary_view": False, "drop_marker_read": None,
+    })
+    provider.run_command_instance_view = pending_view
+
+
+def abandoned_refuses(label, expected, prepare, candidate=None, marker_may_land=False):
+    reset_abandon_fixture()
+    prepare()
+    try:
+        provider.abandon_execute(controller, candidate or action)
+    except provider.ProviderError as exc:
+        assert expected in str(exc), (label, exc)
+    else:
+        raise AssertionError("execute abandonment accepted {}".format(label))
+    expected_marks = 1 if marker_may_land else 0
+    assert state["marks"] == expected_marks and state["deletes"] == 0, (label, state)
+
+
+# Every advertised negative keeps the claim fail-closed. These are scoped to
+# the abandonment proof so the sibling-readiness exception cannot become a
+# force-clear path.
+abandoned_refuses(
+    "live compute", "deallocated or stopped",
+    lambda: state["worker"]["resources"]["vm"].update({"power_state": "VM running"}),
+)
+abandoned_refuses(
+    "missing resource", "resource is absent",
+    lambda: state["worker"]["resources"].pop("monitor-extension"),
+)
+abandoned_refuses(
+    "foreign resource", "resource ID differs",
+    lambda: state["worker"]["resources"]["task-command"].update({"id": "/foreign/task"}),
+)
+abandoned_refuses(
+    "ambiguous slot", "ambiguous or foreign",
+    lambda: state["conflicts"].append({"slot": 6, "kind": "vm", "reason": "duplicate"}),
+)
+abandoned_refuses(
+    "substantive source", "submitted or ambiguous",
+    lambda: state["live"]["properties"].update({"source": {"script": "echo ran"}}),
+)
+def bind_execute():
+    state["live"]["tags"].update({
+        provider.EXECUTION_REQUEST_TAG: action["request_digest"],
+        provider.EXECUTION_IDEMPOTENCY_TAG: action["idempotency_key"],
+    })
+abandoned_refuses("execution binding", "submitted or ambiguous", bind_execute)
+def add_result_marker():
+    state["live"]["properties"]["source"] = None
+    provider.run_command_instance_view = lambda *_args, **_kwargs: {
+        "executionState": "Pending", "exitCode": 0, "startTime": None,
+        "endTime": None, "output": "FM-WORKER-RESULT:{}", "error": "",
+        "executionMessage": None,
+    }
+abandoned_refuses("execution marker", "never-started", add_result_marker)
+def drift_staging():
+    staged = state["worker"]["resources"]["staging-result"]
+    staged["immutable_id"] = "changed-etag"
+    staged["digest"] = "0" * 64
+abandoned_refuses("staging mismatch", "staging is not", drift_staging)
+def vary_observation():
+    state["vary_view"] = True
+abandoned_refuses(
+    "changed provider observations", "observations changed", vary_observation,
+    marker_may_land=True,
+)
+def lose_marker_after_views():
+    state["drop_marker_read"] = 3
+abandoned_refuses(
+    "lost durable marker", "did not remain durable", lose_marker_after_views,
+    marker_may_land=True,
+)
+def foreign_marker():
+    state["worker"]["resources"]["state-container"]["tags"][
+        provider.EXECUTE_ABANDON_MARKER] = "f" * 64
+abandoned_refuses("foreign durable marker", "foreign durable", foreign_marker)
+
+incomplete_action = copy.deepcopy(action)
+incomplete_action["resources"].pop("identity")
+incomplete_action["idempotency_key"] = hashlib.sha256(provider.canonical_bytes({
+    key: value for key, value in incomplete_action.items() if key != "idempotency_key"
+})).hexdigest()
+abandoned_refuses(
+    "incomplete claimed identity", "identity is incomplete", lambda: None,
+    candidate=incomplete_action,
+)
+
+# Stopped is the other explicit dark state. It receives the same full proof,
+# while the failed/Updating monitor and bootstrap siblings remain tolerated.
+reset_abandon_fixture()
+state["worker"]["resources"]["vm"]["power_state"] = "VM stopped"
+stopped = provider.abandon_execute(controller, action)
+assert lifecycle.execute_abandon_power_is_dark(stopped["worker"]["resources"])
+
+# The same failed sibling states still refuse an ordinary, unretired execute.
+# The carve belongs only to exact abandonment and permanent retired-key checks.
+reset_abandon_fixture()
+try:
+    provider.mutate_execute(controller, action)
+except provider.ProviderError as exc:
+    assert "provisioning state is not succeeded" in str(exc), exc
+else:
+    raise AssertionError("ordinary execute accepted non-succeeded readiness children")
+
+# A controller-side result for this exact request blocks the provider proof;
+# controller labels alone never establish the positive no-work conclusion.
+controller_worker = {"slot": action["slot"]}
+lifecycle.validate_abandon_execute_controller_evidence(
+    {"executions": {}}, action, controller_worker)
+try:
+    lifecycle.validate_abandon_execute_controller_evidence(
+        {"executions": {action["request_digest"]: {"result_digest": "f" * 64}}},
+        action, controller_worker,
+    )
+except lifecycle.LifecycleError as exc:
+    assert "durable result" in str(exc), exc
+else:
+    raise AssertionError("execute abandonment accepted a durable controller result")
+
 # Any evidence of execution keeps custody and does not mark or delete.
-state["worker"] = copy.deepcopy(original_worker)
-state["views"] = state["marks"] = state["deletes"] = 0
+reset_abandon_fixture()
 provider.run_command_instance_view = lambda *_args, **_kwargs: {
     "executionState": "Running", "exitCode": 0, "output": "", "error": "",
 }
@@ -9315,6 +9466,49 @@ except provider.ProviderError as exc:
     assert "custody proof" in str(exc), exc
 else:
     raise AssertionError("compute cleanup accepted an unexplained missing task-command")
+
+# Exercise the user-visible abandon-claim fallback, not only its provider
+# helper: the ordinary replay reports sibling readiness, the exact provider
+# proof returns the stopped worker, and controller custody changes atomically.
+durable_worker = {
+    "slot": action["slot"], "deployment_generation": action["deployment_generation"],
+    "owner": action["owner"], "role": action["role"], "sku": action["sku"],
+    "sku_family": action["sku_family"], "cloud_generation": action["cloud_generation"],
+    "cloud_instance_id": action["cloud_instance_id"],
+    "assignment_generation": bindings["assignment_generation"],
+    "bindings": copy.deepcopy(bindings), "resources": copy.deepcopy(action["resources"]),
+}
+durable_state = {
+    "pending_actions": {str(action["slot"]): copy.deepcopy(action)},
+    "workers": {str(action["slot"]): durable_worker}, "executions": {},
+    "cleanup_refusals": [],
+}
+@contextlib.contextmanager
+def controller_lock(_env):
+    yield
+@contextlib.contextmanager
+def slot_lease(_env, _slot):
+    yield object()
+def load_state(_env):
+    return copy.deepcopy(durable_state)
+def save_state(_env, value):
+    durable_state.clear()
+    durable_state.update(copy.deepcopy(value))
+lifecycle.controller_lock = controller_lock
+lifecycle.slot_lease = slot_lease
+lifecycle.load_state = load_state
+lifecycle.save_state = save_state
+lifecycle.provider_mutate = lambda *_args: (_ for _ in ()).throw(
+    lifecycle.LifecycleError("monitor-extension provisioning state is not succeeded"))
+lifecycle.provider_abandon_execute = lambda *_args: copy.deepcopy(stopped)
+lifecycle.command_abandon_claim({"subscription": controller["subscription"]}, SimpleNamespace(
+    slot=action["slot"], idempotency_key=action["idempotency_key"],
+    confirm_abandon=True, confirm_subscription=controller["subscription"],
+))
+assert str(action["slot"]) not in durable_state["pending_actions"], durable_state
+assert durable_state["workers"][str(action["slot"])]["retired_execute_key"] == (
+    action["idempotency_key"])
+
 ORDINARY = {"brief.md": 4384, "repo.bundle": 10042238}
 
 # A compartment payload is admitted, and the manifest carries all four entries
