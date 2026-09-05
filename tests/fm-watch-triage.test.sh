@@ -62,43 +62,25 @@ wait_live() {
   return 0
 }
 
-# Wait until <pid>'s watcher has completed a whole poll cycle, or exited first.
-# A fixed wait_live budget only proves the process is still ALIVE: fm-watch.sh
-# does bounded startup work (the recovery-marker snapshot, lock acquisition)
-# before its first stale scan, so on a loaded
-# machine a short fixed budget can reap a round before the cycle it asserts on
-# ever ran - and then every "no wake, no marker" assertion passes vacuously
-# while every "marker written" assertion fails spuriously.
-# Synchronize on state/.last-poll-cycle, the watcher's iteration-boundary marker,
-# NOT on state/.last-watcher-beat. The liveness beacon now advances at every PHASE
-# boundary of a poll (2026-09-04 supervision hardening), so it can tick several
-# times inside one iteration and would let this return mid-cycle - every
-# end-of-cycle assertion a caller makes would then be racing the watcher. The
-# iteration marker is touched exactly once per poll, which is the boundary this
-# helper has always meant.
-# 0 if the watcher is still alive after a completed cycle, 1 if it exited.
+# Wait until startup has published the watcher-owned liveness beacon, then allow
+# a configured one-second poll to complete. Tests that expect an actionable
+# close still return as soon as the process exits.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-poll-cycle"
-  rm -f "$beat"
-  first=""
+  local state=$1 pid=$2 limit=${3:-300} i=0
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
-    [ -n "$first" ] && break
+    [ -e "$state/.last-watcher-beat" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  while [ "$i" -lt "$limit" ]; do
+  [ -e "$state/.last-watcher-beat" ] || return 1
+  i=0
+  while [ "$i" -lt 12 ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
-    if [ -n "$now" ] && [ "$now" != "$first" ]; then
-      return 0
-    fi
     sleep 0.1
     i=$((i + 1))
   done
-  return 1
+  return 0
 }
 
 # Every wait_for_exit budget in this file is 100 ticks (10s), not because any

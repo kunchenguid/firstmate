@@ -103,10 +103,10 @@ The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 The beacon records PHASE progress, not elapsed time: the watch loop beats at every phase boundary of a poll rather than once per iteration, so its age is the age of the current phase.
 That is what makes an aged beacon meaningful at all - before it, one poll iteration that had grown past the grace made a perfectly healthy watcher read as dead.
-There is deliberately no timer and no beat inside a blocking wait, because a watcher stuck inside one phase must stop beating; `state/.last-poll-cycle` marks the iteration boundary the beacon used to double as, and supervision never reads it.
+Bounded check captures beat from the watcher while waiting and enforce the same deadline in the parent, while other phases beat only when they complete so an unbounded stall still lets the beacon age.
 
 An aged beacon on a LIVE, identity-matched holder is a suspected stall and nothing stronger.
-Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace with a fixed 30-second maximum and attaches when it beats again.
+Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace and attaches when it beats again.
 When that wait expires, the arm reports the holder, leaves it alone, and lets the next turn end retry through the ordinary path.
 A live holder this home cannot identify as its own watcher is not a busy holder and stays a loud failure.
 

@@ -122,6 +122,7 @@ SH
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 1
 holder=$(cat "$FM_HOME/state/.watch.lock/pid")
+printf 'watcher: busy holder pid=%s beacon=99s (grace 4s)\n' "$holder"
 printf 'watcher: busy holder pid=%s still running after 1s; left alone\n' "$holder"
 exit 0
 SH
@@ -577,6 +578,9 @@ test_busy_holder_expiry_is_consumed_without_a_second_wait() {
   [ "$alive" -eq 1 ] && [ "$held" = "$pid" ] || fail "auto-arm stopped or replaced the stalled holder"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] || fail "a stalled holder expiry invoked more than one arm"
   [ "$(epoch_outcome "$dir")" = busy-holder ] || fail "a post-expiry beat hid the detached busy-holder outcome: $(epoch_outcome "$dir")"
+  grep -Eq "outcome=busy-holder .*holder_pid=$pid beacon_age=99s$" \
+    "$dir/state/.claude-autoarm-epoch" \
+    || fail "the typed busy-holder result lost its holder or beacon age: $(head -1 "$dir/state/.claude-autoarm-epoch")"
   pass "auto-arm: a busy-holder expiry closes after one wait without losing its detached outcome"
 }
 
