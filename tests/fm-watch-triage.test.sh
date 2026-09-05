@@ -1875,6 +1875,107 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- stale terminal status, run credited by branch, agent DEAD: surfaced once ---
+# The override above is the same read that misattributes a run on a shared
+# feature branch: bin/fm-crew-state.sh credits a run by BRANCH to a crew that never
+# bound its own run id (tests/fm-watch-pause-precedence.test.sh case (a) proves it
+# over two real worktrees), so once several crews' worktrees sit on one long-lived
+# branch a crew that wrote `done:` and was exited through fm-control still reads
+# `working` off its co-branch sibling's pipeline. Without a liveness gate its
+# empty pane is absorbed as provably working on first sight and the wedge timer
+# then escalates it every STALE_ESCALATE_SECS until teardown. The canned verdict
+# below is exactly that misattributed `working`; the dead verdict comes from the
+# real tmux probe over the fake tmux, whose current command is a bare shell.
+test_stale_terminal_status_dead_agent_not_absorbed_on_cobranch_run() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid round wakes
+  dir=$(make_case terminal-stale-dead-cobranch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-closed"
+  printf 'idle bare shell after agent exit' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/closed.meta"
+  printf 'window=test:fm-sibling\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/sibling.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/closed.status"
+  printf 'working: validating through no-mistakes\n' > "$state/sibling.status"
+  sig=$(seen_sig "$state/closed.status"); printf '%s' "$sig" > "$state/.seen-closed_status"
+  sig=$(seen_sig "$state/sibling.status"); printf '%s' "$sig" > "$state/.seen-sibling_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # First sight: the closed crew's `done:` is the genuinely terminal stale it
+  # looks like, so it surfaces (queue + exit) and starts NO wedge timer, despite
+  # the branch-credited run and a threshold no timer could cross.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "dead crew's terminal stale was absorbed on a co-branch run instead of surfacing: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "dead crew's terminal stale did not print the plain stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "dead crew's terminal stale surfaced as a possible wedge: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on the dead-agent surface"
+  [ ! -e "$state/.stale-since-$key" ] || fail "dead crew's terminal stale started a wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the dead-agent terminal stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "dead crew's terminal stale was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the dead-agent terminal surface"
+
+  # Later polls of the SAME hash: already surfaced, nothing left to do. With the
+  # escalation threshold at its floor and the run still credited by branch, an
+  # absorbed pane would wedge-escalate here every round; a surfaced one is silent.
+  # Each round is armed as the successor firstmate re-arms after handling a wake,
+  # so it stays in the poll loop instead of re-announcing the handled downtime.
+  round=1
+  while [ "$round" -le 3 ]; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "dead crew's surfaced terminal stale woke again on unchanged-hash round $round: $(cat "$out")"
+    fi
+    reap "$pid"
+    [ ! -s "$out" ] || fail "dead crew's surfaced terminal stale printed a wake on round $round: $(cat "$out")"
+    [ ! -e "$state/.stale-since-$key" ] || fail "dead crew's surfaced terminal stale grew a wedge timer on round $round"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "dead crew's terminal stale queued $wakes further wakes after its one acknowledged surface"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "dead crew's terminal stale accumulated wedge escalations"
+
+  # The SAME shape with a LIVE agent keeps today's behaviour: the run overrides
+  # the leftover `done:` line, the pane is absorbed, and the wedge timer starts.
+  dir=$(make_case terminal-stale-live-cobranch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-live"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/live.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/live.status"
+  sig=$(seen_sig "$state/live.status"); printf '%s' "$sig" > "$state/.seen-live_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "live crew's overridden terminal stale surfaced instead of absorbing: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "live crew's overridden terminal stale printed a wake during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "live crew's overridden terminal stale enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "live crew's stale suppressor not advanced on absorb"
+  [ -s "$state/.stale-since-$key" ] || fail "live crew's overridden terminal stale did not start the wedge timer"
+  unset FM_FAKE_CREW_STATE
+  pass "a dead crew's terminal stale is surfaced once and never wedge-escalated despite a branch-credited run; a live crew keeps the override"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -4156,6 +4257,7 @@ test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_stale_terminal_status_dead_agent_not_absorbed_on_cobranch_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
