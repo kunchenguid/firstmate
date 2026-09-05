@@ -303,6 +303,10 @@ On GitHub an outcome that is neither merged nor queued is refused loudly and non
 When the forge already accepted exactly those flags and the pull request still has not entered the queue, that refusal points at the queue state to re-check instead of echoing back the flags the caller just ran.
 An auto-merge request is held to the same standard: `--auto` that leaves the pull request neither merged nor queued is refused rather than reported as success.
 Every GitHub refusal states what it could not observe as plainly as what it did, so an unreadable branch-rule response, an unrecognised queue method, and a merge queue no available read can see are each named rather than left to look like a base branch with no queue at all.
+Before a GitHub merge, the helper runs [`bin/fm-pr-base-check.sh`](../bin/fm-pr-base-check.sh) inside the task's recorded `project=` clone, so no GitHub merge path can skip that guard.
+The guard fetches the PR head and compared branches without a checkout change, and it refuses foreign commits or changed-file blobs taken from a foreign branch.
+It fails closed on an unavailable project clone, a missing branch, unreachable forge data, or an unparseable URL, and only `--override-pr-base-check` permits a merge after failure.
+The guard script's header owns its flags, default `--against main` comparison set, and exact output shape.
 A confirmed merge leaves a durable role-routed outcome instead of living only in the merging agent's memory, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns its destination, shape, identity, normal-case deduplication, and at-least-once recovery.
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
