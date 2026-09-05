@@ -282,6 +282,7 @@ Send in-scope work to the fitting secondmate unless it is blocked or the captain
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+Load the `new-brand-onboarding` skill when the captain asks to onboard, add, set up, or resume a Brand in Studio v2 or invokes `/skill:new-brand-onboarding`; the skill owns the routing between this home, `studio-v2-mate`, and the per-Brand worker.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:

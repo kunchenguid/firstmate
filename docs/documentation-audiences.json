@@ -213,6 +213,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/new-brand-onboarding/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
