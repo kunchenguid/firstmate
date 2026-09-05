@@ -1296,30 +1296,53 @@ SH
 
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
-  # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
-  # artifact keys cannot masquerade as the step contract.
+  # the 75-minute job cap. Read the two scalar fields within their exact YAML
+  # job/step scopes so nested artifact keys cannot masquerade as this contract.
   command -v python3 >/dev/null 2>&1 \
-    || fail "python3 with PyYAML is required to parse .github/workflows/ci.yml as YAML"
+    || fail "python3 is required to read .github/workflows/ci.yml timeouts"
   local json job_timeout step_timeout
-  json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+  json=$(python3 -S - "$ROOT/.github/workflows/ci.yml" <<'PY'
 import json
+import re
 import sys
 
-try:
-    import yaml
-except ImportError as error:
-    raise SystemExit("PyYAML is required to parse the workflow") from error
+
+def section(lines, indent, header):
+    pattern = re.compile(" " * indent + header + r"\s*(?:#.*)?")
+    matches = [i for i, line in enumerate(lines) if pattern.fullmatch(line)]
+    if len(matches) != 1:
+        raise SystemExit(f"expected one workflow section: {header}")
+    start = matches[0] + 1
+    end = start
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.lstrip().startswith("#"):
+            if len(line) - len(line.lstrip()) <= indent:
+                break
+        end += 1
+    return lines[start:end]
+
+
+def timeout(lines, indent):
+    pattern = re.compile(" " * indent + r"timeout-minutes:\s*(\d+)\s*(?:#.*)?")
+    values = [int(match[1]) for line in lines if (match := pattern.fullmatch(line))]
+    if len(values) != 1:
+        raise SystemExit("expected one direct timeout-minutes scalar")
+    return values[0]
+
 
 with open(sys.argv[1], encoding="utf-8") as source:
-    document = yaml.safe_load(source)
-job = document["jobs"]["tests-herdr"]
-step = next(
-    item for item in job["steps"]
-    if isinstance(item, dict) and item.get("name") == "Run real-Herdr family (serial, required)"
+    lines = source.read().splitlines()
+jobs = section(lines, 0, "jobs:")
+job = section(jobs, 2, "tests-herdr:")
+steps = section(job, 4, "steps:")
+name = re.escape("Run real-Herdr family (serial, required)")
+step = section(
+    steps, 6, rf"- name:\s*(?:{name}|\"{name}\"|'{name}')"
 )
 print(json.dumps({
-    "job_timeout": job["timeout-minutes"],
-    "step_timeout": step["timeout-minutes"],
+    "job_timeout": timeout(job, 4),
+    "step_timeout": timeout(step, 8),
 }))
 PY
   ) \
