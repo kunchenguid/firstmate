@@ -12,10 +12,11 @@
 # than one run per check name at the same head - for example a re-raised
 # workflow - so runs are grouped by name and only the most recent run per name
 # (the highest numeric id) is judged; an earlier failed attempt at the same
-# head never blocks a merge a later run at that same head already passed. Every
-# such latest run must be completed with conclusion success, neutral, or
-# skipped - skipped is accepted unconditionally because the check-runs API
-# exposes no field distinguishing why a check was skipped, so any other
+# head never blocks a merge a later run at that same head already passed. With
+# no project required-check list configured (see below), every such latest run
+# must be completed with conclusion success, neutral, or skipped - skipped is
+# accepted unconditionally in that default case because the check-runs API
+# exposes no field distinguishing why a check was skipped - and any other
 # conclusion or an incomplete status refuses, naming the check and its latest
 # conclusion. The verified head is then passed to gh-axi as
 # --match-head-commit, the same live-head-pinning contract GitLab's --sha
@@ -23,6 +24,21 @@
 # fails the merge instead of landing an unverified commit. A caller-supplied
 # --match-head-commit is rejected the same way GitLab's --sha override is,
 # because the verified head comes only from this script's own live read.
+#
+# An optional local, gitignored config/required-checks/<project> file (keyed
+# by the basename of this task's recorded project= directory) names checks
+# that must exist and conclude success at that same verified head, one name
+# per line; its total absence leaves the default paragraph above completely
+# unchanged. A named required check that instead concluded skipped is refused
+# unless its line ends with " skippable-if: <other check name>" and that other
+# check's own latest run at the same head concluded success - a deliberate,
+# named administrative exemption rather than the unconditional default skip
+# allowance, so a required check skipped only because an upstream job it
+# depends on failed is never mistaken for one of those declared exemptions.
+# A required check missing from the head's check runs entirely, still
+# incomplete, or concluded with anything else refuses by name. This list only
+# tightens which of the checks already found at the head must be green; it
+# does not exempt any check the default paragraph above would otherwise judge.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -93,6 +109,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -373,6 +390,21 @@ github_read_head_sha() {
   FM_PR_GITHUB_HEAD=$sha
 }
 
+# This task's optional required-check list, keyed by the basename of the
+# project= directory recorded in its own metadata. Absence of the project=
+# field or of a matching config/required-checks/<project> file prints nothing,
+# which is how an unconfigured home keeps today's default check-run judgment.
+github_required_checks_file() {
+  local project_path project_name candidate
+  project_path=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$project_path" ] || return 0
+  project_name=$(basename "$project_path")
+  [ -n "$project_name" ] || return 0
+  candidate="$CONFIG/required-checks/$project_name"
+  [ -f "$candidate" ] || return 0
+  printf '%s\n' "$candidate"
+}
+
 # The latest check run per name (highest id) at the given head must be
 # completed with conclusion success, neutral, or skipped. An earlier run of the
 # same check name at the same head - an attestation race where a stale failed
@@ -383,7 +415,7 @@ github_read_head_sha() {
 github_check_runs_green() {
   local head=$1 lines line id name status conclusion refusals='' any=false
   local -A latest_id=() latest_status=() latest_conclusion=()
-  local check_name
+  local check_name required_file req_line req_name req_skip_of
   if ! lines=$(env -u GITHUB_TOKEN -u GH_TOKEN gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs" \
     --jq '.check_runs[] | [.id, .name, .status, .conclusion] | @tsv' 2>/dev/null); then
@@ -421,6 +453,45 @@ CHECKS
         ;;
     esac
   done
+  required_file=$(github_required_checks_file)
+  if [ -n "$required_file" ]; then
+    while IFS= read -r req_line || [ -n "$req_line" ]; do
+      [ -n "$req_line" ] || continue
+      case "$req_line" in
+        *' skippable-if: '*)
+          req_name=${req_line%% skippable-if: *}
+          req_skip_of=${req_line#*' skippable-if: '}
+          ;;
+        *)
+          req_name=$req_line
+          req_skip_of=
+          ;;
+      esac
+      if [ -z "${latest_id[$req_name]:-}" ]; then
+        refusals="$refusals  - required check \"$req_name\" was not found at head $head
+"
+        continue
+      fi
+      status=${latest_status[$req_name]}
+      # An incomplete required check was already refused above by name; this
+      # overlay only judges conclusions, never duplicates that refusal.
+      [ "$status" = completed ] || continue
+      conclusion=${latest_conclusion[$req_name]}
+      [ "$conclusion" = success ] && continue
+      if [ "$conclusion" = skipped ] && [ -n "$req_skip_of" ] \
+        && [ "${latest_status[$req_skip_of]:-}" = completed ] \
+        && [ "${latest_conclusion[$req_skip_of]:-}" = success ]; then
+        continue
+      fi
+      if [ -n "$req_skip_of" ]; then
+        refusals="$refusals  - required check \"$req_name\" concluded \"${conclusion:-unreadable}\", not success (or skipped only when \"$req_skip_of\" succeeded)
+"
+      else
+        refusals="$refusals  - required check \"$req_name\" concluded \"${conclusion:-unreadable}\", not success
+"
+      fi
+    done < "$required_file"
+  fi
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s: not every check is green at head %s\n' "$URL" "$head" >&2
     printf '%s' "$refusals" >&2

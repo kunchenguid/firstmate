@@ -77,6 +77,14 @@
 #   (bb) an all-green merge pins the verified live head with --match-head-commit
 #   (bc) a caller-supplied --match-head-commit is refused before recording,
 #       mirroring GitLab's --sha protection
+#   (bd) a configured required check missing from the head's check runs refuses
+#       the merge, naming the check, even though it never appeared to fail
+#   (be) a configured required check still incomplete refuses the merge
+#   (bf) a configured required check that skipped with no declared exemption
+#       refuses the merge, even though skipped alone is otherwise accepted
+#   (bg) a configured required check skipped only because its declared
+#       exemption check succeeded at the same head is accepted
+#   (bh) every configured required check concluding success merges
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1888,9 +1896,10 @@ test_github_pending_check_refuses() {
 
 # A legitimately skipped check is accepted, but a conclusion that only
 # superficially resembles a benign skip (cancelled) is not: the check-runs API
-# exposes no field distinguishing why a check was skipped, so "skipped" is
-# accepted unconditionally and every other non-passing conclusion still
-# refuses on its own terms.
+# exposes no field distinguishing why a check was skipped, so with no project
+# required-check list configured (this case has none) "skipped" is accepted
+# unconditionally and every other non-passing conclusion still refuses on its
+# own terms.
 test_github_skipped_check_passes_but_cancelled_refuses() {
   local case_dir rc
   case_dir=$(make_case github-checks-skipped-and-cancelled)
@@ -1984,6 +1993,135 @@ test_github_checks_green_pins_the_live_head() {
     "$case_dir/gh-axi.log" \
     || fail "github-checks-green-pins-head: the verified live head was not pinned with --match-head-commit"
   pass "fm-pr-merge pins the verified live head with --match-head-commit"
+}
+
+# The optional project required-check list tightens which of the checks found
+# at the head must be green; its total absence (no FM_CONFIG_OVERRIDE case
+# above this point) leaves every prior check-run test's behavior unchanged.
+test_github_required_check_missing_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-required-checks-missing)
+  mkdir -p "$case_dir/wt" "$case_dir/config/required-checks"
+  add_gh_mocks "$case_dir" a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  printf '1\tunit-tests\tcompleted\tsuccess\n' > "$case_dir/github-checks"
+  printf 'release-notes\n' > "$case_dir/config/required-checks/project"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_CONFIG_OVERRIDE="$case_dir/config" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/101 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-required-checks-missing: a missing required check must refuse the merge"
+  assert_grep 'required check "release-notes" was not found at head' "$case_dir/stderr" \
+    "github-required-checks-missing: the missing required check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-required-checks-missing: the merge was attempted despite a missing required check"
+  pass "fm-pr-merge refuses a GitHub merge when a required check never ran at the head"
+}
+
+test_github_required_check_pending_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-required-checks-pending)
+  mkdir -p "$case_dir/wt" "$case_dir/config/required-checks"
+  add_gh_mocks "$case_dir" a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
+  printf '1\tunit-tests\tin_progress\t\n' > "$case_dir/github-checks"
+  printf 'unit-tests\n' > "$case_dir/config/required-checks/project"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_CONFIG_OVERRIDE="$case_dir/config" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/102 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-required-checks-pending: an incomplete required check must refuse the merge"
+  assert_grep 'unit-tests is "in_progress", not completed' "$case_dir/stderr" \
+    "github-required-checks-pending: the pending required check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-required-checks-pending: the merge was attempted while the required check was still pending"
+  pass "fm-pr-merge refuses a GitHub merge while a required check is still pending"
+}
+
+# This is exactly the gap the required-check list closes: a skip with no
+# declared exemption is accepted by the generic loop above but must still
+# refuse here, because an unexempted skip can be the same upstream-failure
+# cascade that let a real test job merge unrun.
+test_github_required_check_skipped_without_exemption_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-required-checks-skipped-no-exemption)
+  mkdir -p "$case_dir/wt" "$case_dir/config/required-checks"
+  add_gh_mocks "$case_dir" a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3
+  printf '1\tunit-tests\tcompleted\tskipped\n' > "$case_dir/github-checks"
+  printf 'unit-tests\n' > "$case_dir/config/required-checks/project"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_CONFIG_OVERRIDE="$case_dir/config" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/103 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-required-checks-skipped-no-exemption: an unexempted skipped required check must refuse the merge"
+  assert_grep 'required check "unit-tests" concluded "skipped", not success' "$case_dir/stderr" \
+    "github-required-checks-skipped-no-exemption: the skipped required check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-required-checks-skipped-no-exemption: the merge was attempted despite the unexempted skip"
+  pass "fm-pr-merge refuses a GitHub merge when a required check skipped with no declared exemption"
+}
+
+# The declared exemption case: "repository" may skip only when "classify"
+# succeeded at the same head, mirroring XAU's configuration-only job pairing.
+test_github_required_check_skipped_with_exemption_merges() {
+  local case_dir rc
+  case_dir=$(make_case github-required-checks-skipped-with-exemption)
+  mkdir -p "$case_dir/wt" "$case_dir/config/required-checks"
+  add_gh_mocks "$case_dir" a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4
+  printf '1\trepository\tcompleted\tskipped\n2\tclassify\tcompleted\tsuccess\n' \
+    > "$case_dir/github-checks"
+  printf 'repository skippable-if: classify\nclassify\n' \
+    > "$case_dir/config/required-checks/project"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_CONFIG_OVERRIDE="$case_dir/config" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/104 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-required-checks-skipped-with-exemption: a declared exemption should let the merge proceed"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-required-checks-skipped-with-exemption: the merge was not attempted despite the declared exemption"
+  pass "fm-pr-merge accepts a required check skipped only when its declared exemption check succeeded"
+}
+
+test_github_required_checks_all_success_merges() {
+  local case_dir rc
+  case_dir=$(make_case github-required-checks-all-success)
+  mkdir -p "$case_dir/wt" "$case_dir/config/required-checks"
+  add_gh_mocks "$case_dir" a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
+  printf '1\trepository\tcompleted\tsuccess\n2\tclassify\tcompleted\tsuccess\n' \
+    > "$case_dir/github-checks"
+  printf 'repository skippable-if: classify\nclassify\n' \
+    > "$case_dir/config/required-checks/project"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_CONFIG_OVERRIDE="$case_dir/config" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/105 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-required-checks-all-success: every named required check succeeding should merge"
+  assert_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-required-checks-all-success: the merge was not attempted despite every required check succeeding"
+  pass "fm-pr-merge merges when every named required check concluded success"
 }
 
 # A caller-supplied --match-head-commit would let a stale or attacker-chosen
@@ -2356,6 +2494,11 @@ test_github_skipped_check_passes_but_cancelled_refuses
 test_github_older_failure_newer_success_merges
 test_github_older_success_newer_failure_refuses
 test_github_checks_green_pins_the_live_head
+test_github_required_check_missing_refuses
+test_github_required_check_pending_refuses
+test_github_required_check_skipped_without_exemption_refuses
+test_github_required_check_skipped_with_exemption_merges
+test_github_required_checks_all_success_merges
 test_github_match_head_commit_override_refuses_before_recording
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url

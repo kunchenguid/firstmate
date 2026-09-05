@@ -265,6 +265,18 @@ Absent, empty, or non-numeric contents fall back to a default of 13; only the fi
 The cap is independent of any single project's pool size: a project can have free slots and still see no dispatch line while this home overall sits at its cap.
 A frozen or at-cap home with ready work still keeps a watcher armed so it notices once the freeze lifts or the cap has room again; only the dispatch-now line itself is suppressed.
 
+## Required checks for GitHub PR merges (config/required-checks/PROJECT)
+
+`config/required-checks/<project>` is an optional local, gitignored, per-project file read by `bin/fm-pr-merge.sh` before a GitHub merge.
+It is keyed by the basename of the project directory recorded in the task's own `project=` metadata, so a project cloned as `projects/XAUUSD` is keyed `XAUUSD`.
+Its total absence leaves `fm-pr-merge.sh`'s default check-run judgment completely unchanged.
+That default judgment requires every check found at the pull request's live head to be completed with conclusion success, neutral, or skipped, with skipped accepted unconditionally.
+When the file exists, it lists one check name per line that must additionally exist among those check runs and conclude success.
+A line may end with `skippable-if: <other check name>` to declare that this one check may conclude skipped instead, but only when that other named check's own latest run at the same head concluded success.
+A required check that is missing entirely, still incomplete, or concluded with anything else - including an undeclared skip - refuses the merge by name.
+This list only tightens which checks already found at the head must be green; it never exempts a check the default judgment would otherwise refuse.
+See `bin/fm-pr-merge.sh`'s header for the exact per-check evidence and refusal wording.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
