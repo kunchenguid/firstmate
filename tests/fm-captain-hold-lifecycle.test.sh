@@ -1532,7 +1532,10 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   local home id wt show rc bootstrap
   home=$(make_home teardown-held-interrupted)
   id=sample-held-cleanup-failure
-  wt="$home/projects/$id"
+  # A disposable copy, not the home's projects/ clone: teardown refuses to
+  # signal into projects/, and this case must reach the failed worktree return
+  # so the pending close record is what remains.
+  wt="$home/wt"
   mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
   tasks_in "$home" add "$id" "Investigate failed sample cleanup" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the cleanup-failure fixture"

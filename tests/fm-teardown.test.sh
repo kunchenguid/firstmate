@@ -62,8 +62,6 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
-REAL_LSOF_FOR_TEST=$(command -v lsof)
-export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -559,12 +557,43 @@ backlog_row_state() {
     sed -n 's/^  state: *//p' | head -1
 }
 
+# Replay whatever pending backlog-close records a teardown left behind, exactly
+# as bin/fm-bootstrap.sh does at every session start. This is the real consumer
+# of `state/<id>.backlog-close`, so a refusal that leaves one behind is observed
+# here as the record removal and row close it actually causes.
+replay_pending_backlog_closes() {  # <case-dir> <home>
+  local case_dir=$1 home=$2
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_TEST_ROOT="$ROOT" FM_TEST_CASE="$case_dir" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    bash -c '
+      set -u
+      . "$FM_TEST_ROOT/bin/fm-tasks-axi-lib.sh"
+      . "$FM_TEST_ROOT/bin/fm-backlog-transition-lib.sh"
+      state="$FM_TEST_CASE/state"; data="$FM_TEST_CASE/data"
+      for marker in "$state"/*.backlog-close; do
+        [ -e "$marker" ] || continue
+        fm_backlog_close_marker_replay "$state" "$marker" "$data" || true
+      done
+    '
+}
+
+# Read one key out of a task record the way every consumer does: the LAST value.
+fm_meta_read() {  # <meta-file> <key>
+  FM_TEST_ROOT="$ROOT" bash -c '
+    set -u
+    . "$FM_TEST_ROOT/bin/fm-backend.sh"
+    fm_meta_get "$1" "$2"
+  ' _ "$1" "$2"
+}
+
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln ls \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
@@ -1076,8 +1105,14 @@ test_lsof_error_never_clears_index_lock() {
   set -e
 
   expect_code 1 "$rc" "lsof-error-index-lock: teardown should refuse when lsof errors"
-  assert_grep "REFUSED: cannot determine leaked processes" "$case_dir/stderr" \
+  # The lock-staleness proof is the only thing here that depends on lsof; the
+  # separate process scan answers from /proc where the kernel exposes it, so its
+  # refusal is not what this case is about (test_lsof_error_refuses_before_removal
+  # covers that one).
+  assert_grep "teardown: lsof check failed" "$case_dir/stderr" \
     "lsof-error-index-lock: teardown did not report the lsof failure"
+  assert_grep "is not provably stale" "$case_dir/stderr" \
+    "lsof-error-index-lock: teardown did not refuse on the unprovable lock"
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "lsof-error-index-lock: teardown removed a lock after lsof failed"
   [ -e "$lock" ] || fail "lsof-error-index-lock: lock file was removed after lsof failed"
@@ -1670,6 +1705,75 @@ SH
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
     || fail "herdr-orphan-refusal: the successful retry did not report completion"
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+}
+
+# A REFUSAL MUST LEAVE THE TASK RELAUNCHABLE, AND AN AGENT IS PART OF THE TASK.
+# The contended presentation lock refuses before anything is returned or erased,
+# and the whole point of that ordering is that a plain rerun still has something
+# to run against. A harvest placed ahead of the refusal breaks exactly that: it
+# stops the crewmate's own processes in the copy, and then the refusal tells the
+# operator to rerun a task whose agent it has just killed. So the harvest belongs
+# behind every refusal, and this case pins it by watching the process itself.
+test_herdr_preflight_refusal_leaves_the_agent_alive() {
+  local case_dir log closed lock ready release holder_pid rc agent_pid
+  case_dir=$(make_case herdr-refusal-spares-agent)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+
+  # Stand-in for the crewmate: a live process whose working directory is the
+  # task's own copy, which is exactly what the harvest selects.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  agent_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$agent_pid" 2>/dev/null || fail "herdr-refusal-spares-agent: the stand-in agent did not start"
+
+  lock=$(FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
+    || { kill -KILL "$agent_pid" 2>/dev/null || true; fail "herdr-refusal-spares-agent: could not resolve the fixture presentation lock path"; }
+  ready="$case_dir/lock-ready"; release="$case_dir/lock-release"
+  ROOT="$ROOT" LOCK="$lock" READY="$ready" RELEASE="$release" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$LOCK" || exit 1
+    : > "$READY"
+    while [ ! -e "$RELEASE" ]; do sleep 0.1; done
+    fm_lock_release "$LOCK"
+  ' &
+  holder_pid=$!
+  local waited=0
+  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || { kill -KILL "$agent_pid" 2>/dev/null || true; fail "herdr-refusal-spares-agent: the contending lock holder never started"; }
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    : > "$release"; kill -KILL "$agent_pid" 2>/dev/null || true
+    fail "herdr-refusal-spares-agent: teardown reported success under lock contention"
+  fi
+  assert_grep "presentation lock is contended" "$case_dir/stderr" \
+    "herdr-refusal-spares-agent: the refusal was not the contended presentation lock"
+  # The assertion this case exists for.
+  if ! kill -0 "$agent_pid" 2>/dev/null; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "herdr-refusal-spares-agent: the refusal killed the agent it told the operator to rerun against"
+  fi
+
+  # And the harvest is not merely deferred out of existence: once the refusal
+  # clears, the same teardown does stop it.
+  : > "$release"
+  wait "$holder_pid" 2>/dev/null || true
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || { kill -KILL "$agent_pid" 2>/dev/null || true; fail "herdr-refusal-spares-agent: the retry after lock release failed: $(cat "$case_dir/stderr2")"; }
+  if kill -0 "$agent_pid" 2>/dev/null; then
+    kill -KILL "$agent_pid" 2>/dev/null || true
+    fail "herdr-refusal-spares-agent: the successful retry never harvested the agent's process"
+  fi
+  pass "a contended herdr presentation lock refuses with the agent still alive, and the retry harvests it"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -2840,6 +2944,194 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+# THE GUARDRAIL THIS WHOLE BATCH RESTS ON. Teardown passes the record's own
+# `worktree=` and `tasktmp=` values into a loop that signals processes. Nothing
+# stood behind them: no refusal of the filesystem root, of a path sitting
+# directly in the home, or of anything under projects/ - where the operator's
+# own stack lives, on ports 3001, 3002, 3003 and 3103.
+#
+# That gap predated this branch and was harmless only by accident: the scan was
+# gated on lsof, absent here, so the loop never ran. Moving it onto the shared
+# resolver made it live, which is what makes this test load-bearing rather than
+# theoretical. A stale or hand-edited record naming the operator's stack must
+# make teardown REFUSE - not signal, and not quietly narrow itself and then run
+# its destructive half anyway.
+test_a_recorded_root_under_projects_refuses_instead_of_signalling() {
+  local case_dir rc pid home
+  case_dir=$(make_case forbidden-recorded-root)
+  home="$case_dir/home"
+  mkdir -p "$home/projects/api-stack"
+  write_meta "$case_dir" no-mistakes ship
+  # The worktree is the ordinary, valid one, so every landed-work check ahead of
+  # the reap passes and this case actually REACHES the signalling loop - which
+  # is the whole point, and the thing an earlier draft of this test got wrong by
+  # refusing for an unrelated reason and looking like it had proved something.
+  land_shippable_commit "$case_dir"
+  # The recorded temp root, however, points at the operator's own stack.
+  printf '%s\n' "tasktmp=$home/projects/api-stack" >> "$case_dir/state/task-x1.meta"
+
+  ( cd "$home/projects/api-stack" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "forbidden-root: the stand-in stack process did not start"
+
+  set +e
+  # This case sets FM_HOME to the fake home so `projects/` sits where the guard
+  # expects it, which moves $DATA there too. Pin it back to the case dir for the
+  # reason run_teardown pins it: without it teardown stops on an unresolvable
+  # data directory and never reaches the signalling loop this case exists to
+  # prove, refusing for an unrelated reason and looking like it proved something
+  # - exactly the mistake the comment above this test warns about.
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  # The process is the assertion that matters.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "forbidden-root: a process under the operator's own projects/ tree was signalled by teardown"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+
+  expect_code 1 "$rc" "forbidden-root: teardown should refuse a recorded root it may never signal into"
+  assert_grep "REFUSED" "$case_dir/stderr" \
+    "forbidden-root: teardown did not report refusing the recorded root"
+  assert_present "$case_dir/wt" "forbidden-root: teardown removed the worktree after refusing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forbidden-root: teardown removed the task record after refusing"
+  pass "a recorded root pointing into the operator's own projects tree refuses teardown instead of signalling into it"
+}
+
+# NO REFUSAL AFTER AN IRREVERSIBLE COMMITMENT. The root refusal advertises a
+# repair the operator runs against this task's record, so the refusal has to
+# leave that record - and the backlog row it belongs to - exactly as it found
+# them. Run past the backlog close-marker write, it did not: the marker survived
+# the refusal, the next session start replayed it, and the replay deleted the
+# very record the printed repair needs and closed the row. The refusal is
+# deterministic, so every rerun refused again; the window before the next session
+# start was the operator's only chance to use the repair, and after it teardown
+# could never run for that id and the leftover processes were never reaped.
+test_a_forbidden_recorded_root_refuses_before_the_backlog_is_committed() {
+  local case_dir rc home
+  case_dir=$(make_case forbidden-root-backlog-intact)
+  home="$case_dir/home"
+  mkdir -p "$home/projects/api-stack"
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  printf '%s\n' "tasktmp=$home/projects/api-stack" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "forbidden-root-backlog: the fixture did not start with an open backlog row"
+
+  rc=0
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "forbidden-root-backlog: teardown should refuse the recorded root"
+  assert_grep "REFUSED" "$case_dir/stderr" \
+    "forbidden-root-backlog: teardown did not report refusing the recorded root"
+
+  # The real consumer of whatever teardown left behind: the pending-close replay
+  # bin/fm-bootstrap.sh runs at every session start.
+  replay_pending_backlog_closes "$case_dir" "$home"
+
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forbidden-root-backlog: a session-start replay erased the record the printed repair needs"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "forbidden-root-backlog: a refused teardown still closed its backlog row through the replay: $(backlog_row_state "$case_dir")"
+  pass "a recorded root refusal leaves the task record and its backlog row intact across a session-start replay"
+}
+
+
+
+# THE WALL HAS NO DOOR, AND THAT IS THE POINT. Forcing a reap under the
+# firstmate home's projects/ tree would stop the captain's own stack - the exact
+# harm the wall exists to prevent - so --force cannot be the escape. Neither is a
+# retarget command: worktree= is the field teardown reads for the landed-work
+# check, the branch cleanup and the return of the copy, so a tool that rewrote it
+# as if it were only a scan root would redirect all of those silently. What the
+# refusal owes the operator instead is honesty - name the bad root, say why, and
+# state the manual repair - and then that repair has to actually work. This case
+# walks it end to end with the stack process alive throughout.
+test_a_forbidden_recorded_root_refuses_with_a_repair_that_works_by_hand() {
+  local case_dir rc stack_pid leftover_pid home real_tmp
+  case_dir=$(make_case forbidden-root-repair)
+  home="$case_dir/home"
+  real_tmp="$case_dir/tmproot/fm-task-x1"
+  mkdir -p "$home/projects/api-stack" "$real_tmp"
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  printf '%s\n' "tasktmp=$home/projects/api-stack" >> "$case_dir/state/task-x1.meta"
+
+  ( cd "$home/projects/api-stack" && exec sleep 300 ) &
+  stack_pid=$!
+  disown
+  ( cd "$real_tmp" && exec sleep 300 ) &
+  leftover_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$stack_pid" 2>/dev/null || fail "forbidden-root-repair: the stand-in stack process did not start"
+  kill -0 "$leftover_pid" 2>/dev/null || fail "forbidden-root-repair: the leftover process did not start"
+
+  run_case_teardown() {
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      "$TEARDOWN" task-x1
+  }
+
+  rc=0
+  run_case_teardown > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "forbidden-root-repair: teardown should refuse a recorded root it may never signal into"
+  assert_grep "$home/projects/api-stack" "$case_dir/stderr" \
+    "forbidden-root-repair: the refusal did not name the bad recorded root"
+  assert_grep "$case_dir/state/task-x1.meta" "$case_dir/stderr" \
+    "forbidden-root-repair: the refusal did not name the record the operator must correct"
+  # No tool is advertised, because none may rewrite this field on the operator's
+  # behalf. A refusal that named one would be pointing at a trap.
+  assert_not_contains "$(cat "$case_dir/stderr")" "fm-task-root.sh" \
+    "forbidden-root-repair: the refusal advertised a retarget command that must not ship"
+  kill -0 "$stack_pid" 2>/dev/null \
+    || fail "forbidden-root-repair: the refusal signalled the operator's own stack"
+
+  # The operator does what the refusal told them to: correct the record itself.
+  # state/<id>.meta is the durable task record - a persisted key=value contract
+  # this suite already writes directly through fm_write_meta.
+  grep -v '^tasktmp=' "$case_dir/state/task-x1.meta" > "$case_dir/meta.fixed"
+  printf '%s\n' "tasktmp=$real_tmp" >> "$case_dir/meta.fixed"
+  mv "$case_dir/meta.fixed" "$case_dir/state/task-x1.meta"
+
+  rc=0
+  run_case_teardown > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  expect_code 0 "$rc" "forbidden-root-repair: teardown should succeed once the record names a legitimate root: $(cat "$case_dir/stderr2")"
+  if kill -0 "$stack_pid" 2>/dev/null; then
+    kill -KILL "$stack_pid" 2>/dev/null || true
+  else
+    kill -KILL "$leftover_pid" 2>/dev/null || true
+    fail "forbidden-root-repair: the repaired teardown signalled the operator's own stack"
+  fi
+  if kill -0 "$leftover_pid" 2>/dev/null; then
+    kill -KILL "$leftover_pid" 2>/dev/null || true
+    fail "forbidden-root-repair: the repaired teardown never harvested the corrected temp root"
+  fi
+  unset -f run_case_teardown
+  pass "a recorded root under projects/ refuses with an honest repair instruction, and the corrected record lets teardown finish"
+}
+
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
@@ -2867,7 +3159,127 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
-test_lsof_absent_reaps_tmux_process_group() {
+# The teardown must never signal the shell it was started from. An operator who
+# does `cd <worktree> && fm-teardown.sh <id>` puts their own shell in the very
+# scan teardown is about to act on, and stopping it would close the session
+# running the teardown. This became reachable on hosts without lsof only when
+# the scan's gate moved to the shared resolver, so it is pinned here rather than
+# left to the two sibling paths that spare the chain inside fm_wtproc_select.
+test_teardown_never_signals_the_shell_it_was_started_from() {
+  local case_dir rc pid holder_pid
+  case_dir=$(make_case teardown-spares-its-invoker)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # An ordinary leftover, so this case still proves the reap runs at all rather
+  # than passing because nothing was ever selected.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "teardown-spares-its-invoker: setup sleeper did not start"
+
+  # A shell whose working directory is inside the worktree, which then runs the
+  # teardown as its child: exactly the operator's position. It records that it
+  # outlived the teardown; if teardown signals its own ancestor, the marker is
+  # never written.
+  # The home and data directory are pinned like run_teardown pins them: left
+  # unset they resolve against whatever home the suite happens to run in, which
+  # is both why this case exited non-zero on an unresolvable data directory
+  # instead of proving anything, and a path by which a test could reach a real
+  # home's records.
+  cat > "$case_dir/holder.sh" <<EOF
+#!/usr/bin/env bash
+cd "$case_dir/wt" || exit 1
+FM_ROOT_OVERRIDE="$ROOT" \
+FM_HOME="$case_dir/home" \
+FM_STATE_OVERRIDE="$case_dir/state" \
+FM_DATA_OVERRIDE="$case_dir/data" \
+FM_CONFIG_OVERRIDE="$case_dir/config" \
+PATH="$case_dir/fakebin:\${FM_TEARDOWN_TEST_PATH:-\$PATH}" \
+  "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+printf '%s\\n' "\$?" > "$case_dir/holder.rc"
+: > "$case_dir/holder.survived"
+EOF
+  chmod +x "$case_dir/holder.sh"
+
+  "$case_dir/holder.sh" &
+  holder_pid=$!
+  wait "$holder_pid" 2>/dev/null || true
+
+  [ -f "$case_dir/holder.survived" ] \
+    || fail "teardown-spares-its-invoker: the shell that started the teardown did not outlive it"
+  rc=$(cat "$case_dir/holder.rc" 2>/dev/null || echo missing)
+  expect_code 0 "$rc" "teardown-spares-its-invoker: teardown should still succeed"
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "teardown-spares-its-invoker: sparing the invoker also spared an ordinary leftover"
+  fi
+  assert_grep "belong to this teardown itself" "$case_dir/stderr" \
+    "teardown-spares-its-invoker: teardown did not report the processes it left alone"
+  pass "teardown reaps a leftover but never signals the shell it was started from"
+}
+
+# The same fallback, reached with BOTH recorded roots absent. Validating the
+# recorded roots introduced a real way to lose it: dropping an absent root is
+# right, but skipping the whole reap call once none were left took the
+# process-group fallback with it - and that fallback is the first act of the
+# call, before any root is examined, and the only cleanup such a host has.
+test_no_cwd_source_still_reaps_the_group_when_both_roots_are_absent() {
+  local case_dir rc pid path_without_lsof
+  case_dir=$(make_case lsof-absent-roots-absent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+
+  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir" &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "roots-absent-group-reap: setup sleeper did not start"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$pid'
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+
+  # Both recorded roots name paths that are not there. The worktree itself is
+  # recorded as a directory that has already been removed, which is the state a
+  # half-finished cleanup leaves behind.
+  printf '%s\n' "tasktmp=$case_dir/gone-tasktmp" >> "$case_dir/state/task-x1.meta"
+  rm -rf "$case_dir/wt-gone"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt-gone" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "tasktmp=$case_dir/gone-tasktmp"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "roots-absent-group-reap: the process-group fallback never ran, so the leaked group survived"
+  fi
+  assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
+    "roots-absent-group-reap: teardown did not use the process-group fallback"
+  pass "a host with no working-directory source still reaps the process group when both recorded roots are gone"
+}
+
+# The process-group fallback is for a host that can answer the cwd question
+# NEITHER from /proc NOR from lsof, so both sources are removed here: /proc is
+# pointed at a path that does not exist and lsof is taken off the search path.
+test_no_cwd_source_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
@@ -2892,6 +3304,7 @@ EOF
 
   rc=0
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
@@ -2901,7 +3314,7 @@ EOF
   fi
   assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
     "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
-  pass "missing lsof falls back to reaping the tmux pane process group"
+  pass "a host with neither /proc nor lsof falls back to reaping the tmux pane process group"
 }
 
 test_lsof_error_refuses_before_removal() {
@@ -2920,11 +3333,12 @@ EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "lsof-error-refusal: teardown should refuse"
-  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
-    "lsof-error-refusal: teardown did not explain the lsof refusal"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (the working-directory scan failed)" "$case_dir/stderr" \
+    "lsof-error-refusal: teardown did not explain the scan refusal"
   assert_present "$case_dir/wt" "lsof-error-refusal: teardown removed the worktree"
   assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
   assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
@@ -3007,6 +3421,9 @@ if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
 fi
 exec "$REAL_PS_FOR_TEST" "$@"
 SH
+  # A synthetic cwd record rather than a delegation to a real lsof: this case
+  # deliberately runs on the lsof resolver (FM_PROC_ROOT_OVERRIDE points at
+  # nothing), and lsof is not installed everywhere the suite runs.
   cat > "$case_dir/fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
 count=0
@@ -3021,13 +3438,17 @@ if [ "$count" -eq 2 ]; then
     i=$((i + 1))
   done
 fi
-exec "$REAL_LSOF_FOR_TEST" "$@"
+if kill -0 "$FM_FAKE_EXEC_PID" 2>/dev/null; then
+  printf 'p%s\nfcwd\nn%s\n' "$FM_FAKE_EXEC_PID" "$FM_FAKE_EXEC_WT"
+fi
+exit 0
 SH
   chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
   FM_FAKE_EXEC_PID="$pid" FM_FAKE_EXEC_MARKER="$marker" \
+  FM_FAKE_EXEC_WT="$case_dir/wt" \
   FM_FAKE_EXEC_DONE="$done_flag" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
@@ -3084,19 +3505,37 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
 }
 
 test_persistent_scan_refuses_after_bounded_retries() {
-  local case_dir rc wt_path fake_pid=99999999
+  local case_dir rc wt_path last_pid
   case_dir=$(make_case persistent-reap-refusal)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
+  # A leak that keeps coming back, which is what "persistent" means in the
+  # field: a supervisor that restarts its child, so every pass finds a LIVE
+  # process in the copy and the reap never converges. The pid is only respawned
+  # once the previous one is really gone, so it stays stable within a pass while
+  # changing across them.
+  #
+  # It used to be a pid that had never existed (99999999). That modelled a
+  # process which is listed and not running - a contradiction the scan now
+  # resolves on its own, since a pid that is not there is not a leftover.
   cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
-printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
+pidfile="$case_dir/persistent.pid"
+pid=\$(cat "\$pidfile" 2>/dev/null || true)
+if [ -z "\$pid" ] || ! kill -0 "\$pid" 2>/dev/null; then
+  ( cd '$wt_path' && exec sleep 300 ) </dev/null >/dev/null 2>&1 &
+  pid=\$!
+  printf '%s' "\$pid" > "\$pidfile"
+  disown 2>/dev/null || true
+fi
+printf 'p%s\nfcwd\nn%s\n' "\$pid" '$wt_path'
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
-   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+# A birth identity that is stable for whichever pid is current, so the reap's
+# pid-reuse guard never rescues the case.
+if [ "${1:-}" = -p ] && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
   printf 'Tue Aug  4 10:00:00 2026\n'
   exit 0
 fi
@@ -3105,8 +3544,11 @@ SH
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_PERSISTENT_PID="$fake_pid" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  last_pid=$(cat "$case_dir/persistent.pid" 2>/dev/null || true)
+  [ -n "$last_pid" ] && kill -KILL "$last_pid" 2>/dev/null
 
   expect_code 1 "$rc" "persistent-reap-refusal: teardown should refuse"
   assert_grep "remain after 3 reap attempts" "$case_dir/stderr" \
@@ -3212,6 +3654,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_preflight_refusal_leaves_the_agent_alive
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
@@ -3264,7 +3707,12 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
-test_lsof_absent_reaps_tmux_process_group
+test_a_recorded_root_under_projects_refuses_instead_of_signalling
+test_a_forbidden_recorded_root_refuses_with_a_repair_that_works_by_hand
+test_a_forbidden_recorded_root_refuses_before_the_backlog_is_committed
+test_teardown_never_signals_the_shell_it_was_started_from
+test_no_cwd_source_reaps_tmux_process_group
+test_no_cwd_source_still_reaps_the_group_when_both_roots_are_absent
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped

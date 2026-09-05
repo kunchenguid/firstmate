@@ -68,8 +68,17 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+4. **Conclude the task's own parked no-mistakes run**, in the same order `bin/fm-teardown.sh` uses: a ship task's run parked at a gate is aborted before the worker that would have answered it is removed, so the replacement never inherits a run parked with nothing driving it.
+   A run that will not conclude refuses here, with the old agent still untouched, so the relaunch rolls back and leaves the durable record and the instructions byte-identical.
+   [`bin/fm-nm-run-lib.sh`](../bin/fm-nm-run-lib.sh)'s header owns which run is attributed to this task and the timeouts it is bounded by.
+5. **Stop the old agent** through the `exit` verb, with its postcondition.
+6. **Stop what the previous incarnation left running** in that same local copy, so the replacement never inherits a server, watcher, or queue worker it did not start.
+   Attribution is the process's real working directory and nothing else, never a command name; this task's own endpoint shell is spared because the relaunch reuses it; the invoking command's own ancestor chain is spared too, so a relaunch typed into a terminal sitting inside that copy never closes it; a `kind=secondmate` task is skipped because its recorded worktree is its firstmate home rather than a disposable copy.
+   When step 5 only READ the agent as already stopped rather than watching it go, the endpoint is asked once more and must still read gone before anything is signalled; an endpoint that reads back live warns, records `reap=unconfirmed-stop`, and leaves every process alone, because a live agent's processes are never touched on any path.
+   A cleanup that cannot be completed warns, records what it did as the journal's `reap=` field, and lets the relaunch finish rather than stranding the task with no agent.
+   That field also carries what the cleanup did NOT cover: `+leaders-unclassified:<n>` when the endpoint's own shell could not be named, and `+tmp-root-refused:<path>` when a recorded root failed validation and was therefore never examined.
+   [`bin/fm-worktree-proc-lib.sh`](../bin/fm-worktree-proc-lib.sh)'s header owns which processes belong to a copy and the guards that keep every answer inside it.
+7. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -119,5 +128,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, the parked-run conclusion ahead of any signal, the leftover-process cleanup and what it spares, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

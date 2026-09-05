@@ -34,6 +34,7 @@ GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+ORPHAN_REAP="$ROOT/bin/fm-orphan-reap.sh"
 
 TMP=$(fm_test_tmproot fm-gate-refuse)
 fm_git_identity fmtest fmtest@example.invalid
@@ -347,6 +348,58 @@ test_teardown_refuses_and_admits() {
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
 }
 
+# --- fm-orphan-reap (reap only) ----------------------------------------------
+
+# A minimal home with one task record. Neither entrypoint under test here gets
+# far enough to need a real worktree: the refusal must fire before either looks
+# at the fleet at all, and the no-regression run is asserted by the ABSENCE of a
+# gate refusal rather than by a successful cleanup.
+make_reap_case() {  # <name> -> case dir
+  local case_dir="$TMP/$1"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$case_dir/wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes"
+  printf '%s\n' "$case_dir"
+}
+
+run_orphan_reap() {  # <cwd> <case-dir> <verb> [ASSIGN...]
+  local cwd=$1 case_dir=$2 verb=$3; shift 3
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      "FM_HOME=$case_dir" "FM_STATE_OVERRIDE=$case_dir/state" "$@" \
+      "$ORPHAN_REAP" "$verb" task-x1 ) 2>&1
+}
+
+
+test_orphan_reap_refuses_and_admits() {
+  local case_dir out rc
+
+  case_dir=$(make_reap_case reap-envmark)
+  out=$(run_orphan_reap "$NORMAL_CWD" "$case_dir" reap NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "orphan-reap: NO_MISTAKES_GATE must refuse the reap"
+  assert_contains "$out" "$ENV_MSG" "orphan-reap: env-marker refusal message"
+
+  case_dir=$(make_reap_case reap-backstop)
+  out=$(run_orphan_reap "$GATE_WT" "$case_dir" reap); rc=$?
+  expect_code 3 "$rc" "orphan-reap: gate-worktree cwd must refuse the reap with the marker unset"
+  assert_contains "$out" "$PATH_MSG" "orphan-reap: path-backstop refusal message"
+
+  # The read-only scan is deliberately NOT refused: bin/fm-session-start.sh runs
+  # it in the digest, and a report that stops nothing is not a fleet mutation.
+  case_dir=$(make_reap_case reap-scan-envmark)
+  out=$(run_orphan_reap "$NORMAL_CWD" "$case_dir" scan NO_MISTAKES_GATE=1); rc=$?
+  [ "$rc" -ne 3 ] || fail "orphan-reap: the read-only scan must not carry the gate refusal: $out"
+  assert_not_contains "$out" "$ENV_MSG" "orphan-reap: scan must not print the gate refusal"
+
+  case_dir=$(make_reap_case reap-ok)
+  out=$(run_orphan_reap "$NORMAL_CWD" "$case_dir" reap); rc=$?
+  [ "$rc" -ne 3 ] || fail "orphan-reap: a normal session must not hit the gate refusal: $out"
+  assert_not_contains "$out" "$ENV_MSG" "orphan-reap: normal reap must not print the gate refusal"
+  assert_not_contains "$out" "$PATH_MSG" "orphan-reap: normal reap must not print the backstop refusal"
+  pass "fm-orphan-reap: the reap refuses on marker and backstop while the read-only scan stays available"
+}
+
 test_helper_env_marker_refuses
 test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
@@ -354,3 +407,4 @@ test_helper_normal_is_noop
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_orphan_reap_refuses_and_admits

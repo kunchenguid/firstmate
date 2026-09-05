@@ -2626,7 +2626,13 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+#
+# FM_TASK_TMP_ROOT is the one place this path's parent is decided, defaulting to
+# /tmp. bin/fm-worktree-proc-lib.sh's fm_wtproc_task_tmp rebuilds the same path
+# from the same variable and refuses any recorded `tasktmp=` that does not
+# resolve to it, so a stale or hand-edited record cannot point a cleanup at a
+# directory this script never created.
+TASK_TMP="${FM_TASK_TMP_ROOT:-/tmp}/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches

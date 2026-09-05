@@ -17,6 +17,9 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. The replaced incarnation's leftover processes are stopped in the copy the
+#      replacement is about to work in - and only there, and never the endpoint's
+#      own shell.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -38,7 +41,12 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 TASK_TMPS=()
 
 relaunch_cleanup() {
-  local d
+  local d p
+  if [ -f "${WITNESS_REGISTRY:-}" ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] && kill -KILL "$p" 2>/dev/null
+    done < "$WITNESS_REGISTRY"
+  fi
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -99,6 +107,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_pid*) cat "$D/panepid"; printf '\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
@@ -121,6 +130,41 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  # A ship relaunch concludes the task's own parked no-mistakes run before it
+  # stops anything, so every case needs a hermetic `no-mistakes` - without it
+  # these tests would reach whatever real binary is on the runner's PATH.
+  # `axi status` answers FM_FAKE_AXI_STATUS verbatim (empty by default, i.e. no
+  # run, so the step is inert), and `axi abort` records its invocation - and
+  # whether FM_FAKE_NM_ABORT_WITNESS was still running when it fired - in
+  # FM_FAKE_NM_ABORT_LOG. With FM_FAKE_NM_ABORT_NOOP=1 the abort changes
+  # nothing and the run reads parked afterwards, the shape that must refuse.
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "axi status")
+    shift 2
+    run_id=""
+    [ "${1:-}" = --run ] && run_id=${2:-}
+    if [ -n "$run_id" ] && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
+      printf 'run:\n  id: "%s"\n  outcome: cancelled\n' "$run_id"
+    else
+      printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+    fi
+    ;;
+  "axi abort")
+    shift 2
+    witness=absent
+    if [ -n "${FM_FAKE_NM_ABORT_WITNESS:-}" ]; then
+      if kill -0 "$FM_FAKE_NM_ABORT_WITNESS" 2>/dev/null; then witness=alive; else witness=gone; fi
+    fi
+    [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] \
+      || printf 'abort %s witness=%s\n' "$*" "$witness" >> "$FM_FAKE_NM_ABORT_LOG"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -131,6 +175,9 @@ new_case() {
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
+  # What the backend would answer for `#{pane_pid}`: the shell this endpoint
+  # runs. Unset by default, which is the "the record cannot name it" case.
+  printf 'fakepane' > "$dir/fake/panepid"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
   printf '%s\n' "$dir"
@@ -185,6 +232,8 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_WTPROC_CREW_STATE_BIN="${FM_WTPROC_CREW_STATE_BIN:-}" \
+    FAKE_CREW_STATE_FILE="${FAKE_CREW_STATE_FILE:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -198,6 +247,55 @@ run_spawn() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
+}
+
+# Witness processes for the leftover-cleanup cases. Registered in a file because
+# each is started inside a command substitution, whose array appends never reach
+# this shell.
+WITNESS_REGISTRY="$TMP_ROOT/.witnesses"
+: > "$WITNESS_REGISTRY"
+
+witness() {  # <cwd> -> pid
+  local dir=$1 pid
+  ( cd "$dir" && exec /bin/sleep 600 ) </dev/null >/dev/null 2>&1 &
+  pid=$!
+  disown
+  printf '%s\n' "$pid" >> "$WITNESS_REGISTRY"
+  /bin/sleep 0.2
+  kill -0 "$pid" 2>/dev/null || fail "witness in $dir did not start"
+  printf '%s' "$pid"
+}
+
+# The shape a terminal endpoint's shell takes: its own session leader.
+session_leader_witness() {  # <cwd> -> pid
+  local dir=$1 pid pidfile i
+  pidfile="$TMP_ROOT/leader.$RANDOM.pid"
+  # shellcheck disable=SC2016  # $$ must expand in the child, not here
+  ( cd "$dir" && exec setsid /bin/sh -c 'echo $$ > "$1"; exec /bin/sleep 600' _ "$pidfile" ) \
+    </dev/null >/dev/null 2>&1 &
+  disown
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$pidfile" ] && break
+    /bin/sleep 0.1
+  done
+  pid=$(cat "$pidfile" 2>/dev/null || true)
+  [ -n "$pid" ] || fail "session-leader witness did not start"
+  printf '%s\n' "$pid" >> "$WITNESS_REGISTRY"
+  /bin/sleep 0.2
+  printf '%s' "$pid"
+}
+
+witness_alive() { kill -0 "$1" 2>/dev/null; }
+
+# A current-state reader whose verdict comes from a file, standing in for
+# bin/fm-crew-state.sh.
+make_crew_state_stub() {  # <case-dir> <state>
+  cat > "$1/crew-state" <<'SH'
+#!/usr/bin/env bash
+printf 'state: %s · source: pane · stub\n' "$(cat "$FAKE_CREW_STATE_FILE" 2>/dev/null || echo unknown)"
+SH
+  chmod +x "$1/crew-state"
+  printf '%s' "$2" > "$1/crew"
 }
 
 meta_field() {  # <case-dir> <id> <key>
@@ -1494,6 +1592,262 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- leftover processes in the replaced incarnation's copy -------------------
+#
+# The gap this closes: a worker that started a server, watcher, or queue worker
+# leaves it running in the same copy its replacement is about to work in, and
+# nothing else in the lifecycle would ever stop it.
+
+test_relaunch_stops_what_the_previous_incarnation_left_running() {
+  local dir out rc leftover
+  dir=$(new_case leftover rl90)
+  add_ship_task "$dir" rl90 claude
+  leftover=$(witness "$dir/wt")
+
+  out=$(run_control "$dir" rl90 relaunch --note "engine stopped overnight"); rc=$?
+  expect_code 0 "$rc" "a relaunch should still succeed while cleaning up"$'\n'"$out"
+  /bin/sleep 0.3
+  witness_alive "$leftover" \
+    && fail "a process the replaced agent left running in the copy survived the relaunch"
+  assert_grep "reap=stopped:$leftover" "$dir/home/state/rl90.control-relaunch" \
+    "the transaction record should name what it stopped"
+  [ "$(meta_field "$dir" rl90 worktree)" = "$dir/wt" ] \
+    || fail "the copy must still be the task's own after the cleanup"
+  pass "fm-control relaunch: what the replaced incarnation left running in the copy is stopped"
+}
+
+test_relaunch_spares_the_endpoint_shell_and_everything_outside_the_copy() {
+  local dir out rc endpoint daemon outside inside
+  dir=$(new_case leftover-guards rl91)
+  add_ship_task "$dir" rl91 claude
+  # The shell this endpoint runs sits in the same copy and the relaunch reuses
+  # it, so the record names it and it must survive.
+  endpoint=$(session_leader_witness "$dir/wt")
+  printf '%s' "$endpoint" > "$dir/fake/panepid"
+  # A daemon the previous incarnation left behind that made itself a session
+  # leader too - the shape of the process that saturated the host on 2026-08-27.
+  # It is not the recorded endpoint's shell, so it has no claim on being spared.
+  daemon=$(session_leader_witness "$dir/wt")
+  # The primary checkout the copy was made from: never this task's to touch.
+  outside=$(witness "$dir/proj")
+  # A plain leftover, so a cleanup that stopped nothing at all would fail here
+  # rather than pass this case vacuously.
+  inside=$(witness "$dir/wt")
+
+  out=$(run_control "$dir" rl91 relaunch --note "engine stopped overnight"); rc=$?
+  expect_code 0 "$rc" "a relaunch should succeed"$'\n'"$out"
+  /bin/sleep 0.3
+  witness_alive "$inside" && fail "the ordinary leftover was not stopped, so this case proves nothing"
+  witness_alive "$daemon" \
+    && fail "a session-leader daemon that is not the recorded endpoint's shell survived the relaunch"
+  witness_alive "$endpoint" \
+    || fail "the shell the record names as this endpoint's was stopped by a relaunch that reuses it"
+  witness_alive "$outside" \
+    || fail "a process in the primary checkout was stopped by a task's cleanup"
+  pass "fm-control relaunch: only the recorded endpoint's own shell is spared, and nothing outside the copy is touched"
+}
+
+test_relaunch_holds_leaders_back_when_the_record_cannot_name_the_endpoint_shell() {
+  local dir out rc leader inside
+  dir=$(new_case leftover-unnameable rl93)
+  add_ship_task "$dir" rl93 claude
+  # The backend cannot say which pid its pane runs, so no session leader in the
+  # copy can be told apart from the endpoint's own shell.
+  printf 'fakepane' > "$dir/fake/panepid"
+  leader=$(session_leader_witness "$dir/wt")
+  inside=$(witness "$dir/wt")
+
+  out=$(run_control "$dir" rl93 relaunch --note "engine stopped overnight"); rc=$?
+  expect_code 0 "$rc" "a relaunch should still succeed"$'\n'"$out"
+  /bin/sleep 0.3
+  witness_alive "$inside" && fail "the ordinary leftover was not stopped, so this case proves nothing"
+  witness_alive "$leader" \
+    || fail "a session leader was stopped although the record could not name the endpoint's shell"
+  assert_grep "leaders-unclassified:1" "$dir/home/state/rl93.control-relaunch" \
+    "the transaction record should say a session leader was never classified"
+  kill -KILL "$leader" 2>/dev/null || true
+  pass "fm-control relaunch: a session leader is held back and recorded when the endpoint's shell cannot be named"
+}
+
+# A cleanup that could not be completed AND held session leaders back has to
+# record both. The durable journal is what an operator reads afterwards, so a
+# failure arm that dropped the leader count would leave a copy whose leaders
+# were never classified looking like one whose cleanup merely went wrong.
+test_a_failed_cleanup_still_records_the_leaders_it_never_classified() {
+  local dir out rc leader leftover wt_real real_ls
+  dir=$(new_case leftover-failed-record rl94)
+  add_ship_task "$dir" rl94 claude
+  # The record cannot name the endpoint's shell, so every session leader is held
+  # back and counted.
+  printf 'fakepane' > "$dir/fake/panepid"
+  wt_real=$(cd "$dir/wt" && pwd -P)
+  leader=$(session_leader_witness "$dir/wt")
+  leftover=$(witness "$dir/wt")
+
+  # A working-directory listing that stops answering the moment the leftover it
+  # was naming dies: the reap signals, and then cannot establish what happened -
+  # the "signalled, fate unknown" outcome, reached without wedging anything.
+  real_ls=$(command -v ls)
+  cat > "$dir/fakebin/ls" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -l ]; then
+  case "\${2:-}" in
+    /proc/*/cwd)
+      if kill -0 $leftover 2>/dev/null; then
+        printf 'lrwxrwxrwx 1 u u 0 Jan 1 00:00 /proc/%s/cwd -> %s\n' $leftover "$wt_real"
+        printf 'lrwxrwxrwx 1 u u 0 Jan 1 00:00 /proc/%s/cwd -> %s\n' $leader "$wt_real"
+        exit 0
+      fi
+      echo "ls: synthetic listing failure" >&2
+      exit 1
+      ;;
+  esac
+fi
+exec "$real_ls" "\$@"
+SH
+  chmod +x "$dir/fakebin/ls"
+
+  export FM_WTPROC_GRACE=1
+  out=$(run_control "$dir" rl94 relaunch --note "engine stopped overnight"); rc=$?
+  unset FM_WTPROC_GRACE
+  rm -f "$dir/fakebin/ls"
+  expect_code 0 "$rc" "a relaunch should still succeed when its cleanup cannot be verified"$'\n'"$out"
+  assert_grep "reap=indeterminate:$leftover" "$dir/home/state/rl94.control-relaunch" \
+    "the record should say the cleanup was signalled and could not be verified, so this case proves nothing otherwise"
+  assert_grep "indeterminate:$leftover+leaders-unclassified:1" "$dir/home/state/rl94.control-relaunch" \
+    "a cleanup that failed AND held a session leader back should record both, not only the failure"
+  witness_alive "$leader" \
+    || fail "a session leader was stopped although the record could not name the endpoint's shell"
+  kill -KILL "$leader" 2>/dev/null || true
+  pass "fm-control relaunch: a cleanup that could not be verified still records the leaders it never classified"
+}
+
+# THE INCIDENT'S OWN SHAPE. On 2026-08-27 a worker was killed mid-run when its
+# engine hit its quota limit, and the server it had started outlived it by eight
+# and a half hours. That worker leaves the endpoint reading gone while the
+# current-state reader still reports `working` - from a no-mistakes run that
+# never got to finish, or from the status log's last `working` verb. Requiring
+# that second source to say `done` or `failed` before cleaning up therefore shut
+# the cleanup off in precisely the case it was written for.
+#
+# On this path there is no living owner for that second source to protect:
+# firstmate is replacing this worker, deliberately, at this moment. The endpoint
+# is the whole test here, and the control arm below keeps the guardrail that
+# matters - an endpoint that reads alive is never cleaned up after.
+#
+# bin/fm-orphan-reap.sh's detection path is unchanged and still requires both
+# sources, because there nobody is replacing anybody.
+test_a_quota_killed_worker_is_cleaned_up_despite_a_stale_working_verb() {
+  local dir out rc leftover
+  dir=$(new_case leftover-incident-shape rl92)
+  add_ship_task "$dir" rl92 claude
+  # The endpoint already reads agent-free, so the relaunch never delivers an
+  # exit and never watches the agent go - it only READS it as gone. This is what
+  # a worker whose engine stopped overnight leaves behind.
+  printf 'zsh' > "$dir/fake/command"
+  # ... while the current state still reads `working`, the stale verb the dead
+  # worker never got to update.
+  make_crew_state_stub "$dir" working
+  leftover=$(witness "$dir/wt")
+
+  out=$(FM_WTPROC_CREW_STATE_BIN="$dir/crew-state" FAKE_CREW_STATE_FILE="$dir/crew" \
+    run_control "$dir" rl92 relaunch --note "engine stopped overnight"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  /bin/sleep 0.5
+  witness_alive "$leftover" \
+    && fail "incident-shape: the process the dead worker left running survived the relaunch that replaced it"
+  assert_grep "reap=stopped:$leftover" "$dir/home/state/rl92.control-relaunch" \
+    "the transaction record should name the process it stopped"
+
+  # No live-agent control arm belongs here, and it is worth saying why rather
+  # than shipping one that asserts the wrong thing. On this path do_exit has
+  # already settled the agent before the cleanup is reached: it returns
+  # `stopped` only after watching a live agent go, returns `already-stopped`
+  # only when it read the endpoint as dead, and dies on every other reading. A
+  # fixture with a live agent therefore exercises the commanded-stop path, where
+  # cleaning up is exactly right - it proves nothing about restraint. The
+  # remaining guard (the endpoint re-read below the exit) covers only the narrow
+  # race where the agent returns between the two reads, which cannot be driven
+  # through this CLI.
+  #
+  # The restraint that CAN be driven lives on the detection path, which this
+  # ruling deliberately left alone: tests/fm-worktree-proc.test.sh's
+  # test_a_disagreeing_current_state_vetoes_the_verdict pins that the same
+  # endpoint-dead-plus-state-working shape is still REFUSED there, where nobody
+  # is replacing anybody and the worker may well be alive.
+  pass "fm-control relaunch: a worker killed mid-run is cleaned up despite the stale working verb it left behind"
+}
+
+# --- the task's own parked no-mistakes run ----------------------------------
+#
+# The cleanup above and bin/fm-teardown.sh's are the same act - both remove the
+# worker that would have answered a gate - so they carry the same ordering: the
+# run is concluded BEFORE anything in the copy is signalled. Signalling first
+# stops whatever was driving the run and leaves it parked forever, holding a
+# fleet slot the replacement then inherits.
+
+# A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, the shape
+# no-mistakes actually emits (the same fixture tests/fm-teardown.test.sh and
+# tests/fm-crew-state.test.sh pin).
+parked_axi_status_toon() {  # <branch> <head>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "$2"
+  pr: ""
+  findings: none
+gate: review
+EOF
+}
+
+test_relaunch_concludes_the_parked_run_before_it_signals_anything() {
+  local dir out rc leftover head
+  dir=$(new_case parked-run rl93)
+  add_ship_task "$dir" rl93 claude
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  # A process of the wedged incarnation, in the copy: exactly what the cleanup
+  # selects, and what the abort must still find running.
+  leftover=$(witness "$dir/wt")
+
+  out=$(FM_FAKE_AXI_STATUS="$(parked_axi_status_toon task-rl93 "$head")" \
+    FM_FAKE_NM_ABORT_LOG="$dir/nm-abort.log" \
+    FM_FAKE_NM_ABORT_WITNESS="$leftover" \
+    run_control "$dir" rl93 relaunch --note "wedged at a no-mistakes gate"); rc=$?
+  expect_code 0 "$rc" "a relaunch should succeed while concluding the parked run"$'\n'"$out"
+  assert_present "$dir/nm-abort.log" \
+    "the relaunch never concluded the task's own parked run"
+  assert_grep "abort --run 01RUN witness=alive" "$dir/nm-abort.log" \
+    "the parked run must be concluded before anything in the copy is signalled"
+  /bin/sleep 0.3
+  witness_alive "$leftover" \
+    && fail "the process the replaced incarnation left running survived the relaunch"
+  pass "fm-control relaunch: the task's own parked run is concluded before the cleanup signals anything"
+}
+
+test_a_parked_run_that_will_not_conclude_refuses_before_anything_is_touched() {
+  local dir out rc leftover head
+  dir=$(new_case parked-run-unconfirmed rl94)
+  add_ship_task "$dir" rl94 claude
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  leftover=$(witness "$dir/wt")
+
+  out=$(FM_FAKE_AXI_STATUS="$(parked_axi_status_toon task-rl94 "$head")" \
+    FM_FAKE_NM_ABORT_LOG="$dir/nm-abort.log" \
+    FM_FAKE_NM_ABORT_NOOP=1 \
+    run_control "$dir" rl94 relaunch --note "wedged at a no-mistakes gate"); rc=$?
+  expect_code 1 "$rc" "a run that stays parked must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "REFUSED: no-mistakes run for rl94 is still parked" \
+    "the refusal should name the run that could not be concluded"
+  witness_alive "$leftover" \
+    || fail "the relaunch signalled the copy after refusing to conclude the parked run"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the relaunch stopped the agent after refusing to conclude the parked run"
+  pass "fm-control relaunch: a run that will not conclude refuses before the agent or the copy is touched"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1545,3 +1899,10 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_stops_what_the_previous_incarnation_left_running
+test_relaunch_spares_the_endpoint_shell_and_everything_outside_the_copy
+test_relaunch_holds_leaders_back_when_the_record_cannot_name_the_endpoint_shell
+test_a_quota_killed_worker_is_cleaned_up_despite_a_stale_working_verb
+test_a_failed_cleanup_still_records_the_leaders_it_never_classified
+test_relaunch_concludes_the_parked_run_before_it_signals_anything
+test_a_parked_run_that_will_not_conclude_refuses_before_anything_is_touched

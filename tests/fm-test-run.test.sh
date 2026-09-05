@@ -788,6 +788,33 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+# The guard's lists are built with LC_ALL=C sort, so every set operation over
+# them must read them under that same collation. A UTF-8 collation ignores the
+# '-'/'.' distinction, which reorders neighbours like fm-backend-zellij.test.sh
+# and fm-backend.test.sh, and comm then refuses its own inputs.
+test_coverage_guard_holds_under_a_utf8_ambient_locale() {
+  local loc probe out
+  loc=""
+  while IFS= read -r probe; do
+    case "$probe" in
+      C.*|POSIX*) continue ;;
+    esac
+    if [ "$(printf 'a-z.t\na.t\n' | LC_ALL="$probe" sort 2>/dev/null)" \
+      != "$(printf 'a-z.t\na.t\n' | LC_ALL=C sort)" ]; then
+      loc=$probe
+      break
+    fi
+  done < <(locale -a 2>/dev/null | grep -i 'utf-\{0,1\}8' || true)
+  if [ -z "$loc" ]; then
+    pass "coverage guard under a UTF-8 ambient locale (no reordering locale installed)"
+    return 0
+  fi
+  out=$(LC_ALL="$loc" "$RUNNER" --check-coverage 2>&1) \
+    || fail "coverage guard failed under LC_ALL=$loc: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under LC_ALL=$loc"
+  pass "coverage guard holds under a UTF-8 ambient locale ($loc)"
+}
+
 test_portable_serial_shards_partition_the_serial_lane() {
   local lanes count serial shard listed union dups shard_lane total cap
   lanes=$("$RUNNER" --list-lanes)
@@ -1387,6 +1414,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_holds_under_a_utf8_ambient_locale
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals
