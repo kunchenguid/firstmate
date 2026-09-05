@@ -84,12 +84,13 @@ fi
 STATE_DIR="$FM_HOME/state"
 mkdir -p "$STATE_DIR"
 CURSOR="$STATE_DIR/.mail-seen"
-# Durable emission journal: every successfully appended poll wake records its
-# uid here under the same flock, BEFORE the cursor records it. The fleet wake
-# drain acknowledges and removes consumed wake rows from its own queue, so the
-# queue alone cannot prove that a wake was ever emitted after an ack; this
-# journal is fm-mail's own record of emission and survives any drain ack, which
-# makes recovery exactly-once instead of racing the drain.
+# Durable emission journal: every poll wake records its uid here under the
+# queue lock, BEFORE the wake row is published, so an ackable wake always has a
+# durable record already written. The fleet wake drain acknowledges and removes
+# consumed wake rows from its own queue, so the queue alone cannot prove that a
+# wake was ever emitted after an ack; this journal is fm-mail's own record of
+# emission and survives any drain ack, which makes recovery exactly-once
+# instead of racing the drain.
 WOKEN="$STATE_DIR/.mail-woken"
 
 # Delegate IMAP/SMTP to python3 (in-core TLS + mime, no shell byte-juggling).
@@ -252,15 +253,16 @@ wake_for() {
   # Reuse the fleet's durable wake append so a poll surfaces as a `check` wake.
   # The key is generation-aware when the mailbox reports a UIDVALIDITY, so a
   # restored mailbox's reused uid can never collide with a stale wake key.
-  # The wake append, the emission journal, and the cursor record commit under a
-  # single held FM_WAKE_QUEUE_LOCK: the drain acknowledges and deletes consumed
-  # rows only under the same lock, so it can never remove our wake between the
-  # surface and the uid record. At least one durable record must survive with a
-  # queued wake row - if both evidence writes fail, the row would be ackable
-  # with no record. It is first rolled back under the held lock and retried on
-  # the next poll; if the queue rewrite also fails, a final best-effort record
-  # is landed instead, and only when the journal, the cursor, and the queue
-  # rewrite all fail does the poll fail closed with an honest report.
+  # Emission commits under a single held FM_WAKE_QUEUE_LOCK in three phases:
+  # the durable journal record is written FIRST, then the wake row is published,
+  # then the cursor records the uid. The journal therefore exists before any row
+  # can be acknowledged, so the drain can never consume the only recovery
+  # evidence: a kill or write failure after the publish still leaves the
+  # journal, and the next poll's heal records the uid without re-waking - never
+  # a duplicate. The one deliberate tradeoff is the reverse direction: if the
+  # publish fails and the journal rollback also fails, the orphan journal entry
+  # heals to a skip (the uid is recorded without a wake) rather than a
+  # duplicate.
   local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
@@ -273,78 +275,45 @@ wake_for() {
   # shellcheck source=/dev/null
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
-    local journal_ok=0 cursor_ok=0
-    printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" && journal_ok=1 || true
-    printf '%s\n' "$id" >> "$CURSOR" && cursor_ok=1 || true
-    if [ "$journal_ok" -eq 0 ] && [ "$cursor_ok" -eq 0 ]; then
-      # No durable record landed. Remove the wake row and any partial evidence
-      # under the held lock so nothing ackable survives without a record; the
-      # next poll retries the mail from a clean slate. A transient queue
-      # rewrite is retried once; if the row still survives, land a durable
-      # record as the final fallback rather than releasing the lock with a
-      # wake the drain could acknowledge and no record of its uid.
-      local rollback_ok=1
-      fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" \
-        || fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id" \
-        || rollback_ok=0
-      if [ "$rollback_ok" -eq 1 ]; then
-        echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
-        status=1
-      else
-        journal_ok=0 cursor_ok=0
-        printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" && journal_ok=1 || true
-        printf '%s\n' "$id" >> "$CURSOR" && cursor_ok=1 || true
-        if [ "$journal_ok" -eq 1 ] || [ "$cursor_ok" -eq 1 ]; then
-          echo "fm-mail: wake for $id durably recorded after the queue rewrite failed" >&2
-        else
-          echo "fm-mail: wake for $id could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
-          status=1
-        fi
-      fi
+  if printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
+    if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
+      printf '%s\n' "$id" >> "$CURSOR" || {
+        echo "fm-mail: cursor record write failed for $id; the journal heals it on the next poll" >&2
+      }
+    else
+      fm_mail_journal_remove_locked "$generation" "$id" || \
+        echo "fm-mail: journal rollback failed for $id; the next poll records it without re-waking" >&2
+      echo "fm-mail: wake append failed for $id; retried on next poll" >&2
+      status=1
     fi
   else
+    echo "fm-mail: emission journal write failed for $id; retried on next poll" >&2
     status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
-fm_mail_rollback_wake_locked() {
-  # Remove a just-appended wake row plus any partial journal/cursor evidence.
-  # Runs under the held FM_WAKE_QUEUE_LOCK, so the rewrite cannot race an
-  # acknowledgement; failure means the poll already fails closed so the next
-  # poll's queue heal still reconciles any residual row.
-  local wake_key=$1 generation=$2 id=$3 clean_key tmp queue_status=0
-  clean_key=$(printf '%s' "$wake_key" | fm_wake_clean_field)
-  tmp=$(mktemp "$FM_WAKE_QUEUE.rollback.XXXXXX") || return 1
-  awk -F '\t' -v key="$clean_key" '
-    NF >= 5 && $3 == "check" && $4 == key { next }
-    { print }
-  ' "$FM_WAKE_QUEUE" > "$tmp" || queue_status=$?
-  if [ -n "$queue_status" ] && [ "$queue_status" -ne 0 ]; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  chmod 0600 "$tmp" 2>/dev/null || true
-  mv -f -- "$tmp" "$FM_WAKE_QUEUE" || {
-    rm -f -- "$tmp"
-    return 1
-  }
+fm_mail_journal_remove_locked() {
+  # Remove a just-written journal record whose wake row could not be published.
+  # Runs under the held FM_WAKE_QUEUE_LOCK; failure means an orphan journal
+  # entry survives, which the next poll's journal heal records without re-waking
+  # (a possible skip, never a duplicate).
+  local generation=$1 id=$2 tmp
+  tmp=$(mktemp "$WOKEN.rm.XXXXXX") || return 1
   if awk -F '\t' -v g="$generation" -v i="$id" \
-      '!($1 == g && $2 == i)' "$WOKEN" > "$WOKEN.tmp.$$" 2>/dev/null; then
-    if mv -f -- "$WOKEN.tmp.$$" "$WOKEN" 2>/dev/null; then
-      :
+      '!($1 == g && $2 == i)' "$WOKEN" > "$tmp" 2>/dev/null; then
+    if mv -f -- "$tmp" "$WOKEN" 2>/dev/null; then
+      return 0
     fi
   fi
-  rm -f -- "$WOKEN.tmp.$$"
-  if grep -vx -e "$id" "$CURSOR" > "$CURSOR.tmp.$$" 2>/dev/null; then
-    if mv -f -- "$CURSOR.tmp.$$" "$CURSOR" 2>/dev/null; then
-      :
-    fi
-  fi
-  rm -f -- "$CURSOR.tmp.$$"
-  return 0
+  rm -f -- "$tmp"
+  return 1
+}
+
+mail_seen() {
+  # $1 = uid; returns 0 when the cursor already records the uid as surfaced.
+  grep -Fqx "$1" "$CURSOR"
 }
 
 case "${1:-}" in
@@ -372,24 +341,27 @@ case "${1:-}" in
   poll)
     # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
     # then diff against already-surfaced uids to find NEW messages and surface
-    # one wake each. Never marks anything read. Emission is a two-phase commit
-    # under one flock - durable wake append, then journal write, then cursor
-    # record - and each poll first heals a run interrupted between those phases
-    # from the journal and the wake queue, so an overlapping poll or an
+    # one wake each. Never marks anything read. Emission is a three-phase commit
+    # under the portable lock - durable journal record, then wake append, then
+    # cursor record - and each poll first heals a run interrupted between those
+    # phases from the journal and the wake queue, so an overlapping poll or an
     # interrupted run can never lose a mail or double-surface it.
-    exec 9>"$STATE_DIR/.mail-seen.lock"
-    flock 9
+    if [ ! -f "$FM_HOME/bin/fm-wake-lib.sh" ]; then
+      echo "fm-mail: $FM_HOME/bin/fm-wake-lib.sh missing; cannot poll" >&2
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    . "$FM_HOME/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
     LIST="$(run_py poll_list)"
     GENERATION="$(printf '%s\n' "$LIST" | head -n1 | cut -f2)"
     LIST="$(printf '%s\n' "$LIST" | tail -n +2)"
 
-    declare -A SEEN
     STORED_GEN=""
     [ -f "$CURSOR" ] || : > "$CURSOR"
     while IFS= read -r u; do
       case "$u" in
         "uidvalidity="*) STORED_GEN="${u#uidvalidity=}" ;;
-        *) [ -n "$u" ] && SEEN["$u"]=1 ;;
       esac
     done < "$CURSOR"
 
@@ -399,60 +371,55 @@ case "${1:-}" in
     # mailbox identity changed, so clear them rather than risk healing a reused
     # uid into the new generation.
     if [ -n "$GENERATION" ] && [ "$STORED_GEN" != "$GENERATION" ]; then
-      SEEN=()
       STORED_GEN="$GENERATION"
       printf 'uidvalidity=%s\n' "$STORED_GEN" > "$CURSOR"
       : > "$WOKEN"
     fi
 
-    # Heal a poll interrupted between its operations. Emission is a two-phase
-    # commit: the wake append makes the surfacing durable, the journal write
-    # then proves THIS home emitted it, and the cursor record finally declares
-    # the uid surfaced. Each phase is healed from durable evidence:
+    # Heal a poll interrupted between its operations. Emission is a three-phase
+    # commit: the durable journal record is written first, the wake append then
+    # publishes the surfacing, and the cursor record finally declares the uid
+    # surfaced. Each phase is healed from durable evidence:
     #
-    # 1. Journal heal - a journal entry is proof a wake was appended, written
-    #    immediately after wake success under the same flock. It survives the
-    #    fleet drain's ack (which physically removes consumed wake rows from the
-    #    queue), so a poll killed after appending its wake but before recording
-    #    the uid is recovered even when the drain already acknowledged that wake:
-    #    the uid is recorded without re-waking, never duplicate.
-    # 2. Queue heal - a queued wake whose uid is absent from the cursor (kill in
-    #    the tiny gap between wake append and journal write) is likewise
+    # 1. Journal heal - a journal entry is proof a wake was committed, written
+    #    BEFORE the row is published and surviving the fleet drain's ack (which
+    #    physically removes consumed wake rows from the queue). A poll killed
+    #    after publishing its wake but before recording the uid is recovered
+    #    even when the drain already acknowledged that wake: the uid is recorded
+    #    without re-waking, never duplicate. An orphan entry whose wake could
+    #    never be published likewise records without re-waking - a possible
+    #    skip, never a duplicate.
+    # 2. Queue heal - a queued wake whose uid is absent from the cursor (a row
+    #    published by a poll killed before its cursor write) is likewise
     #    recorded without re-waking.
     # Both are generation-scoped: only evidence matching the CURRENT mailbox
     # generation is healed, so a legacy key or a stale prior-generation wake can
     # never mark a reused numeric uid as surfaced in the new mailbox.
-    if [ -f "$FM_HOME/bin/fm-wake-lib.sh" ]; then
-      # shellcheck source=/dev/null
-      . "$FM_HOME/bin/fm-wake-lib.sh"
-      if [ -s "$WOKEN" ]; then
-        while IFS=$'\t' read -r jgen juid; do
-          [ -n "$juid" ] || continue
-          [ "$jgen" != "$GENERATION" ] && continue
-          if [ -z "${SEEN[$juid]:-}" ]; then
-            printf '%s\n' "$juid" >> "$CURSOR"
-            SEEN["$juid"]=1
-          fi
-        done < "$WOKEN"
-        : > "$WOKEN"
-      fi
-      while IFS= read -r k; do
-        keyrest="${k#mail:}"
-        [ "$keyrest" = "$k" ] && continue
-        keygen=""
-        keyuid=""
-        case "$keyrest" in
-          */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
-          *) keyuid="$keyrest" ;;
-        esac
-        [ -z "$keyuid" ] && continue
-        [ "$keygen" != "$GENERATION" ] && continue
-        if [ -z "${SEEN[$keyuid]:-}" ]; then
-          printf '%s\n' "$keyuid" >> "$CURSOR"
-          SEEN["$keyuid"]=1
+    if [ -s "$WOKEN" ]; then
+      while IFS=$'\t' read -r jgen juid; do
+        [ -n "$juid" ] || continue
+        [ "$jgen" != "$GENERATION" ] && continue
+        if ! mail_seen "$juid"; then
+          printf '%s\n' "$juid" >> "$CURSOR"
         fi
-      done < <(fm_wake_queued_keys check 2>/dev/null || true)
+      done < "$WOKEN"
+      : > "$WOKEN"
     fi
+    while IFS= read -r k; do
+      keyrest="${k#mail:}"
+      [ "$keyrest" = "$k" ] && continue
+      keygen=""
+      keyuid=""
+      case "$keyrest" in
+        */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
+        *) keyuid="$keyrest" ;;
+      esac
+      [ -z "$keyuid" ] && continue
+      [ "$keygen" != "$GENERATION" ] && continue
+      if ! mail_seen "$keyuid"; then
+        printf '%s\n' "$keyuid" >> "$CURSOR"
+      fi
+    done < <(fm_wake_queued_keys check 2>/dev/null || true)
 
     woke=0
     while IFS= read -r line; do
@@ -460,24 +427,23 @@ case "${1:-}" in
       uid="$(printf '%s' "$line" | cut -f1)"
       fr="$(printf '%s' "$line" | cut -f3)"
       subj="$(printf '%s' "$line" | cut -f4)"
-      if [ -z "${SEEN[$uid]:-}" ]; then
-        # Wake first, then record: the wake append, journal, and cursor commit
-        # together under the wake-queue lock inside wake_for (so no drain ack can
-        # split them), and a failure stops the poll so the next run retries. A
-        # kill before the append leaves nothing and the next poll retries; a kill
-        # after the append is healed above without re-waking.
+      if ! mail_seen "$uid"; then
+        # Wake first, then record: the journal record, wake append, and cursor
+        # commit together under the wake-queue lock inside wake_for (so no drain
+        # ack can split them), and a failure stops the poll so the next run
+        # retries. A kill before the journal leaves nothing and the next poll
+        # retries; a kill after the journal is healed above without re-waking.
         if wake_for "$GENERATION" "$uid" "mail from $fr - ${subj:-no subject}"; then
-          SEEN["$uid"]=1
           echo "fm-mail: woke for $uid"
           woke=$((woke + 1))
         else
           echo "fm-mail: wake failed for $uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
           exit 1
         fi
       fi
     done <<< "$LIST"
-    flock -u 9
-    exec 9>&-
+    fm_lock_release "$STATE_DIR/.mail-seen.lock"
     if [ "$woke" -eq 0 ]; then
       echo "fm-mail: no new mail"
     fi

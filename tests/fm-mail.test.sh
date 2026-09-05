@@ -106,8 +106,11 @@ SH
 }
 
 test_poll_error_propagates() {
-  local fakebin
+  local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   # Fake python3 that exits with an error (simulating IMAP failure).
   cat > "$fakebin/python3" <<'SH'
@@ -273,7 +276,7 @@ SH
   local wakeq
   wakeq=$(grep -c "check: mail 88" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "overlapping polls append exactly one wake for uid 88"
-  pass "fm-mail: flock serializes overlapping polls so mail wakes exactly once"
+  pass "fm-mail: the poll lock serializes overlapping polls so mail wakes exactly once"
 }
 
 test_poll_recovers_journaled_wake_after_ack() {
@@ -372,7 +375,7 @@ SH
   pass "fm-mail: a missing wake library fails the poll instead of suppressing mail"
 }
 
-test_poll_rolls_back_wake_without_durable_record() {
+test_poll_journal_failure_publishes_no_wake() {
   local fakebin homedir_bin roll_home
   fakebin=$(fm_fakebin "$TMP_ROOT")
   roll_home="$TMP_ROOT/rollback-home"
@@ -388,29 +391,29 @@ printf '66\t2026-09-05T00:00:00Z\nalice@example.com\tHello\n'
 SH
   chmod +x "$fakebin/python3"
 
-  # Make both durable evidence writes fail. The wake append still succeeds (the
-  # queue is a different, writable file), but the journal and cursor cannot be
-  # recorded. The rollback must remove the queued wake so nothing ackable
-  # survives without a durable record.
+  # The journal is written BEFORE any wake row is published, so when the
+  # journal cannot be recorded no wake row may exist: the poll fails closed
+  # with nothing ackable, and the next poll retries from a clean slate.
   mkdir -p "$roll_home/state"
   printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
   : > "$roll_home/state/.mail-woken"
-  chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
-  [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
+  : > "$roll_home/state/.wake-queue"
+  chmod 0400 "$roll_home/state/.mail-woken"
+  [ -w "$roll_home/state/.mail-woken" ] && { echo "fixture unexpected: journal still writable"; return 1; }
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
     "$MAIL" poll 2>&1) || rc=$?
-  expect_code 1 "$rc" "poll must fail when no durable record can be written"
-  assert_contains "$out" "rolled back" "poll reports the wake was rolled back"
+  expect_code 1 "$rc" "poll must fail when the durable journal cannot be written"
+  assert_contains "$out" "journal write failed" "poll reports the journal failure"
   local wakeq
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
-  expect_code 0 "$wakeq" "rolled-back wake must not stay queued without a durable record"
+  expect_code 0 "$wakeq" "a journal failure must publish no wake row"
 
   # Restore write access: the next poll must surface the mail fresh, exactly
   # once, as if the interrupted attempt never happened.
-  chmod 0600 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
+  chmod 0600 "$roll_home/state/.mail-woken"
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
@@ -419,15 +422,15 @@ SH
   assert_contains "$out" "woke for 66" "retry poll surfaces the mail exactly once"
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "retry poll appends exactly one wake for uid 66"
-  pass "fm-mail: a wake with no durable record is rolled back, not left ackable"
+  pass "fm-mail: a journal failure publishes no wake and the next poll retries cleanly"
 }
 
-test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake() {
-  local fakebin roll_home
+test_poll_orphan_journal_heals_without_re_waking() {
+  local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
-  roll_home="$TMP_ROOT/rollback-failure-home"
-  mkdir -p "$roll_home/bin" "$roll_home/state"
-  [ -e "$roll_home/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$roll_home/bin/fm-wake-lib.sh"
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -436,44 +439,26 @@ printf '88\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
 SH
   chmod +x "$fakebin/python3"
 
-  # Triple-fault fixture: the journal and cursor cannot be written (read-only),
-  # and the queue file is write-only so the wake append succeeds but the
-  # rollback's awk rewrite cannot read the queue and must fail. No durable
-  # record and no queue rewrite can remove the wake row, so the poll must fail
-  # closed with an honest report and leave the row for the next poll to heal.
-  printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
-  : > "$roll_home/state/.mail-woken"
-  : > "$roll_home/state/.wake-queue"
-  chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
-  chmod 0200 "$roll_home/state/.wake-queue"
-  [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
-  [ -w "$roll_home/state/.wake-queue" ] || { echo "fixture unexpected: queue not appendable"; return 1; }
+  # An orphan journal record for uid 88: the durable record was written but the
+  # wake row was never published (an append failure whose journal rollback also
+  # failed, or a kill between the journal write and the publish). The next poll
+  # must record the uid without re-waking - a possible skip, never a duplicate -
+  # and must not publish a wake row.
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  printf '%s\t%s\n' '90009' '88' > "$HOME_DIR/state/.mail-woken"
+  : > "$HOME_DIR/state/.wake-queue"
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
-    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
     "$MAIL" poll 2>&1) || rc=$?
-  expect_code 1 "$rc" "poll must fail when the wake can be neither recorded nor rolled back"
-  assert_not_contains "$out" "rolled back (journal and cursor writes failed)" "poll must not report a rollback it did not achieve"
-  assert_contains "$out" "could not be rolled back or durably recorded" "poll reports the honest rollback-failure outcome"
-  assert_not_contains "$(cat "$roll_home/state/.mail-seen" 2>/dev/null)" "88" "a failed wake must never be committed to the cursor"
-
-  # Restore access: the still-queued wake must be healed without re-waking, so
-  # the mail surfaces exactly once from the retained row and never duplicates.
-  chmod 0600 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
-  chmod 0644 "$roll_home/state/.wake-queue"
-  rc=0
-  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
-    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
-    "$MAIL" poll 2>&1) || rc=$?
-  expect_code 0 "$rc" "retry poll must succeed after access is restored"
-  assert_contains "$out" "no new mail" "retry poll heals the retained wake without re-waking"
-  assert_not_contains "$out" "woke for 88" "retry poll must not surface the mail a second time"
-  assert_contains "$(cat "$roll_home/state/.mail-seen")" "88" "retry poll records the retained wake's uid in the cursor"
+  expect_code 0 "$rc" "orphan-healing poll must succeed"
+  assert_not_contains "$out" "woke for 88" "orphan journal must not re-wake the mail"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "88" "journal heal records the orphaned uid in the cursor"
   local wakeq
-  wakeq=$(grep -c "check: mail 88" "$roll_home/state/.wake-queue" 2>/dev/null || true)
-  expect_code 1 "$wakeq" "the retained wake row stays queued for the drain exactly once"
-  pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
+  wakeq=$(grep -c "check: mail 88" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  expect_code 0 "$wakeq" "an orphan journal must not publish a wake row"
+  pass "fm-mail: an orphan journal record heals to a skip, never a duplicate"
 }
 
 test_missing_secret_fails_cleanly
@@ -490,5 +475,5 @@ test_poll_serializes_overlapping_invocations
 test_poll_recovers_journaled_wake_after_ack
 test_poll_legacy_wake_does_not_leak_into_generation
 test_poll_missing_wake_lib_does_not_suppress
-test_poll_rolls_back_wake_without_durable_record
-test_poll_rollback_failure_never_leaves_unrecorded_ackable_wake
+test_poll_journal_failure_publishes_no_wake
+test_poll_orphan_journal_heals_without_re_waking
