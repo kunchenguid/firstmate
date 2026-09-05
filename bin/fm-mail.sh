@@ -282,9 +282,9 @@ case "${1:-}" in
     # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
     # then diff against already-surfaced uids to find NEW messages and surface
     # one wake each. Never marks anything read. The entire list-diff-wake loop
-    # runs under one flock and each newly surfaced uid is appended to the
-    # cursor the moment its wake is queued, so an overlapping poll or an
-    # interrupted run can never read a stale cursor and double-surface mail.
+    # runs under one flock and each surfaced uid is committed to the cursor
+    # before its wake is emitted, so an overlapping poll or an interrupted run
+    # can never read a stale cursor and double-surface mail.
     exec 9>"$STATE_DIR/.mail-seen.lock"
     flock 9
     LIST="$(run_py poll_list)"
@@ -310,21 +310,45 @@ case "${1:-}" in
     fi
 
     woke=0
+    wake_err=0
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       uid="$(printf '%s' "$line" | cut -f1)"
       fr="$(printf '%s' "$line" | cut -f3)"
       subj="$(printf '%s' "$line" | cut -f4)"
       if [ -z "${SEEN[$uid]:-}" ]; then
-        wake_for "$uid" "mail from $fr - ${subj:-no subject}"
-        echo "fm-mail: woke for $uid"
+        # Record before waking: the cursor is the durable commit point for a
+        # surface decision, so a wake is never emitted for a uid that is not
+        # already recorded. An interrupted poll can therefore never leave a
+        # wake whose uid the next poll treats as new again. If the wake itself
+        # then fails, roll the record back so a later poll retries the surface
+        # instead of silently dropping it.
         printf '%s\n' "$uid" >> "$CURSOR"
         SEEN["$uid"]=1
-        woke=$((woke + 1))
+        if wake_for "$uid" "mail from $fr - ${subj:-no subject}"; then
+          echo "fm-mail: woke for $uid"
+          woke=$((woke + 1))
+        else
+          SEEN["$uid"]=
+          echo "fm-mail: wake failed for $uid; retried on next poll" >&2
+          wake_err=1
+          : > "$CURSOR.clean"
+          while IFS= read -r u; do
+            case "$u" in
+              "$uid") ;;
+              *) printf '%s\n' "$u" >> "$CURSOR.clean" ;;
+            esac
+          done < "$CURSOR"
+          mv "$CURSOR.clean" "$CURSOR"
+        fi
       fi
     done <<< "$LIST"
     flock -u 9
     exec 9>&-
+    if [ "$wake_err" -eq 1 ]; then
+      echo "fm-mail: poll incomplete; wake queue unavailable" >&2
+      exit 1
+    fi
     if [ "$woke" -eq 0 ]; then
       echo "fm-mail: no new mail"
     fi
