@@ -540,6 +540,37 @@ EOF
   pass "both real correlation-token writers produce lines this classifier reads through"
 }
 
+test_optional_event_time() {
+  local line stamped epoch before after dir
+  before=$(date +%s)
+  line="needs-decision corr=$CORR [key=timed]: choose: A or B"
+  stamped=$(status_stamp_line "$line") || fail "status writer could not stamp an event"
+  after=$(date +%s)
+  epoch=$(status_line_at_epoch "$stamped") || fail "new event has no emission time"
+  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] || fail "event time is not append time"
+  [ "$(status_line_verb "$stamped")" = needs-decision ] || fail "time changed verb"
+  [ "$(_fm_decision_key "$stamped")" = timed ] || fail "time changed key"
+  [ "$(status_line_note "$stamped")" = 'choose: A or B' ] || fail "time changed note"
+  [ "$(status_stamp_line "$stamped")" = "$stamped" ] || fail "restamping changed emission time"
+  for line in 'done: legacy' 'done: [at=1700000000] prose' \
+    'done [at=bad]: malformed' 'done [at=-1]: negative' \
+    'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
+    'done [at=1] [at=2]: ambiguous'; do
+    if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
+  done
+  for line in "done [at=1700000000] [corr=$CORR]: finished" \
+    "done [corr=$CORR] [at=1700000000]: finished"; do
+    [ "$(status_line_at_epoch "$line")" = 1700000000 ] || fail "metadata order changed time"
+  done
+  dir=$(make_case event-time)
+  printf '%s\n' "$stamped" 'working [at=1700000000]: unrelated progress' > "$dir/state/task.status"
+  [ -n "$(status_open_decisions "$dir/state/task.status")" ] || fail "time cleared an open decision"
+  printf '%s\n' 'resolved [at=1700000001] [key=timed]: answered' >> "$dir/state/task.status"
+  [ -z "$(status_open_decisions "$dir/state/task.status")" ] || fail "timed resolution did not close decision"
+  pass "optional event time preserves parsing and legacy unknown time"
+}
+
+test_optional_event_time
 test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in
 test_untokened_pair_is_unchanged
