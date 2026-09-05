@@ -283,16 +283,23 @@ mail_heal() {
   # Both are generation-scoped: only evidence matching the CURRENT mailbox
   # generation is healed, so a legacy key or a stale prior-generation wake can
   # never mark a reused numeric uid as surfaced in the new mailbox.
-  local generation=$1 jgen juid keyrest keygen keyuid
+  local generation=$1 jgen juid keyrest keygen keyuid heal_ok=0
   if [ -s "$WOKEN" ]; then
     while IFS=$'\t' read -r jgen juid; do
       [ -n "$juid" ] || continue
       [ "$jgen" != "$generation" ] && continue
       if ! mail_seen "$juid"; then
-        printf '%s\n' "$juid" >> "$CURSOR"
+        if printf '%s\n' "$juid" >> "$CURSOR"; then
+          :
+        else
+          heal_ok=1
+        fi
       fi
     done < "$WOKEN"
-    : > "$WOKEN"
+    # Clear the journal only when every uid it names was durably recorded; if
+    # any cursor write failed, keep the evidence so the next poll can retry it
+    # (and an acknowledged wake can never be surfaced twice for lack of it).
+    [ "$heal_ok" -eq 0 ] && : > "$WOKEN"
   fi
   while IFS= read -r k; do
     keyrest="${k#mail:}"
@@ -306,7 +313,11 @@ mail_heal() {
     [ -z "$keyuid" ] && continue
     [ "$keygen" != "$generation" ] && continue
     if ! mail_seen "$keyuid"; then
-      printf '%s\n' "$keyuid" >> "$CURSOR"
+      if printf '%s\n' "$keyuid" >> "$CURSOR"; then
+        :
+      else
+        heal_ok=1
+      fi
     fi
   done < <(fm_wake_queued_keys check 2>/dev/null || true)
 }
