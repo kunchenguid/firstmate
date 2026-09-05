@@ -195,8 +195,8 @@ test_marked_project_guidance_stays_unchanged() {
   for eol in $'\n' $'\r\n'; do
     for route in bare pointer symlink promotion; do
       repo=$(mktemp -d "$TMP_ROOT/marked-$route.XXXXXX")
-      printf '%s%s' '# Project memory' "$eol" \
-        '<!-- firstmate:maintained-by-project -->' "$eol" \
+      printf '%s%s' '<!-- firstmate:maintained-by-project -->' "$eol" \
+        '# Project memory' "$eol" \
         '## Editing these notes' "$eol" \
         'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' "$eol" \
         'Preserve these rules for every agent.' "$eol" > "$repo/AGENTS.md"
@@ -222,21 +222,34 @@ test_marked_project_guidance_stays_unchanged() {
   pass "fm-ensure-agents-md.sh: marked project guidance is preserved across ensure paths and line endings"
 }
 
-test_reworded_guidance_requires_explicit_marker() {
-  local repo marker count
-  for marker in '' 'Use <!-- firstmate:maintained-by-project --> here.' '<!-- firstmate:maintained-by-project-extra -->'; do
-    repo=$(mktemp -d "$TMP_ROOT/reworded.XXXXXX")
-    printf '%s\n' '# Project memory' "$marker" '## Editing these notes' \
-      'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' \
-      'Preserve these rules for every agent.' > "$repo/AGENTS.md"
-    "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
-      || fail "ensure failed for unmarked reworded guidance"
-    assert_grep '## Editing these notes' "$repo/AGENTS.md" "ensure removed project guidance"
-    count=$(grep -Fxc '## Maintaining this file' "$repo/AGENTS.md")
-    [ "$count" -eq 1 ] || fail "unmarked reworded guidance did not gain the canonical section"
-    assert_claude_pointer "$repo/CLAUDE.md"
+test_reworded_guidance_requires_first_line_marker() {
+  local repo marker count eol line
+  for marker in '' 'Use <!-- firstmate:maintained-by-project --> here.' \
+    '<!-- firstmate:maintained-by-project-extra -->' \
+    $'```html\n<!-- firstmate:maintained-by-project -->\n```' \
+    $'~~~html\n<!-- firstmate:maintained-by-project -->\n~~~' \
+    '<!-- firstmate:maintained-by-project -->'; do
+    for eol in $'\n' $'\r\n'; do
+      repo=$(mktemp -d "$TMP_ROOT/reworded.XXXXXX")
+      printf '%s\n' '# Project memory' "$marker" '## Editing these notes' \
+        'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' \
+        'Preserve these rules for every agent.' |
+        while IFS= read -r line; do printf '%s%s' "$line" "$eol"; done > "$repo/AGENTS.md"
+      "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+        || fail "ensure failed for unmarked reworded guidance"
+      # AGENTS.md is the helper's generated output contract, not implementation source.
+      assert_grep '## Editing these notes' "$repo/AGENTS.md" "ensure removed project guidance"
+      count=$(grep -Fxc "## Maintaining this file${eol%$'\n'}" "$repo/AGENTS.md")
+      [ "$count" -eq 1 ] || fail "guidance without a first-line mark did not gain the canonical section"
+      assert_claude_pointer "$repo/CLAUDE.md"
+      cp "$repo/AGENTS.md" "$repo/.after-first"
+      "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+        || fail "ensure failed on unmarked project re-run"
+      cmp -s "$repo/.after-first" "$repo/AGENTS.md" \
+        || fail "unmarked project re-run modified guidance"
+    done
   done
-  pass "fm-ensure-agents-md.sh: reworded prose and marker mentions do not replace an explicit mark"
+  pass "fm-ensure-agents-md.sh: prose and marker examples do not replace a first-line mark"
 }
 
 test_existing_crlf_agents_md_with_section_stays_unchanged() {
@@ -412,7 +425,7 @@ test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
-test_reworded_guidance_requires_explicit_marker
+test_reworded_guidance_requires_first_line_marker
 test_marked_project_guidance_stays_unchanged
 test_canonical_pointer_is_accepted_when_both_are_real_files
 test_distinct_real_files_are_refused

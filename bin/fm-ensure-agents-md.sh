@@ -10,10 +10,10 @@
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
-# heading and the project-owned mark below (standalone line, LF or CRLF):
+# heading and the project-owned mark below (exact first line, LF or CRLF):
 # <!-- firstmate:maintained-by-project -->
-# Projects may place this mark alongside equivalent retained maintenance
-# guidance under their own heading. It declares that guidance is present, not
+# Projects may place this mark at the start of the file and retain equivalent
+# maintenance guidance under their own heading. It declares guidance is present, not
 # permission to remove governance. No prose equivalence is inferred.
 # Owns the canonical CLAUDE.md pointer content (the exact two-line @AGENTS.md
 # form). A real-file pointer cannot follow a write into AGENTS.md, which is why
@@ -33,10 +33,10 @@ usage() {
   cat >&2 <<'EOF'
 
 To retain equivalent project-owned maintenance guidance without adding the
-canonical section, place this exact standalone line in AGENTS.md (LF or CRLF):
+canonical section, use this exact first line of AGENTS.md (LF or CRLF):
 <!-- firstmate:maintained-by-project -->
 The mark declares retained guidance, not permission to remove governance.
-Without the mark or the exact canonical heading, the helper adds the section.
+Without the first-line mark or exact canonical heading, the helper adds the section.
 EOF
 }
 
@@ -75,13 +75,14 @@ write_maintenance_section_with_eol() {
 }
 
 # Idempotently append the canonical self-governance section to AGENTS.md when
-# neither its heading nor the project-owned mark is present. Sets
+# neither its heading nor the first-line project-owned mark is present. Sets
 # MAINT_INJECTED=1 when it appends and 0 otherwise, for caller change reporting.
 MAINT_INJECTED=0
 ensure_maintenance_section() {
   MAINT_INJECTED=0
-  if grep -Fqx -e '## Maintaining this file' -e '<!-- firstmate:maintained-by-project -->' "$AGENTS" ||
-    grep -Fqx -e $'## Maintaining this file\r' -e $'<!-- firstmate:maintained-by-project -->\r' "$AGENTS"; then
+  if grep -Fqx -e '## Maintaining this file' -e $'## Maintaining this file\r' "$AGENTS" ||
+    head -n 1 "$AGENTS" | grep -Fqx -e '<!-- firstmate:maintained-by-project -->' \
+      -e $'<!-- firstmate:maintained-by-project -->\r'; then
     return 0
   fi
   local eol=$'\n' sep=''
