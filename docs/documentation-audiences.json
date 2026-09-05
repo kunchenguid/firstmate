@@ -322,10 +322,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/gitlab-merge-watch.md",
-      "audience": "maintainer-verification"
-    },
-    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },

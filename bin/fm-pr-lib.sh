@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
-# supported forges. Callers must validate task IDs and raw PR/MR URLs before
-# constructing task paths or performing any side effect.
+# Shared validation and atomic artifact helpers for merge polling on GitHub,
+# the only supported forge. Callers must validate task IDs and raw PR URLs
+# before constructing task paths or performing any side effect.
 #
-# The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# The stored identity is provider-tagged: provider, url, host, path, number,
+# where "path" is owner/repository on GitHub. Every consumer re-derives the
+# identity from the stored URL and refuses any record whose parts do not
+# reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -109,62 +105,11 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab serves self-hosted instances, so the host is part of the identity
-# rather than a constant. It is accepted only as a lowercase DNS name with no
-# userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
-# github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
-# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
-fm_pr_gitlab_host_valid() {
-  local host=${1-} label
-  local LC_ALL=C
-  local -a labels
-  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
-  case "$host" in
-    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
-  esac
-  IFS=. read -ra labels <<< "$host"
-  for label in "${labels[@]}"; do
-    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
-    case "$label" in
-      -*|*-) return 1 ;;
-    esac
-  done
-}
-
-# A GitLab project path is group[/subgroup...]/project, so at least two
-# segments and no fixed depth. GitLab reserves "-" as its route separator and
-# forbids a leading hyphen, ".git", and ".atom", so none of those can name a
-# real namespace and each is refused here.
-fm_pr_gitlab_path_valid() {
-  local path=${1-} segment
-  local LC_ALL=C
-  local -a segments
-  [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || return 1
-  case "$path" in
-    /*|*/|*//*) return 1 ;;
-  esac
-  IFS=/ read -ra segments <<< "$path"
-  [ "${#segments[@]}" -ge 2 ] && [ "${#segments[@]}" -le 20 ] || return 1
-  for segment in "${segments[@]}"; do
-    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
-    case "$segment" in
-      .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) return 1 ;;
-    esac
-  done
-}
-
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
-# is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# Parse a canonical PR URL into the provider-tagged identity. Validation is
+# strict: the GitHub username and repository rules are unchanged.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# FM_PR_OWNER and FM_PR_REPO are additionally set because
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -191,20 +136,7 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
-  # The path class contains "/" and "-", so this match is greedy to the last
-  # "/-/merge_requests/". Any earlier separator therefore lands inside the
-  # captured path, where the reserved "-" segment is refused.
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
-  [[ "$raw" =~ $pattern ]] || return 1
-  host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
-  FM_PR_URL=$raw
-  FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  return 1
 }
 
 fm_pr_head_valid() {

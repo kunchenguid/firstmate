@@ -25,7 +25,6 @@ REAL_CHMOD=$(command -v chmod)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
-REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -165,19 +164,9 @@ case "${1:-} ${2:-}" in
 esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  # Plain glab, reproducing the real CLI's contract: its field output on stdout
-  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
-  cat > "$fakebin/glab" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
-[ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
-[ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
-SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
-  : > "$dir/glab.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -206,7 +195,7 @@ run_check_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -216,7 +205,7 @@ run_merge_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -359,22 +348,6 @@ test_parser_matrix() {
 https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
-EOF
-  while IFS='|' read -r url host path number; do
-    [ -n "$url" ] || continue
-    fm_pr_url_parse "$url" || fail "parser rejected a canonical merge request URL"
-    [ "$FM_PR_PROVIDER" = gitlab ] || fail "parser did not tag a merge request URL as gitlab"
-    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical merge request URL"
-    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong GitLab host"
-    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong GitLab project path"
-    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong merge request number"
-    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
-      || fail "parser set GitHub owner/repository for a merge request URL"
-  done <<'EOF'
-https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
-https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
-https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
-https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -1278,117 +1251,6 @@ SH
 # merge request into a merge. Its evidence against the public fixture project
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
-test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
-  dir=$(make_case gitlab-merge-watch)
-  state="$dir/home/state"
-  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
-
-  write_poll_meta "$state" task-a "$url"
-  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
-    || fail "could not prepare a GitLab poll"
-  fm_pr_poll_publish_prepared || fail "could not publish a GitLab poll"
-  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
-    || fail "published GitLab poll provenance or metadata binding was invalid"
-  [ "$(cat "$state/task-a.pr-poll")" = "gitlab
-$url
-gitlab.example
-group/subgroup/project
-7" ] || fail "published GitLab sidecar bytes were not exact"
-
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
-    out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
-  done
-  out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
-  [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
-  out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
-  [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
-
-  # glab is addressed by project URL and merge request number, never by the
-  # merge request URL, which the real CLI resolves through the current git
-  # repository the watcher does not have.
-  grep -qF -- "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
-    || fail "GitLab poll did not address glab by project URL and merge request number"
-  ! grep -qF -- "$url" "$dir/glab.log" \
-    || fail "GitLab poll passed a merge request URL to glab"
-
-  # An absent CLI must produce no wake rather than a false merge. The whole
-  # search path is mirrored without glab, because a real glab anywhere on
-  # PATH would make this prove nothing.
-  noglab="$dir/noglab"
-  mkdir -p "$noglab"
-  while IFS= read -r bindir; do
-    [ -d "$bindir" ] || continue
-    for entry in "$bindir"/*; do
-      [ -e "$entry" ] || continue
-      name=$(basename "$entry")
-      [ "$name" = glab ] && continue
-      [ -e "$noglab/$name" ] || ln -s "$entry" "$noglab/$name" 2>/dev/null
-    done
-  done <<EOF
-$dir/fakebin
-$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
-EOF
-  ! PATH="$noglab" command -v glab >/dev/null 2>&1 \
-    || fail "the glab-free search path still resolved glab"
-  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    PATH="$noglab" \
-    bash "$state/task-a.check.sh")
-  [ -z "$out" ] || fail "GitLab poll emitted with glab absent from PATH"
-
-  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
-  # the stored URL exactly.
-  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" elsewhere.example group/subgroup/project 7 \
-    > "$state/task-a.pr-poll"
-  out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
-  [ -z "$out" ] || fail "GitLab poll emitted for a sidecar whose host was swapped"
-  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" gitlab.example group/subgroup/other 7 \
-    > "$state/task-a.pr-poll"
-  out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
-  [ -z "$out" ] || fail "GitLab poll emitted for a sidecar whose project was swapped"
-
-  # Arming is where a missing CLI can still be reported, so it refuses there.
-  write_task_meta "$dir" task-b
-  set +e
-  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
-    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$noglab" \
-    "$PR_CHECK" task-b "$url" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "arming a GitLab watch succeeded with glab absent"
-  case "$out" in
-    *"requires glab on PATH"*) ;;
-    *) fail "arming a GitLab watch with glab absent did not report the missing CLI" ;;
-  esac
-  [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
-
-  # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
-  write_task_meta "$dir" task-c
-  : > "$dir/glab.log"
-  # The merge path needs jq before it reads anything, so this case supplies it
-  # and the refusal below is the unreadable state rather than a missing tool.
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
-  set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
-  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
-    || fail "merge wrapper refused for some reason other than the state it could not read"
-  [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
-  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
-    || fail "merge wrapper did not read the merge request through glab at its own instance"
-  ! grep -qF ' mr merge ' "$dir/glab.log" \
-    || fail "merge wrapper merged despite an unreadable merge request state"
-
-  pass "GitLab merge requests are followed on any instance and never wake falsely"
-}
 
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
@@ -2103,26 +1965,8 @@ test_retirement_queue_failure_and_receipt_tampering() {
   pass "queue failure and untrusted receipts preserve canonical poll evidence"
 }
 
-test_gitlab_merged_poll_retires() {
-  local dir state url rc
-  dir=$(make_case gitlab-merged-retirement)
-  state="$dir/home/state"
-  url=https://gitlab.example/group/subgroup/project/-/merge_requests/17
-  write_poll_meta "$state" task-a "$url"
-  seed_canonical_poll "$dir" task-a "$url"
-  set +e
-  FM_TEST_GLAB_STATE=merged run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "GitLab merged retirement watcher failed: $(cat "$dir/watch.err")"
-  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "GitLab merged wake was missing" ;; esac
-  assert_poll_absent "$state" task-a
-  grep -qxF "pr=$url" "$state/task-a.meta" || fail "GitLab retirement removed canonical metadata"
-  pass "GitHub and GitLab exact merged results share one retirement path"
-}
 
 test_parser_matrix
-test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
@@ -2134,7 +1978,6 @@ test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
-test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
