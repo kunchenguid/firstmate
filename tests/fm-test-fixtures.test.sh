@@ -14,8 +14,26 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-test-fixtures)
 
 test_git_config_isolation() (
-  local dir="$TMP_ROOT/git-config" scope helper
-  mkdir -p "$dir"
+  local dir="$TMP_ROOT/git-config" scope helper jobs timeout
+  mkdir -p "$dir/runner/bin" "$dir/runner/tests"
+  git init -q "$dir/caller"
+  git -C "$dir/caller" config commit.gpgsign false
+  cd "$dir/caller" || exit 1
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  cat > "$dir/runner/tests/fm-test-run.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-git-runner.XXXXXX")
+trap 'rm -rf "$repo"' EXIT
+git init -q "$repo"
+git -C "$repo" config user.name 'Runner Fixture'
+git -C "$repo" config user.email runner@example.invalid
+git -C "$repo" commit -q --allow-empty -m initial
+[ "$(git -C "$repo" log -1 --format='%s:%an:%ae')" = 'initial:Runner Fixture:runner@example.invalid' ]
+[ "$(git -C "$repo" config --get fixture.input)" = preserved ]
+[ "$(GIT_CONFIG_GLOBAL="$FM_TEST_GIT_CONFIG" git config --global --get commit.gpgsign)" = true ]
+SH
+  chmod +x "$dir/runner/tests/fm-test-run.test.sh"
   export GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system"
   export GIT_CONFIG_NOSYSTEM=0
   unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
@@ -46,11 +64,29 @@ git -C "$2" -c commit.gpgsign=false commit -q --allow-empty -m explicit
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
   git -C "$2" commit -q --allow-empty -m environment
 # A config test can deliberately supply its own global file after sourcing.
-[ "$(GIT_CONFIG_GLOBAL="$3" git config --get commit.gpgsign)" = true ] || fail "explicit global config was ignored"
+[ "$(GIT_CONFIG_GLOBAL="$3" git config --global --get commit.gpgsign)" = true ] || fail "explicit global config was ignored"
 SH
     done
+    bash -eus -- "$ROOT/tests/herdr-test-safety.sh" "$dir/$scope-herdr" <<'SH' || exit 1
+. "$1"
+git init -q "$2"
+git -C "$2" -c user.name=test -c user.email=test@example.invalid \
+  commit -q --allow-empty -m initial
+[ "$(git -C "$2" log -1 --format=%s)" = initial ]
+SH
+    for jobs in 1 2; do
+      for timeout in 0 30; do
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=fixture.input GIT_CONFIG_VALUE_0=preserved \
+          FM_TEST_GIT_CONFIG="$dir/$scope" \
+          "$dir/runner/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$timeout" \
+          tests/fm-test-run.test.sh > "$dir/runner.log" 2>&1 \
+          || fail "runner inherited $scope config (jobs=$jobs, timeout=$timeout): $(cat "$dir/runner.log")"
+        assert_grep 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0' "$dir/runner.log" \
+          "runner did not execute the Git fixture"
+      done
+    done
     # Sourcing in test subprocesses cannot change the caller or its config files.
-    [ "$(git config --get commit.gpgsign)" = true ] || fail "caller lost signing preference"
+    [ "$(git config --"$scope" --get commit.gpgsign)" = true ] || fail "caller lost signing preference"
     cmp -s "$dir/$scope" "$dir/expected" || fail "host config file was changed"
     git init -q "$dir/$scope-outside"
     if git -C "$dir/$scope-outside" -c user.name=test -c user.email=test@example.invalid \
@@ -59,7 +95,7 @@ SH
     fi
     assert_grep 'gpg failed to sign' "$dir/outside.log" "outside commit did not attempt signing"
   done
-  pass "shared helpers isolate host Git config and preserve explicit config and outside commits"
+  pass "runner and shared helpers isolate host Git config and preserve explicit config and outside commits"
 )
 
 test_no_mistakes_version_constant() {
