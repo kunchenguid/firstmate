@@ -229,9 +229,47 @@ append_reply_files() {  # <older-path> <newer-path> <output-path>
   ' "$1" "$2" > "$3"
 }
 
+record_ended_reply_locked() {  # <reply-input>
+  local input=$1 host_status reply_text status_text status_key
+  host_status=${FM_LAVISH_HOST_STATUS_FILE-}
+  case "$host_status" in
+    "$STATE/"*.status) ;;
+    *) die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log" ;;
+  esac
+  status_key=${host_status#"$STATE/"}
+  case "$status_key" in
+    ''|*.status/*|*/?*|.status)
+      die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
+      ;;
+  esac
+  if [ -e "$host_status" ] || [ -L "$host_status" ]; then
+    [ -f "$host_status" ] && [ ! -L "$host_status" ] \
+      && [ "$(fm_pr_file_link_count "$host_status" 2>/dev/null)" = 1 ] \
+      || die "Lavish session has ended and the host status log is unsafe"
+  fi
+  reply_text=$(cat -- "$input") || die "cannot read reply text"
+  status_text=$(printf '%s' "$reply_text" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  (umask 077; printf 'note: Lavish session ended; acknowledgement: %s\n' "$status_text" >> "$host_status") \
+    || die "Lavish session has ended but the acknowledgement could not be recorded"
+  printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
+}
+
+remove_reply_state_locked() {  # <source-id>
+  local id=$1 path label
+  for label in pending in-flight; do
+    case "$label" in
+      pending) path=$(pending_reply_path "$id") ;;
+      in-flight) path=$(inflight_reply_path "$id") ;;
+    esac
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    pending_reply_is_private "$path" \
+      || die "retired source left an unsafe $label reply path: $id"
+    rm -f -- "$path" || die "cannot remove retired $label reply: $id"
+  done
+}
+
 cmd_reply() {
   local artifact=${1-} input real id reg registration pending staged cleanup_command
-  local host_status reply_text status_text status_key
   [ -n "$artifact" ] || usage
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
@@ -269,39 +307,8 @@ cmd_reply() {
   if ! fm_procevent_registration_matches_locked "$STATE" lavish "$id" \
     "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real"; then
     if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      host_status=${FM_LAVISH_HOST_STATUS_FILE-}
-      case "$host_status" in
-        "$STATE/"*.status) ;;
-        *)
-          fm_procevent_source_lock_release "$id"
-          die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
-          ;;
-      esac
-      status_key=${host_status#"$STATE/"}
-      case "$status_key" in
-        ''|*.status/*|*/?*|.status)
-          fm_procevent_source_lock_release "$id"
-          die "Lavish session has ended and FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
-          ;;
-      esac
-      if [ -e "$host_status" ] || [ -L "$host_status" ]; then
-        [ -f "$host_status" ] && [ ! -L "$host_status" ] \
-          && [ "$(fm_pr_file_link_count "$host_status" 2>/dev/null)" = 1 ] || {
-            fm_procevent_source_lock_release "$id"
-            die "Lavish session has ended and the host status log is unsafe"
-          }
-      fi
-      reply_text=$(cat -- "$input") || {
-        fm_procevent_source_lock_release "$id"
-        die "cannot read reply text"
-      }
-      status_text=$(printf '%s' "$reply_text" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-      (umask 077; printf 'note: Lavish session ended; acknowledgement: %s\n' "$status_text" >> "$host_status") || {
-        fm_procevent_source_lock_release "$id"
-        die "Lavish session has ended but the acknowledgement could not be recorded"
-      }
+      record_ended_reply_locked "$input"
       fm_procevent_source_lock_release "$id"
-      printf 'session ended; acknowledgement recorded in host status log: %s\n' "$host_status"
       return 0
     fi
     fm_procevent_source_lock_release "$id"
@@ -341,9 +348,18 @@ cmd_reply() {
   }
   fm_procevent_source_lock_release "$id"
 
-  "$SCRIPT_DIR/fm-procevent.sh" restart "$id" --if-matches lavish -- \
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" >/dev/null \
-    || die "reply is staged but the listener could not be restarted: $id"
+  if ! "$SCRIPT_DIR/fm-procevent.sh" restart "$id" --if-matches lavish -- \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" >/dev/null; then
+    fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+    if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      remove_reply_state_locked "$id"
+      record_ended_reply_locked "$input"
+      fm_procevent_source_lock_release "$id"
+      return 0
+    fi
+    fm_procevent_source_lock_release "$id"
+    die "reply is staged but the listener could not be restarted: $id"
+  fi
   printf 'reply staged: %s\n' "$id"
 }
 
