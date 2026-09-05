@@ -149,13 +149,8 @@ herdr_portable_identity_from_ps() { # <pid> <session>
   '
 }
 
-herdr_portable_candidate_status() { # <pid> <session>
-  local pid=$1 session=$2 listing
-  if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
-    LC_ALL=C ps -p "$pid" -o pid= >/dev/null 2>&1 && return 1
-    return 2
-  fi
-  printf '%s\n' "$listing" | awk -v pid="$pid" -v expected="$session" '
+herdr_candidate_from_ps() { # <pid> <session>
+  awk -v pid="$1" -v expected="$2" '
     $1 == pid && $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
       for (i = 5; i <= NF; i++) {
         name = ""
@@ -165,7 +160,16 @@ herdr_portable_candidate_status() { # <pid> <session>
       }
     }
     END { exit !found }
-  ' && return 0
+  '
+}
+
+herdr_portable_candidate_status() { # <pid> <session>
+  local pid=$1 session=$2 listing
+  if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
+    LC_ALL=C ps -p "$pid" -o pid= >/dev/null 2>&1 && return 1
+    return 2
+  fi
+  printf '%s\n' "$listing" | herdr_candidate_from_ps "$pid" "$session" && return 0
   return 2
 }
 
@@ -216,7 +220,8 @@ herdr_portable_process_identity() { # <pid> <session>
 }
 
 herdr_server_snapshot() { # <output> <processes> <candidates>
-  local output=$1 processes=$2 candidates=$3 proc_root pid session stat_line start cwd identity status
+  local output=$1 processes=$2 candidates=$3 proc_root pid session stat_line confirmed_stat
+  local start confirmed_start cwd identity listing status
   local -a stat_fields=()
   proc_root=${FM_TEST_RUN_PROC_ROOT:-/proc}
   ps -ww -u "$(id -u)" -o pid=,stat=,args= > "$processes" || return 1
@@ -255,6 +260,23 @@ herdr_server_snapshot() { # <output> <processes> <candidates>
       [ ! -d "$proc_root/$pid" ] && continue
       return 1
     fi
+    if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! printf '%s\n' "$listing" | herdr_candidate_from_ps "$pid" "$session"; then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! IFS= read -r confirmed_stat < "$proc_root/$pid/stat"; then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    stat_fields=()
+    read -r -a stat_fields <<< "${confirmed_stat##*) }"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    confirmed_start=${stat_fields[19]}
+    [ "$confirmed_start" = "$start" ] || return 1
     printf '%s\t%s\t%s\t%s\n' "$pid" "$start" "$session" "$cwd" >> "$output"
   done < "$candidates"
   LC_ALL=C sort -t$'\t' -k1,1n -k2,2n "$output" -o "$output"

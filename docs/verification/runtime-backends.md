@@ -977,10 +977,11 @@ fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
 
 `tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
 It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
-The runner records each matching server's PID and Linux `/proc` start time before the suite, then fails for new or restarted identities found afterward.
+The runner records each matching server's PID and Linux `/proc` start time before the suite, then revalidates that the same start identity still belongs to the same server and session after collecting its working directory.
+If the PID is replaced during that inventory boundary, the snapshot fails closed and the replacement is reported as new by the final inventory instead of entering the baseline.
 On hosts without `/proc`, it records the process start time under the C locale and UTC with a revalidated working directory, but fails closed for every survivor because second-resolution identity cannot prove that a PID was not reused.
 It warns with PID, start time, working directory, and session only when a kernel identity proves that a pre-existing process remains, so shared-host contamination stays visible without misclassifying a replacement.
-The runner regression separately proves both identity paths reject new and reused identities and unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
+The runner regression separately proves both identity paths reject new and reused identities, rejects a same-session PID replacement during baseline collection, and rejects unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
 Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
