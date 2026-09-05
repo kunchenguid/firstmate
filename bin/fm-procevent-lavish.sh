@@ -751,6 +751,7 @@ cmd_poll() {
     fi
     lavish-axi "${poll_argv[@]}" > "$poll_pipe" &
     poll_pid=$!
+    [ -z "$restart_signal" ] || kill -"$restart_signal" "$poll_pid" 2>/dev/null || true
     poll_response_filter "$response" < "$poll_pipe" &
     filter_pid=$!
     wait "$poll_pid"
