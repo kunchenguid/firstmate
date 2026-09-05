@@ -93,10 +93,6 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox' "$1" "$2"
 }
 
-fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
-  printf '%s/%s.inbox/handled' "$1" "$2"
-}
-
 # Numeric sequence of one record basename, or fail for a non-record name.
 fm_task_inbox_seq_of() {  # <basename>
   local n=${1%.msg}

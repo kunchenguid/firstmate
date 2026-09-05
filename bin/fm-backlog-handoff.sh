@@ -417,21 +417,6 @@ receiver_wake_promote_prepared() { # <secondmate-id> <batch-id>
   receiver_wake_state_write "$id" "pending:$corr"
 }
 
-receiver_wake_discard_pending() { # <secondmate-id>
-  local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending" value corr
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  value=$(cat "$marker" 2>/dev/null || true)
-  case "$value" in
-    pending:*)
-      corr=${value#pending:}
-      fm_pending_reply_discard_undelivered "$STATE" "$corr" || return 1
-      ;;
-    pending) ;;
-    *) return 1 ;;
-  esac
-  rm -f -- "$marker"
-}
-
 receiver_wake_clear_confirmed() { # <secondmate-id>
   local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending" value
   [ -e "$marker" ] || [ -L "$marker" ] || return 0

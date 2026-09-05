@@ -247,11 +247,6 @@ _file_age() {  # seconds since mtime; very large if missing
   echo $(( $(_now) - m ))
 }
 
-_hash_text() {
-  if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
-  else printf '%s' "$1" | md5sum | cut -d ' ' -f1; fi
-}
-
 # --- presence-gating helpers (PURE-ish: side-effect-free reads of state) -----
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>

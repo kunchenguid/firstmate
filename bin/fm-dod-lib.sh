@@ -104,10 +104,6 @@ fm_brief_heading_body() {  # <file> <heading>
   fm_brief_heading_parse "$1" "$2" body
 }
 
-fm_brief_heading_present() {  # <file> <heading>
-  fm_brief_heading_parse "$1" "$2" present >/dev/null
-}
-
 fm_brief_task_heading_body() {  # <file> <heading>
   local task
   task=$(fm_brief_heading_body "$1" "# Task")
