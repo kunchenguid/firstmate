@@ -77,20 +77,29 @@ trap 'cleanup_all; rm -rf "$WORK"' EXIT
 git init -q "$WORK/repo" 2>/dev/null || { echo "skip: git unavailable"; exit 0; }
 git -C "$WORK/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init 2>/dev/null
 
-# make_session <suffix> -> echoes the uuid, and records it for cleanup
-make_session() {
+# make_session <suffix>: creates a session and sets SESSION_ID.
+#
+# It must NOT echo the id for a caller to capture, because a caller capturing it
+# would run this in a command substitution - and the CREATED list it appends to
+# would then be built in that subshell and lost. That is precisely how the
+# cleanup list silently stayed empty and a probe session survived a run. The
+# safety of this file depends on CREATED being right, so the id is passed back
+# through a global instead.
+make_session() {  # <suffix> -> sets SESSION_ID
   local suffix=$1 raw id
+  SESSION_ID=""
   raw=$(thurbox-cli session create --name "fmsmoke-$suffix" --repo-path "$WORK/repo" \
     --command /bin/bash --arg -i --on-existing replace --json 2>/dev/null) || return 1
   id=$(printf '%s' "$raw" | jq -r '.id // empty' 2>/dev/null)
   [ -n "$id" ] || return 1
   CREATED="$CREATED $id"
-  printf '%s' "$id"
+  SESSION_ID=$id
 }
 
 # --- 1. the argument parser --------------------------------------------------
 
-id=$(make_session send) || { echo "skip: could not create a thurbox session"; exit 0; }
+make_session send || { echo "skip: could not create a thurbox session"; exit 0; }
+id=$SESSION_ID
 sleep 2
 target="thurbox:$id"
 
@@ -110,7 +119,8 @@ pass "real binary: ordinary steer text rides the same delivery path"
 
 # --- 2. absence has to be proven --------------------------------------------
 
-id=$(make_session gone) || fail "could not create the absence-proof session"
+make_session gone || fail "could not create the absence-proof session"
+id=$SESSION_ID
 sleep 2
 target="thurbox:$id"
 
@@ -148,7 +158,8 @@ fm_backend_thurbox_endpoint_confirmed_gone "$target" \
 pass "real binary: teardown reaps a soft-deleted session and the endpoint becomes provably gone"
 
 # And the ordinary path: a live session torn down with --force.
-id=$(make_session forced) || fail "could not create the forced-teardown session"
+make_session forced || fail "could not create the forced-teardown session"
+id=$SESSION_ID
 sleep 2
 target="thurbox:$id"
 fm_backend_thurbox_kill "$target" || fail "forced teardown failed"
