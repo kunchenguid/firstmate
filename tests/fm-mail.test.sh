@@ -203,6 +203,41 @@ SH
   pass "fm-mail: generation change prevents a reused uid from being suppressed"
 }
 
+test_poll_serializes_overlapping_invocations() {
+local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # Fresh-generation fake python3 that pauses so two concurrently started
+  # polls genuinely overlap and contend on the cursor.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+sleep 0.2
+printf 'uidvalidity\t50005\n'
+printf '88\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  local combined woke_count
+  FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll >"$TMP_ROOT/poll-a.out" 2>&1 &
+  FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll >"$TMP_ROOT/poll-b.out" 2>&1 &
+  wait
+
+  combined="$(cat "$TMP_ROOT/poll-a.out" "$TMP_ROOT/poll-b.out")"
+  woke_count=$(printf '%s' "$combined" | grep -c "woke for 88" || true)
+  expect_code 1 "$woke_count" "overlapping polls surface uid 88 exactly once"
+  local wakeq
+  wakeq=$(grep -c "check: mail 88" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "overlapping polls append exactly one wake for uid 88"
+  pass "fm-mail: flock serializes overlapping polls so mail wakes exactly once"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -212,3 +247,4 @@ test_send_passes_body
 test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
+test_poll_serializes_overlapping_invocations

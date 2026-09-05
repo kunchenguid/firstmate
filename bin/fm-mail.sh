@@ -281,10 +281,10 @@ case "${1:-}" in
   poll)
     # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
     # then diff against already-surfaced uids to find NEW messages and surface
-    # one wake each. Never marks anything read. The cursor file holds the
-    # generation guard line followed by one surfaced uid per line. A single
-    # flock serializes overlapping polls so two runs cannot both load the same
-    # pre-diff cursor and double-surface the same mail.
+    # one wake each. Never marks anything read. The entire list-diff-wake loop
+    # runs under one flock and each newly surfaced uid is appended to the
+    # cursor the moment its wake is queued, so an overlapping poll or an
+    # interrupted run can never read a stale cursor and double-surface mail.
     exec 9>"$STATE_DIR/.mail-seen.lock"
     flock 9
     LIST="$(run_py poll_list)"
@@ -306,6 +306,7 @@ case "${1:-}" in
     if [ -n "$GENERATION" ] && [ "$STORED_GEN" != "$GENERATION" ]; then
       SEEN=()
       STORED_GEN="$GENERATION"
+      printf 'uidvalidity=%s\n' "$STORED_GEN" > "$CURSOR"
     fi
 
     woke=0
@@ -317,19 +318,13 @@ case "${1:-}" in
       if [ -z "${SEEN[$uid]:-}" ]; then
         wake_for "$uid" "mail from $fr - ${subj:-no subject}"
         echo "fm-mail: woke for $uid"
+        printf '%s\n' "$uid" >> "$CURSOR"
         SEEN["$uid"]=1
         woke=$((woke + 1))
       fi
     done <<< "$LIST"
     flock -u 9
     exec 9>&-
-    {
-      printf 'uidvalidity=%s\n' "$STORED_GEN"
-      for u in "${!SEEN[@]}"; do
-        printf '%s\n' "$u"
-      done
-    } > "$CURSOR.new"
-    mv "$CURSOR.new" "$CURSOR"
     if [ "$woke" -eq 0 ]; then
       echo "fm-mail: no new mail"
     fi
