@@ -484,6 +484,71 @@ SH
   pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
 }
 
+test_poll_retry_rotation_advances_past_failures() {
+  local harness out1 out2 rc1=0 rc2=0
+  harness="$TMP_ROOT/retry-rotate-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+FAILING = set(sys.argv[3].split(',')) if len(sys.argv) > 3 else set()
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'71 72 73 74 75 76 77 78 79 80 81 82'])
+        if cmd == 'fetch':
+            if args[0].decode() in FAILING:
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # All 12 uids are cursor-recorded (degraded wakes) and listed in the retry
+  # set; 71..81 keep failing, 82 recovered. window = max(1*4, 1+10) = 11, so a
+  # single poll examines only 11 retry candidates.
+  {
+    printf 'uidvalidity=90009\n'
+    for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
+      printf '%s\n' "$u"
+    done
+  } > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.mail-retry"
+  for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
+    printf '%s\n' "$u" >> "$HOME_DIR/state/.mail-retry"
+  done
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first retry poll must succeed"
+  assert_not_contains "$out1" $'82\t' "the recovered uid is not reached while failures hold the window"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second retry poll must succeed"
+  assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "rotation lets the recovered uid surface on the next poll"
+  pass "fm-mail: retry rotation advances the scan past persistent failures"
+}
+
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
   local harness out rc=0
   harness="$TMP_ROOT/poll-window-harness.py"
@@ -1013,6 +1078,7 @@ test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
+test_poll_retry_rotation_advances_past_failures
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain

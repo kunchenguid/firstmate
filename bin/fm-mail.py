@@ -191,6 +191,23 @@ def load_retry(retry_path):
     return retry, ordered
 
 
+def rotate_retry_failed(retry_path, uid):
+    """Move a still-failing retry uid to the end of the retry file so the next
+    poll's scan advances past it and a fixed prefix of persistent failures can
+    never starve recovered uids behind it. Runs under the poll's mail-seen
+    lock; the bash layer owns the same file, never concurrently."""
+    if not retry_path or not os.path.exists(retry_path):
+        return
+    with open(retry_path, encoding='utf-8', errors='replace') as f:
+        lines = [ln.rstrip('\n') for ln in f]
+    filtered = [ln for ln in lines if ln and ln != uid]
+    if len(filtered) == len(lines):
+        return
+    filtered.append(uid)
+    with open(retry_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(filtered) + '\n')
+
+
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
     # cursor are considered as new, then previously unfetchable retry-set uids
@@ -250,6 +267,7 @@ def cmd_poll_list():
             typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
                 if u in retry:
+                    rotate_retry_failed(os.environ.get('FM_MAIL_RETRY', ''), u)
                     continue
                 uid = clean(u)
                 out.append((uid, '', '(no header)',
