@@ -14,12 +14,27 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-test-fixtures)
 
 test_git_config_isolation() (
-  local dir="$TMP_ROOT/git-config" scope helper jobs timeout
+  local dir="$TMP_ROOT/git-config" scope helper jobs timeout fakebin rc
   mkdir -p "$dir/runner/bin" "$dir/runner/tests"
   git init -q "$dir/caller"
   git -C "$dir/caller" config commit.gpgsign false
   cd "$dir/caller" || exit 1
   cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
+  fakebin=$(fm_fakebin "$dir/standalone")
+  fm_fake_exit0 "$fakebin" pi
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -c ]; then
+    git -C "$2" log -1 --format=%s > "${FM_TEST_STANDALONE_COMMIT:?}"
+    exit 1
+  fi
+  shift
+done
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$dir/runner/tests/fm-test-run.test.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -85,6 +100,19 @@ SH
           "runner did not execute the Git fixture"
       done
     done
+    rc=0
+    FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=HEAD \
+      FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=updated \
+      FM_TEST_STANDALONE_COMMIT="$dir/$scope-standalone-commit" PATH="$fakebin:$PATH" \
+      bash "$ROOT/tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh" \
+      > "$dir/standalone.log" 2>&1 || rc=$?
+    [ "$rc" = 1 ] || fail "standalone fixture did not stop at the tmux launch"
+    assert_grep 'could not start isolated Pi session' "$dir/standalone.log" \
+      "standalone fixture failed before the tmux launch: $(cat "$dir/standalone.log")"
+    [ "$(cat "$dir/$scope-standalone-commit")" = 'test: initial instruction contract' ] \
+      || fail "standalone fixture did not create its initial commit"
+    bash "$ROOT/tests/fm-gitignore-config.test.sh" > "$dir/gitignore.log" 2>&1 \
+      || fail "standalone gitignore fixture inherited $scope config: $(cat "$dir/gitignore.log")"
     # Sourcing in test subprocesses cannot change the caller or its config files.
     [ "$(git config --"$scope" --get commit.gpgsign)" = true ] || fail "caller lost signing preference"
     cmp -s "$dir/$scope" "$dir/expected" || fail "host config file was changed"

@@ -9,6 +9,8 @@ set -u
 fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/git-config-helpers.sh
+. "$ROOT/tests/git-config-helpers.sh"
 unset NO_MISTAKES_GATE
 
 fail() {
