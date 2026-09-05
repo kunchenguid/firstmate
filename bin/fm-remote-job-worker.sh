@@ -749,6 +749,7 @@ worker_run_job() { # <account-home> <job-dir>
     "HOME=$account_home"
     "FM_HOME=$home"
     "FM_ROOT_OVERRIDE=$root"
+    "FM_REMOTE_JOB_STATE_ROOT=$FM_REMOTE_JOB_STATE"
     FM_REMOTE_JOB_ACTIVE=1
   )
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then

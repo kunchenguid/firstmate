@@ -137,19 +137,23 @@ done
     call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', other)
     wait_for(lambda: not processes())
     print("ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue")
-    call('''
-marker="$FM_REMOTE_JOB_STATE_ROOT/recycled"
-signal_log="$FM_REMOTE_JOB_STATE_ROOT/signalled"
-fm_remote_job_worker_process_group() { printf '424242\\n'; }
-fm_remote_job_process_scope() { return 1; }
-fm_remote_job_group_identity_snapshot() { touch "$marker"; printf '123\\toriginal\\n'; }
-fm_remote_job_group_running() { return 0; }
-fm_remote_job_process_start() { [ ! -e "$marker" ] && printf 'original\\n'; }
-kill() { touch "$signal_log"; }
-if fm_remote_job_stop_worker_tree 123; then exit 1; fi
-[ ! -e "$signal_log" ]
+    unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        call(f'''
+fm_remote_job_process_scope() {{
+  [ "$1" = 123 ] || return 1
+  FM_REMOTE_JOB_PROCESS_ROOT=$FM_ROOT_OVERRIDE
+  FM_REMOTE_JOB_PROCESS_STATE=$FM_REMOTE_JOB_STATE_ROOT
+}}
+fm_remote_job_worker_process_group() {{ printf '{unrelated.pid}\\n'; }}
+fm_remote_job_stop_worker_tree 123
 ''', queue)
-    print("ok - stop refuses to signal a reused group after captured ownership disappears")
+        assert unrelated.poll() is None, "stop signalled the recycled unrelated group"
+    finally:
+        if unrelated.poll() is None:
+            unrelated.terminate()
+            unrelated.wait()
+    print("ok - stop leaves a group recycled before its scoped snapshot untouched")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):

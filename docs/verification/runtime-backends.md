@@ -981,9 +981,9 @@ The runner regression separately proves that the process check rejects surviving
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
 The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, and independent restart supervisors from the same queue, plus a separate queue that must survive.
-It also verifies that cleanup refuses to signal after captured ownership disappears from a reused numeric group.
+It also verifies that cleanup leaves an unrelated process untouched when it reuses the numeric group before the scoped snapshot.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
-The supervisor now retains its own ownership lease across child restarts, and stop discovers verified sibling groups by executable and queue identity rather than adoption parent.
+The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The regression asserts both termination and absence of respawns after stop; it failed against the previous implementation and passed with the fix.
 
 ```sh

@@ -1000,31 +1000,11 @@ fm_remote_job_root_is_live() { # <remote-root>
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ]
 }
 
-# The isolated process group that owns <pid>'s whole worker tree, echoed only
-# when signalling it is provably safe: the group is not this shell's own, not a
-# reserved id, and either its leader or a leaderless member is a scoped remote
-# job worker. A worker started without group isolation (an older build, or
-# launchd's own session) never yields a group.
-fm_remote_job_worker_process_group() { # <pid>
-  local pid=$1 pgid own_pgid leader_command
-  pgid=$(fm_remote_job_process_pgid "$pid") || return 1
-  case "$pgid" in 0|1) return 1 ;; esac
-  own_pgid=$(fm_remote_job_process_pgid "$$") || return 1
-  [ "$pgid" != "$own_pgid" ] || return 1
-  leader_command=$(fm_remote_job_process_command "$pgid" 2>/dev/null || true)
-  case "$leader_command" in
-    *fm-remote-job-worker.sh*) ;;
-    '') fm_remote_job_process_scope "$pid" || return 1 ;;
-    *) return 1 ;;
-  esac
-  printf '%s\n' "$pgid"
-}
-
 # Linux's adoption parent is not ownership evidence. Bind sibling supervisors
 # to the same executable and queue using their kernel environment.
 # Never print the environment: it can contain unrelated private values.
 fm_remote_job_process_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
-  local pid=$1 entry root='' state='' account='' executable script
+  local pid=$1 entry root='' state='' account='' argument cwd='' readlink_bin anchored=0
   [ -O "/proc/$pid" ] && [ -r "/proc/$pid/environ" ] || return 1
   while IFS= read -r -d '' entry; do
     case "$entry" in
@@ -1037,141 +1017,152 @@ fm_remote_job_process_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
   case "$root:$state" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$root" in /*) ;; *) return 1 ;; esac
   case "$state" in /*) ;; *) return 1 ;; esac
-  {
-    IFS= read -r -d '' executable && IFS= read -r -d '' script
-  } < "/proc/$pid/cmdline" 2>/dev/null || return 1
-  case "${executable##*/}" in bash) ;; *) return 1 ;; esac
-  [ "$script" = "$root/bin/fm-remote-job-worker.sh" ] || return 1
+  while IFS= read -r -d '' argument; do
+    [ "$argument" != "$root/bin/fm-remote-job-worker.sh" ] || anchored=1
+  done < "/proc/$pid/cmdline" 2>/dev/null
+  if [ "$anchored" -eq 0 ]; then
+    if [ -x /usr/bin/readlink ]; then readlink_bin=/usr/bin/readlink
+    elif [ -x /bin/readlink ]; then readlink_bin=/bin/readlink
+    else return 1
+    fi
+    cwd=$("$readlink_bin" "/proc/$pid/cwd" 2>/dev/null) || return 1
+    case "$cwd" in
+      "$root"|"$root"/*|"$root (deleted)"|"$root"/*" (deleted)") ;;
+      *) return 1 ;;
+    esac
+  fi
   FM_REMOTE_JOB_PROCESS_ROOT=$root
   FM_REMOTE_JOB_PROCESS_STATE=$state
 }
 
-fm_remote_job_group_running() { # <pgid>; zombies cannot execute or respawn
-  local pgid=$1 snapshot
-  snapshot=$(/bin/ps -e -o pgid= -o stat= 2>/dev/null) || return 2
-  printf '%s\n' "$snapshot" |
-    awk -v group="$pgid" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'
+fm_remote_job_process_non_zombie() { # <pid>
+  local pid=$1 value state
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r value < "/proc/$pid/stat" || return 1
+  value=${value##*) }
+  state=${value%% *}
+  [ -n "$state" ] && [ "$state" != Z ]
 }
 
-fm_remote_job_group_identity_snapshot() { # <pgid>
-  local pgid=$1 snapshot member member_group status start found=1
-  snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 1
-  while read -r member member_group status; do
-    [ "$member_group" = "$pgid" ] && [[ "$status" != Z* ]] || continue
-    start=$(fm_remote_job_process_start "$member" 2>/dev/null) || continue
-    printf '%s\t%s\n' "$member" "$start"
-    found=0
-  done <<< "$snapshot"
-  return "$found"
+fm_remote_job_scoped_process_identity() { # <pid> <root> <state>
+  local pid=$1 root=$2 state=$3 start group
+  fm_remote_job_process_non_zombie "$pid" || return 1
+  fm_remote_job_process_scope "$pid" || return 1
+  [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
+    [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+  start=$(fm_remote_job_process_start "$pid") || return 1
+  group=$(fm_remote_job_process_pgid "$pid") || return 1
+  printf '%s\t%s\n' "$start" "$group"
 }
 
-fm_remote_job_group_has_owned_member() { # <pgid> <snapshot> <root> <state>
-  local pgid=$1 snapshot=$2 root=$3 state=$4 member recorded_start actual_start actual_group candidate
-  while IFS=$'\t' read -r member recorded_start; do
-    [ -n "$member" ] && [ -n "$recorded_start" ] || continue
-    actual_start=$(fm_remote_job_process_start "$member" 2>/dev/null || true)
-    [ "$actual_start" = "$recorded_start" ] || continue
-    actual_group=$(fm_remote_job_process_pgid "$member" 2>/dev/null || true)
-    [ "$actual_group" = "$pgid" ] && return 0
-  done <<< "$snapshot"
-  [ -n "$root" ] && [ -n "$state" ] || return 1
+fm_remote_job_scope_snapshot() { # <root> <state>
+  local root=$1 state=$2 candidate identity own_group group
+  own_group=$(fm_remote_job_process_pgid "$$") || return 1
   for candidate in /proc/[0-9]*; do
     candidate=${candidate##*/}
-    actual_group=$(fm_remote_job_process_pgid "$candidate" 2>/dev/null || true)
-    [ "$actual_group" = "$pgid" ] || continue
-    fm_remote_job_process_scope "$candidate" 2>/dev/null || continue
-    [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
-      [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] && return 0
+    identity=$(fm_remote_job_scoped_process_identity "$candidate" "$root" "$state" 2>/dev/null || true)
+    [ -n "$identity" ] || continue
+    group=${identity##*$'\t'}
+    [ "$group" != "$own_group" ] || continue
+    printf '%s\t%s\n' "$candidate" "$identity"
   done
+}
+
+fm_remote_job_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" |
+    awk -F '\t' 'NF == 3 && !seen[$1 FS $2]++'
+}
+
+fm_remote_job_snapshot_has_live_identity() { # <snapshot>
+  local snapshot=$1 pid recorded_start actual_start
+  while IFS=$'\t' read -r pid recorded_start _; do
+    [ -n "$pid" ] && [ -n "$recorded_start" ] || continue
+    fm_remote_job_process_non_zombie "$pid" || continue
+    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+    [ "$actual_start" != "$recorded_start" ] || return 0
+  done <<< "$snapshot"
   return 1
 }
 
-# Stop a worker and every descendant it leaked, TERM first and KILL only for a
-# survivor. Signals the isolated worker group when one is provable and the lone
-# process otherwise. Returns non-zero when any verified worker-group member is
-# still alive afterwards.
+fm_remote_job_snapshot_group_has_identity() { # <snapshot> <group> <root> <state>
+  local snapshot=$1 group=$2 root=$3 state=$4 pid recorded_start recorded_group identity
+  while IFS=$'\t' read -r pid recorded_start recorded_group; do
+    [ "$recorded_group" = "$group" ] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ "$identity" = "$recorded_start"$'\t'"$recorded_group" ] && return 0
+  done <<< "$snapshot"
+  return 1
+}
+
+fm_remote_job_group_all_members_scoped() { # <group> <root> <state>
+  local group=$1 root=$2 state=$3 process_snapshot pid member_group status found=1 identity
+  process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 1
+  while read -r pid member_group status; do
+    [ "$member_group" = "$group" ] && [[ "$status" != Z* ]] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ -n "$identity" ] && [ "${identity##*$'\t'}" = "$group" ] || return 1
+    found=0
+  done <<< "$process_snapshot"
+  return "$found"
+}
+
+fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal>
+  local snapshot=$1 root=$2 state=$3 signal=$4 pid recorded_start group identity
+  local groups='' signalled_groups=''
+  while IFS=$'\t' read -r _ _ group; do
+    case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
+  done <<< "$snapshot"
+  for group in $groups; do
+    if fm_remote_job_group_all_members_scoped "$group" "$root" "$state" &&
+      fm_remote_job_snapshot_group_has_identity "$snapshot" "$group" "$root" "$state"; then
+      kill -"$signal" -- "-$group" 2>/dev/null || true
+      signalled_groups="$signalled_groups $group"
+    fi
+  done
+  while IFS=$'\t' read -r pid recorded_start group; do
+    case " $signalled_groups " in *" $group "*) continue ;; esac
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ "$identity" = "$recorded_start"$'\t'"$group" ] || continue
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done <<< "$snapshot"
+}
+
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 pgid i=0 candidate root='' state='' group index alive signal status snapshot
-  local groups=() snapshots=() roots=() states=()
+  local pid=$1 root state signal current known='' i actual_start recorded_start
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   if fm_remote_job_process_scope "$pid"; then
-    root=$FM_REMOTE_JOB_PROCESS_ROOT state=$FM_REMOTE_JOB_PROCESS_STATE
-  fi
-  pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
-  if [ -n "$pgid" ]; then
-    groups+=("$pgid")
-    roots+=("$root")
-    states+=("$state")
-  fi
-  if [ -n "$root" ] && [ -n "$state" ]; then
-    # A stale serving-owner record can have admitted more than one supervisor.
-    # Each has its own group even after adoption by a systemd user subreaper.
-    for candidate in /proc/[0-9]*; do
-      candidate=${candidate##*/}
-      fm_remote_job_process_scope "$candidate" 2>/dev/null || continue
-      [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
-        [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || continue
-      group=$(fm_remote_job_worker_process_group "$candidate" 2>/dev/null || true)
-      [ -n "$group" ] || continue
-      case " ${groups[*]:-} " in *" $group "*) continue ;; esac
-      groups+=("$group") roots+=("$root") states+=("$state")
-    done
-  fi
-  if [ "${#groups[@]}" -gt 0 ]; then
-    for group in "${groups[@]}"; do
-      snapshot=$(fm_remote_job_group_identity_snapshot "$group") || return 1
-      snapshots+=("$snapshot")
-    done
+    root=$FM_REMOTE_JOB_PROCESS_ROOT
+    state=$FM_REMOTE_JOB_PROCESS_STATE
     for signal in TERM KILL; do
-      index=0
-      for group in "${groups[@]}"; do
-        if fm_remote_job_group_running "$group"; then
-          fm_remote_job_group_has_owned_member "$group" "${snapshots[$index]}" \
-            "${roots[$index]}" "${states[$index]}" || return 1
-          kill -"$signal" -- "-$group" 2>/dev/null || true
-        else
-          status=$?
-          [ "$status" -eq 1 ] || return 1
-        fi
-        index=$((index + 1))
-      done
+      current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
+      known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
+      [ -z "$current" ] || fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal"
       i=0
       while [ "$i" -lt 50 ]; do
-        alive=0
-        for group in "${groups[@]}"; do
-          if fm_remote_job_group_running "$group"; then alive=1; else [ "$?" -eq 1 ] || return 1; fi
-        done
-        [ "$alive" -eq 1 ] || return 0
+        current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
+        known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
+        fm_remote_job_snapshot_has_live_identity "$known" || return 0
         i=$((i + 1))
         sleep 0.1
       done
     done
     return 1
   fi
-  if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
-    i=$((i + 1))
-    sleep 0.1
+  recorded_start=$(fm_remote_job_process_start "$pid") || return 1
+  for signal in TERM KILL; do
+    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+    [ "$actual_start" = "$recorded_start" ] || return 0
+    kill -"$signal" "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 50 ]; do
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      [ "$actual_start" = "$recorded_start" ] || return 0
+      i=$((i + 1))
+      sleep 0.1
+    done
   done
-  if [ -n "$pgid" ]; then
-    kill -0 -- "-$pgid" 2>/dev/null || return 0
-  else
-    kill -0 "$pid" 2>/dev/null || return 0
-  fi
-  if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
-  i=0
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
-    i=$((i + 1))
-    sleep 0.1
-  done
-  if [ -n "$pgid" ]; then
-    ! kill -0 -- "-$pgid" 2>/dev/null
-  else
-    ! kill -0 "$pid" 2>/dev/null
-  fi
+  return 1
 }
 
 fm_remote_job_read_single_line() {
@@ -1360,12 +1351,15 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.
   set -m
-  nohup env \
-    HOME="$account_home" \
-    FM_ROOT_OVERRIDE="$root" \
-    FM_REMOTE_JOB_STATE_ROOT="$FM_REMOTE_JOB_STATE" \
-    FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
-    "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
+  (
+    cd "$root" || exit 1
+    exec nohup env \
+      HOME="$account_home" \
+      FM_ROOT_OVERRIDE="$root" \
+      FM_REMOTE_JOB_STATE_ROOT="$FM_REMOTE_JOB_STATE" \
+      FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
+      "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null
+  ) &
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
