@@ -3,8 +3,9 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and a Forgejo pull
+# request URL are all accepted, including a request on a self-hosted GitLab or
+# Forgejo instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -51,30 +52,51 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
+# Refuse to arm a self-hosted watch with no CLI to read it on PATH. The poll is
+# silent on every error by design, so a missing CLI would be indistinguishable
+# from a request that is never merged. Arming is the one point where that can be
 # reported, so the absent tool stops the watch here instead of watching nothing.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+if [ "$PROVIDER" = forgejo ] && ! command -v forgejo-axi >/dev/null 2>&1; then
+  echo "error: watching a Forgejo pull request requires forgejo-axi on PATH" >&2
   exit 1
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# head commit as a selectable field and forgejo-axi exposes it as a selectable
+# field too; plain glab exposes it only inside its JSON output, which would need
+# a JSON processor firstmate does not require, so a GitLab task records no
+# pr_head. Every consumer already treats it as optional: bin/fm-teardown.sh
+# reads the head from the forge at teardown rather than from metadata and falls
+# back to its provider-agnostic content check, and bin/fm-review-diff.sh
+# resolves the head from the remote when none is recorded.
+# bin/fm-pr-merge.sh reads a self-hosted head live at merge time for the same
+# reason, and treats a recorded value that disagrees as stale rather than
+# authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+# forgejo-axi needs no repository on disk, because --base-url and the parsed
+# owner/repository address the instance the URL names rather than an ambient
+# default. A field the host does not supply is omitted rather than emitted as
+# null, so requiring exactly one head_sha line refuses an absent value instead
+# of recording an empty one.
+if [ "$PROVIDER" = forgejo ]; then
+  if REMOTE_HEAD=$(forgejo-axi pr view --base-url "https://$HOST" --repo "$PROJECT_PATH" \
+      "$NUMBER" --fields head_sha 2>/dev/null | awk '
+        $1 == "head_sha:" { count++; value = $2 }
+        END { if (count == 1 && value != "") print value; else exit 1 }
+      ') \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

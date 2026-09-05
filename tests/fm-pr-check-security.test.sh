@@ -174,10 +174,33 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # Plain forgejo-axi, reproducing the real CLI's contract: its TOON output on
+  # stdout, and a non-zero exit whose diagnostic also goes to stdout and carries
+  # no bare "merged:" line of its own.
+  cat > "$fakebin/forgejo-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_FORGEJO_LOG"
+if [ "${FM_TEST_FORGEJO_FAIL:-0}" != 0 ]; then
+  printf 'error: "Unable to reach Forgejo"\ncode: NETWORK_ERROR\n'
+  exit 1
+fi
+case "${1:-} ${2:-}" in
+  "pr merged")
+    printf 'proof:\n  merged: %s\n  number: 7\n  merged_at: null\n' \
+      "${FM_TEST_FORGEJO_MERGED:-false}"
+    ;;
+  "pr view")
+    printf 'pull_request:\n  head_sha: %s\n' \
+      "${FM_TEST_FORGEJO_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/forgejo-axi"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/forgejo.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -207,6 +230,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_LOG="$dir/forgejo.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -217,6 +241,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_LOG="$dir/forgejo.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -310,6 +335,52 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://github.com/o/r/pulls/1'
+  'https://gitlab.com/g/p/pulls/1'
+  'https://forgejo.example/o/r/pull/1'
+  'https://forgejo.example/o/r/-/pulls/1'
+  'https://forgejo.example/g/s/p/pulls/1'
+  'https://forgejo.example/o/pulls/1'
+  'https://forgejo.example//r/pulls/1'
+  'https://forgejo.example/o//pulls/1'
+  'https://forgejo.example/o/r/pulls/'
+  'https://forgejo.example/o/r/pulls/0'
+  'https://forgejo.example/o/r/pulls/01'
+  'https://forgejo.example/o/r/pulls/-1'
+  'https://forgejo.example/o/r/pulls/1/files'
+  'https://forgejo.example/o/r/pulls/1/'
+  'https://forgejo.example/o/r/pulls/1?q=x'
+  'https://forgejo.example/o/r/pulls/1#f'
+  'http://forgejo.example/o/r/pulls/1'
+  'https://Forgejo.Example/o/r/pulls/1'
+  'https://forgejo.example:443/o/r/pulls/1'
+  'https://user@forgejo.example/o/r/pulls/1'
+  'https://.forgejo.example/o/r/pulls/1'
+  'https://forgejo.example./o/r/pulls/1'
+  'https://forgejo.example/-owner/r/pulls/1'
+  'https://forgejo.example/owner-/r/pulls/1'
+  'https://forgejo.example/.owner/r/pulls/1'
+  'https://forgejo.example/owner./r/pulls/1'
+  'https://forgejo.example/own--er/r/pulls/1'
+  'https://forgejo.example/own._er/r/pulls/1'
+  'https://forgejo.example/own__er/r/pulls/1'
+  'https://forgejo.example/o+wner/r/pulls/1'
+  'https://forgejo.example/o/./pulls/1'
+  'https://forgejo.example/o/../pulls/1'
+  'https://forgejo.example/o/r.git/pulls/1'
+  'https://forgejo.example/o/r.wiki/pulls/1'
+  'https://forgejo.example/o/r.rss/pulls/1'
+  'https://forgejo.example/o/r.atom/pulls/1'
+  'https://forgejo.example/o/-/pulls/1'
+  'https://forgejo.example/o/r.GIT/pulls/1'
+  'https://forgejo.example/o/r.Git/pulls/1'
+  'https://forgejo.example/o/r.WIKI/pulls/1'
+  'https://forgejo.example/o/r.Rss/pulls/1'
+  'https://forgejo.example/o/r.AtOm/pulls/1'
+  'https://forgejo.example/o/r+z/pulls/1'
+  'https://forgejo.example/o/r`/pulls/1'
+  $'https://forgejo.example/o/r/pulls/1\n'
+  ' https://forgejo.example/o/r/pulls/1'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -376,6 +447,55 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  while IFS='|' read -r url host owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Forgejo pull request URL"
+    [ "$FM_PR_PROVIDER" = forgejo ] || fail "parser did not tag a Forgejo URL as forgejo"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Forgejo URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Forgejo host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong Forgejo project path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Forgejo owner"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Forgejo repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Forgejo pull request number"
+  done <<'EOF'
+https://forgejo.example/o/r/pulls/1|forgejo.example|o|r|1
+https://codeberg.org/forgejo/forgejo/pulls/1234|codeberg.org|forgejo|forgejo|1234
+https://git.example.co.uk/My-Org/repo-name_with.parts/pulls/123456|git.example.co.uk|My-Org|repo-name_with.parts|123456
+https://git.example/o/pulls/pulls/1|git.example|o|pulls|1
+https://forgejo.example/o/a..b/pulls/1|forgejo.example|o|a..b|1
+https://forgejo.example/o/a--b/pulls/1|forgejo.example|o|a--b|1
+https://forgejo.example/o/r.gitx/pulls/1|forgejo.example|o|r.gitx|1
+https://forgejo.example/o/-leading/pulls/1|forgejo.example|o|-leading|1
+EOF
+  # The forge reserves the exact repository names ".", ".." and "-", and matches
+  # its reserved route suffixes after lowercasing, so both are refused whatever
+  # case they arrive in. It applies no rule against a run of "-", "_" or "."
+  # inside a repository name - that restriction is its username rule, enforced
+  # separately for the owner - so a repository the forge can host is not refused
+  # here for carrying one.
+  for row in - r.GIT r.Wiki r.RSS r.AtOm; do
+    ! fm_pr_url_parse "https://forgejo.example/o/$row/pulls/1" \
+      || fail "parser accepted a repository name the forge reserves"
+  done
+  for row in a..b a--b a__b r.gitx -leading trailing-; do
+    fm_pr_url_parse "https://forgejo.example/o/$row/pulls/1" \
+      || fail "parser refused a repository name the forge can host"
+  done
+  # The plural is what tells a Forgejo pull request from a GitHub one, and each
+  # provider keeps its own spelling: the same host and path with the other
+  # provider's segment is not a second accepted spelling for either of them.
+  fm_pr_url_parse https://forgejo.example/o/r/pulls/1 \
+    || fail "parser rejected the plural Forgejo pull request segment"
+  ! fm_pr_url_parse https://forgejo.example/o/r/pull/1 \
+    || fail "parser accepted GitHub's singular segment on a Forgejo host"
+  fm_pr_url_parse https://github.com/o/r/pull/1 \
+    || fail "parser rejected GitHub's singular pull request segment"
+  ! fm_pr_url_parse https://github.com/o/r/pulls/1 \
+    || fail "parser read GitHub's own host as a Forgejo instance"
+  ! fm_pr_url_parse https://gitlab.com/g/p/pulls/1 \
+    || fail "parser read GitLab's own host as a Forgejo instance"
+  ! fm_pr_url_parse https://github.com/o/r/-/merge_requests/1 \
+    || fail "parser read GitHub's own host as a GitLab instance"
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
@@ -678,6 +798,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_LOG="$dir/forgejo.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1388,6 +1509,153 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+test_forgejo_merge_watch() {
+  local dir state out rc url value nofj entry bindir name
+  dir=$(make_case forgejo-merge-watch)
+  state="$dir/home/state"
+  url=https://forgejo.example/my-org/tools/pulls/7
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example my-org/tools 7 "$POLL" \
+    || fail "could not prepare a Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Forgejo poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "forgejo
+$url
+forgejo.example
+my-org/tools
+7" ] || fail "published Forgejo sidecar bytes were not exact"
+
+  # Only an exact merged proof wakes firstmate. Every other reading, including
+  # an unreadable pull request and a changed output format, stays silent.
+  for value in false '' null TRUE True merged not-a-boolean; do
+    out=$(FM_TEST_FORGEJO_MERGED="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a non-merged proof"
+  done
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted after a forgejo-axi failure"
+
+  # forgejo-axi is addressed by the instance the record names and the derived
+  # owner/repository, never by the pull request URL: it reads only
+  # owner/repository/number out of a URL and still sends the request wherever its
+  # own configuration points, which would let an ambient default answer instead.
+  grep -qF -- "pr merged --base-url https://forgejo.example --repo my-org/tools 7" "$dir/forgejo.log" \
+    || fail "Forgejo poll did not address forgejo-axi by instance and repository"
+  ! grep -qF -- "$url" "$dir/forgejo.log" \
+    || fail "Forgejo poll passed a pull request URL to forgejo-axi"
+
+  # An absent CLI must produce no wake rather than a false merge. The whole
+  # search path is mirrored without forgejo-axi, because a real one anywhere on
+  # PATH would make this prove nothing.
+  nofj="$dir/nofj"
+  mkdir -p "$nofj"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = forgejo-axi ] && continue
+      [ -e "$nofj/$name" ] || ln -s "$entry" "$nofj/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nofj" command -v forgejo-axi >/dev/null 2>&1 \
+    || fail "the forgejo-axi-free search path still resolved forgejo-axi"
+  out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_LOG="$dir/forgejo.log" \
+    PATH="$nofj" \
+    bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Forgejo poll emitted with forgejo-axi absent from PATH"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example my-org/tools 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example my-org/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose repository was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example my-org/sub/tools 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar carrying a nested project path"
+
+  # The poll re-validates rather than trusting the sidecar, so the repository
+  # names the forge reserves are refused here too, in whatever case they arrive.
+  for value in - tools.git tools.GIT tools.Wiki tools.RSS tools.AtOm; do
+    printf '%s\n%s\n%s\n%s\n%s\n' forgejo \
+      "https://forgejo.example/my-org/$value/pulls/7" forgejo.example "my-org/$value" 7 \
+      > "$state/task-a.pr-poll"
+    out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a repository name the forge reserves"
+  done
+  # A repository the forge can host still wakes, so the refusals above are not
+  # simply a stricter poll that never fires.
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo \
+    "https://forgejo.example/my-org/a..b/pulls/7" forgejo.example my-org/a..b 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll refused a repository name the forge can host"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example my-org/tools 7 \
+    > "$state/task-a.pr-poll"
+
+  # Arming is where a missing CLI can still be reported, so it refuses there.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nofj" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Forgejo watch succeeded with forgejo-axi absent"
+  case "$out" in
+    *"requires forgejo-axi on PATH"*) ;;
+    *) fail "arming a Forgejo watch with forgejo-axi absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Forgejo arming left a poll armed"
+
+  # Arming records the head forgejo-axi supplies, which needs no repository on
+  # disk the way the GitHub lookup does.
+  write_task_meta "$dir" task-d
+  : > "$dir/forgejo.log"
+  run_check_entry "$dir" task-d "$url" >/dev/null || fail "could not arm a Forgejo watch"
+  grep -qxF "pr_head=0123456789abcdef0123456789abcdef01234567" "$state/task-d.meta" \
+    || fail "arming a Forgejo watch did not record the head forgejo-axi reported"
+  grep -qF -- "pr view --base-url https://forgejo.example --repo my-org/tools 7 --fields head_sha" \
+    "$dir/forgejo.log" \
+    || fail "the Forgejo head lookup did not address forgejo-axi by instance and repository"
+
+  # The merge path addresses the forge the URL names, and never another one.
+  # This fixture's forgejo-axi answers nothing at all for mergeability, so the
+  # merge's read cannot be parsed, which must refuse rather than merge on a state
+  # it could not read.
+  write_task_meta "$dir" task-c
+  : > "$dir/forgejo.log"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  set +e
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merge wrapper merged a Forgejo pull request it could not read"
+  grep -qF 'could not read the Forgejo pull request state before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the state it could not read"
+  [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a Forgejo URL"
+  [ ! -s "$dir/glab.log" ] || fail "merge wrapper reached the GitLab CLI for a Forgejo URL"
+  grep -qF "pr mergeability --base-url https://forgejo.example --repo my-org/tools 7" \
+    "$dir/forgejo.log" \
+    || fail "merge wrapper did not read the pull request through forgejo-axi at its own instance"
+  ! grep -qE '^pr merge ' "$dir/forgejo.log" \
+    || fail "merge wrapper merged despite an unreadable pull request state"
+
+  pass "Forgejo pull requests are followed on any instance and never wake falsely"
 }
 
 seed_canonical_poll() {
@@ -2123,6 +2391,7 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_forgejo_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

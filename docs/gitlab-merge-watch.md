@@ -44,6 +44,7 @@ That is deliberate: the host-agnostic property is a property of the stored recor
 GitLab runs mostly on self-hosted instances, so a merge request can live under any host.
 A GitLab project also sits under at least one group at no fixed depth, so no owner-and-repository pair can address one the way it can on GitHub.
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
+Neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` names `gitlab.com` as the GitLab host; the string appears in them only where the Forgejo provider refuses it as a host belonging to another forge (see [forgejo-merge-watch.md](forgejo-merge-watch.md)).
 `tests/fm-pr-check-security.test.sh` proves the host-agnostic path through a non-default-host sidecar and verifies that `glab` receives the reconstructed project URL.
 
 ## How plain glab is invoked, and why
@@ -267,7 +268,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
+`bin/fm-pr-check.sh` records no `pr_head=` for GitLab, because plain `glab` exposes the head commit only inside its JSON output rather than as a selectable field; that script's header owns which providers do record one.
 It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
 
 The merge path does not record one either, and deliberately does not depend on one.

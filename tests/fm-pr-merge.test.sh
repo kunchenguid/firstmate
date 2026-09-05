@@ -87,6 +87,16 @@ MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
+# The Forgejo fixture. A placeholder host that resolves nowhere, and an
+# owner/repository pair, because a Forgejo project is always exactly one of each.
+FJ_HOST=forgejo.example
+FJ_OWNER=my-org
+FJ_REPO=tools
+FJ_BASE_URL="https://$FJ_HOST"
+FJ_URL="$FJ_BASE_URL/$FJ_OWNER/$FJ_REPO/pulls/7"
+FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
+FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -320,6 +330,99 @@ make_gitlab_case() {
   printf '%s\n' "$case_dir"
 }
 
+add_forgejo_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/forgejo-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_FORGEJO_LOG"
+case_dir=$(dirname "$FM_TEST_FORGEJO_JSON")
+case "${1:-} ${2:-}" in
+  "pr mergeability")
+    [ ! -e "$case_dir/forgejo-view-fails" ] || exit 1
+    cat "$FM_TEST_FORGEJO_JSON"
+    exit 0
+    ;;
+  "pr merged")
+    [ ! -e "$case_dir/forgejo-merged-fails" ] || exit 1
+    if [ -e "$case_dir/forgejo-stays-open" ]; then
+      cat "$case_dir/proof-open.json"
+    else
+      cat "$case_dir/proof-merged.json"
+    fi
+    exit 0
+    ;;
+  "pr merge")
+    [ ! -e "$case_dir/forgejo-merge-fails" ] || { echo "error: pr merge failed" >&2 ; exit 1 ; }
+    : > "$case_dir/forgejo-merge-called"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/forgejo-axi"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+# write_mergeability_json <file> [<field>=<value> ...]
+# A mergeability payload that satisfies every pre-merge condition, with the
+# named fields overridden so one case drives exactly one condition. Values are
+# written into the JSON as-is, so a value may carry a JSON escape.
+write_mergeability_json() {
+  local file=$1 kv key value
+  local number=7 url=$FJ_URL head=$FJ_HEAD
+  local forge_mergeable=true checks_pass=true mergeable=true reasons='[]'
+  shift
+  for kv in "$@"; do
+    key=${kv%%=*}
+    value=${kv#*=}
+    case "$key" in
+      number) number=$value ;;
+      url) url=$value ;;
+      head) head=$value ;;
+      forge_mergeable) forge_mergeable=$value ;;
+      checks_pass) checks_pass=$value ;;
+      mergeable) mergeable=$value ;;
+      reasons) reasons=$value ;;
+      *) fail "write_mergeability_json: unknown field '$key'" ;;
+    esac
+  done
+  printf '{"mergeability":{"number":%s,"url":"%s","head_sha":"%s",' \
+    "$number" "$url" "$head" > "$file"
+  printf '"forgejo_mergeable":%s,"checks_pass":%s,"mergeable":%s,"reasons":%s}}\n' \
+    "$forge_mergeable" "$checks_pass" "$mergeable" "$reasons" >> "$file"
+}
+
+write_merged_proof_json() {
+  local file=$1 merged=$2 url=${3:-$FJ_URL}
+  printf '{"proof":{"merged":%s,"number":7,"url":"%s","head_sha":"%s"}}\n' \
+    "$merged" "$url" "$FJ_HEAD" > "$file"
+}
+
+# make_forgejo_case <name> [<field>=<value> ...]: a case dir with every forge
+# mock and a mergeability payload. Echoes the case dir.
+make_forgejo_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  add_glab_mock "$case_dir"
+  add_forgejo_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/glab.log"
+  : > "$case_dir/forgejo.log"
+  write_mergeability_json "$case_dir/mergeability.json" "$@"
+  write_merged_proof_json "$case_dir/proof-merged.json" true
+  write_merged_proof_json "$case_dir/proof-open.json" false
+  printf '%s\n' "$case_dir"
+}
+
+# The merge line forgejo-axi was asked to run, so a test asserts one exact
+# invocation rather than a substring of the whole log.
+forgejo_merge_line() {
+  grep -E '^pr merge ' "$1" || true
+}
+
 # mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
 # re-exposed by symlink except one tool, because a real copy anywhere on PATH
 # would prove nothing. The named bindirs are mirrored ahead of the search path,
@@ -364,6 +467,8 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_FORGEJO_LOG="$case_dir/forgejo.log" \
+  FM_TEST_FORGEJO_JSON="$case_dir/mergeability.json" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -1712,6 +1817,376 @@ test_gitlab_invalid_head_refuses() {
   pass "fm-pr-merge refuses a GitLab head commit it cannot validate"
 }
 
+test_forgejo_url_resolves_and_merges() {
+  local case_dir rc merge_line
+  case_dir=$(make_forgejo_case forgejo-merges)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-merges: a well-formed pull request URL should merge, not error"
+  assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-merges: pr= was not recorded before merging"
+  assert_grep "pr mergeability --base-url $FJ_BASE_URL --repo $FJ_OWNER/$FJ_REPO 7 --json" \
+    "$case_dir/forgejo.log" \
+    "forgejo-merges: the pre-merge state was not read from the instance the URL names"
+  merge_line=$(forgejo_merge_line "$case_dir/forgejo.log")
+  [ "$merge_line" = "pr merge --base-url $FJ_BASE_URL --repo $FJ_OWNER/$FJ_REPO 7 --expected-head $FJ_HEAD --method squash" ] \
+    || fail "forgejo-merges: unexpected merge invocation: '$merge_line'"
+  assert_grep "mergeable with passing checks at head $FJ_HEAD" "$case_dir/stderr" \
+    "forgejo-merges: the verified head was not reported"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "forgejo-merges: a pull request reached the GitHub CLI"
+  [ ! -s "$case_dir/glab.log" ] || fail "forgejo-merges: a pull request reached the GitLab CLI"
+  pass "fm-pr-merge merges a Forgejo pull request through forgejo-axi instead of refusing it"
+}
+
+test_forgejo_host_comes_from_the_url() {
+  local case_dir rc host base_url url
+  host=code.self-hosted.example
+  base_url="https://$host"
+  url="$base_url/team/ci-runner/pulls/31"
+  case_dir=$(make_forgejo_case forgejo-host-from-url "url=$url" number=31)
+  write_merged_proof_json "$case_dir/proof-merged.json" true "$url"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-host-from-url: a self-hosted pull request should merge"
+  assert_grep "pr mergeability --base-url $base_url --repo team/ci-runner 31 --json" \
+    "$case_dir/forgejo.log" \
+    "forgejo-host-from-url: the read did not use the host from the URL"
+  assert_grep "pr merge --base-url $base_url --repo team/ci-runner 31" "$case_dir/forgejo.log" \
+    "forgejo-host-from-url: the merge did not use the host from the URL"
+  assert_no_grep "$FJ_HOST" "$case_dir/forgejo.log" \
+    "forgejo-host-from-url: a host was assumed instead of taken from the URL"
+  # forgejo-axi reads only owner/repository/number out of a pull request URL and
+  # still sends the request wherever its own configuration points, so passing one
+  # would leave the instance to an ambient default.
+  assert_no_grep "$url" "$case_dir/forgejo.log" \
+    "forgejo-host-from-url: a pull request URL was passed instead of an explicit instance"
+  pass "fm-pr-merge takes the Forgejo instance from the URL rather than assuming one"
+}
+
+test_forgejo_defaults_to_squash_and_keeps_an_explicit_method() {
+  local case_dir rc merge_line
+  case_dir=$(make_forgejo_case forgejo-default-method)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forgejo-default-method: merge should succeed"
+  merge_line=$(forgejo_merge_line "$case_dir/forgejo.log")
+  case "$merge_line" in
+    *'--method squash'*) : ;;
+    *) fail "forgejo-default-method: the GitHub squash default was not mirrored: '$merge_line'" ;;
+  esac
+
+  case_dir=$(make_forgejo_case forgejo-explicit-method)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- --method rebase \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forgejo-explicit-method: merge should succeed"
+  merge_line=$(forgejo_merge_line "$case_dir/forgejo.log")
+  [ "$merge_line" = "pr merge --base-url $FJ_BASE_URL --repo $FJ_OWNER/$FJ_REPO 7 --expected-head $FJ_HEAD --method rebase" ] \
+    || fail "forgejo-explicit-method: the caller's method was overridden: '$merge_line'"
+  pass "fm-pr-merge names the squash default on Forgejo and preserves an explicit method"
+}
+
+test_forgejo_each_condition_refuses_independently() {
+  local case_dir rc name expected spec
+  set -- \
+    "forge|forge_mergeable=false|the forge reports mergeable as \"false\", not true" \
+    "checks|checks_pass=false|the checks at head $FJ_HEAD report passing as \"false\", not true" \
+    "verdict|mergeable=false|the merged verdict is \"false\", not true"
+  for spec in "$@"; do
+    name=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    case_dir=$(make_forgejo_case "forgejo-refuse-$name" "${spec%%|*}" mergeable=false)
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "error: refusing to merge $FJ_URL" "$case_dir/stderr" \
+      "forgejo-refuse-$name: refusal did not name the pull request"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-refuse-$name: refusal did not name the failing condition"
+    [ -z "$(forgejo_merge_line "$case_dir/forgejo.log")" ] \
+      || fail "forgejo-refuse-$name: a merge was attempted despite the refusal"
+    assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
+      "forgejo-refuse-$name: a refusal should still leave the recorded PR reference"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "forgejo-refuse-$name: a refusal should still leave the merge poll armed"
+  done
+  pass "fm-pr-merge refuses on each Forgejo pre-merge condition independently"
+}
+
+test_forgejo_reports_every_failing_condition_and_the_forge_reasons() {
+  local case_dir rc expected
+  case_dir=$(make_forgejo_case forgejo-refuse-all forge_mergeable=false checks_pass=false \
+    mergeable=false 'reasons=["forgejo_not_mergeable","checks_failure"]')
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-refuse-all: fm-pr-merge should refuse"
+  for expected in \
+    'the forge reports mergeable as "false", not true' \
+    "the checks at head $FJ_HEAD report passing as \"false\", not true" \
+    'the merged verdict is "false", not true' \
+    'the forge names: forgejo_not_mergeable, checks_failure'
+  do
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-refuse-all: '$expected' was not reported"
+  done
+  pass "fm-pr-merge reports every failing Forgejo condition and the forge's own reasons"
+}
+
+test_forgejo_answer_for_another_pull_request_refuses() {
+  local case_dir rc name
+  for name in number url; do
+    case_dir=$(make_forgejo_case "forgejo-mismatch-$name")
+    case "$name" in
+      number) write_mergeability_json "$case_dir/mergeability.json" number=8 ;;
+      url) write_mergeability_json "$case_dir/mergeability.json" \
+        "url=$FJ_BASE_URL/$FJ_OWNER/other/pulls/7" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-mismatch-$name: fm-pr-merge should refuse"
+    assert_grep "not $FJ_URL" "$case_dir/stderr" \
+      "forgejo-mismatch-$name: refusal did not name the pull request it asked about"
+    [ -z "$(forgejo_merge_line "$case_dir/forgejo.log")" ] \
+      || fail "forgejo-mismatch-$name: a merge was authorized by a view of another pull request"
+  done
+  pass "fm-pr-merge refuses a Forgejo view that answered for another pull request"
+}
+
+test_forgejo_stale_recorded_head_is_reported() {
+  local case_dir rc merge_line
+  case_dir=$(make_forgejo_case forgejo-stale-head)
+  # The recorded head is what a rebase leaves behind. It is read before
+  # fm-pr-check.sh rewrites the metadata, which re-records the head it resolves
+  # live, so reading it afterwards would find the fresh value instead.
+  printf 'pr_head=%s\n' "$FJ_STALE_HEAD" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-stale-head: the live head satisfies every condition, so it should merge"
+  assert_grep "recorded head $FJ_STALE_HEAD disagrees with the live head $FJ_HEAD" \
+    "$case_dir/stderr" "forgejo-stale-head: the stale recorded head was trusted silently"
+  merge_line=$(forgejo_merge_line "$case_dir/forgejo.log")
+  case "$merge_line" in
+    *"--expected-head $FJ_HEAD"*) : ;;
+    *) fail "forgejo-stale-head: the merge was not bound to the live head: '$merge_line'" ;;
+  esac
+  pass "fm-pr-merge reports a stale recorded Forgejo head and verifies the live one"
+}
+
+test_forgejo_unreadable_state_refuses() {
+  local case_dir rc name
+  for name in view-fails not-an-object missing-mergeability split-value; do
+    case_dir=$(make_forgejo_case "forgejo-unreadable-$name")
+    case "$name" in
+      view-fails) : > "$case_dir/forgejo-view-fails" ;;
+      not-an-object) printf '[]\n' > "$case_dir/mergeability.json" ;;
+      missing-mergeability) printf '{"proof":{}}\n' > "$case_dir/mergeability.json" ;;
+      # A value carrying a newline splits into a line no field name matches, so
+      # it must refuse rather than be truncated into a value a check accepts.
+      split-value) write_mergeability_json "$case_dir/mergeability.json" \
+        'url=opened\nnot-a-field' ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-unreadable-$name: fm-pr-merge should refuse"
+    assert_grep 'could not read the Forgejo pull request state before merging' \
+      "$case_dir/stderr" "forgejo-unreadable-$name: refusal did not name the unreadable state"
+    [ -z "$(forgejo_merge_line "$case_dir/forgejo.log")" ] \
+      || fail "forgejo-unreadable-$name: a merge was attempted on an unreadable state"
+  done
+  pass "fm-pr-merge refuses an unreadable Forgejo pull request state rather than merging blind"
+}
+
+test_forgejo_invalid_head_refuses() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-invalid-head head=not-a-sha)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-invalid-head: fm-pr-merge should refuse"
+  assert_grep 'could not read the Forgejo pull request head commit before merging' \
+    "$case_dir/stderr" "forgejo-invalid-head: refusal did not name the unreadable head"
+  [ -z "$(forgejo_merge_line "$case_dir/forgejo.log")" ] \
+    || fail "forgejo-invalid-head: a merge was bound to a head that is not a commit"
+  pass "fm-pr-merge refuses a Forgejo head commit it cannot validate"
+}
+
+test_forgejo_merge_failure_propagates() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-merge-fails)
+  : > "$case_dir/forgejo-merge-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "forgejo-merge-fails: a failed forgejo-axi merge was reported as success"
+  assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-merge-fails: a failed merge should still leave the recorded PR reference"
+  pass "fm-pr-merge propagates a real forgejo-axi merge failure without silently succeeding"
+}
+
+test_forgejo_unconfirmed_merge_leaves_the_poll_armed() {
+  local case_dir rc name
+  for name in unreadable still-open other-pull-request; do
+    case_dir=$(make_forgejo_case "forgejo-unconfirmed-$name")
+    case "$name" in
+      unreadable) : > "$case_dir/forgejo-merged-fails" ;;
+      still-open) : > "$case_dir/forgejo-stays-open" ;;
+      other-pull-request)
+        write_merged_proof_json "$case_dir/proof-merged.json" true \
+          "$FJ_BASE_URL/$FJ_OWNER/other/pulls/7"
+        ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "forgejo-unconfirmed-$name: an unconfirmed landing should not fail the run"
+    [ -n "$(forgejo_merge_line "$case_dir/forgejo.log")" ] \
+      || fail "forgejo-unconfirmed-$name: the merge itself never ran"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "forgejo-unconfirmed-$name: an unconfirmed landing should leave the merge poll armed"
+    assert_grep 'the merge poll remains armed' "$case_dir/stderr" \
+      "forgejo-unconfirmed-$name: the unconfirmed landing was not reported"
+  done
+  pass "fm-pr-merge records no landed Forgejo outcome it could not confirm"
+}
+
+test_forgejo_missing_tool_refuses_before_recording() {
+  local case_dir rc tool other
+  for tool in forgejo-axi jq; do
+    if [ "$tool" = forgejo-axi ]; then other=jq; else other=forgejo-axi; fi
+    case_dir=$(make_forgejo_case "forgejo-no-$tool")
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+    # One tool absent, the other still answered by this case's own mock, so the
+    # refusal names exactly one tool on a host that ships neither.
+    PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
+      || fail "forgejo-no-$tool: the $tool-free search path lost the $other mock as well"
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    FM_TEST_FORGEJO_LOG="$case_dir/forgejo.log" \
+    FM_TEST_FORGEJO_JSON="$case_dir/mergeability.json" \
+    PATH="$case_dir/no$tool" \
+      "$PR_MERGE" task-x1 "$FJ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-no-$tool: fm-pr-merge should refuse"
+    assert_grep "merging a Forgejo pull request requires $tool on PATH" "$case_dir/stderr" \
+      "forgejo-no-$tool: the refusal did not name the missing tool"
+    assert_no_grep "$other" "$case_dir/stderr" \
+      "forgejo-no-$tool: the refusal named a tool that is present"
+    assert_no_grep "pr=" "$case_dir/state/task-x1.meta" \
+      "forgejo-no-$tool: a missing tool still recorded PR metadata"
+    assert_absent "$case_dir/state/task-x1.check.sh" \
+      "forgejo-no-$tool: a missing tool still armed a merge poll"
+  done
+  pass "fm-pr-merge refuses a Forgejo merge with either required tool absent"
+}
+
+test_forgejo_override_args_refuse_before_recording() {
+  local case_dir rc spec flag expected
+  set -- \
+    "--expected-head|$FJ_HEAD|must not override the head commit" \
+    "--base-url|https://elsewhere.example|must not override the forge instance" \
+    "--repo|other/repo|must not override the repository"
+  for spec in "$@"; do
+    flag=${spec%%|*}
+    expected=${spec##*|}
+    spec=${spec#*|}
+    case_dir=$(make_forgejo_case "forgejo-override${flag}")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- "$flag" "${spec%%|*}" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-override$flag: fm-pr-merge should refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "forgejo-override$flag: the refusal did not name the override"
+    assert_no_grep "pr=" "$case_dir/state/task-x1.meta" \
+      "forgejo-override$flag: an override still recorded PR metadata"
+    [ ! -s "$case_dir/forgejo.log" ] \
+      || fail "forgejo-override$flag: an override still reached forgejo-axi"
+  done
+  pass "fm-pr-merge refuses Forgejo arguments that would override the URL's own identity"
+}
+
+test_forgejo_github_method_spellings_refuse_before_recording() {
+  local case_dir rc flag
+  for flag in --squash --merge --rebase; do
+    case_dir=$(make_forgejo_case "forgejo-method-${flag#--}")
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" -- "$flag" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-method$flag: fm-pr-merge should refuse"
+    assert_grep "--method squash|merge|rebase, not $flag" "$case_dir/stderr" \
+      "forgejo-method$flag: the refusal did not name the spelling forgejo-axi rejects"
+    assert_no_grep "pr=" "$case_dir/state/task-x1.meta" \
+      "forgejo-method$flag: a rejected method spelling still recorded PR metadata"
+    [ ! -s "$case_dir/forgejo.log" ] \
+      || fail "forgejo-method$flag: a rejected method spelling still reached forgejo-axi"
+  done
+  pass "fm-pr-merge refuses GitHub merge-method spellings forgejo-axi does not accept"
+}
+
 test_gitlab_missing_tool_refuses_before_recording() {
   local case_dir rc tool other
   for tool in glab jq; do
@@ -2132,6 +2607,20 @@ test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_gitlab_head_override_args_refuse_before_recording
+test_forgejo_url_resolves_and_merges
+test_forgejo_host_comes_from_the_url
+test_forgejo_defaults_to_squash_and_keeps_an_explicit_method
+test_forgejo_each_condition_refuses_independently
+test_forgejo_reports_every_failing_condition_and_the_forge_reasons
+test_forgejo_answer_for_another_pull_request_refuses
+test_forgejo_stale_recorded_head_is_reported
+test_forgejo_unreadable_state_refuses
+test_forgejo_invalid_head_refuses
+test_forgejo_merge_failure_propagates
+test_forgejo_unconfirmed_merge_leaves_the_poll_armed
+test_forgejo_missing_tool_refuses_before_recording
+test_forgejo_override_args_refuse_before_recording
+test_forgejo_github_method_spellings_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward

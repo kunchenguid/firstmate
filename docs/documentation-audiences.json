@@ -345,6 +345,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/forgejo-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },
