@@ -225,7 +225,7 @@ write_remote_home_summary() {  # <remote-home> <generated-epoch>
   local home=$1 epoch=$2
   mkdir -p "$home/state"
   jq -n --arg home "$home" --argjson epoch "$epoch" '{
-    schema:"fm-secondmate-home-summary.v1",
+    schema:"fm-secondmate-home-summary.v2",
     hold_classifier_schema:"fm-captain-hold-buckets.v1",
     generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
     valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"captain_decision",
@@ -2827,7 +2827,7 @@ SH
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
-  local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
+  local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp approved_pr
   parent=$(make_home concurrent-remote-ledgers)
   make_remote_ledger_fleet "$parent" 5
   fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
@@ -2855,6 +2855,41 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
     fi
   done
   [ -n "$cache_file" ] || fail "healthy remote read did not populate its summary cache"
+  approved_pr="https://github.com/acme/remote/pull/1368"
+  mkdir -p "$remote_home/data"
+  cat > "$remote_home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+
+## Done
+- [x] remote-approved - Captain-approved delivery $approved_pr (repo: firstmate) (kind: ship) (hold-kind: captain) (merged 2026-09-03)
+EOF
+  tmp="$cache_file.tmp"
+  jq '.schema = "fm-secondmate-home-summary.v1" | .landed = [] | .counts.landed = 0' \
+    "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
+  tmp="$remote_home/state/home-summary.json.tmp"
+  jq '.schema = "fm-secondmate-home-summary.v1" | .landed = [] | .counts.landed = 0' \
+    "$remote_home/state/home-summary.json" > "$tmp" && mv "$tmp" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e --arg pr "$approved_pr" '
+    (.landed | all(.artifact != $pr))
+      and (.secondmates | any(.id == "ledger-1" and .state == "unknown"
+        and .freshness == "stale" and .provenance == "unknown"
+        and (.reason | contains("schema is stale"))
+        and (.reason | contains("rerun the fleet update"))))
+      and all(.secondmates[] | select(.id != "ledger-1"); .freshness == "fresh")
+      and (.omitted | any(.surface == "secondmate ledger-1 home ledger schema is stale"
+        and .reveal == "rerun the fleet update"))
+  ' >/dev/null || fail "a pre-change landed ledger was accepted as healthy or rejected silently: $json"
+
+  write_remote_home_summary "$remote_home" 1000
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .freshness == "fresh"))
+      and (.omitted | all(.surface != "secondmate ledger-1 home ledger schema is stale"))
+  ' >/dev/null || fail "a fleet update did not clear the stale home-ledger disclosure: $json"
+
   tmp="$cache_file.tmp"
   jq 'del(.hold_classifier_schema)' \
     "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
