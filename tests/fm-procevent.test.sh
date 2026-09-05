@@ -1845,6 +1845,75 @@ pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
 pe "$RESTART_HOME" retire restart-src >/dev/null
 pass "the generic restart hook drains the old child and replaces only an exact owned registration"
 
+# A replacement machine-wide claim can arrive after restart signals the old
+# child but before it observes that generation's release. It is a successful
+# replacement only when the new runner serves this state root and generation.
+RESTART_FOREIGN_HOME="$TMP_ROOT/restart-foreign-home"; new_home "$RESTART_FOREIGN_HOME"
+RESTART_FOREIGN_OTHER_HOME="$TMP_ROOT/restart-foreign-other-home"; new_home "$RESTART_FOREIGN_OTHER_HOME"
+RESTART_FOREIGN_BLOCKER="$TMP_ROOT/restart-foreign-blocker.sh"
+RESTART_FOREIGN_LOCAL_STARTED="$TMP_ROOT/restart-foreign-local-started"
+RESTART_FOREIGN_LOCAL_TERM="$TMP_ROOT/restart-foreign-local-term"
+RESTART_FOREIGN_LOCAL_RELEASE="$TMP_ROOT/restart-foreign-local-release"
+RESTART_FOREIGN_OTHER_STARTED="$TMP_ROOT/restart-foreign-other-started"
+RESTART_FOREIGN_OTHER_TERM="$TMP_ROOT/restart-foreign-other-term"
+RESTART_FOREIGN_OTHER_RELEASE="$TMP_ROOT/restart-foreign-other-release"
+cat > "$RESTART_FOREIGN_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+started=$1
+term_file=$2
+release=$3
+printf 'started\n' > "$started"
+term() {
+  printf 'term\n' > "$term_file"
+  while [ ! -e "$release" ]; do sleep 0.02; done
+  exit 0
+}
+trap term TERM
+while :; do sleep 1; done
+SH
+chmod +x "$RESTART_FOREIGN_BLOCKER"
+pe_register "$RESTART_FOREIGN_HOME" lavish restart-foreign-src -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_FOREIGN_LOCAL_STARTED" \
+  "$RESTART_FOREIGN_LOCAL_TERM" "$RESTART_FOREIGN_LOCAL_RELEASE" >/dev/null
+restart_foreign_generation_out=$(pe "$RESTART_FOREIGN_HOME" generation restart-foreign-src \
+  --if-matches lavish -- "$RESTART_FOREIGN_BLOCKER" "$RESTART_FOREIGN_LOCAL_STARTED" \
+  "$RESTART_FOREIGN_LOCAL_TERM" "$RESTART_FOREIGN_LOCAL_RELEASE") \
+  || fail "generation did not identify the foreign-claim fixture"
+restart_foreign_generation=${restart_foreign_generation_out#generation: }
+pe_register "$RESTART_FOREIGN_OTHER_HOME" lavish restart-foreign-donor -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_FOREIGN_OTHER_STARTED" \
+  "$RESTART_FOREIGN_OTHER_TERM" "$RESTART_FOREIGN_OTHER_RELEASE" >/dev/null
+restart_foreign_donor_source="$RESTART_FOREIGN_OTHER_HOME/state/procevent/restart-foreign-donor.source"
+RESTART_FOREIGN_GENERATION="$restart_foreign_generation" perl -pi -e '
+  s/^registration_token=.*$/registration_token=$ENV{RESTART_FOREIGN_GENERATION}/
+' "$restart_foreign_donor_source"
+pe "$RESTART_FOREIGN_HOME" reconcile >/dev/null
+pe "$RESTART_FOREIGN_OTHER_HOME" reconcile >/dev/null
+wait_for "$RESTART_FOREIGN_LOCAL_STARTED" || fail "local foreign-claim fixture did not start"
+wait_for "$RESTART_FOREIGN_OTHER_STARTED" || fail "foreign replacement fixture did not start"
+restart_foreign_out="$TMP_ROOT/restart-foreign.out"
+restart_foreign_status=0
+pe "$RESTART_FOREIGN_HOME" restart restart-foreign-src \
+  --if-generation "$restart_foreign_generation" --if-matches lavish -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_FOREIGN_LOCAL_STARTED" \
+  "$RESTART_FOREIGN_LOCAL_TERM" "$RESTART_FOREIGN_LOCAL_RELEASE" \
+  > "$restart_foreign_out" 2>&1 &
+restart_foreign_pid=$!
+wait_for "$RESTART_FOREIGN_LOCAL_TERM" || fail "restart did not signal the local fixture"
+mv "$FM_PROCEVENT_CLAIM_ROOT/restart-foreign-donor.claim" \
+  "$FM_PROCEVENT_CLAIM_ROOT/restart-foreign-src.claim"
+wait "$restart_foreign_pid" || restart_foreign_status=$?
+[ "$restart_foreign_status" -ne 0 ] \
+  || fail "restart accepted a foreign replacement claim for the same registration generation"
+assert_contains "$(cat "$restart_foreign_out")" "replacement source runner belongs to another home" \
+  "restart did not identify the foreign replacement owner"
+: > "$RESTART_FOREIGN_LOCAL_RELEASE"
+: > "$RESTART_FOREIGN_OTHER_RELEASE"
+rm -f -- "$FM_PROCEVENT_CLAIM_ROOT/restart-foreign-src.claim"
+pe "$RESTART_FOREIGN_HOME" retire restart-foreign-src >/dev/null
+pe "$RESTART_FOREIGN_OTHER_HOME" retire restart-foreign-donor >/dev/null
+pass "restart rejects a foreign replacement claim for the requested generation"
+
 RESTART_LATE_HOME="$TMP_ROOT/restart-late-home"; new_home "$RESTART_LATE_HOME"
 RESTART_LATE_STARTED="$TMP_ROOT/restart-late-started"
 : > "$RESTART_LATE_STARTED"

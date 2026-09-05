@@ -1326,6 +1326,14 @@ cmd_restart() {
         fi
         current_token=$FM_PROCEVENT_CLAIM_TOKEN
         if [ "$current_token" != "$token" ]; then
+          if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+            fm_procevent_source_lock_release "$id"
+            die "replacement source runner belongs to another home: $id"
+          fi
+          if [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$generation" ]; then
+            fm_procevent_source_lock_release "$id"
+            die "replacement source registration generation changed while restarting: $id"
+          fi
           fm_procevent_source_lock_release "$id"
           printf 'restarted: %s\n' "$id"
           return 0
