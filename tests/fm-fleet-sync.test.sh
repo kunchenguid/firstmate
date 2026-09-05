@@ -410,6 +410,54 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+# The posture parser REFUSES a row carrying an unrecognized +flag, and the
+# refusal used to be absorbed by a `|| echo "no-mistakes off"` fallback: the
+# local-only skip then never fired and sync fast-forwarded a project the registry
+# says must never be synced. Fail-closed now, and the parser's own diagnostic
+# reaches the operator instead of a default posture. Mutation: restore the
+# `|| echo "no-mistakes off"` default and the clone advances to the origin's new
+# commit while the output reports an ordinary sync.
+test_unreadable_posture_is_never_synced() {
+  local home clone out before after
+  home=$(new_home)
+  clone=$(build_pair "$home" omicron)
+  advance_origin "$home" omicron C1
+  mkdir -p "$home/data"
+  printf -- '- omicron [local-only +external-contrct] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(git -C "$clone" rev-parse HEAD)
+
+  out=$(run_sync "$home" "$clone")
+
+  after=$(git -C "$clone" rev-parse HEAD)
+  [ "$before" = "$after" ] \
+    || fail "a project whose registered posture could not be read was synced anyway"
+  assert_contains "$out" "omicron: skipped:" "the unreadable posture did not skip the project"
+  assert_contains "$out" "+external-contrct" "the skip did not surface the parser's own diagnostic"
+  assert_not_contains "$out" "omicron: synced" "the unreadable posture still reported a sync"
+  pass "a project whose registered posture cannot be read is skipped, never synced"
+}
+
+# The refusal must not swallow the ordinary registry paths this parser has always
+# handled by warning and defaulting. Mutation: skip on any parser stderr rather
+# than on its exit status and these two well-formed cases stop syncing.
+test_well_formed_and_unregistered_rows_sync_as_before() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" tau)
+  advance_origin "$home" tau C1
+  mkdir -p "$home/data"
+  printf -- '- tau [direct-PR +external-contract] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "tau: synced" "a well-formed marked row stopped syncing"
+
+  home=$(new_home)
+  clone=$(build_pair "$home" upsilon)
+  advance_origin "$home" upsilon C1
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "upsilon: synced" "an unregistered project stopped syncing"
+  pass "well-formed and unregistered rows sync exactly as before"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -704,6 +752,8 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_unreadable_posture_is_never_synced
+test_well_formed_and_unregistered_rows_sync_as_before
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

@@ -18,6 +18,10 @@
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
 # unregistered or local-only project is refused rather than provisioned.
+# A project marked +external-contract carries its complete private contract in
+# the manifest beside its registry row, so the remote home receives the marker
+# and the contract together; a marked project whose contract is absent, empty or
+# unreadable refuses here, before the host is contacted at all.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
@@ -45,7 +49,7 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
@@ -169,6 +173,16 @@ EOF
     local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac
+  CONTRACT_PATH=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --external-contract "$project") \
+    || die "cannot resolve the external-contract setting for project $project from $DATA/projects.md"
+  CONTRACT_B64=
+  if [ -n "$CONTRACT_PATH" ]; then
+    { [ -f "$CONTRACT_PATH" ] && [ -r "$CONTRACT_PATH" ] && [ -s "$CONTRACT_PATH" ]; } \
+      || die "project $project is marked +external-contract but its contract is absent, empty, or unreadable at $CONTRACT_PATH; nothing was provisioned, because a remote home holding the marker without it would refuse every ship and scout brief for $project"
+    CONTRACT_B64=$(encode < "$CONTRACT_PATH") \
+      || die "cannot read the private contract for project $project at $CONTRACT_PATH"
+  fi
   # An origin named on the command line is authoritative. Reading one from a
   # clone this home happens to have is only a convenience for the already-cloned
   # case; it is never a reason to create one.
@@ -185,7 +199,7 @@ EOF
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
   PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
   MODE_B64=$(printf '%s' "$MODE" | encode)
-  printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
+  printf 'project=%s|%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" "$CONTRACT_B64" >> "$TMP/project.records"
   PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
 done
 

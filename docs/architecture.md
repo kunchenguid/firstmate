@@ -288,7 +288,8 @@ A ship brief records its mode as a fixed machine-readable line and the spawn ref
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered both into a generated ship brief and into the ship instructions a promoted scout receives, so a promoted worker cannot be handed a weaker contract than a briefed one.
 It is also the one owner of the no-mistakes `--intent` contract those workers follow.
 `data/projects.md` records each project's standing posture and optional `+yolo` merge flag as the captain's default and as context for that decision, including the conditional `no-mistakes-prod-only` policy; a ship spawn that drops below the registered rigor prints a deviation notice and continues.
-`bin/fm-project-mode.sh` remains the one registry parser for the mechanical consumers that have no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
+`bin/fm-project-mode.sh` remains the one registry parser, and the mechanical consumers of the registered delivery posture are still only those with no task in hand: fleet sync's `local-only` skip and home seeding's refusal and no-mistakes initialization.
+Its `--external-contract` read answers an independent per-project setting rather than posture, so brief scaffolding may consult it without reopening the per-task delivery decision ([Project agent contracts](#project-agent-contracts)).
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
@@ -353,18 +354,30 @@ Because a terminal event's id is derived from its identity tuple rather than gen
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 
-## Project memory belongs to projects
+## Project agent contracts
 
-Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a real `@AGENTS.md` import pointer.
-Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
+By default, durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a real `@AGENTS.md` import pointer.
+Ship briefs prompt workers to create or update those files through the normal delivery path.
 Each project `AGENTS.md` carries a short `## Maintaining this file` self-governance section; `bin/fm-ensure-agents-md.sh` owns the canonical wording and injects it idempotently when creating the skeleton, promoting an existing `CLAUDE.md`, or reconciling an existing `AGENTS.md` that still lacks it.
 It refuses a case-variant real memory file such as a lowercase `agents.md`, so the pointer's `@AGENTS.md` import resolves to a real `AGENTS.md` on a case-sensitive filesystem, and surfaces the mismatch for manual reconciliation.
-The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by [`AGENTS.md`](../AGENTS.md) (project and knowledge management).
+
+One per-project exception is explicit rather than inferred: a `+external-contract` token in that project's private `data/projects.md` row selects `data/project-contracts/<project>.md` as its agent-contract owner.
+`bin/fm-project-mode.sh` refuses a row whose annotation carries any other `+token`, naming the token and the valid set, because an unread flag fails open into an ordinary brief while an unknown mode already fails closed onto the most rigorous posture.
+That refusal is distinct from the warn-and-default the parser has always used for an absent project, and its mechanical consumers keep the two apart: `bin/fm-fleet-sync.sh` skips a project whose posture it cannot read rather than syncing it under a substituted default, and `bin/fm-home-seed.sh` refuses the seed.
+The registry holds the switch because it is project posture, while `data/` holds the complete text because it is durable private knowledge rather than a local operating choice.
+For that mode, `fm-brief.sh` embeds the complete current text into every ship and scout brief, refuses before writing a brief when the file is absent, empty, or unreadable, and replaces the ship scaffold's project-memory instructions with a return path through firstmate.
+The embedded snapshot carries a publication prohibition beside it, and `fm-brief.sh` leaves a ship brief on disk only once its delivery marker reads back as the requested mode through `bin/fm-dod-lib.sh`, so contract prose cannot shadow the contract `fm-spawn.sh` checks.
+`bin/fm-home-seed.sh` propagates a marked project's contract into a seeded secondmate home with its registry row and refuses the seed when it cannot, so a home holds the marker and the contract together or neither.
+Remote provisioning carries a marked project's complete contract in the same manifest record as its registry row: `bin/fm-remote-home-seed.sh` refuses before contacting the host when that contract is absent, empty, or unreadable, and `bin/fm-remote-home-provision.sh` publishes the contract before the row that marks it and refuses a marked row that arrives without one; every contract a converge publishes or clears is snapshotted into the same rollback set that owns `data/projects.md`, so neither half ever lands alone, including on the failure path.
+Because that registry is rebuilt from the manifest alone, a converge that drops a project also clears that project's contract, keeping the pairing symmetric: never a marker without its contract, never a contract without its marker.
+`fm-ensure-agents-md.sh` independently identifies the registered clone or task worktree and refuses before creating or modifying `AGENTS.md` or `CLAUDE.md`; because it runs inside a project worktree whose output a worker can publish, that refusal states the policy generically and identifies neither the project, the registry marker, the contract path, nor the registered posture.
+Projects without the token retain the default scaffold bytes and file-maintenance behavior.
+The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by [`AGENTS.md`](../AGENTS.md) (project and knowledge management), while `bin/fm-project-mode.sh`'s header owns the registry token and contract path grammar.
 
 ## Operational memory routing
 
 `/stow` sweeps the current session for durable knowledge that only exists in conversation and routes each finding to the most specific disk home.
-Home-domain captain preferences go to `data/captain.md`, cross-domain shared captain preferences go to the primary home's `data/captain-shared.md`, fleet-local operational facts and gotchas go to home-local `data/learnings.md`, project-intrinsic knowledge goes through normal crewmate delivery into that project's committed `AGENTS.md`, and task-scoped notes or undone next steps go to the backlog.
+Home-domain captain preferences go to `data/captain.md`, cross-domain shared captain preferences go to the primary home's `data/captain-shared.md`, fleet-local operational facts and gotchas go to home-local `data/learnings.md`, ordinary project-intrinsic knowledge goes through normal worker delivery into that project's committed `AGENTS.md`, externally contracted project knowledge returns through firstmate to its private contract or human-facing docs as appropriate, and task-scoped notes or undone next steps go to the backlog.
 Memory writes use inspect-then-update rather than blind append; the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns tier markers, decay, cold archival, and offload.
 The same pass also persists open-work record state the session is holding - filing a thread that was never recorded and correcting one the session knows went stale - bounded to the open work that session is actually holding.
 It is deliberately not a reconciliation of durable records against repository or PR reality: its input is the volatile context, so it can only preserve what the session still knows, and no reconciliation that outlives a session exists today.

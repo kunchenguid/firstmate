@@ -472,7 +472,11 @@ rm -rf "$TMP_ROOT/beta-src"
 cat > "$TMP_ROOT/seed-parent/data/projects.md" <<'EOF'
 - beta [direct-PR] - beta project (added 2026-08-06)
 - delta [local-only] - delta project (added 2026-08-06)
+- epsilon [direct-PR +external-contract] - epsilon project (added 2026-08-06)
 EOF
+mkdir -p "$TMP_ROOT/seed-parent/data/project-contracts"
+printf '## Fixture authority boundary\n\nNever deploy this fixture.\n' \
+  > "$TMP_ROOT/seed-parent/data/project-contracts/epsilon.md"
 BETA_ORIGIN="file://$TMP_ROOT/beta.git"
 PROJECTS_BEFORE=$(projects_snapshot "$TMP_ROOT/seed-parent/projects")
 
@@ -513,6 +517,55 @@ fi
 assert_grep 'has no registry record' "$TMP_ROOT/seed-unregistered.out" \
   "the unregistered-project refusal did not name the missing record"
 
+# A remote home receives the marked project's registry row and its complete
+# private contract in the same manifest record, so it is never left holding the
+# marker alone - which would make fm-brief.sh refuse every ship and scout
+# scaffold there. Proven by running the real fm-brief.sh inside the provisioned
+# remote home. Mutation: stop appending the contract field in
+# fm-remote-home-seed.sh's project loop and provisioning refuses instead, so the
+# seed never succeeds.
+out=$(FM_SECONDMATE_CHARTER='External contract charter.' FM_SECONDMATE_SCOPE='external contract' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-external remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-external-home" "epsilon=$BETA_ORIGIN" 2>&1) \
+  || fail "seeding an externally contracted project remotely should carry its contract"$'\n'"$out"
+assert_grep '+external-contract' "$TMP_ROOT/seed-external-home/data/projects.md" \
+  "the remote home did not receive the project's external-contract marker"
+cmp -s "$TMP_ROOT/seed-parent/data/project-contracts/epsilon.md" \
+  "$TMP_ROOT/seed-external-home/data/project-contracts/epsilon.md" \
+  || fail "the remote home did not receive the complete private contract beside its marker"
+FM_HOME="$TMP_ROOT/seed-external-home" "$ROOT/bin/fm-brief.sh" remote-contract-task epsilon --mode direct-PR >/dev/null \
+  || fail "the remote home cannot scaffold a brief for the marked project it received"
+assert_grep 'Never deploy this fixture.' "$TMP_ROOT/seed-external-home/data/remote-contract-task/brief.md" \
+  "the remote home's brief did not embed the received private contract"
+pass "remote seeding delivers an external-contract marker and its complete contract together"
+
+# Fail closed before the marker can travel: with the parent's contract removed,
+# the seed refuses without contacting the host at all, so the marked row never
+# crosses the wire. Mutation: drop the contract preflight from the project loop
+# and the SSH count moves, because the refusal then comes back from the host.
+mv "$TMP_ROOT/seed-parent/data/project-contracts/epsilon.md" "$TMP_ROOT/epsilon-contract.hidden"
+ssh_before_external=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)
+if FM_SECONDMATE_CHARTER='Missing contract charter.' FM_SECONDMATE_SCOPE='missing contract' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-nocontract remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-nocontract-home" "epsilon=$BETA_ORIGIN" \
+  > "$TMP_ROOT/seed-nocontract.out" 2>&1; then
+  fail "seeding a marked project whose contract is unavailable claimed success"
+fi
+assert_grep 'epsilon' "$TMP_ROOT/seed-nocontract.out" \
+  "the unavailable-contract refusal did not name the project"
+assert_grep 'absent, empty, or unreadable' "$TMP_ROOT/seed-nocontract.out" \
+  "the unavailable-contract refusal did not name the reason"
+assert_absent "$TMP_ROOT/seed-nocontract-home" "the refused seed still provisioned a remote home"
+assert_no_grep '- seed-nocontract ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the refused seed still registered a remote route"
+[ "$(cat "$SSH_COUNT" 2>/dev/null || echo 0)" = "$ssh_before_external" ] \
+  || fail "the marked project's registry row was sent to the remote host before being refused"
+mv "$TMP_ROOT/epsilon-contract.hidden" "$TMP_ROOT/seed-parent/data/project-contracts/epsilon.md"
+pass "remote seeding fails closed before a marker without its contract can travel"
+
+# The unmarked project seeds exactly as before, with a marked row sitting in the
+# same parent registry. Mutation: gate on registered projects generally rather
+# than on the +external-contract marker and this whole block turns red.
 out=$(FM_SECONDMATE_CHARTER='Own beta delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='beta delivery and validation' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-noclone remote-mac "$REMOTE_ROOT" \
@@ -553,6 +606,152 @@ assert_grep 'not an accepted clone URL' "$TMP_ROOT/unsafe-origin.out" \
   "remote provisioning did not name the rejected origin"
 assert_absent "$TMP_ROOT/unsafe-origin-home" "the rejected manifest left a remote home behind"
 pass "remote provisioning re-validates a supplied origin at the receiving host"
+
+# The same non-trusting posture covers the external-contract marker: a manifest
+# that reached this host with a marked registry row and no contract behind it
+# must publish nothing. Mutation: drop the --external-contract check from
+# fm-remote-home-provision.sh's project loop and this home is published holding
+# the marker alone.
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=1\nproject=%s|%s|%s|%s\n' \
+  "$(printf external-marker | base64 | tr -d '\n')" \
+  "$(printf 'External marker manifest charter.\n' | base64 | tr -d '\n')" \
+  "$(printf beta | base64 | tr -d '\n')" \
+  "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+  "$(printf -- '- beta [direct-PR +external-contract] - beta project (added 2026-08-06)' | base64 | tr -d '\n')" \
+  "$(printf direct-PR | base64 | tr -d '\n')" \
+  > "$TMP_ROOT/external-marker.manifest"
+if FM_HOME="$TMP_ROOT/external-marker-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/external-marker.manifest" \
+  > "$TMP_ROOT/external-marker.out" 2>&1; then
+  fail "remote provisioning published an external-contract marker with no contract behind it"
+fi
+assert_grep 'refusing to publish the marker alone' "$TMP_ROOT/external-marker.out" \
+  "remote provisioning did not state why the marked row was rejected"
+assert_absent "$TMP_ROOT/external-marker-home/data/project-contracts" \
+  "the rejected marked manifest left a contract directory behind"
+assert_absent "$TMP_ROOT/external-marker-home" "the rejected marked manifest left a remote home behind"
+pass "remote provisioning refuses an external-contract marker it cannot pair with a contract"
+
+# Converging an EXISTING remote home mutates data/project-contracts/ before it
+# writes data/projects.md, so a failure in that window used to leave one half
+# alone: a published contract with no marker, or - worse - a cleared contract
+# whose restored registry row still marks the project, which bricks every ship
+# and scout scaffold there. Both halves now ride the same before/ snapshot set
+# that already owns data/projects.md. A second marked project whose contract
+# destination is a directory is the deterministic failure trigger: it dies after
+# the first project has already been mutated. Mutation: drop the
+# snapshot_owned_contract calls, or the contract restore loop in rollback(), and
+# both halves below stay mutated after the refused converge.
+converge_home="$TMP_ROOT/converge-home"
+converge_manifest() {  # <id> <beta-registry-row> <beta-contract-b64> <gamma-registry-row> <gamma-contract-b64>
+  printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=2\nproject=%s|%s|%s|%s|%s\nproject=%s|%s|%s|%s|%s\n' \
+    "$(printf '%s' "$1" | base64 | tr -d '\n')" \
+    "$(printf 'Converge charter.\n' | base64 | tr -d '\n')" \
+    "$(printf beta | base64 | tr -d '\n')" \
+    "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+    "$(printf -- '%s' "$2" | base64 | tr -d '\n')" \
+    "$(printf direct-PR | base64 | tr -d '\n')" "$3" \
+    "$(printf gamma | base64 | tr -d '\n')" \
+    "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+    "$(printf -- '%s' "$4" | base64 | tr -d '\n')" \
+    "$(printf direct-PR | base64 | tr -d '\n')" "$5"
+}
+run_converge() {  # <manifest-file> <output-file>
+  FM_HOME="$converge_home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$1" > "$2" 2>&1
+}
+BETA_MARKED='- beta [direct-PR +external-contract] - beta project (added 2026-08-06)'
+BETA_PLAIN='- beta [direct-PR] - beta project (added 2026-08-06)'
+GAMMA_MARKED='- gamma [direct-PR +external-contract] - gamma project (added 2026-08-06)'
+BETA_CONTRACT_B64=$(printf '## Beta authority boundary\n\nNever deploy beta from a task worktree.\n' | base64 | tr -d '\n')
+GAMMA_CONTRACT_B64=$(printf '## Gamma authority boundary\n\nNever deploy gamma from a task worktree.\n' | base64 | tr -d '\n')
+
+# Seed the existing home with beta marked and its contract in place.
+converge_manifest converge "$BETA_MARKED" "$BETA_CONTRACT_B64" "$GAMMA_MARKED" "$GAMMA_CONTRACT_B64" \
+  > "$TMP_ROOT/converge-seed.manifest"
+run_converge "$TMP_ROOT/converge-seed.manifest" "$TMP_ROOT/converge-seed.out" \
+  || fail "the initial converge should provision both marked projects: $(cat "$TMP_ROOT/converge-seed.out")"
+assert_present "$converge_home/data/project-contracts/beta.md" "the initial converge did not publish beta's contract"
+beta_contract_before=$(cat "$converge_home/data/project-contracts/beta.md")
+projects_before=$(cat "$converge_home/data/projects.md")
+
+# Failure sequence B: beta arrives unmarked so its contract is cleared, then
+# gamma's stale removal dies on a destination that is not a regular file. The
+# rolled-back registry still marks beta, so beta's contract has to come back
+# exactly as it was or this home is bricked for beta.
+rm -f "$converge_home/data/project-contracts/gamma.md"
+mkdir -p "$converge_home/data/project-contracts/gamma.md"
+converge_manifest converge "$BETA_PLAIN" '' '- gamma [direct-PR] - gamma project (added 2026-08-06)' '' \
+  > "$TMP_ROOT/converge-clear.manifest"
+if run_converge "$TMP_ROOT/converge-clear.manifest" "$TMP_ROOT/converge-clear.out"; then
+  fail "a converge whose contract removal cannot complete should refuse"
+fi
+[ "$(cat "$converge_home/data/project-contracts/beta.md" 2>/dev/null)" = "$beta_contract_before" ] \
+  || fail "the refused converge left beta's registry marker without its contract"
+[ "$(cat "$converge_home/data/projects.md")" = "$projects_before" ] \
+  || fail "the refused converge did not restore the previous project registry"
+rmdir "$converge_home/data/project-contracts/gamma.md"
+
+# Failure sequence A: a newly marked project publishes its contract, then a
+# second marked project dies, so the private text must not be stranded on this
+# host under a home whose restored registry never referenced it.
+rm -f "$converge_home/data/project-contracts/delta.md"
+mkdir -p "$converge_home/data/project-contracts/gamma.md"
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=2\nproject=%s|%s|%s|%s|%s\nproject=%s|%s|%s|%s|%s\n' \
+  "$(printf converge | base64 | tr -d '\n')" \
+  "$(printf 'Converge charter.\n' | base64 | tr -d '\n')" \
+  "$(printf delta | base64 | tr -d '\n')" \
+  "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+  "$(printf -- '- delta [direct-PR +external-contract] - delta project (added 2026-08-06)' | base64 | tr -d '\n')" \
+  "$(printf direct-PR | base64 | tr -d '\n')" "$BETA_CONTRACT_B64" \
+  "$(printf gamma | base64 | tr -d '\n')" \
+  "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+  "$(printf -- '%s' "$GAMMA_MARKED" | base64 | tr -d '\n')" \
+  "$(printf direct-PR | base64 | tr -d '\n')" "$GAMMA_CONTRACT_B64" \
+  > "$TMP_ROOT/converge-publish.manifest"
+if run_converge "$TMP_ROOT/converge-publish.manifest" "$TMP_ROOT/converge-publish.out"; then
+  fail "a converge whose contract publication cannot complete should refuse"
+fi
+assert_absent "$converge_home/data/project-contracts/delta.md" \
+  "the refused converge stranded a private contract the restored registry never marked"
+[ "$(cat "$converge_home/data/projects.md")" = "$projects_before" ] \
+  || fail "the refused converge did not restore the previous project registry"
+pass "remote provisioning rolls a failed converge back to marker and contract together"
+
+# The pairing invariant is symmetric, and data/projects.md is rebuilt from the
+# manifest alone: a converge that DROPS a project removes its registry row, so
+# that project's private contract must go with it rather than sitting on this
+# host with nothing left to mark it. Mutation: drop the orphan sweep that feeds
+# remove_stale_contract from the contract directory and beta's contract outlives
+# the row that justified it.
+rm -rf "$converge_home/data/project-contracts/gamma.md"
+converge_manifest converge "$BETA_MARKED" "$BETA_CONTRACT_B64" "$GAMMA_MARKED" "$GAMMA_CONTRACT_B64" \
+  > "$TMP_ROOT/converge-restore.manifest"
+run_converge "$TMP_ROOT/converge-restore.manifest" "$TMP_ROOT/converge-restore.out" \
+  || fail "restoring both marked projects should converge: $(cat "$TMP_ROOT/converge-restore.out")"
+assert_present "$converge_home/data/project-contracts/beta.md" "the restoring converge did not publish beta's contract"
+
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=1\nproject=%s|%s|%s|%s|%s\n' \
+  "$(printf converge | base64 | tr -d '\n')" \
+  "$(printf 'Converge charter.\n' | base64 | tr -d '\n')" \
+  "$(printf gamma | base64 | tr -d '\n')" \
+  "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+  "$(printf -- '%s' "$GAMMA_MARKED" | base64 | tr -d '\n')" \
+  "$(printf direct-PR | base64 | tr -d '\n')" "$GAMMA_CONTRACT_B64" \
+  > "$TMP_ROOT/converge-shrink.manifest"
+run_converge "$TMP_ROOT/converge-shrink.manifest" "$TMP_ROOT/converge-shrink.out" \
+  || fail "a converge that drops a project should succeed: $(cat "$TMP_ROOT/converge-shrink.out")"
+assert_no_grep '^- beta ' "$converge_home/data/projects.md" \
+  "the shrinking converge kept the dropped project's registry row"
+assert_absent "$converge_home/data/project-contracts/beta.md" \
+  "the shrinking converge stranded the dropped project's private contract with no row to mark it"
+assert_present "$converge_home/data/project-contracts/gamma.md" \
+  "the shrinking converge removed a contract whose project it still carries"
+FM_HOME="$converge_home" "$ROOT/bin/fm-brief.sh" shrink-task gamma --mode direct-PR >/dev/null \
+  || fail "the converged home cannot scaffold a brief for the project it still carries"
+assert_grep 'Never deploy gamma from a task worktree.' "$converge_home/data/shrink-task/brief.md" \
+  "the converged home's brief did not embed the retained private contract"
+pass "remote provisioning clears the contract of a project a converge drops"
 
 # Firstmate is a shared template, so seeding must carry a project origin from any
 # forge or host, not a privileged one. These four URL shapes have to survive the

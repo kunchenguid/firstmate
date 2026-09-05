@@ -324,7 +324,20 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  # A registry row the posture parser REFUSES (an unrecognized +flag, an
+  # unreadable registry) is not the same as a project it merely cannot find: the
+  # parser warns and defaults only for the latter. Substituting a default posture
+  # for a refusal drops the local-only skip below and fast-forwards a project the
+  # registry says must never be synced, so a refusal skips this project and shows
+  # the parser's own diagnostic instead. The failure path re-reads to separate
+  # the streams; the parser only reads a file, so that costs nothing but a stat.
+  mode_status=0
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null) || mode_status=$?
+  if [ "$mode_status" -ne 0 ]; then
+    reason=$(first_line "$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>&1 >/dev/null)")
+    echo "$label: skipped: ${reason:-cannot read the registered delivery posture}"
+    return 0
+  fi
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"

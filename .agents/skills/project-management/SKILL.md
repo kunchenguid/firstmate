@@ -52,6 +52,14 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
+The optional `+external-contract` setting is also independent of delivery and merge posture.
+Enable it only for the exact project the captain names, never by analogy or as a registry-wide migration.
+Before marking the row, require a non-empty readable private contract at `data/project-contracts/<project>.md`, because `fm-brief.sh` refuses every ship and scout scaffold for a marked project until that file is available in the active home.
+`bin/fm-home-seed.sh` carries the contract into a seeded secondmate home alongside the row, and refuses the seed when it cannot, so a home never inherits the marker alone.
+Remote provisioning carries the contract in the same manifest record as the row, and refuses before contacting the host when the contract is unavailable, so a remote home is bound by the same rule.
+The registry switch belongs here as per-project posture, while the contract content belongs in private `data/` rather than local-choice `config/` or the project's git.
+`bin/fm-project-mode.sh`'s header owns the exact annotation and path grammar, and refuses a row carrying any `+token` outside that grammar rather than reading it as unmarked.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.

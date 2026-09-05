@@ -18,10 +18,29 @@
 # filesystem (issue #389). The real-file pointer also eliminates the old
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
+# For a project whose data/projects.md row carries +external-contract, refuses
+# before inspecting or writing project memory files. This runs inside a PROJECT
+# worktree, whose tool output a worker can paste into a pull request or an
+# evidence file, so the refusal states the policy generically and identifies
+# nothing: not the registry marker, not the private contract's path, not the
+# project's registered posture, not even which project matched. Firstmate's own
+# home already holds every one of those specifics for captain-side diagnosis, and
+# the registry reader's own diagnostics are suppressed here for the same reason.
+# A registry this helper cannot read or parse takes the same refusal rather than
+# proceeding, because an unreadable row cannot prove the project is unmarked. It identifies a registered
+# clone and its linked worktrees by their shared Git directory, with an
+# identity-normalized origin-URL match as a fallback for worktrees provided by
+# another tool: scp-like, ssh, and https spellings of one repository, with or
+# without a trailing .git, name the same origin.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
@@ -39,6 +58,111 @@ DIR=${1:-.}
 [ -d "$DIR" ] || { echo "error: not a directory: $DIR" >&2; exit 1; }
 DIR=$(cd "$DIR" && pwd -P)
 cd "$DIR"
+
+# Compare origins by repository identity rather than spelling. git@host:o/r.git,
+# ssh://git@host/o/r, and https://host/o/r all reduce to host/o/r; local paths
+# keep their form and only lose a trailing slash or .git.
+normalize_origin_url() {
+  local url=$1 authority path host rest
+  case "$url" in
+    file://*)
+      url=${url#file://}
+      ;;
+    *://*)
+      url=${url#*://}
+      case "$url" in
+        */*)
+          authority=${url%%/*}
+          path=${url#*/}
+          authority=${authority#*@}
+          url="${authority%%:*}/$path"
+          ;;
+        *)
+          url=${url#*@}
+          url=${url%%:*}
+          ;;
+      esac
+      ;;
+    /*|./*|../*)
+      ;;
+    *:*)
+      host=${url%%:*}
+      case "$host" in
+        */*) ;;
+        *)
+          rest=${url#*:}
+          url="${host#*@}/${rest#/}"
+          ;;
+      esac
+      ;;
+  esac
+  url=${url%/}
+  url=${url%.git}
+  url=${url%/}
+  printf '%s\n' "$url"
+}
+
+absolute_git_path() {
+  local repo=$1 path=$2 parent
+  case "$path" in
+    /*) parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1 ;;
+    *) parent=$(cd "$repo/$(dirname "$path")" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  printf '%s/%s\n' "$parent" "$(basename "$path")"
+}
+
+external_contract_project() {
+  local registry="$DATA/projects.md" projects project clone contract
+  local target_common_raw target_common clone_common_raw clone_common target_origin clone_origin
+  [ -f "$registry" ] || return 1
+  projects=$(awk '$1=="-" && $2!="" { print $2 }' "$registry" 2>/dev/null) || return 2
+  target_common_raw=$(git -C "$DIR" rev-parse --git-common-dir 2>/dev/null) || return 1
+  target_common=$(absolute_git_path "$DIR" "$target_common_raw") || return 1
+  target_origin=$(git -C "$DIR" remote get-url origin 2>/dev/null || true)
+  if [ -n "$target_origin" ]; then
+    target_origin=$(normalize_origin_url "$target_origin")
+  fi
+  for project in $projects; do
+    clone="$FM_HOME/projects/$project"
+    [ -d "$clone" ] || continue
+    clone_common_raw=$(git -C "$clone" rev-parse --git-common-dir 2>/dev/null || true)
+    clone_common=
+    if [ -n "$clone_common_raw" ]; then
+      clone_common=$(absolute_git_path "$clone" "$clone_common_raw" 2>/dev/null || true)
+    fi
+    clone_origin=$(git -C "$clone" remote get-url origin 2>/dev/null || true)
+    if [ -n "$clone_origin" ]; then
+      clone_origin=$(normalize_origin_url "$clone_origin")
+    fi
+    if [ -n "$clone_common" ] && [ "$target_common" = "$clone_common" ]; then
+      :
+    elif [ -n "$target_origin" ] && [ "$target_origin" = "$clone_origin" ]; then
+      :
+    else
+      continue
+    fi
+    contract=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-project-mode.sh" --external-contract "$project" 2>/dev/null) || return 2
+    if [ -n "$contract" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+policy_refusal() {
+  echo "error: this project's agent operating rules are managed outside the repository; refusing to create or modify AGENTS.md or CLAUDE.md here. Return durable agent knowledge to firstmate instead of recording it in this repository." >&2
+}
+if external_contract_project >/dev/null 2>&1; then
+  policy_refusal
+  exit 1
+else
+  external_status=$?
+  if [ "$external_status" -ne 1 ]; then
+    policy_refusal
+    exit "$external_status"
+  fi
+fi
 
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md

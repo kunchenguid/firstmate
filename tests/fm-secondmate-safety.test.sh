@@ -1119,6 +1119,139 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   pass "remote-backed subhome seeding validates existing destination origins"
 }
 
+# A seeded home inherits its parent's registry ROW verbatim, so an
+# +external-contract marker travels whether or not anyone remembers the private
+# contract that marker points at. Marker without contract bricks the secondmate
+# for that project - fm-brief.sh refuses every ship and scout scaffold there -
+# and contract without marker leaves private text no consumer in that home reads.
+# The seed must produce both or neither. Mutation: drop the sync_project_contracts
+# call from sync_project_registry and the seeded home's own brief scaffold refuses
+# with the marker in place; drop its unmarked-project branch and the stale
+# contract outlives the marker that justified it.
+test_home_seed_pairs_the_external_contract_marker_with_its_contract() {
+  local home sub brief out
+  home="$TMP_ROOT/contract-seed-main"
+  sub="$TMP_ROOT/contract-seed-sub"
+  mkdir -p "$home/projects" "$home/data/project-contracts" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_init_commit "$home/projects/beta"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/contract-seed-alpha.git"
+  fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/contract-seed-beta.git"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR +external-contract] - alpha project (added 2026-09-01)
+- beta [direct-PR] - beta project (added 2026-09-01)
+EOF
+  cat > "$home/data/project-contracts/alpha.md" <<'EOF'
+## Fixture authority boundary
+
+Never deploy this fixture from a task worktree.
+EOF
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha and beta delivery' \
+    FM_SECONDMATE_SCOPE='alpha and beta delivery' \
+    "$ROOT/bin/fm-home-seed.sh" contracted "$sub" alpha beta >/dev/null \
+    || fail "seeding a marked project with its contract present should succeed"
+
+  assert_grep '+external-contract' "$sub/data/projects.md" "seeded registry dropped the external-contract marker"
+  cmp -s "$home/data/project-contracts/alpha.md" "$sub/data/project-contracts/alpha.md" \
+    || fail "the marked project's private contract did not travel into the seeded home"
+
+  # The behavior that matters: the secondmate can actually scaffold work for the
+  # marked project in its own home, with the contract embedded.
+  FM_HOME="$sub" "$ROOT/bin/fm-brief.sh" contracted-task alpha --mode direct-PR >/dev/null \
+    || fail "the seeded home cannot scaffold a brief for the marked project it inherited"
+  brief="$sub/data/contracted-task/brief.md"
+  assert_grep 'Never deploy this fixture from a task worktree.' "$brief" \
+    "the seeded home's brief did not embed the inherited private contract"
+
+  out=$(FM_HOME="$sub" "$ROOT/bin/fm-brief.sh" unmarked-task beta --mode direct-PR 2>&1) \
+    || fail "the seeded home cannot scaffold a brief for the unmarked project: $out"
+  assert_no_grep '# Project operating contract' "$sub/data/unmarked-task/brief.md" \
+    "an unmarked project inherited external-contract behavior in the seeded home"
+
+  # The other lone half: a contract in the child for a project its parent does not
+  # mark. Re-seeding the same home must clear it rather than leave private text
+  # behind that no consumer there reads.
+  printf 'stale private text\n' > "$sub/data/project-contracts/beta.md"
+  FM_HOME="$home" FM_SECONDMATE_SCOPE='alpha and beta delivery' \
+    "$ROOT/bin/fm-home-seed.sh" contracted "$sub" alpha beta >/dev/null \
+    || fail "re-seeding the same home should succeed"
+  assert_absent "$sub/data/project-contracts/beta.md" "an unmarked project kept a stale private contract in the seeded home"
+  cmp -s "$home/data/project-contracts/alpha.md" "$sub/data/project-contracts/alpha.md" \
+    || fail "re-seeding dropped the marked project's private contract"
+  pass "fm-home-seed: a seeded home inherits an external-contract marker and its contract together"
+}
+
+# The private contract is the most sensitive thing this seed copies, so its
+# destination gets the containment the file already applies to data/projects.md
+# and data/charter.md. A data/project-contracts that is a symlink out of the home
+# would otherwise pass the leaf check - the target file is neither a symlink nor
+# present - and land the complete contract wherever the link points. Mutation:
+# drop the directory validation and containment check from sync_project_contracts
+# and the escaped path receives the private text.
+test_home_seed_refuses_a_contract_destination_outside_the_home() {
+  local home sub escape err out
+  home="$TMP_ROOT/contract-escape-main"
+  sub="$TMP_ROOT/contract-escape-sub"
+  escape="$TMP_ROOT/contract-escape-target"
+  err="$TMP_ROOT/contract-escape.err"
+  mkdir -p "$home/projects" "$home/data/project-contracts" "$home/state" "$escape"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/contract-escape-alpha.git"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR +external-contract] - alpha project (added 2026-09-01)
+EOF
+  printf '## Fixture authority boundary\n\nNever deploy this fixture.\n' \
+    > "$home/data/project-contracts/alpha.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha delivery' FM_SECONDMATE_SCOPE='alpha delivery' \
+    "$ROOT/bin/fm-home-seed.sh" contract-escape "$sub" alpha >/dev/null \
+    || fail "the first seed should succeed"
+  rm -rf "$sub/data/project-contracts"
+  ln -s "$escape" "$sub/data/project-contracts"
+
+  if FM_HOME="$home" FM_SECONDMATE_SCOPE='alpha delivery' \
+    "$ROOT/bin/fm-home-seed.sh" contract-escape "$sub" alpha >/dev/null 2>"$err"; then
+    fail "re-seeding through a symlinked contract directory should refuse"
+  fi
+  out=$(cat "$err")
+  assert_contains "$out" "project-contracts" "the refusal did not name the escaping destination"
+  assert_absent "$escape/alpha.md" "the private contract was written outside the secondmate home"
+  pass "fm-home-seed: a contract destination that escapes the home is refused before the copy"
+}
+
+# The dangerous direction is fail-open: inheriting the marker while the contract
+# stays behind. The seed refuses instead, names the project and the exact path it
+# looked for, and leaves no marked row in the child. Mutation: warn and continue
+# instead of returning non-zero and the child is seeded bricked for that project.
+test_home_seed_refuses_a_marked_project_without_its_contract() {
+  local home sub err out
+  home="$TMP_ROOT/contract-missing-main"
+  sub="$TMP_ROOT/contract-missing-sub"
+  err="$TMP_ROOT/contract-missing.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/contract-missing-alpha.git"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR +external-contract] - alpha project (added 2026-09-01)
+EOF
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='alpha delivery' \
+    FM_SECONDMATE_SCOPE='alpha delivery' \
+    "$ROOT/bin/fm-home-seed.sh" contracted-missing "$sub" alpha >/dev/null 2>"$err"; then
+    fail "seeding a marked project whose contract is missing should refuse"
+  fi
+  out=$(cat "$err")
+  assert_contains "$out" "alpha" "the refusal did not name the marked project"
+  assert_contains "$out" "$home/data/project-contracts/alpha.md" "the refusal did not name the exact contract path"
+  assert_absent "$sub/data/project-contracts/alpha.md" "the refused seed left a contract behind"
+  if [ -f "$sub/data/projects.md" ]; then
+    assert_no_grep '+external-contract' "$sub/data/projects.md" \
+      "the refused seed left the child holding the marker without its contract"
+  fi
+  pass "fm-home-seed: a marked project whose contract cannot travel refuses the seed"
+}
+
 test_home_seed_resolves_relative_source_origins() {
   local home subhome subhome_abs expected out actual
   home="$TMP_ROOT/relative-origin-home"
@@ -2931,6 +3064,9 @@ test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
+test_home_seed_pairs_the_external_contract_marker_with_its_contract
+test_home_seed_refuses_a_contract_destination_outside_the_home
+test_home_seed_refuses_a_marked_project_without_its_contract
 test_home_seed_skips_initialized_existing_no_mistakes_projects
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome

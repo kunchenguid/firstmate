@@ -9,9 +9,10 @@
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
-# line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
+# line that bin/fm-spawn.sh checks a ship brief against; fm_brief_delivery_mode
+# below is the matching reader, so this file owns both sides of that marker.
+# This file is also the one owner of the no-mistakes `--intent` contract: only
+# the brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
 # roughly the same specification - so a report, decision, or PR the intent
@@ -230,4 +231,40 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+}
+
+# Read a generated ship brief's recorded delivery mode back out. Prints the mode,
+# or nothing when the brief records none (scaffolded before the marker existed,
+# or not a ship brief). Consumers must use this rather than scanning the brief
+# themselves.
+#
+# The marker's authority must not depend on the brief's other bytes. A ship brief
+# can carry caller-supplied prose - bin/fm-brief.sh embeds a project's complete
+# external contract snapshot - and a contract is prose about that project's
+# delivery rules, so a line reading "Delivery contract: mode=direct-PR" at column
+# 0 is entirely plausible in it. A first-match scan over the whole file would let
+# that prose shadow the real marker and either fake agreement on the wrong mode
+# or refuse a correct spawn. So the marker counts only in the position this owner
+# emits it: directly under a "# Definition of done" heading, in the LAST such
+# block, which every generator writes as the brief's final section. Every heading
+# clears what an earlier block recorded, so the answer always comes from that
+# final block alone - a scout brief, whose real block carries no marker, reads
+# back as "no marker" even when the embedded contract impersonates one above it,
+# and that stays true after bin/fm-promote.sh flips the task to kind=ship without
+# rewriting the brief. Embedded prose can therefore neither reach the position
+# nor outlive a later block that declines to fill it.
+# bin/fm-brief.sh additionally asserts this reader returns the mode it asked for
+# before it leaves a brief on disk, so the guarantee is enforced at both ends.
+fm_brief_delivery_mode() {  # <brief-path>
+  local brief=$1
+  [ -f "$brief" ] && [ -r "$brief" ] || return 0
+  awk '
+    $0 == "# Definition of done" { mode = "" }
+    prev == "# Definition of done" && index($0, "Delivery contract: mode=") == 1 {
+      mode = substr($0, length("Delivery contract: mode=") + 1)
+      sub(/ .*$/, "", mode)
+    }
+    { prev = $0 }
+    END { if (mode != "") print mode }
+  ' "$brief"
 }

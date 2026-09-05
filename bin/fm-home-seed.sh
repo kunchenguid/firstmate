@@ -15,7 +15,10 @@
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
+#       is copied to data/charter.md, each seeded project whose registry row is
+#       marked +external-contract carries its private contract along into the
+#       home's data/project-contracts/ so the marker is never inherited alone,
+#       newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
@@ -456,15 +459,23 @@ EOF
   return 1
 }
 
+registered_mode_for_project() {  # <project>
+  local project=$1 line
+  line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
+  printf '%s\n' "${line%% *}"
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
-  read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
-EOF
+  mode=$(registered_mode_for_project "$project") || {
+    echo "error: cannot resolve the registered delivery posture for project $project from $DATA/projects.md" >&2
+    return 1
+  }
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
@@ -489,9 +500,10 @@ validate_seed_project() {
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
-  read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
-EOF
+  mode=$(registered_mode_for_project "$project") || {
+    echo "error: cannot resolve the registered delivery posture for project $project from $DATA/projects.md" >&2
+    return 1
+  }
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
@@ -522,6 +534,7 @@ SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
 SEED_CREATED_PROJECTS_FILE=
+SEED_SYNCED_CONTRACTS_FILE=
 SEED_PARENT_REG_EXISTED=0
 SEED_PARENT_BRIEF=
 SEED_PARENT_BRIEF_CREATED=0
@@ -539,6 +552,24 @@ restore_seed_file() {
   else
     rm -f "$path" 2>/dev/null || true
   fi
+}
+
+# The private contracts sync_project_contracts placed in the secondmate home move
+# back with the registry rows they belong to: a rolled-back seed must not leave a
+# marked project's contract behind, and must not lose one it overwrote. Recorded
+# per project name, which the registry grammar guarantees is a single bare word.
+restore_synced_contracts() {
+  local project backup path existed
+  [ -n "${SEED_SYNCED_CONTRACTS_FILE:-}" ] || return 0
+  [ -f "$SEED_SYNCED_CONTRACTS_FILE" ] || return 0
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    backup="$SEED_BACKUP_DIR/sub-contracts/$project.md"
+    path="$SEED_HOME/data/project-contracts/$project.md"
+    existed=0
+    [ -f "$backup" ] && existed=1
+    restore_seed_file "$existed" "$backup" "$path"
+  done < "$SEED_SYNCED_CONTRACTS_FILE"
 }
 
 seed_rollback_target() {
@@ -652,6 +683,7 @@ seed_rollback() {
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
+        restore_synced_contracts
       fi
     fi
   fi
@@ -671,11 +703,10 @@ registry_line_for_project() {
 }
 
 project_mode_in_home() {
-  local home=$1 project=$2 mode
-  read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
-EOF
-  printf '%s\n' "$mode"
+  local home=$1 project=$2 line
+  line=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
+  printf '%s\n' "${line%% *}"
 }
 
 sync_project_registry() {
@@ -703,12 +734,84 @@ sync_project_registry() {
     fi
     printf '%s\n' "$line" >> "$tmp"
   done
+  sync_project_contracts "$home" "$@" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$sub_reg"
+}
+
+# A seeded home must carry a project's +external-contract marker and that
+# project's private contract together, or neither: the marker alone makes
+# fm-brief.sh refuse every ship and scout scaffold for that project there, which
+# bricks the secondmate for it, and the contract alone is private text no
+# consumer in that home reads. The parent's registry row is copied verbatim, so
+# the marker travels whether or not anyone remembers the file; this places the
+# file beside it, and refuses the whole seed when it cannot. The marker itself is
+# read through fm-project-mode.sh, the single owner of that parse, rather than by
+# re-matching the row here. Runs before the registry rows are moved into place so
+# a contract is never missing while its marker is already readable. The
+# destination directory and every contract path go through the same containment
+# checks this file already applies to data/projects.md and data/charter.md, so a
+# symlinked data/project-contracts cannot land the private text outside the home.
+sync_project_contracts() {
+  local home=$1 project src dst abs_home abs_dst
+  shift
+  validate_operational_dir "$home" "data/project-contracts" || return 1
+  abs_home=$(resolved_path "$home")
+  for project in "$@"; do
+    src=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-project-mode.sh" --external-contract "$project") || {
+      echo "error: cannot resolve the external-contract setting for project $project from $DATA/projects.md" >&2
+      return 1
+    }
+    dst="$home/data/project-contracts/$project.md"
+    if [ -L "$dst" ] || { [ -e "$dst" ] && [ ! -f "$dst" ]; }; then
+      echo "error: secondmate private contract must be a regular file inside the home: $dst" >&2
+      return 1
+    fi
+    abs_dst=$(resolved_path "$dst")
+    if ! path_is_ancestor_of "$abs_home" "$abs_dst"; then
+      echo "error: secondmate private contract must resolve inside the secondmate home: $dst" >&2
+      return 1
+    fi
+    if [ -z "$src" ]; then
+      # Unmarked in the parent, so the row this seed writes is unmarked too: a
+      # contract left from an earlier seed would be the other lone half.
+      [ -e "$dst" ] || continue
+      record_synced_contract "$project" "$dst"
+      rm -f "$dst" || {
+        echo "error: cannot remove the stale private contract at $dst for unmarked project $project" >&2
+        return 1
+      }
+      continue
+    fi
+    if [ ! -f "$src" ] || [ ! -r "$src" ] || [ ! -s "$src" ]; then
+      echo "error: project $project is marked +external-contract but its contract is absent, empty, or unreadable at $src; seeding $home would give it the marker without the contract, which refuses every ship and scout brief there" >&2
+      return 1
+    fi
+    mkdir -p "$home/data/project-contracts" || return 1
+    record_synced_contract "$project" "$dst"
+    cp "$src" "$dst" || {
+      echo "error: cannot copy the private contract for project $project to $dst" >&2
+      return 1
+    }
+  done
+}
+
+record_synced_contract() {
+  local project=$1 dst=$2
+  [ -n "${SEED_SYNCED_CONTRACTS_FILE:-}" ] || return 0
+  if [ -f "$dst" ]; then
+    mkdir -p "$SEED_BACKUP_DIR/sub-contracts"
+    cp "$dst" "$SEED_BACKUP_DIR/sub-contracts/$project.md" 2>/dev/null || true
+  fi
+  printf '%s\n' "$project" >> "$SEED_SYNCED_CONTRACTS_FILE"
 }
 
 initialize_no_mistakes_project() {
   local home=$1 project=$2 created=$3 mode dst
-  mode=$(project_mode_in_home "$home" "$project")
+  mode=$(project_mode_in_home "$home" "$project") || {
+    echo "error: cannot resolve the registered delivery posture for project $project in $home" >&2
+    return 1
+  }
   [ "$mode" = no-mistakes ] || return 0
   dst=$(validate_project_destination "$home" "$project") || return 1
   if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
@@ -844,6 +947,9 @@ seed_home() {
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
   : > "$SEED_CREATED_PROJECTS_FILE"
+  SEED_SYNCED_CONTRACTS_FILE="$SEED_BACKUP_DIR/synced-contracts"
+  : > "$SEED_SYNCED_CONTRACTS_FILE"
+  mkdir -p "$SEED_BACKUP_DIR/sub-contracts"
   SEED_PARENT_REG_EXISTED=0
   SEED_PARENT_BRIEF="$DATA/$id/brief.md"
   SEED_PARENT_BRIEF_CREATED=0

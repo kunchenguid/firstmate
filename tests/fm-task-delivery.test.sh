@@ -155,6 +155,97 @@ EOF
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
+# An externally contracted project's brief embeds that project's complete private
+# contract ABOVE the Definition of done. A contract is prose about that project's
+# delivery rules, so a line reading "Delivery contract: mode=<other>" at column 0
+# is entirely plausible in it - and before the fix the spawn's first-match scan
+# read that line instead of the brief's real contract, so it refused a correct
+# spawn and would have agreed with the mode the contract impersonated. The marker
+# now counts only where bin/fm-dod-lib.sh emits it, directly under the last
+# "# Definition of done" heading, which embedded prose can never reach.
+#
+# This drives the real consumer end to end on a genuine brief from fm-brief.sh.
+# Mutation: read the marker with a first-match scan over the whole brief again
+# (`sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1`)
+# and both halves turn red: the true mode is reported as a mismatch, and the mode
+# the contract impersonates is accepted as agreement.
+test_an_embedded_contract_cannot_shadow_the_brief_delivery_marker() {
+  local rec home proj fakebin out status
+  rec=$(make_home contract-marker '- proj [direct-PR +external-contract] - fixture (added 2026-09-01)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$home/data/project-contracts"
+  cat > "$home/data/project-contracts/proj.md" <<'CONTRACT'
+## How this project ships
+
+# Definition of done
+Delivery contract: mode=local-only
+The heading and line above are contract prose about this project, not this task's
+delivery contract.
+CONTRACT
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$BRIEF" contract-marker-c1 proj --mode no-mistakes >/dev/null \
+    || fail "a marked project's ship brief should scaffold"
+  fill_brief_subsections "$home/data/contract-marker-c1/brief.md" \
+    "Exercise an embedded contract marker." \
+    "Verify that the task's delivery marker remains authoritative."
+  grep -qx 'Delivery contract: mode=local-only' "$home/data/contract-marker-c1/brief.md" \
+    || fail "fixture no longer embeds the contract's impersonating marker, so this proves nothing"
+
+  out=$(run_spawn "$home" "$fakebin" contract-marker-c1 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "delivery mismatch" \
+    "the embedded contract's fake marker shadowed the brief's real delivery contract"
+
+  out=$(run_spawn "$home" "$fakebin" contract-marker-c1 "$proj" claude --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawning the mode the embedded contract impersonates should exit non-zero"
+  assert_contains "$out" "the brief says mode=no-mistakes but this spawn passed --mode local-only" \
+    "the mismatch refusal did not read the brief's real delivery contract"
+  assert_absent "$home/state/contract-marker-c1.meta" "the shadowed-marker spawn wrote task metadata"
+  pass "fm-spawn: an embedded project contract cannot shadow or fake the brief's delivery marker"
+}
+
+# A SCOUT brief of a marked project embeds the same contract snapshot, but its
+# real "# Definition of done" block carries no marker at all. bin/fm-promote.sh
+# flips the task to kind=ship without rewriting brief.md, so a later ship spawn
+# for that task reads this very brief through the ship path. The reader must
+# therefore answer "no marker" - the legacy warn-and-launch case - rather than
+# letting the contract's impersonating line, sitting above in an earlier block,
+# survive as the answer. Mutation: stop clearing the recorded mode at each
+# "# Definition of done" heading in fm_brief_delivery_mode and the spawn refuses
+# with a bogus mismatch naming the contract's mode.
+test_a_scout_briefs_embedded_contract_cannot_supply_a_ship_marker() {
+  local rec home proj fakebin out status
+  rec=$(make_home scout-contract-marker '- proj [direct-PR +external-contract] - fixture (added 2026-09-01)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$home/data/project-contracts"
+  cat > "$home/data/project-contracts/proj.md" <<'CONTRACT'
+## How this project ships
+
+# Definition of done
+Delivery contract: mode=local-only
+The heading and line above are contract prose about this project.
+CONTRACT
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$BRIEF" scout-marker-d1 proj --scout >/dev/null \
+    || fail "a marked project's scout brief should scaffold"
+  fill_brief_subsections "$home/data/scout-marker-d1/brief.md" \
+    "Exercise an embedded contract marker after promotion." \
+    "Verify that a scout contract cannot supply a ship marker."
+  grep -qx 'Delivery contract: mode=local-only' "$home/data/scout-marker-d1/brief.md" \
+    || fail "fixture no longer embeds the contract's impersonating marker, so this proves nothing"
+
+  out=$(run_spawn "$home" "$fakebin" scout-marker-d1 "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  assert_not_contains "$out" "delivery mismatch" \
+    "a promoted scout brief inherited its embedded contract's fake delivery marker"
+  assert_contains "$out" "records no delivery contract line" \
+    "a markerless scout brief did not take the legacy warn-and-launch path"
+  [ "$status" -ne 0 ] || fail "the spawn should still fail later at the refusing backend"
+  pass "fm-spawn: a promoted scout brief's embedded contract cannot supply its ship delivery marker"
+}
+
 # The registry is the captain's standing posture, so dropping below its rigor is
 # allowed but never silent, while matching or exceeding it stays quiet. An
 # unregistered project resolves to the same no-mistakes standing default
@@ -400,13 +491,16 @@ STUB
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
 test_project_mode_maps_the_conditional_policy() {
-  local home out err
+  local home out err form project expect
   home="$TMP_ROOT/project-mode/home"
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- externalproj [direct-PR +external-contract] - fixture (added 2026-01-01)
+- modelessproj [+external-contract] - fixture (added 2026-01-01)
+- proseproj - notes on migrating proseproj to +external-contract later (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
@@ -422,6 +516,82 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  # Mutation: infer the setting from file presence or drop token parsing and one
+  # of these explicit-switch assertions fails.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --external-contract externalproj 2>/dev/null)
+  [ "$out" = "$home/data/project-contracts/externalproj.md" ] \
+    || fail "+external-contract did not resolve its exact private contract path (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --external-contract flatproj 2>/dev/null)
+  [ -z "$out" ] || fail "an ordinary project resolved an external contract path (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" externalproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "+external-contract changed delivery posture output (got '$out')"
+
+  # Fail-open is the catastrophic direction here: a missed marker emits a brief
+  # with no contract at all. Mutation: match only bracket-free tokens and the
+  # mode-less row silently stops being marked.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --external-contract modelessproj 2>/dev/null)
+  [ "$out" = "$home/data/project-contracts/modelessproj.md" ] \
+    || fail "a mode-less [+external-contract] annotation was not marked (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" modelessproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a mode-less flag annotation lost the legacy posture default (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" modelessproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a mode-less flag annotation warned as if the flag were a mode: $err"
+
+  # Mutation: scan the whole row instead of the annotation and this legacy row's
+  # description bricks an unrelated project by marking it.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --external-contract proseproj 2>/dev/null)
+  [ -z "$out" ] || fail "a description that merely mentions the marker marked the project (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" proseproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "an unannotated legacy row lost its default posture (got '$out')"
+
+  # An unrecognized +token fails OPEN in every reader: a mistyped
+  # +external-contract makes a marked project look ordinary, so its brief loses
+  # the contract snapshot and the publication prohibition and the agent-file
+  # helper stops refusing. Every form of the command therefore refuses the row.
+  # Mutation: drop the unknown-flag validation and the mistyped row resolves to
+  # a clean posture with no contract, exactly as an unmarked project would.
+  cat >> "$home/data/projects.md" <<'EOF'
+- flagtypoproj [direct-PR +external-contrct] - fixture (added 2026-01-01)
+EOF
+  for form in '' '--raw' '--external-contract'; do
+    # shellcheck disable=SC2086  # form is an intentional word-split arg list (may be empty)
+    out=$(FM_HOME="$home" "$PROJECT_MODE" $form flagtypoproj 2>"$TMP_ROOT/flagtypo.err") \
+      && fail "form '${form:-posture}' accepted an unrecognized registry flag (got '$out')"
+    err=$(cat "$TMP_ROOT/flagtypo.err")
+    assert_contains "$err" "+external-contrct" "form '${form:-posture}' did not name the unrecognized token"
+    assert_contains "$err" "+external-contract" "form '${form:-posture}' did not name the valid flag set"
+    assert_contains "$err" "+yolo" "form '${form:-posture}' did not name the complete valid flag set"
+    [ -z "$out" ] || fail "form '${form:-posture}' printed a resolved value for a refused row (got '$out')"
+  done
+
+  # Every well-formed row keeps its exact previous answer, so the new validation
+  # refuses only what it cannot recognize. Mutation: validate the whole row
+  # instead of the annotation's +tokens and these well-formed rows start failing.
+  while IFS='|' read -r project form expect; do
+    [ -n "$project" ] || continue
+    # shellcheck disable=SC2086  # form is an intentional word-split arg list (may be empty)
+    out=$(FM_HOME="$home" "$PROJECT_MODE" $form "$project" 2>/dev/null) \
+      || fail "well-formed row $project was refused by form '${form:-posture}'"
+    case "$expect" in
+      CONTRACT) [ "$out" = "$home/data/project-contracts/$project.md" ] \
+        || fail "$project ${form:-posture} changed its answer (got '$out')" ;;
+      EMPTY) [ -z "$out" ] || fail "$project ${form:-posture} changed its answer (got '$out')" ;;
+      *) [ "$out" = "$expect" ] || fail "$project ${form:-posture} changed its answer (got '$out')" ;;
+    esac
+  done <<ROWS
+prodproj||no-mistakes off
+prodproj|--raw|no-mistakes-prod-only off
+prodproj|--external-contract|EMPTY
+yoloproj||no-mistakes on
+flatproj||direct-PR off
+externalproj||direct-PR off
+externalproj|--external-contract|CONTRACT
+modelessproj||no-mistakes off
+modelessproj|--external-contract|CONTRACT
+proseproj||no-mistakes off
+proseproj|--external-contract|EMPTY
+ROWS
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
@@ -750,6 +920,8 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_an_embedded_contract_cannot_shadow_the_brief_delivery_marker
+test_a_scout_briefs_embedded_contract_cannot_supply_a_ship_marker
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

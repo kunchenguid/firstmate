@@ -8,7 +8,15 @@
 # base64 parent SSH alias, and one base64 project record per line. Each project
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
-# trusting the sender. The remote code root is cloned into an absent home,
+# trusting the sender. A registry line marked +external-contract must arrive with
+# that project's complete private contract in the same record; this host publishes
+# the contract before the registry row that marks it and refuses the whole
+# provisioning otherwise, so a home never holds the marker alone. Every contract a
+# manifest publishes or clears is snapshotted into the same before/ set that owns
+# data/projects.md, so a failed converge of an existing home restores both halves
+# together instead of stranding one. Because data/projects.md is rebuilt from the
+# manifest alone, a converge that drops a project clears that project's contract
+# too: never a marker without its contract, never a contract without its marker. The remote code root is cloned into an absent home,
 # project origins are cloned on this host, the project registry and charter are
 # published, the durable .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
@@ -53,6 +61,8 @@ PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
+TOUCHED_CONTRACTS="$TMP/touched-contracts"
+: > "$TOUCHED_CONTRACTS"
 release_provision_lock() {
   if [ "$PROVISION_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$PROVISION_LOCK"
@@ -82,6 +92,11 @@ rollback() {
       restore_owned_file data/projects.md || true
       restore_owned_file .fm-secondmate-home || true
       restore_owned_file .fm-secondmate-parent || true
+      while IFS= read -r project; do
+        [ -n "$project" ] || continue
+        restore_owned_file "data/project-contracts/$project.md" || true
+      done < "$TOUCHED_CONTRACTS"
+      rmdir -- "$FM_HOME/data/project-contracts" 2>/dev/null || true
       [ "$CREATED_BACKLOG" -eq 0 ] || rm -f -- "$FM_HOME/data/backlog.md"
     fi
   fi
@@ -195,12 +210,19 @@ fi
 
 PROJECT_REG="$TMP/projects.md"
 : > "$PROJECT_REG"
+CONTRACT_NAMES="$TMP/contract-names"
+: > "$CONTRACT_NAMES"
+STALE_CONTRACT_NAMES="$TMP/stale-contract-names"
+: > "$STALE_CONTRACT_NAMES"
+CONTRACT_DIR="$FM_HOME/data/project-contracts"
+MANIFEST_NAMES="$TMP/manifest-names"
+: > "$MANIFEST_NAMES"
 while IFS= read -r record; do
   [ -n "$record" ] || continue
   encoded=${record#project=}
   old_ifs=$IFS
   IFS='|'
-  read -r NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64 <<EOF
+  read -r NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64 CONTRACT_B64 <<EOF
 $encoded
 EOF
   IFS=$old_ifs
@@ -221,6 +243,24 @@ EOF
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
   case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
+  mkdir -p "$TMP/registry-probe"
+  printf '%s\n' "$REGISTRY_LINE" > "$TMP/registry-probe/projects.md"
+  CONTRACT_PATH=$(FM_DATA_OVERRIDE="$TMP/registry-probe" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --external-contract "$NAME") \
+    || die "project $NAME registry line cannot be read for its external-contract setting"
+  if [ -n "$CONTRACT_PATH" ]; then
+    [ -n "$CONTRACT_B64" ] \
+      || die "project $NAME is marked +external-contract but the manifest carried no private contract; refusing to publish the marker alone"
+    base64_decode_to "$CONTRACT_B64" "$TMP/contract.$NAME" \
+      || die "project $NAME private contract is not valid base64"
+    [ -s "$TMP/contract.$NAME" ] \
+      || die "project $NAME private contract arrived empty; refusing to publish the marker alone"
+    printf '%s\n' "$NAME" >> "$CONTRACT_NAMES"
+  else
+    [ -z "$CONTRACT_B64" ] \
+      || die "project $NAME carries a private contract but is not marked +external-contract"
+    printf '%s\n' "$NAME" >> "$STALE_CONTRACT_NAMES"
+  fi
   DEST="$FM_HOME/projects/$NAME"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
@@ -236,12 +276,78 @@ EOF
         || die "no-mistakes initialization failed for project $NAME"
     fi
   fi
+  printf '%s\n' "$NAME" >> "$MANIFEST_NAMES"
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
+
+# data/projects.md is rebuilt from the manifest alone, so a project this converge
+# drops loses its registry row entirely. Its contract has to go with it: the
+# pairing invariant is symmetric, and a contract with no row left to mark it is
+# private text stranded on this host past a converge that no longer references
+# the project. Enumerated from the directory rather than the manifest, because a
+# dropped project is by definition absent from the manifest.
+if [ -d "$CONTRACT_DIR" ] && [ ! -L "$CONTRACT_DIR" ]; then
+  for contract_file in "$CONTRACT_DIR"/*.md; do
+    [ -e "$contract_file" ] || continue
+    orphan_project=$(basename -- "$contract_file" .md)
+    grep -Fxq -- "$orphan_project" "$MANIFEST_NAMES" 2>/dev/null && continue
+    printf '%s\n' "$orphan_project" >> "$STALE_CONTRACT_NAMES"
+  done
+fi
 
 cp "$TMP/charter" "$FM_HOME/data/charter.md.tmp.$$"
 chmod 600 "$FM_HOME/data/charter.md.tmp.$$"
 mv -f -- "$FM_HOME/data/charter.md.tmp.$$" "$FM_HOME/data/charter.md"
+snapshot_owned_contract() {  # <project>
+  local project=$1 rel existing
+  rel="data/project-contracts/$project.md"
+  existing="$FM_HOME/$rel"
+  grep -Fxq -- "$project" "$TOUCHED_CONTRACTS" 2>/dev/null && return 0
+  mkdir -p "$TMP/before/data/project-contracts" || die "cannot stage the contract rollback snapshot"
+  rm -f -- "$TMP/before/$rel" "$TMP/before/$rel.present"
+  if [ -e "$existing" ] || [ -L "$existing" ]; then
+    [ -f "$existing" ] && [ ! -L "$existing" ] || die "existing remote home has unsafe owned file: $rel"
+    cp -p -- "$existing" "$TMP/before/$rel" || die "cannot snapshot existing remote home file: $rel"
+    : > "$TMP/before/$rel.present"
+  fi
+  printf '%s\n' "$project" >> "$TOUCHED_CONTRACTS"
+}
+publish_contract() {  # <project> <source>
+  local project=$1 source=$2 dest parent_real home_real
+  [ ! -L "$CONTRACT_DIR" ] || die "project contract directory is a symlink: $CONTRACT_DIR"
+  mkdir -p "$CONTRACT_DIR" || die "cannot create the project contract directory"
+  parent_real=$(CDPATH='' cd -- "$CONTRACT_DIR" && pwd -P) || die "project contract directory is unavailable"
+  home_real=$(CDPATH='' cd -- "$FM_HOME" && pwd -P) || die "FM_HOME is unavailable"
+  [ "$parent_real" = "$home_real/data/project-contracts" ] \
+    || die "project contract directory escapes FM_HOME: $CONTRACT_DIR"
+  dest="$parent_real/$project.md"
+  [ ! -L "$dest" ] || die "project $project contract destination is a symlink"
+  if [ -e "$dest" ]; then
+    [ -f "$dest" ] || die "project $project contract destination is not a regular file"
+  fi
+  snapshot_owned_contract "$project"
+  cp "$source" "$dest.tmp.$$" || die "cannot stage the private contract for project $project"
+  chmod 600 "$dest.tmp.$$"
+  mv -f -- "$dest.tmp.$$" "$dest" || die "cannot publish the private contract for project $project"
+}
+remove_stale_contract() {  # <project>
+  local project=$1 dest
+  [ ! -L "$CONTRACT_DIR" ] || die "project contract directory is a symlink: $CONTRACT_DIR"
+  [ -d "$CONTRACT_DIR" ] || return 0
+  dest="$CONTRACT_DIR/$project.md"
+  [ -e "$dest" ] || [ -L "$dest" ] || return 0
+  [ -f "$dest" ] && [ ! -L "$dest" ] || die "project $project contract destination is not a regular file"
+  snapshot_owned_contract "$project"
+  rm -f -- "$dest" || die "cannot remove the stale private contract for project $project"
+}
+while IFS= read -r contract_project; do
+  [ -n "$contract_project" ] || continue
+  publish_contract "$contract_project" "$TMP/contract.$contract_project"
+done < "$CONTRACT_NAMES"
+while IFS= read -r contract_project; do
+  [ -n "$contract_project" ] || continue
+  remove_stale_contract "$contract_project"
+done < "$STALE_CONTRACT_NAMES"
 cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
 {

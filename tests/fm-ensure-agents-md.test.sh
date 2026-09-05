@@ -353,6 +353,127 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+init_registered_project() {
+  local home=$1 project=$2 annotation=$3 repo
+  repo="$home/projects/$project"
+  mkdir -p "$home/data" "$home/projects"
+  git init -q -b main "$repo"
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  printf 'fixture\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm init
+  printf -- '- %s [%s] - fixture (added 2026-09-01)\n' "$project" "$annotation" > "$home/data/projects.md"
+}
+
+# Mutation: remove the pre-write external_contract_project refusal and both
+# AGENTS.md and CLAUDE.md are created in the linked task worktree.
+test_external_contract_project_refuses_without_creating_agent_files() {
+  local home repo worktree out rc
+  home="$TMP_ROOT/external-home"
+  init_registered_project "$home" contracted-project 'no-mistakes-prod-only +external-contract'
+  repo="$home/projects/contracted-project"
+  worktree="$TMP_ROOT/external-task-worktree"
+  git -C "$repo" worktree add -q --detach "$worktree" HEAD
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$worktree" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-ensure-agents-md.sh should refuse an externally contracted project"
+  assert_contains "$out" "managed outside the repository" "external-contract refusal did not state the policy"
+  assert_absent "$worktree/AGENTS.md" "external-contract refusal created AGENTS.md"
+  assert_absent "$worktree/CLAUDE.md" "external-contract refusal created CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: externally contracted linked worktrees refuse without writing agent files"
+}
+
+# The git-common-dir match covers firstmate's own pooled worktrees; a worktree
+# provided by another tool is recognized by origin identity instead. Mutation:
+# compare origin URLs by raw string equality and this ssh-vs-https pair stops
+# matching, so the marked project's agent files get created after all.
+test_external_contract_matches_equivalent_origin_spellings() {
+  local home repo elsewhere out rc
+  home="$TMP_ROOT/external-origin-home"
+  init_registered_project "$home" contracted-project 'no-mistakes-prod-only +external-contract'
+  repo="$home/projects/contracted-project"
+  git -C "$repo" remote add origin 'git@github.com:example-org/contracted-project.git'
+  elsewhere="$TMP_ROOT/external-origin-foreign"
+  git init -q -b main "$elsewhere"
+  git -C "$elsewhere" remote add origin 'https://github.com/example-org/contracted-project'
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$elsewhere" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an https checkout of an ssh-registered marked project was not refused"
+  assert_contains "$out" "managed outside the repository" "origin-matched refusal did not state the policy"
+  assert_absent "$elsewhere/AGENTS.md" "origin-matched refusal created AGENTS.md"
+  assert_absent "$elsewhere/CLAUDE.md" "origin-matched refusal created CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: equivalent ssh and https origin spellings identify the same marked project"
+}
+
+# A different repository on the same host must NOT inherit the refusal.
+# Mutation: normalize origins down to the host and this unrelated repo refuses.
+test_external_contract_does_not_capture_a_different_repository() {
+  local home repo elsewhere out
+  home="$TMP_ROOT/external-origin-distinct-home"
+  init_registered_project "$home" contracted-project 'no-mistakes-prod-only +external-contract'
+  repo="$home/projects/contracted-project"
+  git -C "$repo" remote add origin 'git@github.com:example-org/contracted-project.git'
+  elsewhere="$TMP_ROOT/external-origin-distinct-foreign"
+  git init -q -b main "$elsewhere"
+  git -C "$elsewhere" remote add origin 'https://github.com/example-org/some-other-repo.git'
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$elsewhere" 2>&1) \
+    || fail "an unrelated repository on the same host was refused: $out"
+  assert_present "$elsewhere/AGENTS.md" "unrelated repository did not create AGENTS.md"
+  assert_claude_pointer "$elsewhere/CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: origin normalization does not capture a different repository on the same host"
+}
+
+# This helper runs INSIDE a project worktree on an external forge, and the brief
+# for a marked project forbids reproducing the contract or the fact that it
+# exists on any published surface. A worker that pastes this refusal into a PR
+# comment or an evidence file must publish nothing about the marking: not the
+# registry token, not the contract path, not the project's registered posture,
+# not which project matched. The specifics stay in firstmate's own home, which
+# already holds the registry row and the contract. Mutation: put any of those
+# identifiers back into the refusal and the matching assertion fails.
+test_external_contract_refusal_identifies_nothing_in_the_worktree() {
+  local home repo worktree out
+  home="$TMP_ROOT/external-quiet-home"
+  init_registered_project "$home" contracted-project 'no-mistakes-prod-only +external-contract'
+  repo="$home/projects/contracted-project"
+  worktree="$TMP_ROOT/external-quiet-worktree"
+  git -C "$repo" worktree add -q --detach "$worktree" HEAD
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$worktree" 2>&1) \
+    && fail "fm-ensure-agents-md.sh should refuse an externally contracted project"
+  assert_contains "$out" "managed outside the repository" \
+    "the refusal no longer states the policy the worker has to follow"
+  assert_not_contains "$out" "external-contract" \
+    "the refusal published the registry marker into the project worktree"
+  assert_not_contains "$out" "project-contracts" \
+    "the refusal published the private contract location into the project worktree"
+  assert_not_contains "$out" "no-mistakes-prod-only" \
+    "the refusal published the project's registered posture into the project worktree"
+  assert_not_contains "$out" "contracted-project" \
+    "the refusal published which project is externally contracted into the project worktree"
+  assert_not_contains "$out" "$home" \
+    "the refusal published an absolute path under the firstmate home into the project worktree"
+  assert_absent "$worktree/AGENTS.md" "the refusal created AGENTS.md"
+  assert_absent "$worktree/CLAUDE.md" "the refusal created CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: the external-contract refusal states the policy and identifies nothing"
+}
+
+# Mutation: classify every registered project as external and this ordinary
+# registered project stops following the byte-for-byte legacy creation path.
+test_ordinary_registered_project_keeps_existing_behavior() {
+  local home repo out
+  home="$TMP_ROOT/ordinary-registered-home"
+  init_registered_project "$home" ordinary-project no-mistakes-prod-only
+  repo="$home/projects/ordinary-project"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh changed ordinary registered-project behavior"
+  assert_contains "$out" "created: AGENTS.md and CLAUDE.md" \
+    "ordinary registered project changed its existing creation result"
+  assert_present "$repo/AGENTS.md" "ordinary registered project did not create AGENTS.md"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: ordinary registered projects retain existing behavior"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
@@ -369,3 +490,8 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_external_contract_project_refuses_without_creating_agent_files
+test_external_contract_matches_equivalent_origin_spellings
+test_external_contract_does_not_capture_a_different_repository
+test_ordinary_registered_project_keeps_existing_behavior
+test_external_contract_refusal_identifies_nothing_in_the_worktree

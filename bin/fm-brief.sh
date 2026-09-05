@@ -36,7 +36,8 @@
 #   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# captain's standing delivery posture as context, and this script never reads that
+# posture. It reads only the independent +external-contract project setting:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -59,11 +60,18 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
+# Ship tasks ordinarily include a project-memory section so durable
+# project-intrinsic learnings can be committed to AGENTS.md through the project's
+# delivery path. For a registry row carrying +external-contract, ship and scout
+# briefs instead embed the complete data/project-contracts/<repo>.md snapshot,
+# fail before writing the brief when it is absent, empty, or not readable in
+# full (a NUL byte or a short read would truncate the snapshot), and the
+# ship brief routes durable agent knowledge back through firstmate rather than
+# asking the worker to create agent-directed files in the project. The snapshot
+# carries an explicit publication prohibition beside it, and a ship brief is only
+# left on disk once its delivery marker reads back (through bin/fm-dod-lib.sh, the
+# reader bin/fm-spawn.sh uses) as the mode this scaffold was asked for, so no
+# contract's bytes can shadow or fake that marker.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -180,7 +188,6 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -210,6 +217,7 @@ EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
+mkdir -p "$DATA/$ID"
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
@@ -308,6 +316,51 @@ fi
 
 REPO=${POS[1]}
 
+EXTERNAL_CONTRACT_PATH=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+  "$SCRIPT_DIR/fm-project-mode.sh" --external-contract "$REPO") || {
+  echo "error: could not resolve external-contract setting for project $REPO from $DATA/projects.md" >&2
+  exit 1
+}
+refuse_external_contract() {
+  echo "error: project $REPO is marked +external-contract but its contract is absent, empty, or unreadable at $EXTERNAL_CONTRACT_PATH${1:+ ($1)}" >&2
+  exit 1
+}
+PROJECT_CONTRACT_SECTION=
+EXTERNAL_CONTRACT=0
+if [ -n "$EXTERNAL_CONTRACT_PATH" ]; then
+  EXTERNAL_CONTRACT=1
+  if [ ! -f "$EXTERNAL_CONTRACT_PATH" ] || [ ! -r "$EXTERNAL_CONTRACT_PATH" ] || [ ! -s "$EXTERNAL_CONTRACT_PATH" ]; then
+    refuse_external_contract
+  fi
+  PROJECT_CONTRACT=
+  # `read -d ''` stops at the first NUL byte and reports SUCCESS when it finds
+  # one, so a contract carrying a NUL (or a read that ends early for any other
+  # reason) would otherwise be snapshotted truncated under a heading promising
+  # the complete text. A complete read instead hits EOF and returns non-zero, so
+  # a zero return means the contract is not whole readable text: refuse.
+  IFS= read -r -d '' PROJECT_CONTRACT < "$EXTERNAL_CONTRACT_PATH" \
+    && refuse_external_contract "contract is not readable as text: it contains a NUL byte"
+  CONTRACT_BYTES=$(wc -c < "$EXTERNAL_CONTRACT_PATH")
+  SNAPSHOT_BYTES=$(printf '%s' "$PROJECT_CONTRACT" | wc -c)
+  if [ "$((SNAPSHOT_BYTES))" -ne "$((CONTRACT_BYTES))" ]; then
+    refuse_external_contract "read $((SNAPSHOT_BYTES)) of $((CONTRACT_BYTES)) bytes"
+  fi
+  if [ -z "$PROJECT_CONTRACT" ]; then
+    refuse_external_contract
+  fi
+  IFS= read -r -d '' PROJECT_CONTRACT_SECTION <<EOF || true
+# Project operating contract
+The following is the complete external contract snapshot for project $REPO at brief generation time.
+It is firstmate-private and stays inside this task: follow it, but never reproduce, quote, paraphrase, or summarize any part of it, or the fact that it exists, on any surface published outside firstmate.
+That covers project files, code, comments, commit messages, branch names, pull request titles and bodies, issues and issue comments, review replies, CI or pipeline inputs, and evidence, fixture, or report files you create or push.
+When something in it needs to reach firstmate, say so in your status file, which is firstmate-private; when a task legitimately needs one of its facts in a published artifact, append \`needs-decision:\` and stop rather than deciding to publish it yourself.
+
+$PROJECT_CONTRACT
+
+EOF
+fi
+mkdir -p "$DATA/$ID"
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -356,7 +409,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$PROJECT_CONTRACT_SECTION$HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -426,12 +479,30 @@ case "$MODE" in
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
+if [ "$EXTERNAL_CONTRACT" -eq 1 ]; then
+  IFS= read -r -d '' PROJECT_MEMORY_SECTION <<'EOF' || true
+# External project knowledge
+Do not create or modify `AGENTS.md`, `CLAUDE.md`, agent skills, agent memories, or other agent-directed operating files in this project.
+Return durable agent-specific project knowledge to firstmate in your final status so firstmate can route it to the private external contract.
+Put human-useful product, developer, operator, and safety facts in the project's human-facing documentation only when that documentation is part of this task's accepted scope.
+EOF
+else
+  IFS= read -r -d '' PROJECT_MEMORY_SECTION <<EOF || true
+# Project memory
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Record only project knowledge useful to almost every future session.
+For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+EOF
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$PROJECT_CONTRACT_SECTION$HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -474,13 +545,20 @@ $ASK_USER_BLOCK
 
 $INBOX_SECTION
 
-# Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
+$PROJECT_MEMORY_SECTION
 $DOD
 EOF
+# The delivery marker's authority must not depend on the embedded contract's
+# bytes. A contract is prose about a project's delivery rules, so it can plausibly
+# carry a "Delivery contract: mode=..." line of its own, and bin/fm-spawn.sh
+# refuses or agrees on whatever it reads back. Assert here, through the same owner
+# (bin/fm-dod-lib.sh) that spawn reads with, that this brief reads back as the mode
+# this scaffold was asked for, so no brief whose contract shadows, moves, or fakes
+# the marker is ever left on disk for a spawn to find.
+RECORDED_MODE=$(fm_brief_delivery_mode "$BRIEF")
+if [ "$RECORDED_MODE" != "$MODE" ]; then
+  rm -f "$BRIEF"
+  echo "error: refusing to leave $BRIEF on disk: its delivery contract reads back as ${RECORDED_MODE:-none}, not the requested mode=$MODE" >&2
+  exit 1
+fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

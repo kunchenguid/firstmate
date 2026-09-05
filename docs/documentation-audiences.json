@@ -475,6 +475,34 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/secondmate.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/ship-direct-pr.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/ship-herdr-lab.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/ship-local-only.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/assets/fm-brief-baseline/ship-no-mistakes.md",
+      "audience": "maintainer-verification"
     }
   ]
 }
