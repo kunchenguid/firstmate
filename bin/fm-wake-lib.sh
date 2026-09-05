@@ -1389,10 +1389,10 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
-  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
+  # Resolve the pid into a variable FIRST: resolving the frame identity inside a
   # command substitution would resolve it in that subshell, recording the
   # identity of a process that exits immediately.
-  pid=${BASHPID:-$$}
+  fm_current_pid pid || return 1
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
   fm_lock_try_acquire "$lock" || return 1
@@ -1431,7 +1431,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
-  pid=${BASHPID:-$$}
+  fm_current_pid pid || return 1
   i=0
   while ! fm_lock_try_acquire "$lock"; do
     [ "$i" -lt 20 ] || return 1
@@ -1467,7 +1467,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
 # arming, mutating shared state, or emitting.
 fm_autoarm_still_owner() {  # <state-dir> <gen>
   local state=$1 gen=$2 pid
-  pid=${BASHPID:-$$}
+  fm_current_pid pid || return 1
   fm_autoarm_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
 }
@@ -1475,7 +1475,7 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
 fm_autoarm_reset_owned() {  # <state-dir> <gen>
   local state=$1 gen=$2 lock pid
   lock="$state/.claude-autoarm.lock"
-  pid=${BASHPID:-$$}
+  fm_current_pid pid || return 1
   fm_lock_try_acquire "$lock" || return 2
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
@@ -1556,7 +1556,7 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # TERM and the ledger graft below, keeping the documented bounded
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i self_pid
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
@@ -1596,7 +1596,8 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
     && [ "$owner" = "$lock_pid" ] \
     && [ -z "$(sed -n '2p' "$epoch" 2>/dev/null)" ]; then
     line1=$(sed -n '1p' "$epoch" 2>/dev/null || true)
-    tmp="$epoch.tmp.${BASHPID:-$$}"
+    fm_current_pid self_pid || self_pid=$$
+    tmp="$epoch.tmp.$self_pid"
     if [ -n "$line1" ] \
       && printf '%s\n%s\n' "$line1" "$recorded" > "$tmp" 2>/dev/null \
       && touch -r "$epoch" "$tmp" 2>/dev/null \
