@@ -53,7 +53,7 @@ test_crewmate_brief_explains_session_lock_scope() {
 
 test_ordinary_briefs_state_slice_contracts() {
   local kind id brief section_file line_count charter wait_syntax
-  wait_syntax="A \`paused:\` line may optionally include \`wait=pr:<full PR URL>\` or \`wait=quota:<provider scope>\`; omitted premises remain valid."
+  wait_syntax="Write every external wait as \`paused [key=<slug>]: <why>\` and add the machine-readable premise when one exists: \`wait=pr:<full PR URL>\` when the wait is a pull request, \`wait=quota:<provider>\` when it is a provider quota window (provider exactly as named in config/model-catalog.json); for any other external wait (an upstream release, an external third party, an unknown provider) state the why in words and add no \`wait=\` token, never an invented PR or provider; a decision the owner must make is never a pause, it is \`needs-decision\`."
   for kind in ship scout; do
     id="brief-slice-contracts-$kind"
     if [ "$kind" = scout ]; then
@@ -66,7 +66,12 @@ test_ordinary_briefs_state_slice_contracts() {
     brief="$BRIEF_HOME/data/$id/brief.md"
     assert_grep '# Rules' "$brief" "$kind brief is missing its Rules section"
     assert_grep "$wait_syntax" "$brief" \
-      "$kind brief omitted the optional wait-premise status syntax"
+      "$kind brief omitted the instructed wait-premise status syntax"
+    assert_no_grep 'may optionally include' "$brief" \
+      "$kind brief still carries the optional wait-premise wording"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_no_grep 'Use `paused: {why}`' "$brief" \
+      "$kind brief still teaches the competing bare paused: {why} syntax"
     section_file="$TMP_ROOT/$kind-rules-section"
     awk '/^# Rules$/ {seen=1; next} seen && /^# / {exit} seen {print}' "$brief" > "$section_file"
     assert_grep '- Specify the exact verification command and the observable passing result.' "$section_file" \
@@ -95,6 +100,65 @@ test_ordinary_briefs_state_slice_contracts() {
   assert_no_grep 'Write the specification so it reads top to bottom' "$charter" \
     "secondmate charter must not receive ordinary-task specification guidance"
   pass "fm-brief: ship and scout briefs state four short Rules-section slice contracts"
+}
+
+test_instructed_wait_premise_binds_to_real_wait_reader() {
+  local id brief sentence pr_url pr_token quota_provider quota_token home fakebin out
+
+  id="brief-wait-premise-composition"
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the wait-premise composition brief"
+  brief="$BRIEF_HOME/data/$id/brief.md"
+
+  sentence=$(rg '^Write every external wait as' "$brief") \
+    || fail "brief does not instruct the machine-readable wait-premise form"
+
+  pr_url='https://github.com/pedromuller-del/firstmate/pull/9001'
+  pr_token=$(printf '%s' "$sentence" | rg -o 'wait=pr:<[^>]+>') \
+    || fail "instructed sentence has no wait=pr: template to bind"
+  pr_token=${pr_token/<full PR URL>/$pr_url}
+
+  quota_provider='cursor'
+  quota_token=$(printf '%s' "$sentence" | rg -o 'wait=quota:<[^>]+>') \
+    || fail "instructed sentence has no wait=quota: template to bind"
+  quota_token=${quota_token/<provider>/$quota_provider}
+
+  home="$TMP_ROOT/wait-premise-home"
+  fakebin="$TMP_ROOT/wait-premise-fakebin"
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  printf '%s\n' '{"pools":[{"pool":"test","provider":"'"$quota_provider"'","plan":"test","harness":"cursor-agent","account":"test","models":["test-model"],"quota_readable":true,"gap":"","note":""}]}' \
+    > "$home/config/model-catalog.json"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${FAKE_PR_STATE:-OPEN}" in
+  MERGED|OPEN|CLOSED) printf '%s\n' "${FAKE_PR_STATE}" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+
+  printf 'paused [key=pr-task]: waiting for the fork PR %s\n' "$pr_token" > "$home/state/pr-task.status"
+  printf 'paused [key=quota-task]: waiting for quota reset %s\n' "$quota_token" > "$home/state/quota-task.status"
+  printf 'paused [key=release-task]: waiting on an upstream release\n' > "$home/state/release-task.status"
+
+  out=$(PATH="$fakebin:$PATH" FAKE_PR_STATE=OPEN FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wait-premise.sh" --shadow-row pr-task)
+  expect_code 0 "$?" "the instructed PR form should be readable by the real wait-premise reader"
+  [ "$out" = "$pr_token"$'\tstill-waiting\t1' ] \
+    || fail "the instructed PR form did not bind to a still-waiting verdict: $out"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wait-premise.sh" --shadow-row quota-task)
+  expect_code 0 "$?" "the instructed quota form should be readable by the real wait-premise reader"
+  [ "$out" = "$quota_token"$'\texpired\t1' ] \
+    || fail "the instructed quota form did not bind to an expired verdict: $out"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wait-premise.sh" --shadow-row release-task)
+  expect_code 0 "$?" "an unsupported wait must not fabricate a premise"
+  [ -z "$out" ] || fail "an unsupported wait produced a premise row: $out"
+
+  pass "fm-brief: the instructed wait-premise form binds through the real fm-wait-premise.sh reader for pr, quota, and unsupported waits"
 }
 
 test_ordinary_briefs_bookend_load_bearing_task() {
@@ -1176,11 +1240,11 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     brief="$home/data/$id/brief.md"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Use `awaiting`' "$brief" \
       "$kind brief did not instruct the configured pause status"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_no_grep '`paused: {why}`' "$brief" \
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_no_grep 'Use `paused`' "$brief" \
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
@@ -1785,6 +1849,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_crewmate_brief_explains_session_lock_scope
 test_ordinary_briefs_state_slice_contracts
+test_instructed_wait_premise_binds_to_real_wait_reader
 test_ordinary_briefs_bookend_load_bearing_task
 test_fill_refuses_non_ordinary_or_already_filled_brief
 test_validate_bookends_refuses_half_filled_and_divergent

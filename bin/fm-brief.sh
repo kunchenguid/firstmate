@@ -592,8 +592,8 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
-A \`$PAUSED_VERB:\` line may optionally include \`wait=pr:<full PR URL>\` or \`wait=quota:<provider scope>\`; omitted premises remain valid.
+Use \`$PAUSED_VERB\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Write every external wait as \`$PAUSED_VERB [key=<slug>]: <why>\` and add the machine-readable premise when one exists: \`wait=pr:<full PR URL>\` when the wait is a pull request, \`wait=quota:<provider>\` when it is a provider quota window (provider exactly as named in config/model-catalog.json); for any other external wait (an upstream release, an external third party, an unknown provider) state the why in words and add no \`wait=\` token, never an invented PR or provider; a decision the owner must make is never a pause, it is \`needs-decision\`.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -725,11 +725,11 @@ IFS= read -r -d '' SCOUT_RULES_3_TO_7 <<EOF || true
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   Use \`$PAUSED_VERB\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-A \`$PAUSED_VERB:\` line may optionally include \`wait=pr:<full PR URL>\` or \`wait=quota:<provider scope>\`; omitted premises remain valid.
+Write every external wait as \`$PAUSED_VERB [key=<slug>]: <why>\` and add the machine-readable premise when one exists: \`wait=pr:<full PR URL>\` when the wait is a pull request, \`wait=quota:<provider>\` when it is a provider quota window (provider exactly as named in config/model-catalog.json); for any other external wait (an upstream release, an external third party, an unknown provider) state the why in words and add no \`wait=\` token, never an invented PR or provider; a decision the owner must make is never a pause, it is \`needs-decision\`.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -1111,11 +1111,11 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   Use \`$PAUSED_VERB\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-A \`$PAUSED_VERB:\` line may optionally include \`wait=pr:<full PR URL>\` or \`wait=quota:<provider scope>\`; omitted premises remain valid.
+Write every external wait as \`$PAUSED_VERB [key=<slug>]: <why>\` and add the machine-readable premise when one exists: \`wait=pr:<full PR URL>\` when the wait is a pull request, \`wait=quota:<provider>\` when it is a provider quota window (provider exactly as named in config/model-catalog.json); for any other external wait (an upstream release, an external third party, an unknown provider) state the why in words and add no \`wait=\` token, never an invented PR or provider; a decision the owner must make is never a pause, it is \`needs-decision\`.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
