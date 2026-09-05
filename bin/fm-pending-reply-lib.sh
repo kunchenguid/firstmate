@@ -326,19 +326,22 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 # Does not deliver anything. Fails if parent paths cannot be prepared.
 fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
   local parent_home=$1 state=$2 task_id=$3 request_text=$4
-  local dir rec corr now summary status_path tmp
+  local dir archive_dir rec corr now summary status_path tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
   dir=$(fm_pending_reply_dir "$state")
+  archive_dir=$(fm_pending_reply_archive_dir "$state")
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
   corr=$(fm_pending_reply_new_id)
   [ "${#corr}" -eq 16 ] || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   # Extremely unlikely collision; regenerate once.
-  if [ -e "$rec" ]; then
+  if [ -e "$rec" ] || [ -e "$archive_dir/$corr" ]; then
     corr=$(fm_pending_reply_new_id)
     rec=$(fm_pending_reply_path "$state" "$corr")
-    [ ! -e "$rec" ] || return 1
+    if [ -e "$rec" ] || [ -e "$archive_dir/$corr" ]; then
+      return 1
+    fi
   fi
   now=$(fm_pending_reply_now)
   summary=$(fm_pending_reply_summarize "$request_text")
