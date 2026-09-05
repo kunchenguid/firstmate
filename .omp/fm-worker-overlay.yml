@@ -1,0 +1,36 @@
+# Firstmate worker posture for omp (Oh My Pi), passed as `--config` on every
+# Firstmate-launched omp session (crewmate, scout, and secondmate alike) by
+# bin/fm-spawn.sh, whose header owns why the launch carries it. It is the omp
+# analogue of the Pi adapter's `--tui-mode regular` pin: a per-launch overlay,
+# never a write to the captain's own ~/.omp/agent/config.yml, which stays
+# exactly as the captain set it (model roles, theme, providers, compaction).
+# Each key below pins one setting whose captain-facing value would park an
+# unattended worker on an interactive prompt, change its pinned model under it,
+# or make its composer unreadable to bin/fm-composer-lib.sh. Verified against
+# omp 18.1.11's own settings schema (`omp config list`).
+composer:
+  # Renders a bare `❯` (U+276F) row, a glyph the shared composer classifier
+  # already reads; the shipped default `band` and six other shapes are not in
+  # its catalogue, and the shape is otherwise a captain-level setting.
+  shape: borderless
+tools:
+  # `write` (and `always-ask`) prompt on every shell command; nobody answers a
+  # worker's prompt. --auto-approve on the launch line pins the same thing, so
+  # the two agree even if one is dropped.
+  approvalMode: yolo
+plan:
+  # `plan.defaultOnStartup: true` opens every session read-only; a worker that
+  # cannot edit files sits on its brief forever.
+  defaultOnStartup: false
+prewalk:
+  # Prewalk swaps the active model for the `smol` role after the first edit, so
+  # a worker pinned with --model would silently change model mid-task.
+  enabled: false
+retry:
+  # `confirm` pops a dialog when a usage window runs low; `auto` lets omp fall
+  # through the captain's own fallback chain without a keystroke.
+  usageReservePolicy: auto
+# One-at-a-time delivery is omp's shipped default; pinned so a steer typed by
+# bin/fm-send.sh keeps the ordering the delivery guard expects.
+steeringMode: one-at-a-time
+followUpMode: one-at-a-time

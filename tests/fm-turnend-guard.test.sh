@@ -324,6 +324,7 @@ Codex|{"cwd":"$dir","stop_hook_active":false}
 OpenCode|{"stop_hook_active":false}
 Pi|{"stop_hook_active":false}
 pi-signed|{"stop_hook_active":false}
+omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
 EOF
