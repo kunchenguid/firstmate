@@ -270,6 +270,7 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+      *"headRefName"*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
 esac
@@ -1041,6 +1042,37 @@ test_no_pr_recorded_force_still_allows() {
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "no-pr-force-allows: --force did not close the backlog item: $(backlog_row_state "$case_dir")"
   pass "--force still closes a ship task's backlog item when no PR is recorded or discoverable"
+}
+
+# 2026-09-05 shell/174 incident regression: a prerequisite PR recorded under
+# prerequisite_pr= (bin/fm-pr-check.sh --prerequisite) must never be read by
+# teardown's landed check. PR_URL is read only via `grep '^pr='`, which does
+# not match a `prerequisite_pr=` line, and pr_is_merged never falls back to a
+# key other than pr=/branch-name discovery, so a merged, HEAD-matching
+# prerequisite PR must not make genuinely unlanded work look landed.
+test_prerequisite_pr_ignored_by_teardown() {
+  local case_dir rc
+  case_dir=$(make_case prerequisite-ignored)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # No fork, no push to origin, not merged into main: genuinely unlanded work.
+  printf '%s\n' 'prerequisite_pr=https://github.com/example/repo/pull/99' \
+    >> "$case_dir/state/task-x1.meta"
+  ! grep -qE '^pr=' "$case_dir/state/task-x1.meta" \
+    || fail "prerequisite-ignored: test setup bug, meta unexpectedly has a pr= line"
+  # The default fakebin/gh and gh-axi from make_case report no PR at all, so a
+  # correct teardown never has any PR to call merged in the first place; this
+  # only proves the refusal comes from PR_URL staying empty, not from a merged
+  # PR fixture also being unreachable by branch name.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "prerequisite-ignored: teardown should refuse unlanded work despite a merged prerequisite_pr"
+  grep -q REFUSED "$case_dir/stderr" || fail "prerequisite-ignored: no REFUSED line in stderr"
+  pass "a recorded prerequisite_pr is never read as the task's own delivery by teardown's landed check"
 }
 
 setup_replayed_unpushed_patch_case() {
@@ -3485,6 +3517,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_no_pr_recorded_fully_pushed_no_discoverable_pr_refuses
 test_no_pr_recorded_fully_pushed_pr_discovered_allows
 test_no_pr_recorded_force_still_allows
+test_prerequisite_pr_ignored_by_teardown
 test_replayed_unpushed_patch_refuses_without_force
 test_replayed_unpushed_patch_allows_with_force
 test_merged_pr_with_later_local_commit_refuses

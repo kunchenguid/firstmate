@@ -213,6 +213,24 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# fm_pr_branch_matches_task <candidate-branch> <task-id> [<actual-branch>]
+# True when <candidate-branch> - a PR's head branch, read live from the forge -
+# is this task's own branch: exactly <actual-branch> when the caller could
+# read one live from the task's worktree, or the fm/<task-id> stem allowing an
+# optional -fixN or -rN retry suffix. Either match is accepted (bin/fm-pr-check.sh
+# is the only caller and always tries both). Refuses on an empty candidate so a
+# forge read that came back blank can never pass.
+fm_pr_branch_matches_task() {
+  local candidate=${1-} id=${2-} actual=${3-} escaped_id
+  local LC_ALL=C
+  [ -n "$candidate" ] || return 1
+  if [ -n "$actual" ] && [ "$candidate" = "$actual" ]; then
+    return 0
+  fi
+  escaped_id=${id//./\\.}
+  [[ "$candidate" =~ ^fm/${escaped_id}(-fix[0-9]+|-r[0-9]+)?$ ]]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null

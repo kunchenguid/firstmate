@@ -157,6 +157,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -195,6 +196,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -226,6 +228,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -334,8 +337,9 @@ write_mr_json() {
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s}\n' \
+  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
+  printf '"source_branch":"fm/task-x1"}\n' >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
@@ -847,6 +851,7 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *headRefOid*) printf '%s\n' 8484848484848484848484848484848484848484 ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -934,6 +939,7 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *headRefOid*) printf '%s\n' 8686868686868686868686868686868686868686 ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
     esac
     ;;
   "api graphql") exit 1 ;;
@@ -1705,15 +1711,29 @@ test_gitlab_stale_recorded_head_is_reported() {
 }
 
 test_gitlab_unreadable_state_refuses() {
-  local case_dir rc name
+  local case_dir rc name expected
   for name in view-fails not-an-object split-value; do
     case_dir=$(make_gitlab_case "gitlab-unreadable-$name")
     case "$name" in
-      view-fails) : > "$case_dir/glab-view-fails" ;;
-      not-an-object) printf '[]\n' > "$case_dir/mr.json" ;;
+      # fm-pr-check.sh's own branch-identity read of the same `-F json` call
+      # fails first on these two, since it cannot be answered at all (view
+      # fails outright) or has no object to read .source_branch from.
+      view-fails)
+        : > "$case_dir/glab-view-fails"
+        expected="could not read PR $MR_URL's head branch"
+        ;;
+      not-an-object)
+        printf '[]\n' > "$case_dir/mr.json"
+        expected="could not read PR $MR_URL's head branch"
+        ;;
       # A value carrying a newline splits into a line no field name matches, so
       # it must refuse rather than be truncated into a value a check accepts.
-      split-value) write_mr_json "$case_dir/mr.json" 'state=opened\nnot-a-field' ;;
+      # source_branch itself still reads fine, so fm-pr-check.sh's own check
+      # passes and fm-pr-merge.sh's own field-count check is what refuses.
+      split-value)
+        write_mr_json "$case_dir/mr.json" 'state=opened\nnot-a-field'
+        expected='could not read the GitLab merge request state before merging'
+        ;;
     esac
 
     set +e
@@ -1723,7 +1743,7 @@ test_gitlab_unreadable_state_refuses() {
     set -e
 
     expect_code 1 "$rc" "gitlab-unreadable-$name: fm-pr-merge should refuse"
-    assert_grep 'could not read the GitLab merge request state before merging' \
+    assert_grep "$expected" \
       "$case_dir/stderr" "gitlab-unreadable-$name: refusal did not name the unreadable state"
     [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
       || fail "gitlab-unreadable-$name: a merge was attempted on an unreadable state"

@@ -312,7 +312,7 @@ meta_incarnation() { # <meta>
 }
 
 pr_for_task() { # <meta> <status> [preferred-line]
-  local meta=$1 status=$2 preferred=${3:-} value
+  local meta=$1 status=$2 preferred=${3:-} value prereq
   value=$(meta_field "$meta" pr)
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
@@ -321,7 +321,17 @@ pr_for_task() { # <meta> <status> [preferred-line]
   if [ -z "$value" ] && [ -f "$status" ]; then
     value=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$status" 2>/dev/null | tail -1 || true)
   fi
-  clean_field "$value"
+  value=$(clean_field "$value")
+  # A prerequisite PR (bin/fm-pr-check.sh --prerequisite) is often mentioned
+  # in a status line alongside the task's real work; without this guard the
+  # free-text regex fallback above could pick up that mention as the task's
+  # own PR once pr= itself is empty, misattributing it exactly the way this
+  # task's own incident did before the pr= write side was fixed.
+  prereq=$(clean_field "$(meta_field "$meta" prerequisite_pr)")
+  if [ -n "$prereq" ] && [ "$value" = "$prereq" ]; then
+    value=
+  fi
+  printf '%s' "$value"
 }
 
 home_secondmate_id() {

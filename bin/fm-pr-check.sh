@@ -5,7 +5,23 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+#
+# Before recording pr=, the PR's head branch (read live from the forge) must
+# be this task's own branch: fm_pr_branch_matches_task (bin/fm-pr-lib.sh)
+# accepts either the branch actually checked out in the recorded worktree, or
+# the fm/<task-id> stem allowing an optional -fixN or -rN retry suffix. This
+# stops a PR built for other work (e.g. a foundation prerequisite) from being
+# recorded as this task's own delivery, which teardown and the merge path then
+# treat as landed once it merges (2026-09-05 shell/174 incident: PR 174 was
+# recorded as this task's pr=, teardown found it merged, and the real shell PR
+# was closed as a duplicate). Pass --prerequisite to record such a PR anyway,
+# under prerequisite_pr= instead of pr= (no pr_head-equivalent, since no
+# reader ever treats that key as this task's own delivery). The branch read
+# needs gh for GitHub or jq for GitLab; when the needed tool is absent the check is
+# skipped rather than refused, matching the pr_head lookup's own best-effort
+# posture toward a missing gh.
+#
+# Usage: fm-pr-check.sh [--prerequisite] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +36,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
+PREREQUISITE=0
+if [ "${1-}" = --prerequisite ]; then
+  PREREQUISITE=1
+  shift
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -42,6 +63,73 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+
+if [ "$PREREQUISITE" -eq 1 ]; then
+  # A prerequisite record is informational only: no branch-identity check, no
+  # merge poll, and no ready line, because this PR is never claimed to be this
+  # task's own delivery. No pr_head-equivalent is captured here: nothing reads
+  # it, since the whole point of prerequisite_pr= is that no landed test
+  # consults it. prerequisite_pr= is written strictly before any existing
+  # pr=/pr_head=/x_* tail so fm_pr_metadata_identity_parse's exactly-one-pr=
+  # invariant (relied on by the poll/retirement paths below) still holds for a
+  # task that has already recorded its own real PR.
+  META_TMP=
+  META_LOCK=
+  META_LOCK_HELD=0
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap below.
+  prereq_cleanup() {
+    [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+    if [ "$META_LOCK_HELD" = 1 ]; then
+      fm_lock_release "$META_LOCK" || true
+      META_LOCK_HELD=0
+    fi
+  }
+  trap prereq_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK"
+  META_LOCK_HELD=1
+  [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
+    || { echo "error: task metadata is unavailable" >&2; exit 1; }
+  META_DEVICE=$(fm_pr_file_device "$META") || exit 1
+  STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+  [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+  META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
+  HEAD_LINES=()
+  TAIL_LINES=()
+  IN_TAIL=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$IN_TAIL" -eq 1 ]; then
+      TAIL_LINES+=("$line")
+      continue
+    fi
+    case "$line" in
+      pr=*) IN_TAIL=1; TAIL_LINES+=("$line") ;;
+      prerequisite_pr=*) ;;
+      *) HEAD_LINES+=("$line") ;;
+    esac
+  done < "$META"
+  {
+    for line in "${HEAD_LINES[@]+"${HEAD_LINES[@]}"}"; do printf '%s\n' "$line"; done
+    printf 'prerequisite_pr=%s\n' "$URL"
+    for line in "${TAIL_LINES[@]+"${TAIL_LINES[@]}"}"; do printf '%s\n' "$line"; done
+  } > "$META_TMP" || exit 1
+  chmod 0600 "$META_TMP" || exit 1
+  fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
+  if [ "${#TAIL_LINES[@]}" -gt 0 ]; then
+    fm_pr_metadata_identity_parse "$META_TMP" || exit 1
+  fi
+  fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
+  mv -f -- "$META_TMP" "$META" || exit 1
+  META_TMP=
+  fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+  printf 'recorded: state/%s.meta prerequisite_pr=%s\n' "$ID" "$URL"
+  exit 0
+fi
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
@@ -62,6 +150,55 @@ fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
+# Branch identity (see the file header): read the PR's head branch live from
+# the forge and refuse unless it is this task's own branch. This is a separate
+# query from the pr_head lookup below on purpose, so it never changes what
+# that lookup sees. GitLab needs jq because plain glab exposes the source
+# branch only inside its JSON output. Neither gh nor jq is otherwise required
+# by this script, so their absence degrades the check to a skip rather than a
+# refusal, the same best-effort posture the pr_head lookup below already
+# takes for a missing gh: an environment that never needed these tools before
+# should not newly refuse to record a PR because of this check alone.
+TASK_BRANCH=
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  TASK_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+fi
+PR_BRANCH=
+case "$PROVIDER" in
+  github)
+    if command -v gh >/dev/null 2>&1; then
+      if [ -n "$WT" ] && [ -d "$WT" ]; then
+        PR_BRANCH=$(cd "$WT" && gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) || PR_BRANCH=
+      else
+        PR_BRANCH=$(gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) || PR_BRANCH=
+      fi
+      if [ -z "$PR_BRANCH" ]; then
+        echo "error: could not read PR $URL's head branch to verify it against task $ID" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  gitlab)
+    if command -v jq >/dev/null 2>&1; then
+      GITLAB_PROJECT_URL="https://$HOST/$PROJECT_PATH"
+      if GITLAB_JSON=$(GITLAB_HOST="$HOST" glab mr view "$NUMBER" -R "$GITLAB_PROJECT_URL" -F json 2>/dev/null) \
+        && [ -n "$GITLAB_JSON" ]; then
+        PR_BRANCH=$(printf '%s' "$GITLAB_JSON" | jq -r '.source_branch // empty' 2>/dev/null) || PR_BRANCH=
+      fi
+      if [ -z "$PR_BRANCH" ]; then
+        echo "error: could not read PR $URL's head branch to verify it against task $ID" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
+if [ -n "$PR_BRANCH" ] && ! fm_pr_branch_matches_task "$PR_BRANCH" "$ID" "$TASK_BRANCH"; then
+  EXPECTED_DESC="fm/$ID (optionally -fixN or -rN)"
+  [ -z "$TASK_BRANCH" ] || EXPECTED_DESC="$TASK_BRANCH or $EXPECTED_DESC"
+  echo "error: PR $URL head branch '$PR_BRANCH' does not match task $ID's branch ($EXPECTED_DESC); pass --prerequisite to record a PR built for other work" >&2
+  exit 1
+fi
+
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
@@ -71,9 +208,8 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ]; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
