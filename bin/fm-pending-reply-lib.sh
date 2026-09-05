@@ -19,8 +19,11 @@
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
-# Record location (parent FM_HOME):
-#   state/pending-replies/<corr_id>
+# Record locations (parent FM_HOME):
+#   state/pending-replies/<corr_id>          unresolved hot record
+#   state/pending-replies/archive/<corr_id>  retained settled record, excluded
+#                                            from the watcher tick scan
+# Correlation lookup and collision checks cover both locations.
 # One more durable input, owned by bin/fm-procevent-remote-reply.sh and read
 # here: state/remote-replies/<task_id>.caught-up, the remote reply mirror's
 # watermark (see the remote reply-channel freshness section below).

@@ -5,12 +5,11 @@
 # Reports whether a firstmate home needs supervision because it has in-flight
 # work (a state/<id>.meta exists) or an X-mode relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
-# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
-# bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
-# bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
-# fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
-# live watcher process means per supervision model. The status fields here retain
-# the beacon-age details used in their messages.
+# (state/.last-watcher-beat, touched at poll phase boundaries, within the grace
+# window). bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
+# bin/fm-wake-lib.sh for its block decision and consumes the beacon-age details
+# from this status. bin/fm-guard.sh consumes only the supervision-need fields for
+# its queued-wakes warning and does not report watcher liveness.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {

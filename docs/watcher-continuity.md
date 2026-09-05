@@ -86,7 +86,8 @@ Because branch claims contain no check-kind rows, a branch acknowledgement skips
 
 ## Arm-layer cycle contract
 
-`bin/fm-watch-arm.sh` never returns a clean empty success.
+`bin/fm-watch-arm.sh` never returns a silent empty success.
+Its sole non-actionable zero return reports that an identity-matched busy holder remains live after the bounded wait and was left alone for the next turn-end attempt.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
@@ -106,7 +107,8 @@ That is what makes an aged beacon meaningful at all - before it, one poll iterat
 There is deliberately no timer and no beat inside a blocking wait, because a watcher stuck inside one phase must stop beating; `state/.last-poll-cycle` marks the iteration boundary the beacon used to double as, and supervision never reads it.
 
 An aged beacon on a LIVE, identity-matched holder is a suspected stall and nothing stronger.
-Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits briefly for it to beat again and attaches when it does.
+Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace with a fixed 30-second maximum and attaches when it beats again.
+When that wait expires, the arm reports the holder, leaves it alone, and lets the next turn end retry through the ordinary path.
 A live holder this home cannot identify as its own watcher is not a busy holder and stays a loud failure.
 
 ## Regression coverage

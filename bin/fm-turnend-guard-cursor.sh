@@ -94,8 +94,8 @@ PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
-# A malformed payload is uncertainty, not a reason to park: fail open and let
-# the pull guard report the problem on the next fleet command.
+# A malformed payload is uncertainty, not a reason to park: fail open because
+# this hook cannot safely classify the turn-end event.
 LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then error("payload")
   elif has("loop_count") then

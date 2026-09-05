@@ -155,14 +155,12 @@ fm_watcher_healthy() {
 }
 
 # fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
-# identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
-# arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
-# that - it decides whether to start, attach to, or replace a real watcher
-# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# identity-matched watcher PROCESS holds this home's lock with a fresh beacon.
+# The arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) and
+# bin/fm-turnend-guard.sh need exactly that at the turn boundary, so a leftover
+# beacon must never satisfy them. The model-aware classifiers below remain for
+# harness classification and regression compatibility; bin/fm-guard.sh no
+# longer asks them to report watcher liveness.
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -307,28 +305,24 @@ fm_afk_daemon_owns_supervision() {
 }
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
-# Model-aware "is supervision healthy right now" verdict for the pull warning
-# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+# Compatibility classifier for the former model-aware pull warning; no current
+# guard consumes this verdict. The arm layer and turn-end guard use the strict
+# fm_watcher_healthy predicate instead. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
-#   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
+#   FM_WATCHER_VERDICT_REASON  when not ok:
 #                              no-watcher   - a live watcher process is the real
 #                                             signal for this model but none holds
-#                                             the lock (the beacon is still fresh)
+#                                             the lock while the beacon is fresh
 #                              stale-beacon - the beacon is stale beyond grace or
-#                                             absent (a genuine supervision lapse)
+#                                             absent
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
-# because the watcher only runs between turns; only a stale beacon is a lapse.
-# extension: a live identity-matched watcher is the ordinary healthy state, but a
-# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_extension_owns_supervision: the Pi or the
-# omp extension pair, whichever the lock-owning session recorded) - that is the
-# extension's own tear-down-and-respawn hand-off, which it retries and escalates
-# itself. A lock with any recorded pid remains down if the strict health check fails.
-# Without ownership proof an unheld lock is down exactly as before, so an unloaded,
-# version-drifted, or exited Pi session still alarms immediately, and a cycle the
-# extension never restores still alarms once the beacon passes grace.
-# persistent: require a live identity-matched watcher with a fresh beacon
-# (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
+# because the watcher runs only between turns.
+# extension: a live identity-matched watcher is healthy; a genuinely unheld lock
+# is also healthy while the beacon is fresh and a live Pi or omp session provably
+# owns continuity through fm_extension_owns_supervision. A lock with any recorded
+# pid is unhealthy if the strict check fails.
+# persistent: require a live identity-matched watcher with a fresh beacon; a
+# fresh leftover beacon with no live watcher is unhealthy.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.

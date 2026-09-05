@@ -708,10 +708,10 @@ fi
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
-# tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
-# below. The read-only path never touches the queue because it lacks mutation
-# authority, and another session may be actively handling it. It still runs
-# fm-guard.sh directly with non-mutating advisory text, so the same alarms
+# worktree-tangle and queued-wakes alarms land right here too, ahead of the bulk
+# digest below. The read-only path never touches the queue because it lacks
+# mutation authority, and another session may be actively handling it. It still
+# runs fm-guard.sh directly with non-mutating advisory text, so the same alarms
 # surface without repair commands.
 stage wake-queue
 subsection "WAKE QUEUE"
