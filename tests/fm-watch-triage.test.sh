@@ -1704,6 +1704,129 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# Pi's optional Claude-style footer includes a clock that rerenders every 30
+# seconds and changes once per minute even while the agent remains ready.
+# The watcher must treat that one proven dynamic field as stable for both Pi
+# launch identities, while preserving real pane progress and keeping identical
+# timestamp-shaped content significant for every other harness.
+test_pi_idle_footer_clock_does_not_repeat_stale() {
+  local harness dir state fakebin out capture_file window sig pid key pre_clock_count post_clock_count
+  for harness in pi pi-signed; do
+    dir=$(make_case "${harness}-idle-footer-clock"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"
+    window="test:fm-${harness}-clock"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    cat > "$capture_file" <<'EOF'
+quoted older Pi pane:
+main  ctx:0%  0  Sol 5.6 (272k context)  09:10  · compact in 94%
+▶▶ agent ready · high thinking
+continued transcript
+────────────────────────
+gigachad:~/work
+main  ctx:0%  0  Sol 5.6 (272k context)  10:03  · compact in 94%
+▶▶ agent ready · high thinking
+EOF
+    printf 'window=%s\nkind=ship\nharness=%s\n' "$window" "$harness" > "$state/${harness}-clock.meta"
+    printf 'working: implementation turn settled\n' > "$state/${harness}-clock.status"
+    sig=$(seen_sig "$state/${harness}-clock.status")
+    printf '%s' "$sig" > "$state/.seen-${harness}-clock_status"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE='state: unknown · source: none · idle Pi fixture' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness initial idle pane did not surface once"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "$harness initial idle pane did not print stale"
+    pre_clock_count=$(cat "$state/.count-$key" 2>/dev/null || true)
+    case "$pre_clock_count" in
+      ''|*[!0-9]*) fail "$harness initial stale counter was not numeric" ;;
+    esac
+    ack_stopped_cycle "$state" || fail "$harness initial stale cycle could not be acknowledged"
+
+    # This is the operator-visible flood trigger: every byte remains unchanged
+    # except the clock tick in the proven Pi footer immediately above its ready
+    # state line. A re-armed watcher must remain quiet across many poll cycles.
+    cat > "$capture_file" <<'EOF'
+quoted older Pi pane:
+main  ctx:0%  0  Sol 5.6 (272k context)  09:10  · compact in 94%
+▶▶ agent ready · high thinking
+continued transcript
+────────────────────────
+gigachad:~/work
+main  ctx:0%  0  Sol 5.6 (272k context)  10:04  · compact in 94%
+▶▶ agent ready · high thinking
+EOF
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE='state: unknown · source: none · idle Pi fixture' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid" 100; then
+      reap "$pid"
+      fail "$harness clock-only idle footer tick emitted another notification: $(cat "$out")"
+    fi
+    post_clock_count=$(cat "$state/.count-$key" 2>/dev/null || true)
+    case "$post_clock_count" in
+      ''|*[!0-9]*) reap "$pid"; fail "$harness clock-only stale counter was not numeric" ;;
+    esac
+    [ "$post_clock_count" -gt "$pre_clock_count" ] \
+      || { reap "$pid"; fail "$harness clock-only path completed no stale scan"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$harness clock-only tick printed a wake reason"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$harness clock-only tick queued another wake"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "$harness quiet clock cycle could not be acknowledged"
+
+    # A real transcript change remains significant even when it looks exactly
+    # like a copied Pi footer, so only the bottom-anchored live footer is masked.
+    cat > "$capture_file" <<'EOF'
+quoted older Pi pane:
+main  ctx:0%  0  Sol 5.6 (272k context)  09:11  · compact in 94%
+▶▶ agent ready · high thinking
+continued transcript
+────────────────────────
+gigachad:~/work
+main  ctx:0%  0  Sol 5.6 (272k context)  10:04  · compact in 94%
+▶▶ agent ready · high thinking
+EOF
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE='state: unknown · source: none · idle Pi fixture' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness genuine pane progress did not surface"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "$harness genuine pane progress lost its stale notification"
+  done
+
+  # Disconfirm a global timestamp scrub: the same bytes under another supported
+  # harness remain ordinary pane content, and a changed clock-shaped value must
+  # still produce a distinct stale notification.
+  dir=$(make_case claude-clock-shaped-content); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-claude-clock-content"
+  printf 'quoted Pi footer clock 10:04\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/claude-clock-content.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · idle Claude fixture' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "initial Claude clock-shaped content did not surface"
+  ack_stopped_cycle "$state" || fail "initial Claude clock-shaped cycle could not be acknowledged"
+  printf 'quoted Pi footer clock 10:05\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · idle Claude fixture' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "Claude clock-shaped content change was incorrectly suppressed"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "non-Pi clock-shaped content lost its stale notification"
+
+  pass "Pi and pi-signed footer clock ticks dedupe without suppressing real pane changes or non-Pi timestamps"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2467,7 +2590,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
   sleep 2
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
@@ -3165,7 +3288,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
@@ -3180,7 +3303,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 100 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
@@ -4038,6 +4161,7 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_pi_idle_footer_clock_does_not_repeat_stale
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

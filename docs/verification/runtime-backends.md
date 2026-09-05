@@ -167,6 +167,31 @@ That shared plain-Pi path is retained as disconfirming evidence against using an
 Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
+### Pi idle footer clock
+
+Pi's optional Claude-style footer clock was verified on 2026-08-20 with Pi 0.84.1 and tmux 3.6b on macOS arm64.
+The live guard launched the real interactive harness on a private tmux socket without submitting a prompt, observed its idle `HH:MM` value change, proved a re-armed watcher completed another stale scan without printing or queuing a second wake, then typed unsubmitted composer text and observed a new stale wake.
+The installed machine had no `pi-signed` wrapper, so the guard reported that identity absent rather than treating it as verified.
+The portable regression in `tests/fm-watch-triage.test.sh` covers both `pi` and `pi-signed`, the unchanged-idle counter path, a bottom-anchoring counterexample, genuine pane progress, non-Pi clock-shaped content, and the existing wedge path.
+
+Refresh the real rendered-surface evidence after either Pi identity or the footer extension changes:
+
+```sh
+FM_PI_FOOTER_CLOCK_LIVE=1 \
+  bin/fm-test-run.sh tests/fm-pi-footer-clock-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - pi (0.84.1): real idle footer clock changed without another stale wake and typed pane progress still surfaced
+# harness absent, not verified here: pi-signed
+ok - live Pi footer-clock guard verified 1 installed harness(es)
+```
+
+The hash correction is shared after `fm_backend_capture`, so tmux, Herdr, Zellij, Orca, and cmux all use the same normalization without backend-specific matchers.
+Only metadata identities `pi` and `pi-signed` enter it; every other supported harness retains raw capture hashing.
+
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.

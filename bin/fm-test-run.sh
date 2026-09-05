@@ -283,6 +283,7 @@ family_for_basename() {
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-pi-footer-clock-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -1199,6 +1200,10 @@ families_for_changed_path() {
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-watch.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)

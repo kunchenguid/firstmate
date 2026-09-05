@@ -246,6 +246,41 @@ _event_cap_fails=0
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
+# Pi's optional Claude-style footer rerenders its HH:MM clock every 30 seconds,
+# changing once per minute even while the agent and transcript remain idle.
+# Normalize only that proven dynamic field: the recorded harness must be Pi or
+# pi-signed, and the clock must sit on the structured context line immediately
+# above Pi's ready/working state line. Other timestamps, harnesses, and every
+# other pane byte remain significant to stale detection.
+normalize_pane_for_stale_hash() {  # <harness>, pane bytes on stdin
+  local harness=$1 pane='' before_state state_line context_line prefix normalized_context
+  local state_re='^[[:space:]]*▶▶ agent (ready|working)([[:space:]].*)?$'
+  local context_re='^(.*ctx:(\?|[0-9]+%).*\([0-9]+(\.[0-9]+)?[kM]? context\).*  )([0-9][0-9]:[0-9][0-9])(.*)$'
+  IFS= read -r -d '' pane || true
+  case "$harness" in
+    pi|pi-signed) ;;
+    *) printf '%s' "$pane"; return ;;
+  esac
+  case "$pane" in
+    *$'\n'*) ;;
+    *) printf '%s' "$pane"; return ;;
+  esac
+  state_line=${pane##*$'\n'}
+  before_state=${pane%$'\n'*}
+  context_line=${before_state##*$'\n'}
+  if [[ "$state_line" =~ $state_re ]] && [[ "$context_line" =~ $context_re ]]; then
+    normalized_context="${BASH_REMATCH[1]}<clock>${BASH_REMATCH[5]}"
+    if [ "$before_state" = "$context_line" ]; then
+      prefix=''
+    else
+      prefix="${before_state%$'\n'*}"$'\n'
+    fi
+    printf '%s%s\n%s' "$prefix" "$normalized_context" "$state_line"
+  else
+    printf '%s' "$pane"
+  fi
+}
+
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
@@ -1829,7 +1864,7 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    h=$(printf '%s' "$tail40" | normalize_pane_for_stale_hash "$(window_harness "$w")" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
