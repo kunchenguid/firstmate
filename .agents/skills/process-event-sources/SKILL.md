@@ -34,10 +34,11 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 After a host applies and re-serves one batch of captain feedback, send a short acknowledgement that says exactly what changed through the listener that already owns the poll:
 
 ```sh
-bin/fm-procevent-lavish.sh reply <artifact.html> "<short change summary>"
+FM_LAVISH_HOST_STATUS_FILE=<host-task-status-file> bin/fm-procevent-lavish.sh reply <artifact.html> "<short change summary>"
 ```
 
 The reply command stages the acknowledgement durably, requests an immediate listener restart, and returns without polling in the host's turn.
+For a final Send & End batch, it records the acknowledgement in the host status log because the board is already closed; preserve the applied final changes in the host report.
 Never start a competing `lavish-axi poll` from the host turn.
 
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:

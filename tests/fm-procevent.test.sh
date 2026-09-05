@@ -1604,6 +1604,20 @@ FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LO
 wait "$reply_retire_pid" || fail "racing retire command failed"
 assert_contains "$(cat "$pending_reply")" "Reply staged after re-arm." \
   "old retirement deleted the replacement registration's reply"
+
+rm -f -- "$REPLY_HOME/state/procevent/$reply_id.source" "$pending_reply"
+ended_status="$REPLY_HOME/state/reply-host.status"
+ended_reply_out=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  FM_LAVISH_HOST_STATUS_FILE="$ended_status" RESTART_LOG="$RESTART_LOG" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Applied the final requested change." 2>&1) \
+  || fail "reply rejected a final acknowledgement after session retirement"
+assert_contains "$ended_reply_out" "session ended; acknowledgement recorded in host status log" \
+  "retired-session reply did not explain its successful fallback"
+assert_contains "$(cat "$ended_status")" \
+  "note: Lavish session ended; acknowledgement: Applied the final requested change." \
+  "retired-session reply did not append the acknowledgement to the host status log"
+assert_absent "$pending_reply" "retired-session reply staged an undeliverable board acknowledgement"
 pass "Lavish host replies survive crashes and early restarts with at-least-once delivery"
 
 # The generic control hook restarts the exact registered generation immediately
