@@ -1647,7 +1647,8 @@ test_captain_approved_deliveries_stay_in_landed() {
   "$TASKS_AXI_BIN" 'done' approved-mate --pr "$mate_pr" --file "$mate_backlog" >/dev/null \
     || fail "could not reproduce the secondmate approval-time close"
 
-  "$TASKS_AXI_BIN" add answered-question "Choose the sample route" --kind captain \
+  "$TASKS_AXI_BIN" add answered-question \
+    "Decide whether https://github.com/o/r/pull/7 may merge" --kind captain \
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the answered captain question"
   run_captain "$home" "$fakebin" hold answered-question \
