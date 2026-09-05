@@ -25,10 +25,20 @@
 # from the primary checkout's default branch when that branch led origin. This is
 # where that base first acquires a delivery, so it is re-checked here: promoting
 # into a mode that opens a pull request (bin/fm-dod-lib.sh owns which those are) is
-# refused while the worktree's default branch still carries commits origin has
-# never seen, because the branch built on it would publish every one of them inside
-# the PR. The check reads local refs only and never fetches, and it never touches
-# the worktree; the refusal names the exact commit count and both remedies.
+# refused while the commit THIS worktree is sitting on is unreachable from
+# origin/<default>, because fm/<id> branches from there and the pull request would
+# publish every commit origin has never seen.
+# The only question is what this worktree would publish, so the primary checkout's
+# own default branch is never measured: a scout resting on origin's tip promotes
+# normally however far that branch has since run ahead with local-only landings,
+# and a scout parked on a historical commit promotes whenever origin still contains
+# it. Reading this worktree's own history is also what catches the mirror case a
+# count taken on another ref misses - a default branch rewritten and then pushed
+# leaves origin and local identical while the worktree still holds the pre-rewrite
+# commits origin never received.
+# The check reads local refs only and never fetches, and it never touches the
+# worktree; the refusal names the exact commit count and every remedy, including
+# the one that applies when the extra commits are the scout's own scratch history.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -148,13 +158,16 @@ if fm_delivery_opens_pull_request "$MODE" && [ -n "$WT" ] && [ -d "$WT" ]; then
   BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
   if [ -n "$BASE_DEFAULT" ]; then
     BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
-    BASE_LOCAL_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
-    if [ -n "$BASE_ORIGIN_REV" ] && [ -n "$BASE_LOCAL_REV" ]; then
-      BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_LOCAL_REV" 2>/dev/null || true)
-      [ -n "$BASE_UNPUSHED" ] || BASE_UNPUSHED=0
-      if [ "$BASE_UNPUSHED" -gt 0 ] 2>/dev/null; then
+    BASE_HEAD_REV=$(git -C "$WT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
+    if [ -n "$BASE_ORIGIN_REV" ] && [ -n "$BASE_HEAD_REV" ]; then
+      # Commits this worktree holds that origin/<default> cannot reach: zero exactly
+      # when HEAD is already an ancestor of the forge tip, so this one count answers
+      # both a base that ran ahead locally and a base origin rewrote out from under.
+      BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_HEAD_REV" 2>/dev/null || true)
+      case "$BASE_UNPUSHED" in ''|*[!0-9]*) BASE_UNPUSHED=0 ;; esac
+      if [ "$BASE_UNPUSHED" -gt 0 ]; then
         if [ "$BASE_UNPUSHED" -eq 1 ]; then BASE_UNIT=commit; else BASE_UNIT=commits; fi
-        echo "error: $BASE_DEFAULT in $WT carries $BASE_UNPUSHED $BASE_UNIT origin/$BASE_DEFAULT does not, and mode=$MODE opens a pull request against origin; refusing to promote rather than publish that unpushed local history inside the PR. Push $BASE_DEFAULT to origin first, or promote with --mode local-only." >&2
+        echo "error: the base checked out in $WT carries $BASE_UNPUSHED $BASE_UNIT origin/$BASE_DEFAULT does not, and mode=$MODE opens a pull request against origin; refusing to promote rather than publish that unpushed local history inside the PR. Push those commits to origin first, or move this worktree back onto a base origin already contains (dropping the scout's scratch commits if that is what they are), or promote with --mode local-only." >&2
         exit 1
       fi
     fi

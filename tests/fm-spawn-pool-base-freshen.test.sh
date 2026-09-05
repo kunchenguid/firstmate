@@ -609,7 +609,7 @@ test_pull_request_delivery_keeps_the_forge_tip() {
   assert_contains "$out" "opens a pull request against origin" \
     "the spawn did not say why the primary's branch was not used as the base"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed withheld candidate: %s\n' "$(printf '%s\n' "$out" | grep 'ahead of origin/main')"
+    printf '# observed withheld candidate: %s\n' "$(printf '%s\n' "$out" | grep 'opens a pull request against origin')"
   fi
   pass "a pull-request delivery keeps origin's tip and reports the primary branch it withheld"
 }

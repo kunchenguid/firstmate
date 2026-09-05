@@ -5,6 +5,8 @@
 # A task whose meta records a pull-request delivery is then compared against origin/<default>, because that is the branch its pull request targets and every commit missing from origin lands inside it.
 # Which modes those are is bin/fm-dod-lib.sh's to say, and bin/fm-spawn.sh reads the same owner when it picks the worktree's base, so the branch is reviewed against the commit it was actually built on.
 # Any other task is compared against whichever of origin/<default> and the local <default> contains the other, which is the base bin/fm-spawn.sh gave its worktree, because a local-only project's landed work lives only on the local default branch while its origin stays frozen at the last push.
+# When neither of those two contains the other - the branches have diverged - the local <default> is the base, because a task that lands locally branches from there and the three-dot merge base still resolves to the real branch point.
+# The two missing-ref fallbacks are asymmetric on purpose: an unresolvable origin/<default> leaves the local <default> as the base, and a missing local <default> leaves origin/<default>.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
