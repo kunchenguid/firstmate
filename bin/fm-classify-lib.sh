@@ -114,14 +114,14 @@ last_status_line() {
   local f=$1 line last='' fallback='' verb
   [ -f "$f" ] && [ -r "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *[![:space:]]*) fallback=$line ;; esac
-    case "$line" in *:*) ;; *) continue ;; esac
-    verb=$(status_line_verb "$line")
+    case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
+    case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
     case "$verb" in
       working|needs-decision|blocked|done|failed|note|\
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") last=$line ;;
+      *) status_is_captain_relevant "$line" && last=$line ;;
     esac
   done < "$f"
   printf '%s\n' "${last:-$fallback}"
@@ -146,10 +146,9 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb matched=1 restore_case=0 pattern
   [ -n "$line" ] || return 1
-  status_is_paused "$line" && return 1
-  verb=$(status_line_verb "$line")
+  status_line_verb "$line" verb
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
@@ -160,7 +159,11 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  pattern=${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}
+  shopt -q nocasematch || { shopt -s nocasematch; restore_case=1; }
+  [[ "$line" =~ $pattern ]] && matched=0
+  [ "$restore_case" -eq 0 ] || shopt -u nocasematch
+  return "$matched"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -296,23 +299,24 @@ status_line_verb() {  # <status-line> -> leading verb word
   # contain a correlation token is returned byte-for-byte as before, so every
   # line without one keeps its exact historical verb, spacing included.
   case "$v" in
-    *corr=*) ;;
-    *) printf '%s' "$v"; return 0 ;;
+    *corr=*)
+      # Retain the first word, then drop only recognised tokens from the remaining
+      # whole words. Anything unrecognised stays, so prose still matches no verb.
+      word=${v%%[[:space:]]*}
+      out=$word
+      v=${v#"$word"}
+      v=${v#"${v%%[![:space:]]*}"}
+      while [ -n "$v" ]; do
+        word=${v%%[[:space:]]*}
+        v=${v#"$word"}
+        v=${v#"${v%%[![:space:]]*}"}
+        _fm_classify_is_corr_token "$word" && continue
+        out="$out $word"
+      done
+      ;;
+    *) out=$v ;;
   esac
-  # Retain the first word, then drop only recognised tokens from the remaining
-  # whole words. Anything unrecognised stays, so prose still matches no verb.
-  word=${v%%[[:space:]]*}
-  out=$word
-  v=${v#"$word"}
-  v=${v#"${v%%[![:space:]]*}"}
-  while [ -n "$v" ]; do
-    word=${v%%[[:space:]]*}
-    v=${v#"$word"}
-    v=${v#"${v%%[![:space:]]*}"}
-    _fm_classify_is_corr_token "$word" && continue
-    out="$out $word"
-  done
-  printf '%s' "$out"
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$out"; else printf '%s' "$out"; fi
 }
 # 0 when a complete "[key=...]" token sits in the documented position before
 # the line's first colon (or anywhere on a line that has no colon at all).
@@ -500,14 +504,21 @@ status_open_decisions() {  # <status-file>
 # within each kind the fold's most recently opened record supplies the detail.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local last open key verb note blocked='' decision=''
+  local last open='' key verb note blocked='' decision='' line resolve held
   last=$(last_status_line "$1")
-  if [ "$2" != secondmate ]; then
-    case "$(status_line_verb "$last")" in
-      done|failed) printf '%s\n' "$last"; return 0 ;;
-    esac
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  if [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      status_line_verb "$line" verb
+      case "$verb" in
+        done|failed) [ "$2" = secondmate ] || open='' ;;
+        needs-decision|blocked|"$resolve"|"$held")
+          open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+          ;;
+      esac
+    done < "$1"
   fi
-  open=$(status_open_decisions "$1")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in
       blocked) blocked="blocked [key=$key]: $note" ;;

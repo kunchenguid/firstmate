@@ -1466,7 +1466,7 @@ test_secondmate_open_block_survives_unrelated_append() {
   fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude"
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate busy --gen "$gen" --source claude-hook --event user-prompt-submit
-  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer' 'working: continuing another task' 'done: another task completed' 'failed: another task failed'; do
+  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer' 'working: continuing another task' 'done: another task completed' 'failed: another task failed' $'done: another task completed\nnote: cleanup complete' $'failed: another task failed\nnote: cleanup complete'; do
     printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$d/state/mate.status"
     out=$(run_crew_state "$d" mate)
     assert_contains "$out" "state: blocked" "open blocker survives '$suffix' with a busy endpoint"
@@ -1481,7 +1481,7 @@ test_secondmate_open_block_survives_unrelated_append() {
 
 test_single_owner_terminal_declaration_supersedes_stale_decision() {
   reset_fakes
-  local d kind opener terminal out
+  local d kind opener terminal out key expected
   d=$(new_case terminal-stale-decision)
   mkdir -p "$d/wt"
   make_fakebin "$d" >/dev/null
@@ -1495,10 +1495,77 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
         out=$(run_crew_state "$d" task)
         assert_contains "$out" "state: $terminal" "$kind terminal declaration supersedes stale $opener"
         assert_contains "$out" "final outcome" "the terminal declaration supplies the detail"
+        printf 'note: cleanup complete\n' >> "$d/state/task.status"
+        out=$(run_crew_state "$d" task)
+        assert_contains "$out" "state: unknown" "$kind cleanup note does not revive a pre-terminal $opener"
+        assert_not_contains "$out" "an earlier decision" "superseded decision detail stays absent after cleanup"
+        expected=parked
+        [ "$opener" != blocked ] || expected=blocked
+        for key in choice new-choice; do
+          printf '%s [key=%s]: reopened after completion\nnote: more cleanup\n' "$opener" "$key" >> "$d/state/task.status"
+          out=$(run_crew_state "$d" task)
+          assert_contains "$out" "state: $expected" "$kind retains a post-terminal $opener for $key"
+          assert_contains "$out" "reopened after completion" "the reopened decision supplies the detail"
+          printf 'resolved [key=%s]: answered\n' "$key" >> "$d/state/task.status"
+          out=$(run_crew_state "$d" task)
+          assert_contains "$out" "state: unknown" "matching resolution clears the reopened decision"
+          assert_not_contains "$out" "an earlier decision" "closing a reopened decision cannot revive pre-terminal decisions"
+        done
       done
     done
   done
   pass "ship and scout terminal declarations supersede stale decisions"
+}
+
+test_latest_status_preserves_legacy_completions() {
+  local d event line
+  d=$(new_case latest-legacy)
+  for event in 'PR ready https://example.com/pull/1' 'checks green' 'ready in branch fm/topic' merged 'PR READY https://example.com/pull/1'; do
+    printf 'paused: awaiting release\n%s\nMore detail: cleanup complete.\n\n' "$event" > "$d/state/task.status"
+    line=$(last_status_line "$d/state/task.status")
+    [ "$line" = "$event" ] || fail "legacy completion '$event' was hidden by an earlier pause"
+    status_is_captain_relevant "$line" || fail "legacy completion is no longer captain-relevant"
+    status_is_paused "$line" && fail "legacy completion retained pause handling"
+    printf 'working: following up on merged work\n' >> "$d/state/task.status"
+    line=$(last_status_line "$d/state/task.status")
+    [ "$line" = 'working: following up on merged work' ] || fail "later working event did not supersede legacy completion"
+    status_is_captain_relevant "$line" && fail "legacy prose made a working event captain-relevant"
+  done
+  (
+    shopt -u nocasematch
+    FM_CAPTAIN_RE='custom-event:' status_is_captain_relevant 'CUSTOM-EVENT: ready' || fail "custom captain regex lost case-insensitive matching"
+    shopt -q nocasematch && fail "captain matching changed caller shell options"
+    FM_CAPTAIN_RE='custom-event:' status_is_captain_relevant 'done: ready' && fail "custom captain regex did not replace defaults"
+    shopt -s nocasematch
+    status_is_captain_relevant 'unrelated prose' && fail "ordinary prose became captain-relevant"
+    shopt -q nocasematch || fail "captain matching cleared caller shell options"
+  ) || fail "captain matching changed regex or shell-option behavior"
+  pass "latest status retains legacy completion events and shared captain matching"
+}
+
+test_latest_status_subshell_work_does_not_grow_with_history() {
+  local d size i level small large
+  d=$(new_case latest-processes)
+  for size in 1 100; do
+    : > "$d/state/task.status"
+    for ((i = 0; i < size; i++)); do
+      printf 'working corr=0123456789abcdef [key=phase]: progress\nMore detail: still working.\n' >> "$d/state/task.status"
+    done
+    printf 'PR ready https://example.com/pull/1\npaused corr=0123456789abcdef [key=release]: awaiting release\n\n' >> "$d/state/task.status"
+    : > "$d/children-$size"
+    (
+      level=$BASH_SUBSHELL
+      set -T
+      trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$d/children-$size"; fi' DEBUG
+      last_status_line "$d/state/task.status" > "$d/output"
+    )
+    [ "$(cat "$d/output")" = 'paused corr=0123456789abcdef [key=release]: awaiting release' ] \
+      || fail "latest status lost correlation-token parsing on a long log"
+  done
+  small=$(wc -c < "$d/children-1")
+  large=$(wc -c < "$d/children-100")
+  [ "$large" -le "$((small + 20))" ] || fail "latest status launches shell work for every historical line ($small -> $large)"
+  pass "latest status subprocess work stays bounded as history grows"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -2289,6 +2356,8 @@ test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_secondmate_open_block_survives_unrelated_append
 test_single_owner_terminal_declaration_supersedes_stale_decision
+test_latest_status_preserves_legacy_completions
+test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
