@@ -1617,6 +1617,26 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # A deploy the confirmed-merge handoff refused only because the merged
+  # commit's own build had not finished yet is finished here. The handoff calls
+  # bin/fm-deploy-trigger.sh from this same loop already, so the deferred
+  # re-check runs on exactly that footing rather than needing a per-task check
+  # slot that teardown would take away with the task. The trigger owns the whole
+  # decision and queues its own captain-facing line; it prints a project name
+  # only when it queued one, so a quiet cycle never wakes firstmate. Cheap when
+  # nothing is pending: no record directory means no call at all.
+  if [ -d "$STATE/deploy-pending" ] && [ ! -L "$STATE/deploy-pending" ] \
+    && [ "$(age_of "$STATE/.last-deploy-pending")" -ge "$CHECK_INTERVAL" ]; then
+    touch "$STATE/.last-deploy-pending"
+    deploy_pending_out=$("$SCRIPT_DIR/fm-deploy-trigger.sh" \
+      "$FM_HOME" "$STATE" --resume-pending 2>/dev/null | tr '\n' ' ') \
+      || deploy_pending_out=
+    deploy_pending_out=${deploy_pending_out% }
+    if [ -n "$deploy_pending_out" ]; then
+      wake "check: deploy: $deploy_pending_out"
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

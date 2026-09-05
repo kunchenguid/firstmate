@@ -760,6 +760,38 @@ test_local_only_truly_unpushed_refuses() {
   pass "local-only worktree with truly unpushed work is refused (safety preserved)"
 }
 
+test_a_pending_deploy_record_survives_teardown() {
+  local case_dir rc record
+  case_dir=$(make_case pending-deploy)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  local wt_head
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  # A merge whose commit outran its own build leaves this record so the deploy
+  # can still happen once the build lands. Cleaning up the task that merged it
+  # routinely happens first, and the record belongs to the PROJECT, not the
+  # task, so a completed teardown must leave it exactly where it is.
+  record="$case_dir/state/deploy-pending/project"
+  mkdir -p "$case_dir/state/deploy-pending"
+  printf 'fm-deploy-pending-v1\nproject=project\n' > "$record"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pending-deploy: teardown should succeed when work is merged into local main"
+  # The task's own state going away is what keeps this case from passing
+  # vacuously on a teardown that did nothing.
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "pending-deploy: teardown did not remove the task record, so it proved nothing about what it keeps"
+  assert_present "$record" \
+    "pending-deploy: teardown removed the project's pending deploy along with the task"
+  pass "a project's pending deploy record survives the teardown of the task whose merge created it"
+}
+
 test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
@@ -3527,6 +3559,7 @@ test_teardown_ready_probe_failure_falls_back_to_legacy_reminder
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_a_pending_deploy_record_survives_teardown
 test_no_mistakes_origin_remote_allows
 test_pr_recorded_but_open_refuses
 test_pr_recorded_but_merge_state_unreadable_refuses

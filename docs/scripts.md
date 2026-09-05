@@ -16,7 +16,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-deploy-status.sh`    | Report what is merged but not yet live for one project, split into what may ship on its own and what the captain reserved |
 | `fm-deploy.sh`           | Put a merged commit live on the machine that serves one project, or put the previous one back |
-| `fm-deploy-trigger.sh`   | Decide and perform the automatic deploy that follows a confirmed merge, inert without a deploy policy |
+| `fm-deploy-trigger.sh`   | Decide and perform the automatic deploy that follows a confirmed merge, and finish one that was refused only because the commit's build had not landed; inert without a deploy policy |
 | `fm-deploy-lib.sh`       | Shared deploy classification: what is pending, and which of it the captain owns |
 | `fm-deploy-target-lib.sh` | Load and validate one project's deploy target, accepting data only |
 | `fm-fleet-snapshot.sh`   | Print structured fleet snapshot JSON and refresh only its parent-side remote-ledger cache (schema `fm-fleet-snapshot.v1`) |

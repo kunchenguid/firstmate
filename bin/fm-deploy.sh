@@ -79,6 +79,14 @@
 # Every attempt, refusal included, is appended to
 # state/deploy-ledger/<project>.jsonl.
 #
+# Exit statuses: 0 deployed (or nothing to do), 1 refused, 2 the request itself
+# could not be used, 3 the live version could not be read, and 4 refused only
+# because the commit's own build has not finished. 4 is the one refusal that
+# clears on its own, and it exists so bin/fm-deploy-trigger.sh can wait for that
+# build rather than read the sentence to find out. Every other refusal is 1: a
+# red build, an expired artifact, a reserved surface, and an unmet host
+# requirement all stay refused until someone changes something.
+#
 # config/deploy-policy/<project> and config/deploy-target/<project> are both
 # required and both LOCAL; docs/configuration.md owns their formats.
 set -eu
@@ -166,6 +174,19 @@ refuse() {
   printf 'refused: %s\n' "$1" >&2
   ledger_append refused "${DEPLOYED_SHA:-unknown}" "${TARGET_SHA:-unknown}" "${AUTHORITY:-none}" "$1"
   exit 1
+}
+
+# A refusal whose condition clears on its own with nobody doing anything, told
+# apart from every other refusal by its exit status alone so a caller never has
+# to read the sentence. Only the two build races qualify: the commit's build has
+# not started, or it has not finished. Everything else - a red build, an expired
+# artifact, a reserved surface, an unmet host requirement - stays exit 1, because
+# waiting changes none of them. The refusal itself is identical: same message,
+# same ledger row, same nothing-was-touched guarantee.
+refuse_transient() {
+  printf 'refused: %s\n' "$1" >&2
+  ledger_append refused "${DEPLOYED_SHA:-unknown}" "${TARGET_SHA:-unknown}" "${AUTHORITY:-none}" "$1"
+  exit 4
 }
 
 # The flag alone is not permission; it must carry what the captain actually
@@ -341,13 +362,13 @@ if [ -n "$FM_DEPLOY_TGT_bundle_path" ]; then
     # "gone": both leave nothing to download, and only one of them is a
     # problem. Saying the wrong one sends the captain looking for a broken
     # build that is merely a few minutes behind.
-    [ -n "$run_id" ] || refuse "no build has appeared yet for $TARGET_SHA, so its front-end bundle cannot be obtained; if the commit only just merged, its build has not started"
+    [ -n "$run_id" ] || refuse_transient "no build has appeared yet for $TARGET_SHA, so its front-end bundle cannot be obtained; if the commit only just merged, its build has not started"
     run_state=$(gh run view "$run_id" --repo "$GH_REPO" --json status,conclusion \
       -q '"\(.status) \(.conclusion)"' 2>/dev/null) || run_state=''
     case "$run_state" in
       completed*) ;;
       '') ;; # the run's state could not be read; fall through to the download
-      *) refuse "the build for $TARGET_SHA has not finished yet (it is ${run_state%% *}), so its front-end bundle does not exist to download; it can go live once that build finishes" ;;
+      *) refuse_transient "the build for $TARGET_SHA has not finished yet (it is ${run_state%% *}), so its front-end bundle does not exist to download; it can go live once that build finishes" ;;
     esac
     case "$run_state" in
       'completed success') ;;

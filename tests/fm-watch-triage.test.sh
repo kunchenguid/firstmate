@@ -915,6 +915,40 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
 # has NOT changed since the previous poll. There is no positive evidence, so the
 # wake must still surface - a stopped worker is exactly what the turn-end marker
 # earns its keep detecting, and widening the proof must not cost that.
+# A deploy the confirmed-merge handoff refused only because the merged commit's
+# own build was still running leaves a durable record, and the watcher's own
+# cycle is what finishes it. Nothing about that record is a per-task check slot,
+# so this asserts the wiring itself: the record has to be acted on, and the one
+# captain-facing line it produced has to reach firstmate. The fixture is a
+# project with a deploy policy and no local copy, which is the cheapest way to
+# make the re-check reach a reportable answer without a machine, a build, or a
+# clone anywhere in it.
+test_a_pending_deploy_is_resumed_on_the_watcher_cycle() {
+  local dir state fakebin out drain_out record pid
+  dir=$(make_case deploy-pending-cycle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$state/deploy-pending" "$dir/config/deploy-policy"
+  printf 'dashboard/**\n' > "$dir/config/deploy-policy/demo"
+  record="$state/deploy-pending/demo"
+  printf 'fm-deploy-pending-v1\nproject=demo\ntask=task-p\nsha=%s\nfrom_sha=%s\nauthority=auto\nfirst_seen=%s\nreason=the build has not finished yet\n' \
+    aaaaaaaa bbbbbbbb "$(date +%s)" > "$record"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_DEPLOY_SYNC_TIMEOUT=5 FM_DEPLOY_STATUS_TIMEOUT=5 \
+    FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 200 || fail "the watcher never acted on a pending deploy record"
+  grep -F 'check: deploy: demo' "$out" >/dev/null \
+    || fail "the watcher did not report the resumed deploy: $(cat "$out")"
+  assert_absent "$record" "the resumed deploy left its record behind"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the resumed deploy failed"
+  grep -F "could not check whether demo's live site is up to date" "$drain_out" >/dev/null \
+    || fail "the resumed deploy's captain-facing line was not queued: $(cat "$drain_out")"
+  pass "a pending deploy left by an early merge is resumed on the watcher's own cycle"
+}
+
 test_turn_ended_still_pane_surfaced() {
   local dir state fakebin out drain_out capture_file window key pid
   dir=$(make_case turn-ended-still); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4074,6 +4108,7 @@ test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_still_pane_surfaced
+test_a_pending_deploy_is_resumed_on_the_watcher_cycle
 test_turn_ended_malformed_prior_hash_surfaced
 test_turn_ended_trailing_newline_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced

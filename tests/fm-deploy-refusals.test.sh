@@ -35,6 +35,14 @@
 #       and leaves a hand-run deploy working
 #   (j) a clone with no origin/HEAD still resolves its target through the
 #       documented origin/main fallback
+#   (l) only the two build races refuse with the transient exit status; every
+#       other refusal keeps the ordinary one
+#   (m) a merge that outran its own build is recorded rather than reported, and
+#       the recorded deploy goes live exactly once when the build lands
+#   (n) a merge that never builds is reported once and its record cleared
+#   (o) a newer merge supersedes the pending one for the same project
+#   (p) the pending deploy outlives the task whose merge created it
+#   (q) a pending deploy that waits past its horizon stops waiting and says so
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -200,6 +208,44 @@ run_deploy() {
   ( PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
       FMTEST_TARGET_SHA="${FMTEST_TARGET_SHA:-$PLAIN}" \
       "$ROOT/bin/fm-deploy.sh" "$@" 2>&1 )
+}
+
+# The trigger's two entry points, run against the fixture's fake transport.
+# FMTEST_TARGET_SHA has to name the commit the fake `gh` should answer about,
+# exactly as run_deploy does, or the run lookup answers about nothing.
+run_trigger() {  # <task-id> | --resume-pending
+  ( PATH="$FAKEBIN:$PATH" FM_DEPLOY_SYNC_TIMEOUT=5 \
+      FMTEST_TARGET_SHA="${FMTEST_TARGET_SHA:-$PLAIN}" \
+      "$ROOT/bin/fm-deploy-trigger.sh" "$HOME_DIR" "$HOME_DIR/state" "$@" 2>/dev/null )
+}
+
+pending_record() { printf '%s\n' "$HOME_DIR/state/deploy-pending/demo"; }
+
+queued_wakes() { cat "$HOME_DIR/state/.wake-queue" 2>/dev/null || true; }
+
+# How many times the machine was actually changed. `checkout --detach` is the
+# first command that changes what the machine serves, so counting it is how a
+# case proves a deploy happened once rather than twice.
+deploy_count() { grep -c -- 'checkout --detach' "$SSH_LOG" 2>/dev/null || true; }
+
+# make_deployable_case <name>: the standard fixture with origin/main moved off
+# the reserved design commit, so the range from what is live to the target is
+# auto-deployable and the trigger reaches the deploy instead of reporting a
+# surface the captain reserved.
+make_deployable_case() {
+  make_case "$1"
+  git_c update-ref refs/remotes/origin/main "$PLAIN"
+  git_c symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  fm_write_meta "$HOME_DIR/state/task-p.meta" "project=$REPO" "worktree=$REPO"
+}
+
+# Drive the trigger to the one refusal that waits: the commit merged, and its
+# own build has not finished.
+record_an_early_merge() {  # <case label>
+  FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' run_trigger task-p \
+    || fail "$1: the trigger reported a failure for a merge that outran its build"
+  assert_present "$(pending_record)" \
+    "$1: a deploy refused only because the build was still running left no record to finish it"
 }
 
 assert_machine_untouched() {  # <case label>
@@ -455,6 +501,156 @@ test_a_deploy_freeze_pauses_the_trigger_but_not_the_captain() {
   pass "a deploy freeze pauses the merge trigger, keeps the policy, and leaves a hand-run deploy working"
 }
 
+test_only_a_build_race_refuses_with_the_transient_status() {
+  local rc
+  make_case transient-status
+  # The whole deferred re-check turns on telling "wait" apart from "no" by exit
+  # status alone, so this pins both halves of that split in one place. The two
+  # build races are the only refusals whose condition clears with nobody doing
+  # anything.
+  rc=0; FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' run_deploy demo "$PLAIN" >/dev/null 2>&1 || rc=$?
+  expect_code 4 "$rc" "transient-status: a build still running"
+  rc=0; run_deploy demo "$PLAIN" >/dev/null 2>&1 || rc=$?
+  expect_code 4 "$rc" "transient-status: no build for the commit yet"
+  rc=0; FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed failure' run_deploy demo "$PLAIN" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "transient-status: a build that finished without succeeding"
+  rc=0; FMTEST_GH_RC=0 FMTEST_DOWNLOAD_FAILS=1 run_deploy demo "$PLAIN" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "transient-status: an artifact past its retention"
+  rc=0; run_deploy demo "$DESIGN" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "transient-status: a range touching a reserved surface"
+  pass "only the two build races refuse with the status that means wait; every other refusal means no"
+}
+
+test_a_merge_that_outran_its_build_is_recorded_not_reported() {
+  local record out
+  make_deployable_case early-merge
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' run_trigger task-p) \
+    || fail "early-merge: the trigger reported a failure"
+  [ -z "$out" ] || fail "early-merge: the merge path printed something: $out"
+  assert_machine_untouched early-merge
+  # Being a few minutes early is not news, so nothing is said.
+  assert_not_contains "$(queued_wakes)" "needs a look" early-merge
+  assert_not_contains "$(queued_wakes)" "up to date with everything merged" early-merge
+  record=$(pending_record)
+  assert_present "$record" "early-merge: no record was written to finish the deploy later"
+  assert_grep "sha=$PLAIN" "$record" "early-merge: the record does not name the commit that was refused"
+  assert_grep "from_sha=$DEPLOYED" "$record" "early-merge: the record does not name the version it would replace"
+  assert_grep "authority=auto" "$record" "early-merge: the record does not name the authority it acted under"
+  assert_grep "has not finished yet" "$record" "early-merge: the record does not name the reason"
+  pass "a merge that outran its own build is recorded to be finished later, not reported to the captain"
+}
+
+test_the_recorded_deploy_goes_live_once_the_build_lands() {
+  local out
+  make_deployable_case build-lands
+  record_an_early_merge build-lands
+  [ "$(deploy_count)" = 0 ] || fail "build-lands: the early merge changed the machine"
+
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed success' run_trigger --resume-pending) \
+    || fail "build-lands: the deferred re-check reported a failure"
+  assert_contains "$out" demo "build-lands: the re-check did not name the project it acted on"
+  [ "$(deploy_count)" = 1 ] \
+    || fail "build-lands: the deploy did not happen once the build landed: $(tr '\n' '|' < "$SSH_LOG")"
+  assert_absent "$(pending_record)" "build-lands: the record outlived the deploy it asked for"
+  assert_contains "$(queued_wakes)" "up to date with everything merged" build-lands
+  # ...and it cleared the record because the deploy SUCCEEDED, not because it
+  # reached the machine and failed there. Without this the case would pass on
+  # the failure path and still look like proof the build landing works.
+  assert_not_contains "$(queued_wakes)" "could not be updated automatically" build-lands
+
+  # Nothing is left to re-run, so a later cycle is silent and the machine is not
+  # deployed to a second time.
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed success' run_trigger --resume-pending) \
+    || fail "build-lands: the second re-check reported a failure"
+  [ -z "$out" ] || fail "build-lands: an empty re-check still woke firstmate: $out"
+  [ "$(deploy_count)" = 1 ] || fail "build-lands: the same merge deployed twice"
+  pass "a deploy refused only because the build was late goes live exactly once when the build lands"
+}
+
+test_a_merge_that_never_builds_is_reported_once_and_cleared() {
+  local out
+  make_deployable_case build-never
+  record_an_early_merge build-never
+
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed failure' run_trigger --resume-pending) \
+    || fail "build-never: the deferred re-check reported a failure"
+  assert_contains "$out" demo "build-never: the re-check did not name the project it acted on"
+  assert_machine_untouched build-never
+  assert_contains "$(queued_wakes)" "could not be updated automatically" build-never
+  assert_contains "$(queued_wakes)" "finished without succeeding" build-never
+  assert_absent "$(pending_record)" "build-never: a build that will never succeed is still being waited for"
+
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed failure' run_trigger --resume-pending) \
+    || fail "build-never: the second re-check reported a failure"
+  [ -z "$out" ] || fail "build-never: the same failed build was reported twice: $out"
+  pass "a merge whose build never succeeds is reported once and stops being waited for"
+}
+
+test_a_newer_merge_supersedes_the_pending_one() {
+  local record newer
+  make_deployable_case superseded
+  record_an_early_merge superseded
+  record=$(pending_record)
+  assert_grep "sha=$PLAIN" "$record" "superseded: the first merge was not recorded"
+
+  # The newer merge has to build on the commit origin/main already points at,
+  # not on the reserved design commit further along this branch, or the range
+  # would stop being auto-deployable and the case would be measuring that
+  # instead of supersession.
+  git_c checkout -q --detach "$PLAIN"
+  commit_file src/engine.py engine2 "a second plain code change"
+  newer=$(git_c rev-parse HEAD)
+  git_c update-ref refs/remotes/origin/main "$newer"
+  FMTEST_TARGET_SHA=$newer FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' run_trigger task-p \
+    || fail "superseded: the trigger reported a failure for the newer merge"
+
+  assert_grep "sha=$newer" "$record" "superseded: the newer merge did not take over the record"
+  assert_no_grep "sha=$PLAIN" "$record" "superseded: the older commit is still what would be deployed"
+  [ "$(find "$HOME_DIR/state/deploy-pending" -type f | wc -l)" -eq 1 ] \
+    || fail "superseded: the project ended up with more than one pending deploy"
+  pass "a newer merge supersedes the pending one for the same project rather than queueing behind it"
+}
+
+test_the_pending_deploy_outlives_the_task_that_merged_it() {
+  local out
+  make_deployable_case outlives-task
+  record_an_early_merge outlives-task
+
+  # Cleaning up the task that merged the work is ordinary, and it happens well
+  # before a slow build finishes. Teardown removes that task's own records and
+  # nothing else, so this leaves exactly what a completed one leaves: no trace
+  # of task-p at all. That the record itself survives a REAL teardown is
+  # asserted where a real teardown fixture exists, in tests/fm-teardown.test.sh;
+  # what this case owns is that the deploy still happens afterwards.
+  rm -f "$HOME_DIR/state/task-p".*
+  out=$(FMTEST_GH_RC=0 FMTEST_BUILD_STATE='completed success' run_trigger --resume-pending) \
+    || fail "outlives-task: the deferred re-check reported a failure"
+  assert_contains "$out" demo "outlives-task: the re-check did not name the project it acted on"
+  [ "$(deploy_count)" = 1 ] \
+    || fail "outlives-task: the deploy did not happen after the task was cleaned up: $(tr '\n' '|' < "$SSH_LOG")"
+  assert_absent "$(pending_record)" "outlives-task: the record outlived the deploy it asked for"
+  pass "a pending deploy outlives the task whose merge created it"
+}
+
+test_a_pending_deploy_stops_waiting_past_its_horizon() {
+  local out record
+  make_deployable_case gives-up
+  record_an_early_merge gives-up
+  record=$(pending_record)
+  # Age the record rather than wait out the horizon.
+  sed -i.bak "s/^first_seen=.*/first_seen=$(( $(date +%s) - 4000 ))/" "$record"
+  rm -f "$record.bak"
+
+  out=$(FM_DEPLOY_PENDING_MAX_SECS=300 FMTEST_GH_RC=0 FMTEST_BUILD_STATE='in_progress ' \
+    run_trigger --resume-pending) || fail "gives-up: the deferred re-check reported a failure"
+  assert_contains "$out" demo "gives-up: the re-check did not name the project it acted on"
+  assert_contains "$(queued_wakes)" "still has not gone live" gives-up
+  assert_machine_untouched gives-up
+  assert_absent "$record" "gives-up: the record is still being waited on past its horizon"
+  pass "a pending deploy that waits past its horizon stops waiting and says the merge never built"
+}
+
+
 test_a_reserved_range_refuses_before_touching_the_machine
 test_a_build_still_running_is_a_race_not_a_missing_bundle
 test_a_build_that_failed_is_named_as_a_failed_build
@@ -471,3 +667,10 @@ test_a_broken_deploy_target_is_refused_rather_than_partly_used
 test_the_merge_trigger_is_inert_without_a_policy
 test_the_merge_trigger_never_deploys_a_reserved_range
 test_a_clone_without_origin_head_still_resolves_its_target
+test_only_a_build_race_refuses_with_the_transient_status
+test_a_merge_that_outran_its_build_is_recorded_not_reported
+test_the_recorded_deploy_goes_live_once_the_build_lands
+test_a_merge_that_never_builds_is_reported_once_and_cleared
+test_a_newer_merge_supersedes_the_pending_one
+test_the_pending_deploy_outlives_the_task_that_merged_it
+test_a_pending_deploy_stops_waiting_past_its_horizon

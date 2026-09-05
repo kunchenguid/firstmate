@@ -291,6 +291,11 @@ A completed rollback, and a version someone restored by hand, are each recorded 
 `bin/fm-deploy.sh --help` owns the exact results, flags, and the order the procedure runs in.
 A deploy that cannot obtain the sealed bundle says which of four reasons it is - no build has appeared for that commit yet, the build is still running, the build finished without succeeding, or the artifact expired - because the first two are a deploy that outran the commit's own build and the last two are not.
 
+The first two are also the only refusals that clear with nobody doing anything, so they are the only ones that wait.
+Either of them writes `state/deploy-pending/<project>`, and the watcher re-runs the whole decision for that record on its ordinary cycle until the build lands and the deploy goes through, until a reason that does not clear on its own reports instead, or until the record passes its give-up horizon and says the merge never built.
+A newer merge rewrites that record with its own commit rather than queueing behind the older one.
+[`bin/fm-deploy-trigger.sh`](../bin/fm-deploy-trigger.sh) owns the record format, the horizon, and `FM_DEPLOY_PENDING_MAX_SECS`.
+
 [`bin/fm-deploy-status.sh`](../bin/fm-deploy-status.sh), [`bin/fm-deploy.sh`](../bin/fm-deploy.sh), and [`bin/fm-deploy-trigger.sh`](../bin/fm-deploy-trigger.sh) own their exact commands, flags, and refusals in their own headers and `--help`.
 
 ## Concurrency cap (config/concurrency-cap)
