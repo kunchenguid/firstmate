@@ -828,10 +828,24 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   rm -f -- "$tmp"
 }
 
+apply_pending_retained_artifact() {  # <task-id>
+  local id=$1 marker
+  local -a args=()
+  marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  fm_backlog_close_marker_validate "$marker" "$DATA" "$id" "$STATE" || return 1
+  [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
+  args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  case "${args[0]-}" in
+    --pr|--report) fm_backlog_mutate "$DATA" update "$id" "${args[@]}" ;;
+  esac
+}
+
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
   else
+    apply_pending_retained_artifact "$1" || return 1
     tasks_axi "done" "$1" >/dev/null
   fi
 }

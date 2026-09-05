@@ -2074,6 +2074,59 @@ SH
   pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
 }
 
+test_answer_before_cleanup_replay_preserves_the_retained_report() {
+  local home id wt rc bootstrap json
+  home=$(make_home answer-before-cleanup-replay)
+  id=sample-answer-before-cleanup-replay
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  tasks_in "$home" add "$id" "Investigate answer before cleanup replay" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the answer-before-replay fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Interrupted cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
+    >/dev/null || fail "could not hold the answer-before-replay fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the answer-before-replay fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted cleanup lost its retained-artifact record"
+
+  printf 'Proceed with the reported result.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer before cleanup replay"
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay cleanup after the answer: $bootstrap"
+  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
+  json=$(run_bearings "$home") || fail "Bearings failed after the answer-before-replay lifecycle"
+  printf '%s' "$json" | jq -e \
+    --arg id "$id" --arg report "data/$id/report.md" \
+    '.landed | any(.id == $id and .artifact == $report)' >/dev/null \
+    || fail "the retained report disappeared when the captain answered before replay: $json"
+  pass "an answer before cleanup replay preserves the retained report"
+}
+
 # A home whose data directory is relocated keeps one backlog; the predicate and
 # the retention must address it the way teardown does, not FM_HOME/data.
 test_teardown_retains_captain_calls_in_a_relocated_backlog() {
@@ -2239,6 +2292,7 @@ test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
+test_answer_before_cleanup_replay_preserves_the_retained_report
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
