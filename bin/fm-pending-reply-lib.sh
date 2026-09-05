@@ -162,13 +162,26 @@ fm_pending_reply_locate() {  # <state-dir> <corr_id>
 # cannot be archived stays where it is and is simply scanned again next tick,
 # which is correct but slower - never a lost record. Returns 0 when the record is
 # no longer in the hot directory.
-fm_pending_reply_archive() {  # <state-dir> <corr_id>
+_fm_pending_reply_archive_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 hot archive_dir
   hot=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$hot" ] || return 0
   archive_dir=$(fm_pending_reply_archive_dir "$state")
   mkdir -p "$archive_dir" 2>/dev/null || return 1
   mv -f "$hot" "$archive_dir/$corr" 2>/dev/null || return 1
+}
+
+fm_pending_reply_archive() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_archive_locked "$state" "$corr" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -735,7 +748,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # hot record to converge on.
   if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
     || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-    fm_pending_reply_archive "$state" "$corr" || true
+    _fm_pending_reply_archive_locked "$state" "$corr" || true
   fi
   return 0
 }

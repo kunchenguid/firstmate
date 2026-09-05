@@ -184,7 +184,7 @@ EOF
 
 test_receiver_wake_snapshots_archive_transition_under_lock() {
   local home="$TMP_ROOT/archive-race-main" sub="$TMP_ROOT/archive-race-sub"
-  local corr=00000000000000dd marker hot archive lock holder handoff i status=0 racebin
+  local corr=00000000000000dd marker hot archive handoff archiver i status=0 racebin blocked=0 real_grep
   setup_homes "$home" "$sub"
   mkdir -p "$sub/data" "$home/state/pending-replies/archive"
   printf '## Queued\n\n## Done\n' > "$home/data/backlog.md"
@@ -197,7 +197,6 @@ EOF
   marker="$home/state/.backlog-handoff-design.wake-pending"
   hot="$home/state/pending-replies/$corr"
   archive="$home/state/pending-replies/archive/$corr"
-  lock="$home/state/.pending-reply-$corr.lock"
   printf 'pending:%s\n' "$corr" > "$marker"
   cat > "$hot" <<EOF
 schema=fm-pending-reply.v1
@@ -207,36 +206,41 @@ delivered_epoch=100
 phase=resolved
 resolved_epoch=101
 EOF
-  FM_STATE_OVERRIDE="$home/state" bash -c '
-    . "$1"
-    fm_lock_acquire_wait "$2"
-    touch "$3"
-    while [ ! -e "$4" ]; do /bin/sleep 0.02; done
-    fm_lock_release "$2"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/lock-ready" "$home/lock-release" &
-  holder=$!
-  i=0
-  while [ "$i" -lt 50 ] && [ ! -e "$home/lock-ready" ]; do sleep 0.02; i=$((i + 1)); done
-  [ -e "$home/lock-ready" ] || fail "the archive-race lock holder did not start"
   racebin="$home/racebin"
+  real_grep=$(command -v grep)
   mkdir "$racebin"
-  cat > "$racebin/sleep" <<'SH'
+  cat > "$racebin/grep" <<'SH'
 #!/usr/bin/env bash
-touch "$FM_ARCHIVE_RACE_WAITING"
-exec /bin/sleep "$@"
+case "$*" in
+  *"^task_id="*"$FM_ARCHIVE_RACE_HOT"*)
+    touch "$FM_ARCHIVE_RACE_READING"
+    while [ ! -e "$FM_ARCHIVE_RACE_CONTINUE" ]; do /bin/sleep 0.02; done
+    ;;
+esac
+exec "$FM_REAL_GREP" "$@"
 SH
-  chmod +x "$racebin/sleep"
-  PATH="$racebin:$PATH" FM_ARCHIVE_RACE_WAITING="$home/handoff-waiting" FM_HOME="$home" \
+  chmod +x "$racebin/grep"
+  PATH="$racebin:$PATH" FM_REAL_GREP="$real_grep" FM_ARCHIVE_RACE_HOT="$hot" \
+    FM_ARCHIVE_RACE_READING="$home/handoff-reading" \
+    FM_ARCHIVE_RACE_CONTINUE="$home/handoff-continue" FM_HOME="$home" \
     "$ROOT/bin/fm-backlog-handoff.sh" design archive-race > "$home/handoff.out" 2>&1 &
   handoff=$!
   i=0
-  while [ "$i" -lt 50 ] && [ ! -e "$home/handoff-waiting" ]; do sleep 0.02; i=$((i + 1)); done
-  [ -e "$home/handoff-waiting" ] || fail "the handoff did not reach correlation-lock contention"
-  mv "$hot" "$archive"
-  touch "$home/lock-release"
-  wait "$holder" || fail "the archive-race lock holder failed"
+  while [ "$i" -lt 50 ] && [ ! -e "$home/handoff-reading" ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$home/handoff-reading" ] || fail "the handoff did not begin its locked correlation snapshot"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_pending_reply_archive "$2" "$3"
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$home/state" "$corr" &
+  archiver=$!
+  sleep 0.2
+  kill -0 "$archiver" 2>/dev/null && blocked=1
+  touch "$home/handoff-continue"
   wait "$handoff" || status=$?
+  wait "$archiver" || fail "the concurrent archive failed"
+  [ "$blocked" -eq 1 ] || fail "the concurrent archive ignored the correlation lock"
   [ "$status" -eq 0 ] || fail "the hot-to-archive transition failed the handoff: $(cat "$home/handoff.out")"
+  [ -f "$archive" ] || fail "the concurrent archive did not retain the resolved record"
   assert_absent "$marker" "the hot-to-archive transition left the receiver wake pending"
   [ "$(inbox_record_count "$home/state" design)" -eq 0 ] \
     || fail "the hot-to-archive transition duplicated the receiver instruction"
