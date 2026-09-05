@@ -55,6 +55,9 @@
 # deduplication marker: normal polls surface a message once, while a crash or
 # marker failure may produce a rare duplicate rather than silently lose a wake.
 #
+# Inbox paths containing bytes outside printable ASCII are unsupported. The
+# doorbell refuses them rather than sending terminal control bytes to a pane.
+#
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
 # and tests. No side effects on source beyond its sourced libraries.
@@ -249,9 +252,14 @@ fm_task_inbox_body() {  # <record-path>
 # still receives the complete instruction in the line itself. The leading `: `
 # is the POSIX shell no-op, so the same line typed into a pane whose agent has
 # exited (a bare shell) runs nothing; see the dead-pane note in the header.
+# A non-printable path fails without output so terminal controls never reach
+# the pane's line discipline.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs quoted
+  local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  case "$abs" in
+    *[![:print:]]*) return 1 ;;
+  esac
   quoted=$(printf '%s' "$abs" | sed "s/'/'\\\\''/g")
   printf ": Firstmate instruction waiting: list '%s'/*.msg and, in numeric order, read and act on each, then mv each handled file to '%s'/handled/." \
     "$quoted" "$quoted"
@@ -276,7 +284,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead) return 3 ;;
   esac
-  line=$(fm_task_inbox_doorbell_line "$rec")
+  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    return 2
+  fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;

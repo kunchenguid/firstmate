@@ -210,6 +210,36 @@ test_doorbell_is_a_shell_noop() {
   pass "inbox: a hostile-path doorbell executes as a no-op in bare shells"
 }
 
+test_doorbell_rejects_terminal_controls() {
+  local dir state rec doorbell control label log marker rc
+  dir="$TMP_ROOT/control-path"
+  marker="$dir/marker"
+  mkdir -p "$dir"
+  make_watch_stubs "$dir" >/dev/null
+  for label in etx esc; do
+    case "$label" in
+      etx) control=$'\003' ;;
+      esc) control=$'\033' ;;
+    esac
+    state="$dir/${control}touch marker; # $label/state"
+    mkdir -p "$state"
+    rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+    doorbell= rc=0
+    doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") || rc=$?
+    [ "$rc" -ne 0 ] || fail "a $label path should make doorbell construction fail"
+    [ -z "$doorbell" ] || fail "a rejected $label path emitted doorbell bytes"
+    log="$dir/$label.send.log"; : > "$log"
+    rc=0
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+    [ "$rc" = 2 ] || fail "a rejected $label path should return send-failed status 2, got $rc"
+    [ ! -s "$log" ] || fail "a $label path reached send-keys:"$'\n'"$(cat "$log")"
+    [ ! -e "$marker" ] || fail "a $label path executed its crafted command"
+    [ -f "$rec" ] || fail "rejecting a $label path removed the durable record"
+  done
+  pass "inbox: terminal-control paths are rejected without typing"
+}
+
 # fm_task_inbox_ring against a backend whose agent classifies dead: nothing is
 # typed and the distinct return code lets callers route to recovery. A missing
 # or unreadable endpoint still rings, so a blind classifier never starves a
@@ -635,6 +665,7 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
 
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
+test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
