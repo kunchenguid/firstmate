@@ -246,7 +246,7 @@ clear_stale_recorded_watcher_lock() {
 HEALTHY_PID=
 HEALTHY_IDENTITY=
 healthy_watcher() {
-  local grace=${1:-$GRACE}
+  local grace=${1:-$WATCHER_STALE_GRACE}
   HEALTHY_PID=
   HEALTHY_IDENTITY=
   fm_watcher_healthy "$STATE" "$WATCH" "$grace" "$FM_HOME" || return 1

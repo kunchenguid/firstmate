@@ -1209,6 +1209,47 @@ SH
   pass "busy-holder validation and attachment use the watcher stale threshold"
 }
 
+test_initial_attachment_uses_watcher_stale_threshold() {
+  local dir state holder identity armpid i out held holder_alive=0 attached=0
+  dir=$(make_case initial-threshold-attach)
+  state="$dir/state"
+  sleep 60 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the initial threshold holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  sleep 2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=30 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null; then
+      attached=1
+      break
+    fi
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$dir/arm.out" 2>/dev/null || true)
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$holder" && holder_alive=1
+  reap "$armpid"
+  reap "$holder"
+  [ "$attached" -eq 1 ] || fail "the arm rejected a holder fresh under the watcher threshold: $out"
+  case "$out" in *"watcher: FAILED"*) fail "the initial threshold holder failed loudly: $out" ;; esac
+  [ "$held" = "$holder" ] && [ "$holder_alive" -eq 1 ] \
+    || fail "the initial threshold holder was signalled or replaced"
+  pass "initial attachment uses the watcher stale threshold"
+}
+
 test_recovering_holder_is_attached_to_not_replaced() {
   local dir state fakebin armout armpid watcher_pid i out second secondpid
   dir=$(make_case busy-holder-attach)
@@ -1563,6 +1604,7 @@ test_singleton_start
 test_stale_beacon_holder_is_not_reported_as_a_failure
 test_busy_holder_replacement_stays_a_loud_failure
 test_busy_holder_uses_watcher_stale_threshold
+test_initial_attachment_uses_watcher_stale_threshold
 test_recovering_holder_is_attached_to_not_replaced
 test_frame_identity_is_per_subshell_and_stable
 test_lock_acquisition_refuses_unobtainable_frame_identity
