@@ -2519,6 +2519,88 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# fm_backend_herdr_task_binding_snapshot_matches: one read-only proof sample for
+# repairing pre-endpoint_task_id metadata. The exact pane must still report the
+# recorded tab and workspace, the tab must still carry the Firstmate task label
+# expected at spawn, and the pane's live foreground cwd must resolve
+# to the recorded isolated worktree. Labels alone never authorize this proof.
+fm_backend_herdr_task_binding_snapshot_matches() {  # <session> <workspace-id> <tab-id> <pane-id> <task-id> <canonical-worktree>
+  local session=$1 workspace=$2 tab=$3 pane=$4 id=$5 worktree=$6 pane_out tab_out live_cwd live_worktree
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  live_cwd=$(printf '%s' "$pane_out" | jq -r --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    select(.result.pane.pane_id == $pane)
+    | select(.result.pane.tab_id == $tab)
+    | select(.result.pane.workspace_id == $workspace)
+    | select((.result.pane.foreground_cwd | type) == "string" and (.result.pane.foreground_cwd | length) > 0)
+    | .result.pane.foreground_cwd
+  ' 2>/dev/null)
+  [ -n "$live_cwd" ] || return 1
+  live_worktree=$(CDPATH='' cd -- "$live_cwd" 2>/dev/null && pwd -P) || return 1
+  [ "$live_worktree" = "$worktree" ] || return 1
+
+  tab_out=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$tab_out" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "fm-$id" '
+    .result.tab.tab_id == $tab
+    and .result.tab.workspace_id == $workspace
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_verify_task_binding: verify that one legacy metadata endpoint
+# still belongs to one exact task before a caller publishes endpoint_task_id.
+# The proof is deliberately read-only. It checks both directions of the live
+# pane/tab/workspace relationships, unique task labeling inside the workspace,
+# canonical worktree identity, and a repeated final snapshot so changed live
+# state is ambiguity rather than repair authority.
+fm_backend_herdr_verify_task_binding() {  # <session> <workspace-id> <tab-id> <pane-id> <task-id> <worktree>
+  local session=$1 workspace=$2 tab=$3 pane=$4 id=$5 worktree=$6 canonical_worktree
+  local workspaces tabs panes
+  fm_backend_herdr_tool_check || return 1
+  canonical_worktree=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || {
+    echo "REFUSED: recorded Herdr worktree for task $id is absent or unreadable; preserving task state." >&2
+    return 1
+  }
+  fm_backend_herdr_task_binding_snapshot_matches \
+    "$session" "$workspace" "$tab" "$pane" "$id" "$canonical_worktree" || {
+      echo "REFUSED: live Herdr pane, task label, or worktree does not exactly match task $id; preserving task state." >&2
+      return 1
+    }
+
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || workspaces=
+  if ! printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" '
+    (.result.workspaces | type) == "array"
+    and ([.result.workspaces[] | select(.workspace_id == $workspace)] | length) == 1
+  ' >/dev/null 2>&1; then
+    echo "REFUSED: recorded Herdr workspace for task $id is absent or ambiguous; preserving task state." >&2
+    return 1
+  fi
+
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || tabs=
+  if ! printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg label "fm-$id" '
+    (.result.tabs | type) == "array"
+    and ([.result.tabs[] | select(.label == $label)] | length) == 1
+    and ([.result.tabs[] | select(.tab_id == $tab and .label == $label)] | length) == 1
+  ' >/dev/null 2>&1; then
+    echo "REFUSED: Herdr task tab for task $id is absent, duplicated, or relabeled; preserving task state." >&2
+    return 1
+  fi
+
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || panes=
+  if ! printf '%s' "$panes" | jq -e --arg pane "$pane" --arg tab "$tab" '
+    (.result.panes | type) == "array"
+    and ([.result.panes[] | select(.pane_id == $pane and .tab_id == $tab)] | length) == 1
+  ' >/dev/null 2>&1; then
+    echo "REFUSED: Herdr pane-to-tab relationship for task $id is absent or ambiguous; preserving task state." >&2
+    return 1
+  fi
+
+  fm_backend_herdr_task_binding_snapshot_matches \
+    "$session" "$workspace" "$tab" "$pane" "$id" "$canonical_worktree" || {
+      echo "REFUSED: live Herdr endpoint for task $id changed during ownership verification; preserving task state." >&2
+      return 1
+    }
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
