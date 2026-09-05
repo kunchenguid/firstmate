@@ -4,6 +4,8 @@
 # fleet-state tripwire contract is bin/fm-herdr-lab.sh.
 set -u
 
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 # Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
 # tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
 # tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,
