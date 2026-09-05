@@ -265,12 +265,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# Ring the doorbell, best-effort: one dead-agent pre-check, one advisory
+# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint's agent is positively dead (nothing typed; recovery owns the
+# the endpoint is positively dead or missing (nothing typed; recovery owns the
 # record). No return value is delivery proof; the acknowledgement move is the
 # only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
@@ -282,7 +282,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
-    dead) return 3 ;;
+    dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2

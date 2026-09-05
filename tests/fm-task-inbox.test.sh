@@ -97,7 +97,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || printf 'fm-t1\n'; exit 0 ;;
+  list-windows) [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf 'fm-t1\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -240,9 +240,9 @@ test_doorbell_rejects_terminal_controls() {
   pass "inbox: terminal-control paths are rejected without typing"
 }
 
-# fm_task_inbox_ring against a backend whose agent classifies dead: nothing is
-# typed and the distinct return code lets callers route to recovery. A missing
-# or unreadable endpoint still rings, so a blind classifier never starves a
+# fm_task_inbox_ring against a backend whose agent classifies dead or missing:
+# nothing is typed and the distinct return code lets callers route to recovery.
+# An unreadable endpoint still rings, so a blind classifier never starves a
 # live worker.
 test_ring_skips_dead_agent() {
   local dir state rec log rc
@@ -259,6 +259,12 @@ test_ring_skips_dead_agent() {
   [ ! -s "$log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "skipping the ring must leave the durable record in place"
   rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_MISSING=1 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 3 ] || fail "a missing endpoint should return 3 from the ring, got $rc"
+  [ ! -s "$log" ] || fail "a missing endpoint was typed into:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "skipping a missing endpoint must leave the durable record in place"
+  rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "a live agent should still be rung, got $rc"
@@ -269,7 +275,7 @@ test_ring_skips_dead_agent() {
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
-  pass "inbox: the ring skips a positively dead agent and still rings live or unclassifiable endpoints"
+  pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -663,6 +669,28 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
   pass "watcher: a positively dead pane is never typed into and surfaces exactly one stale wake"
 }
 
+test_watcher_dead_pane_ignores_stale_busy_state() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case dead-pane-busy)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_FAKE_TMUX_AGENT=zsh FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "stale busy state hid a dead pane's unhandled instruction"; }
+  [ ! -s "$log" ] || fail "a busy-marked dead pane was typed into:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a busy-marked dead pane should surface exactly once:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ -f "$rec" ] || fail "the durable record must survive stale busy-state recovery"
+  [ "$(cat "$state/t1.inbox/.escalated")" = "${rec##*/}" ] \
+    || fail "stale busy-state recovery should suppress repeated surfacing"
+  pass "watcher: dead-pane recovery overrides stale busy state"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -682,3 +710,4 @@ test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
+test_watcher_dead_pane_ignores_stale_busy_state
