@@ -655,9 +655,9 @@ PYEOF
   pass "fm-mail: a raised FETCH surfaces that uid degraded and advances"
 }
 
-test_poll_retry_rotation_advances_past_failures() {
-  local harness out1 out2 rc1=0 rc2=0
-  harness="$TMP_ROOT/retry-rotate-harness.py"
+test_poll_retry_cursor_advances_past_failures() {
+  local harness out1 out2 pos1 pos2 rc1=0 rc2=0
+  harness="$TMP_ROOT/retry-cursor-harness.py"
   cat > "$harness" <<'PYEOF'
 import os, sys
 os.environ.update({
@@ -666,6 +666,7 @@ os.environ.update({
     'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
     'FM_MAIL_CURSOR': sys.argv[1],
     'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[5],
     'FM_MAIL_POLL_MAX_WAKES': '1',
 })
 FAILING = set(sys.argv[3].split(',')) if len(sys.argv) > 3 else set()
@@ -696,7 +697,10 @@ sys.exit(mod.cmd_poll_list())
 PYEOF
   # All 12 uids are cursor-recorded (degraded wakes) and listed in the retry
   # set; 71..81 keep failing, 82 recovered. window = max(1*4, 1+10) = 11, so a
-  # single poll examines only 11 retry candidates.
+  # single poll examines a bounded 11-uid window starting at the durable retry
+  # position. Position 0 scans 71..81 first, then the stored position advances
+  # to 11 so the next poll wraps and reaches 82 - a recovered uid can never be
+  # stranded behind the persistent-failure prefix.
   {
     printf 'uidvalidity=90009\n'
     for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
@@ -707,17 +711,22 @@ PYEOF
   for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
     printf '%s\n' "$u" >> "$HOME_DIR/state/.mail-retry"
   done
+  : > "$HOME_DIR/state/.mail-retry-pos"
 
   out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
-    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-retry-pos" 2>&1) || rc1=$?
   expect_code 0 "$rc1" "first retry poll must succeed"
   assert_not_contains "$out1" $'82\t' "the recovered uid is not reached while failures hold the window"
+  pos1=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "11" "$pos1" "the retry-scan position advances past the scanned window"
 
   out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
-    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-retry-pos" 2>&1) || rc2=$?
   expect_code 0 "$rc2" "second retry poll must succeed"
-  assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "rotation lets the recovered uid surface on the next poll"
-  pass "fm-mail: retry rotation advances the scan past persistent failures"
+  assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "the cursor wraps and the recovered uid surfaces on the next poll"
+  pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "10" "$pos2" "the retry-scan position keeps advancing around the set"
+  pass "fm-mail: the retry-scan cursor advances past persistent failures"
 }
 
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
@@ -1249,7 +1258,7 @@ test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
-test_poll_retry_rotation_advances_past_failures
+test_poll_retry_cursor_advances_past_failures
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_cap_one_never_suppresses_new_mail
 test_poll_fails_closed_when_retry_unwritable
