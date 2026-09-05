@@ -174,10 +174,11 @@ if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
-# brief carries, so the mode-specific Definition of done is rendered from its
-# single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
-# promoted no-mistakes worker that never received the ask-user escalation rule or
-# the --yes ban is the delivery hole this file used to leave open.
+# brief carries, so the mode-specific Definition of done and the Proof bar
+# section are both rendered from their single owner (bin/fm-dod-lib.sh) rather
+# than summarised into a hint line. A promoted no-mistakes worker that never
+# received the ask-user escalation rule or the --yes ban is the delivery hole
+# this file used to leave open.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
@@ -207,6 +208,8 @@ $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
   fm_ship_batch_rule_block 8 9
+  printf '\n'
+  fm_proof_bar_section
   printf '\n'
   fm_dod_block "$MODE" "$ID" "$META"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }

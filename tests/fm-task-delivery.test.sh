@@ -290,6 +290,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   relative_home=$(CDPATH='' cd -- "$relative_root/home" && pwd -P)
   relative_meta="$relative_home/state/promote-relative.meta"
   printf 'window=fm-promote-relative\nkind=scout\nworktree=/tmp/wt\n' > "$relative_meta"
+  write_brief "$relative_home" promote-relative
   (
     cd "$relative_root" || exit 1
     CDPATH="$relative_root/cdpath" FM_HOME=home FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
@@ -402,8 +403,8 @@ STUB
       "$mode: promoted worker's delivery actions were not bound to its verified task root"
     assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$payload" \
       "$mode: promoted worker's root binding did not cover every delivery action"
-    grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$payload" \
-      || fail "$mode: promoted worker did not receive the batched-findings contract as rule 8"
+    grep -Fqx "8. Before your first run, if you already know a fix pattern applies to more than the one site you were asked to change (a parser rule, a validation, a timestamp format, a malformed-input guard), sweep the whole repo for that mechanism, fix every site in one commit, and paste the site list into the Proof bar's Prep line before starting (rule B in the Proof bar above; this is Tier 1 prep done before the run instead of only after a review finds it)." "$payload" \
+      || fail "$mode: promoted worker did not receive the pre-run mechanism-sweep clause as rule 8"
     assert_grep "Enumerate the COMPLETE finding set first" "$payload" \
       "$mode: promoted worker was not told to enumerate the complete finding set"
     assert_grep "surfaces that can share each defect's mechanism" "$payload" \
@@ -527,6 +528,7 @@ test_generated_delivery_preflight_scans_real_submodule_commits() {
 
   meta="$promote_home/state/$id.meta"
   printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$task_root" > "$meta"
+  write_brief "$promote_home" "$id"
   FM_HOME="$promote_home" FM_STATE_OVERRIDE="$promote_home/state" \
     "$PROMOTE" "$id" --mode no-mistakes --yolo off >/dev/null 2>&1 \
     || fail "promotion generation for the submodule fixture should succeed"

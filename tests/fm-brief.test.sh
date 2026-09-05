@@ -938,8 +938,8 @@ test_ship_briefs_batch_findings_before_resubmitting() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "ship brief was not scaffolded"
-  grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$brief" \
-    || fail "ship brief must keep the batched-findings contract as rule 8"
+  grep -Fqx "8. Before your first run, if you already know a fix pattern applies to more than the one site you were asked to change (a parser rule, a validation, a timestamp format, a malformed-input guard), sweep the whole repo for that mechanism, fix every site in one commit, and paste the site list into the Proof bar's Prep line before starting (rule B in the Proof bar above; this is Tier 1 prep done before the run instead of only after a review finds it)." "$brief" \
+    || fail "ship brief must keep the pre-run mechanism-sweep clause as rule 8"
   assert_grep "never fix and resubmit the first defect you find" "$brief" \
     "ship brief must forbid fixing and resubmitting the first defect alone"
   assert_grep "Enumerate the COMPLETE finding set first" "$brief" \
@@ -948,13 +948,13 @@ test_ship_briefs_batch_findings_before_resubmitting() {
     "ship brief must require checking surfaces that share the defect mechanism"
   assert_grep "One-at-a-time stop-fix-rereview loops are forbidden." "$brief" \
     "ship brief must forbid one-at-a-time stop-fix-rereview loops"
+  assert_grep "9. Never re-run a failed CI job or workflow" "$brief" \
+    "ship brief must keep the CI-no-rerun standing rule as rule 9"
   # The name-and-origin pointer must resolve to the generated brief's ask-user rule without depending on its number.
-  assert_grep "If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings)," "$brief" \
+  assert_grep "If a decision belongs above the implementation worker (product choices, destructive actions)," "$brief" \
     "the generated Rules section must retain the ask-user escalation rule"
-  assert_grep "follow the \`needs-decision\` escalation rule for human-owned decisions under \`# Rules\` in your original task brief and stop" "$brief" \
-    "the ask-user escalation must name its rule and originating section"
-  assert_no_grep "(rule 6)" "$brief" \
-    "the ask-user escalation must not depend on an ambiguous rule number"
+  assert_grep "For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file" "$brief" \
+    "the ask-user escalation must render the structured one-event-plus-snapshot contract"
   pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"
 }
 

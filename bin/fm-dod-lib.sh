@@ -54,6 +54,38 @@ EOF
 # restate the sentence a second time anywhere else.
 FM_CI_NO_RERUN_LINE='Never re-run a failed CI job or workflow: a red result at a stale head is not evidence. Fix the determinism problem or push a new head, then let CI run fresh.'
 
+# fm_proof_bar_section prints the "# Proof bar" section: prep-tier definitions,
+# evidence contract, scope boundary, and the class-sweep rule B, one owner
+# shared by bin/fm-brief.sh's ship scaffold and bin/fm-promote.sh's promoted
+# ship instructions, so a promoted worker gets the same Prep contract that
+# fm_ship_batch_rule_block's rule 8 text points back at ("the Proof bar
+# above"). Source of the tier text: data/firstmate-proof-bar-in-intent/prep-tiers.md
+# (captain ruling 2026-09-04), a private record of the ruling, not a runtime
+# pointer target - this section is the tier definitions' one worker-facing owner.
+fm_proof_bar_section() {
+  cat <<'EOF'
+# Proof bar
+Prep: {PREP}
+
+## Tier definitions and evidence contract
+Tier 0, none. The default: human-only prose, cosmetic changes, one-site fixes with no callers. State "Prep: Tier 0 - {one reason}". Honesty test: if you would need a search to state that reason, it is not Tier 0.
+Tier 1, mechanism sweep. The change fixes a pattern or mechanism at one site (a parser rule, a validation, a timestamp format, a malformed-input guard). Before your first run: search the whole repo for the same mechanism, not the same words (rg for the construct; Serena find_symbol for the function family), fix every site in one commit, list the sites.
+Tier 2, wiring trace. The change alters something other code depends on (a signature, a contract, a record shape, a return value, a route, a config key or value). Before your first run: Serena find_referencing_symbols on each changed symbol, PLUS rg for the literal names and values changed - tests and checkers that read source or config as text are invisible to symbol search. Confirm each site is handled, list them. If Serena is unavailable in your runtime, fall back to rg on the symbol name plus an import search, and name which tool produced the list.
+The cap: a Tier 1 or 2 prep that passes 20 minutes or 15 sites stops and reports to firstmate that the task is scoped wrong and gets split. Never prep harder.
+You may raise the stated tier by one with a one-line reason; you may never lower it.
+The evidence contract: paste the prep output as a list, verbatim, under this Proof bar before your first run. One line per site: path and line or symbol, then exactly one disposition - fixed, confirmed unaffected with the reason, or out of scope with the reason and the item that owns it. A site with no disposition is not on the list. No list means no prep happened; "checked, all wired" is not evidence.
+A reviewer finding at a site NOT on your list is both a real finding to fix and a prep miss; record the prep miss in your report.
+
+## Scope boundary
+A finding inside this task's stated bar is yours to fix in this run. A finding asking for proof machinery beyond the stated bar is answered out of scope by default (AGENTS.md section 7). A settled family already answered in an earlier round is out of scope; do not reopen it without new evidence.
+
+## Class-sweep rule (rule B)
+The first finding of a family means sweep the whole repo for the mechanism, fix every site in one commit, and answer every finding in that family in one round with one fix command. Rule 8 under `# Rules` below is this same rule, extended to also apply before your first run whenever you already know the family in advance.
+
+When you run /no-mistakes, copy this entire Proof bar section verbatim into `--intent` alongside the captain intent contract below.
+EOF
+}
+
 # fm_ship_batch_rule_block <rule-8-number> <rule-9-number> prints rule 8 (the
 # pre-run mechanism sweep plus the post-review batch-findings response) and
 # rule 9 (FM_CI_NO_RERUN_LINE) for a ship brief's # Rules list. The pre-run
