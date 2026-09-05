@@ -47,21 +47,27 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local state_root=${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     PF_TEST_LOCK_HOLDER=
   fi
-  if [ -f "$pid_file" ]; then
-    pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    if [ -n "$pid" ]; then
-      if ! { fm_remote_job_resolve_stop_owner "$pid" &&
-        fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"; }; then
-        printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
-        return 1
-      fi
+  if [ -d "$state_root" ] && ! (
+    export FM_REMOTE_JOB_STATE_ROOT=$state_root
+    fm_remote_job_prepare_state "$HOME" || exit 1
+    if fm_remote_job_lock_owner_matches_process "$HOME" "$FM_REMOTE_JOB_STATE/supervisor.lock"; then
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_OWNER_PID" "$FM_REMOTE_JOB_OWNER_START"
+    elif [ -f "$FM_REMOTE_JOB_STATE/worker.pid" ]; then
+      pid=$(cat "$FM_REMOTE_JOB_STATE/worker.pid" 2>/dev/null) || pid=
+      [ -z "$pid" ] || ! fm_remote_job_process_start "$pid" >/dev/null 2>&1 || {
+        fm_remote_job_resolve_stop_owner "$pid" &&
+          fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"
+      }
     fi
+  ); then
+    printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
+    return 1
   fi
   fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   fm_test_cleanup

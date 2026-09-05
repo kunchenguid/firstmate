@@ -1014,8 +1014,8 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   state="$dir/state"
   proc_root="$dir/proc"
   pid=4242
-  identity_key=proc-starttime
-  [ "$(uname)" != Linux ] || identity_key=linux-starttime
+  identity_key='proc-starttime'
+  [ "$(uname)" != Linux ] || identity_key='linux-starttime'
   mkdir -p "$proc_root"
   printf 'btime 1784094040\n' > "$proc_root/stat"
   write_fake_proc_identity "$proc_root" "$pid" 987654
