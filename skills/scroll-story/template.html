@@ -133,8 +133,7 @@
 
     .stage {
       position: sticky;
-      top: 50vh;
-      transform: translateY(-50%);
+      top: calc(50vh - var(--stage-height) / 2);
       height: var(--stage-height);
       min-width: 0;
       overflow: hidden;

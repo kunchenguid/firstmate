@@ -37,7 +37,7 @@ A single focal path or schema delta may involve several related SVG elements, bu
 
 Put the sticky stage and scrolling steps in the same `.scrolly` container.
 The container's height is established by the steps column, so it bounds the sticky element and releases it when the story ends.
-Use two columns on wide screens, vertically center the stage with `top: 50vh` plus a transform, and give the steps generous vertical spacing.
+Use two columns on wide screens, vertically center the stage with a computed sticky offset of `top: calc(50vh - var(--stage-height) / 2)`, and give the steps generous vertical spacing.
 
 ```css
 :root {
@@ -59,8 +59,7 @@ Use two columns on wide screens, vertically center the stage with `top: 50vh` pl
 
 .stage {
   position: sticky;
-  top: 50vh;
-  transform: translateY(-50%);
+  top: calc(50vh - var(--stage-height) / 2);
   height: var(--stage-height);
   overflow: hidden;
 }
@@ -99,6 +98,9 @@ Use two columns on wide screens, vertically center the stage with `top: 50vh` pl
 }
 ```
 
+The computed `top` keeps the stage's painted box identical to its layout box, so the stage stays vertically centered once pinned yet can never paint above its own flow position at first paint.
+Do not center the stage with a `translateY(-50%)` transform instead - before the sticky threshold engages, the transform lifts the stage half its height over whatever content precedes the container.
+If a centering transform is unavoidable, reserve at least half of `--stage-height` in clearance above the stage's flow position.
 Do not place `overflow: hidden`, `auto`, or `scroll` on an ancestor of the sticky stage unless that ancestor is intentionally the scroll container.
 Reserve enough top and bottom padding in `.steps` for the first and last beats to cross the reading line while the stage is still visible.
 
@@ -358,6 +360,7 @@ Before handing over the page, verify every item in a real browser:
 - [ ] Every scroll step contains one idea.
 - [ ] The stage changes exactly one thing per step.
 - [ ] The first and last steps have enough scroll room to activate.
+- [ ] At first paint, before any scrolling, the stage does not overlap the content above the story.
 - [ ] The stage remains pinned inside the story and releases at the story's end.
 - [ ] Fast forward scrolling and reverse scrolling reconstruct the correct state.
 - [ ] The layout collapses into a non-sticky flow at phone width.
