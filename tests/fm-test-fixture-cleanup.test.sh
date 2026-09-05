@@ -8,8 +8,12 @@
 # that exact pattern and assert the fixture root is actually gone once the
 # owning process's guarded teardown has run - on a normal exit and on a
 # terminating signal - plus that a stale marked fixture from a killed prior
-# run gets reaped on the next source. Nothing here inspects tests/lib.sh's
-# source text; it only observes filesystem state around the real helper.
+# run gets reaped on the next source.
+#
+# The second half of the file covers the leaked-process sweep those helpers run
+# before removing a root, including the boundary it must never cross. Nothing
+# here inspects tests/lib.sh's source text; it only observes filesystem state
+# and real process liveness around the real helpers.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -164,9 +168,482 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+# --- leaked-process sweep ---------------------------------------------------
+#
+# Removing a fixture root does not stop what is still running inside it, so
+# fm_test_cleanup sweeps each registered root before removing it. These cases
+# pin both halves of that contract through the real helpers: that a process
+# left running inside a fixture root does not survive its owner, and - the
+# property that matters most - that the sweep cannot reach anything outside
+# the one root it was given.
+
+# These cases deliberately start processes that must SURVIVE a sweep, so a case
+# that fails early (fail exits immediately) would leak them - the exact class of
+# leak this file is here to pin. tests/lib.sh's documented extension point is an
+# own EXIT trap that still calls fm_test_cleanup, so sleeper pids are tracked and
+# reaped there rather than only on each success path.
+SLEEPER_PIDS=()
+
+sweep_test_cleanup() {
+  local p
+  for p in "${SLEEPER_PIDS[@]:-}"; do
+    [ -n "$p" ] && kill -KILL "$p" 2>/dev/null
+  done
+  fm_test_cleanup
+}
+trap sweep_test_cleanup EXIT
+trap 'sweep_test_cleanup; exit 130' INT
+trap 'sweep_test_cleanup; exit 143' TERM
+
+# Start a `sleep` whose cwd is <dir>, disowned so it is not the test shell's
+# job to reap, and echo its pid once it is confirmed running. Mirrors the shape
+# a leaked `treehouse get` subshell takes: reparented, cwd inside the tree.
+#
+# The sleeper's stdio must be detached. Callers use `$(start_cwd_sleeper ...)`,
+# and a command substitution reads until the write end of its pipe is closed by
+# EVERY holder - so a sleeper that inherited stdout would block the capture for
+# its full duration rather than for as long as this function runs.
+start_cwd_sleeper() {  # <dir>
+  local dir=$1 pid tries=0
+  ( cd "$dir" && exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  disown
+  while [ "$tries" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s\n' "$pid"
+}
+
+# Record a sleeper for the EXIT trap. Called in the parent shell (not inside the
+# command substitution that captures the pid), so the array append survives.
+track_sleeper() {  # <pid>
+  [ -n "${1:-}" ] && SLEEPER_PIDS+=("$1")
+}
+
+reap_sleeper() {  # <pid>
+  [ -n "${1:-}" ] || return 0
+  kill -KILL "$1" 2>/dev/null || true
+}
+
+# proc_is_alive <pid>
+# `kill -0` is the wrong liveness test here: these sleepers are children of the
+# test shell, and a signalled child stays a ZOMBIE until the shell reaps it -
+# a state `kill -0` reports as success, which would read a successfully killed
+# process as a survivor. Ask for the process state instead and treat Z as dead.
+proc_is_alive() {  # <pid>
+  local state
+  [ -n "${1:-}" ] || return 1
+  state=$(ps -o state= -p "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$state" ] || return 1
+  case "$state" in Z*) return 1 ;; esac
+  return 0
+}
+
+test_cleanup_sweeps_processes_leaked_in_its_own_root() {
+  local child_out child_dir pid alive
+  # The owning process registers the root, leaves a process running inside it,
+  # publishes both, and exits - exercising the real EXIT-trap path rather than
+  # calling the sweep directly.
+  # The sleeper's stdio is detached so a regressed sweep fails this case
+  # instead of hanging the capture for the sleeper's full duration.
+  child_out=$(bash -c '
+    # shellcheck source=tests/lib.sh
+    . "'"$LIB"'"
+    d=$(fm_test_tmproot fm-test-cleanup-sweep)
+    ( cd "$d" && exec sleep 300 ) >/dev/null 2>&1 </dev/null &
+    pid=$!
+    disown
+    printf "%s\n%s\n" "$d" "$pid"
+  ')
+  child_dir=$(printf '%s\n' "$child_out" | sed -n '1p')
+  pid=$(printf '%s\n' "$child_out" | sed -n '2p')
+  [ -n "$pid" ] || fail "the child never published the pid of the process it leaked"
+  assert_absent "$child_dir" "the fixture root survived its owning process's exit"
+
+  alive=0
+  if proc_is_alive "$pid"; then
+    alive=1
+    reap_sleeper "$pid"
+  fi
+  [ "$alive" -eq 0 ] \
+    || fail "a process left running inside the fixture root survived fm_test_cleanup"
+  pass "fm_test_cleanup reaps a process leaked inside its own fixture root"
+}
+
+test_sweep_cannot_reach_outside_its_own_root() {
+  local harness swept sibling prefixed outside swept_pid sibling_pid prefixed_pid outside_pid rc=0
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-boundary)
+  # All four live under this suite's own registered root, so they are equally
+  # eligible on the TMPDIR condition alone and only the marker and the root
+  # argument may separate them - and so the suite's own cleanup reaps whatever
+  # an early failure leaves behind.
+  swept="$harness/swept"
+  sibling="$harness/sibling"
+  mkdir -p "$swept" "$sibling"
+  : > "$swept/.fm-test-fixture"
+  : > "$sibling/.fm-test-fixture"
+  # A sibling whose path is a STRING PREFIX of the swept root: the classic way
+  # a prefix comparison escapes its subtree. "$swept-prefixed" is not under
+  # "$swept", so it must be untouched.
+  prefixed="$swept-prefixed"
+  mkdir -p "$prefixed"
+  : > "$prefixed/.fm-test-fixture"
+  outside="$harness/outside"
+  mkdir -p "$outside"
+
+  swept_pid=$(start_cwd_sleeper "$swept") || fail "the in-root sleeper never started"
+  track_sleeper "$swept_pid"
+  sibling_pid=$(start_cwd_sleeper "$sibling") || fail "the sibling-root sleeper never started"
+  track_sleeper "$sibling_pid"
+  prefixed_pid=$(start_cwd_sleeper "$prefixed") || fail "the prefix-sibling sleeper never started"
+  track_sleeper "$prefixed_pid"
+  outside_pid=$(start_cwd_sleeper "$outside") || fail "the out-of-root sleeper never started"
+  track_sleeper "$outside_pid"
+
+  fm_test_sweep_leaked_processes "$swept" || rc=$?
+  expect_code 0 "$rc" "the sweep did not succeed on a well-formed fixture root"
+
+  proc_is_alive "$swept_pid" \
+    && { reap_sleeper "$swept_pid"; fail "the sweep left a process running inside the root it was given"; }
+  proc_is_alive "$sibling_pid" \
+    || fail "the sweep reached another fixture root's process"
+  proc_is_alive "$prefixed_pid" \
+    || fail "the sweep reached a sibling whose path is a string prefix of the swept root"
+  proc_is_alive "$outside_pid" \
+    || fail "the sweep reached a process outside the swept root entirely"
+
+  reap_sleeper "$sibling_pid"
+  reap_sleeper "$prefixed_pid"
+  reap_sleeper "$outside_pid"
+  pass "the leaked-process sweep reaches only processes inside the root it was given"
+}
+
+test_sweep_refuses_unmarked_and_non_tmpdir_roots() {
+  local harness unmarked elsewhere outside_tmpdir unmarked_pid outside_pid rc=0
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-refusals)
+  # Under TMPDIR but carrying no fixture marker: a path that reached the
+  # registry without fm_test_tmproot having created it must not be swept.
+  unmarked="$harness/unmarked"
+  # Marked but outside TMPDIR: a marker file alone must not license a sweep of
+  # an arbitrary directory - a real task worktree or the primary checkout could
+  # be handed a marker by anything. TMPDIR is repointed at a sibling for this
+  # half, so the marked root really is outside the TMPDIR the sweep will read.
+  elsewhere="$harness/effective-tmpdir"
+  outside_tmpdir="$harness/marked-outside-tmpdir"
+  mkdir -p "$elsewhere" "$outside_tmpdir" "$unmarked"
+  : > "$outside_tmpdir/.fm-test-fixture"
+
+  unmarked_pid=$(start_cwd_sleeper "$unmarked") || fail "the unmarked-root sleeper never started"
+  track_sleeper "$unmarked_pid"
+  outside_pid=$(start_cwd_sleeper "$outside_tmpdir") || fail "the non-TMPDIR sleeper never started"
+  track_sleeper "$outside_pid"
+
+  fm_test_sweep_leaked_processes "$unmarked" || rc=$?
+  expect_code 0 "$rc" "the sweep failed rather than skipping an unmarked root"
+  rc=0
+  # A child shell, so the redirected TMPDIR cannot reach this shell at all.
+  # Its own orphan scan is suppressed: it would otherwise sweep the redirected
+  # TMPDIR rather than the one this case is asserting about.
+  FM_TEST_SKIP_ORPHAN_REAP=1 TMPDIR="$elsewhere" bash -c '
+    # shellcheck source=tests/lib.sh
+    . "$1"
+    fm_test_sweep_leaked_processes "$2"
+  ' _ "$LIB" "$outside_tmpdir" || rc=$?
+  expect_code 0 "$rc" "the sweep failed rather than skipping a non-TMPDIR root"
+
+  proc_is_alive "$unmarked_pid" \
+    || fail "the sweep signalled into a TMPDIR directory carrying no fixture marker"
+  proc_is_alive "$outside_pid" \
+    || fail "the sweep signalled into a marked directory outside TMPDIR"
+
+  reap_sleeper "$unmarked_pid"
+  reap_sleeper "$outside_pid"
+  pass "the sweep skips roots that are unmarked or outside TMPDIR instead of signalling into them"
+}
+
+test_sweep_kills_a_process_that_ignores_term() {
+  local harness root pid alive ready tries
+  # The shape that actually leaked is TERM-resistant: the pane shell holding the
+  # fixture tree is an interactive login shell, and every one of the 99 found on
+  # this machine survived SIGTERM and needed SIGKILL. A sweep that only TERMed
+  # and waited would look correct against a plain `sleep` while still leaking
+  # the real thing, so pin the KILL pass against a process that ignores TERM.
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-stubborn)
+  root="$harness/stubborn"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  # `kill -0 "$pid"` only proves the process exists - not that it has reached
+  # `trap "" TERM` yet. Sending TERM as soon as the pid appears races the
+  # trap's installation: TERM can arrive first and kill the process with its
+  # default disposition, which would make this "TERM-resistant" case flaky
+  # rather than pinned. A marker written right after the trap is installed
+  # gives a deterministic readiness signal instead.
+  ready="$root/.term-trap-armed"
+  bash -c 'trap "" TERM; : > "$2"; cd "$1" || exit 1; while :; do sleep 0.2; done' \
+    _ "$root" "$ready" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  disown
+  track_sleeper "$pid"
+  tries=0
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null \
+      || fail "the TERM-resistant fixture process exited before arming its trap"
+    tries=$((tries + 1))
+    [ "$tries" -lt 200 ] || fail "the TERM-resistant fixture process never armed its trap"
+    sleep 0.05
+  done
+  # Confirm it really is TERM-resistant, so this case cannot pass vacuously
+  # against a process that would have died to the TERM pass anyway.
+  kill -TERM "$pid" 2>/dev/null
+  sleep 0.5
+  proc_is_alive "$pid" \
+    || fail "the fixture process died to SIGTERM, so this case cannot prove the KILL pass"
+
+  fm_test_sweep_leaked_processes "$root" \
+    || fail "the sweep failed on a root holding a TERM-resistant process"
+
+  alive=0
+  if proc_is_alive "$pid"; then
+    alive=1
+    reap_sleeper "$pid"
+  fi
+  [ "$alive" -eq 0 ] \
+    || fail "a TERM-resistant process inside the fixture root survived the sweep"
+  pass "the sweep escalates to KILL for a process that ignores TERM"
+}
+
+test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
+  local harness root pid alive
+  # A cwd-only recheck closes the "left the subtree" case but not PID reuse:
+  # if the pid the sweep scanned has already exited and the OS handed the
+  # number to an unrelated process by the time the sweep is about to signal,
+  # a cwd-only recheck cannot tell the difference. fm_proc_reap_identity is
+  # overridden here, in a child shell, to return a different value on every
+  # call - exactly what re-deriving identity for a reused pid would look like
+  # - so the pre-signal identity recheck can never match what was captured at
+  # scan time. The real sleeper must therefore survive untouched.
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-identity)
+  root="$harness/reused"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  pid=$(start_cwd_sleeper "$root") || fail "the identity-check sleeper never started"
+  track_sleeper "$pid"
+
+  # A plain shell variable would not do: each call to fm_proc_reap_identity runs
+  # inside the command substitution that captures its output, which is a
+  # subshell, so an in-memory counter would never actually advance in the
+  # caller. A counter file survives across that subshell boundary instead.
+  bash -c '
+    # shellcheck source=tests/lib.sh
+    . "$1"
+    counter="$2/identity-calls"
+    fm_proc_reap_identity() {
+      local n
+      n=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
+      printf "%s\n" "$n" > "$counter"
+      printf "identity-%s\n" "$n"
+    }
+    fm_test_sweep_leaked_processes "$3"
+  ' _ "$LIB" "$harness" "$root" \
+    || fail "the sweep failed rather than no-op'ing on an identity mismatch"
+
+  # The counter proves the override was actually consulted. Without it, a sweep
+  # that stopped asking for identity would pass this case vacuously: "the
+  # sleeper survived" is also what a sweep that signalled nothing looks like.
+  [ -s "$harness/identity-calls" ] \
+    || fail "the sweep never asked for a process identity, so this case proves nothing"
+
+  alive=0
+  proc_is_alive "$pid" && alive=1
+  reap_sleeper "$pid"
+  [ "$alive" -eq 1 ] \
+    || fail "the sweep signalled a pid whose identity no longer matched what it captured at scan time"
+  pass "the sweep leaves a pid alone once its identity no longer matches what was captured at scan time"
+}
+
+test_signal_guard_still_admits_a_leak_that_execd_since_the_scan() {
+  local harness root pid ready landed tries=0
+  local captured own_before own_after cmd_before cmd_after scan
+  # WHY THIS CASE EXISTS. The pre-signal recheck above stops the sweep
+  # signalling a recycled pid - but identity can be built two ways, and only
+  # one is correct for a REAPER. bin/fm-wake-lib.sh's fm_pid_identity (the
+  # OWNERSHIP identity, used for lock claims) folds in the command line, so it
+  # deliberately breaks on `exec`. Building the sweep on that would make it
+  # spare any leaked process that exec'd after the scan - reinstating the very
+  # leak this file pins, and silently, because sparing a process is
+  # indistinguishable from having had nothing to reap. fm_proc_reap_identity is
+  # birth-only for exactly that reason.
+  #
+  # This asserts the shared predicate directly rather than racing a signal into
+  # the sweep's grace window: the exec is driven by a marker file and confirmed
+  # landed before anything is asserted, so the case turns on the identity rule
+  # and never on scheduling. bin/fm-teardown.sh's reap passes through the same
+  # predicate, so this covers production too.
+  harness=$(fm_test_tmproot fm-test-cleanup-signal-guard)
+  root="$harness/leak"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  ready="$harness/ready"
+  landed="$harness/landed"
+
+  # Waits for the marker, then execs - so the pid, its start time and its cwd
+  # all survive while the command line is rewritten. Mirrors a leaked
+  # `treehouse get` subshell handing off to the shell it opens.
+  ( cd "$root" && exec perl -e '
+      my ($ready, $landed) = @ARGV;
+      open my $fh, ">", $ready or die "ready";
+      close $fh;
+      until (-e $landed) { select undef, undef, undef, 0.01; }
+      exec "sleep", "313";
+    ' "$ready" "$landed" ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  disown
+  track_sleeper "$pid"
+  while [ "$tries" -lt 200 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -e "$ready" ] || fail "the exec fixture process never started"
+
+  captured=$(fm_proc_reap_identity "$pid") \
+    || fail "could not capture a reap identity for the fixture process"
+  own_before=$(fm_test_pid_identity "$pid") \
+    || fail "could not capture an ownership identity for the fixture process"
+  cmd_before=$(ps -p "$pid" -o command= 2>/dev/null)
+
+  # `sleep 313` is a signature no other process on the machine is running, so
+  # polling the command line for it is positive proof the exec landed - not the
+  # mere absence of the old one.
+  : > "$landed"
+  tries=0
+  while [ "$tries" -lt 400 ]; do
+    cmd_after=$(ps -p "$pid" -o command= 2>/dev/null)
+    case "$cmd_after" in *"sleep 313"*) break ;; esac
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  case "$cmd_after" in
+    *"sleep 313"*) ;;
+    *) fail "the fixture process never exec'd, so this case proves nothing" ;;
+  esac
+
+  scan=$(fm_pids_with_cwd_under "$root") \
+    || fail "the cwd scan failed against the exec fixture root"
+  fm_proc_pid_in_list "$scan" "$pid" \
+    || fail "the exec'd process left the fixture root, so this case proves nothing"
+
+  # The property: birth identity is unchanged, so the leak is still reapable.
+  fm_proc_safe_to_signal "$pid" "$captured" "$scan" \
+    || fail "the signal guard refused a leaked process that only exec'd since the scan"
+
+  # And the divergence that makes the property non-trivial: the ownership
+  # identity DID change, so a sweep built on it would have spared this leak.
+  own_after=$(fm_test_pid_identity "$pid") \
+    || fail "could not re-read the ownership identity after the exec"
+  [ "$cmd_after" != "$cmd_before" ] \
+    || fail "the exec did not rewrite the command line, so the identities cannot diverge"
+  [ "$own_after" != "$own_before" ] \
+    || fail "the ownership identity did not change across the exec, so this case pins nothing"
+
+  reap_sleeper "$pid"
+  pass "the signal guard still admits a leak that only exec'd since the scan"
+}
+
+test_sweep_never_reaches_a_registered_repo_checkout_dir() {
+  local repo_dir pid
+  # Not hypothetical: tests/fm-lint.test.sh registers a cleanup dir created by
+  # `mktemp -d "$ROOT/.fm-lint-parity.XXXXXX"` - inside the repo checkout - and
+  # tests/fm-arm-pretool-check.test.sh registers a bare mktemp root with no
+  # fixture marker. A sweep driven off the registry alone would signal into the
+  # checkout, so both conditions are checked against that real shape here, with
+  # a marker planted to prove the TMPDIR condition carries it on its own.
+  repo_dir=$(mktemp -d "$ROOT/.fm-test-sweep-repo-guard.XXXXXX") \
+    || fail "could not create the repo-internal directory this case is about"
+  pid=$(start_cwd_sleeper "$repo_dir") || {
+    rm -rf "$repo_dir"
+    fail "the repo-internal sleeper never started"
+  }
+  track_sleeper "$pid"
+
+  fm_test_sweepable_root "$repo_dir" \
+    && fail "a directory inside the repo checkout was accepted as sweepable"
+  : > "$repo_dir/.fm-test-fixture"
+  fm_test_sweepable_root "$repo_dir" \
+    && fail "a marker file alone made a repo-checkout directory sweepable"
+  fm_test_sweep_leaked_processes "$repo_dir" \
+    || fail "the sweep failed rather than skipping a repo-checkout directory"
+
+  proc_is_alive "$pid" || fail "the sweep signalled a process inside the repo checkout"
+  reap_sleeper "$pid"
+  rm -rf "$repo_dir"
+  pass "the sweep never reaches a registered directory inside the repo checkout"
+}
+
+test_sweep_never_signals_the_sweeping_shell() {
+  local harness root rc=0
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-self)
+  root="$harness/self"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  # A shell whose OWN cwd is inside the root it sweeps must survive: the child
+  # cd's in, sweeps, and only then reports. TMPDIR is pointed at the harness so
+  # the root qualifies while staying inside this test's own fixture tree.
+  TMPDIR="$harness" bash -c '
+    # shellcheck source=tests/lib.sh
+    . "'"$LIB"'"
+    cd "$1" || exit 9
+    fm_test_sweep_leaked_processes "$1" || exit 8
+    printf "survived\n"
+  ' _ "$root" > "$harness/out" 2>"$harness/err" || rc=$?
+
+  expect_code 0 "$rc" "a shell sweeping the root it is sitting in did not survive"
+  assert_grep survived "$harness/out" \
+    "the sweeping shell was signalled by its own sweep"
+  pass "the sweep never signals the shell performing it"
+}
+
+test_orphan_sweep_reaps_processes_left_in_a_stale_root() {
+  local stale_dir pid alive
+  # The accumulation path: a prior run killed hard enough to skip its traps
+  # leaves both a root and processes inside it. The next source must clear both.
+  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-stale-procs.XXXXXX")
+  printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
+  pid=$(start_cwd_sleeper "$stale_dir") || fail "the stale-root sleeper never started"
+  track_sleeper "$pid"
+  touch -t 202001010000 "$stale_dir/.fm-test-fixture"
+
+  bash -c '
+    # shellcheck source=tests/lib.sh
+    . "$1"
+  ' _ "$LIB"
+
+  assert_absent "$stale_dir" "the orphan reaper left the stale fixture root behind"
+  alive=0
+  if proc_is_alive "$pid"; then
+    alive=1
+    reap_sleeper "$pid"
+  fi
+  [ "$alive" -eq 0 ] \
+    || fail "the orphan reaper removed a stale fixture root but left its leaked process running"
+  pass "the orphan sweep reaps processes left inside a stale fixture root, not just the root"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_cleanup_sweeps_processes_leaked_in_its_own_root
+test_sweep_cannot_reach_outside_its_own_root
+test_sweep_refuses_unmarked_and_non_tmpdir_roots
+test_sweep_kills_a_process_that_ignores_term
+test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches
+test_signal_guard_still_admits_a_leak_that_execd_since_the_scan
+test_sweep_never_reaches_a_registered_repo_checkout_dir
+test_sweep_never_signals_the_sweeping_shell
+test_orphan_sweep_reaps_processes_left_in_a_stale_root

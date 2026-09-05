@@ -156,12 +156,14 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     root via fm_pids_with_cwd_under, then sends TERM - and KILL after a short
+#     grace period to any survivor - only to a pid that still passes
+#     fm_proc_safe_to_signal against a fresh scan. bin/fm-proc-cwd-lib.sh owns
+#     both boundaries for this reap and firstmate's own test-fixture cleanup,
+#     and explains why cwd rather than a process tree and why identity must be
+#     re-verified per signal. Both roots are unique per task and never shared,
+#     so this can never reach another task's or the primary's processes.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -209,6 +211,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-proc-cwd-lib.sh
+. "$SCRIPT_DIR/fm-proc-cwd-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1631,71 +1635,13 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
-pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
-}
-
-task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
-  local -a stat_fields
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
-    return 0
-  fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value=$(fm_nm_trim "$value")
-  [ -n "$value" ] || return 1
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf 'lstart=%s\n' "$value"
-}
-
-task_process_identity_matches() {  # <pid> <identity>
-  local current
-  current=$(task_process_identity "$1") || return 1
-  [ "$current" = "$2" ]
-}
-
-task_pid_list_contains() {  # <pid-list> <pid>
-  printf '%s\n' "$1" | grep -Fxq "$2"
-}
+# Fix 2 (see script header) resolves both of its safety boundaries - "which
+# processes are rooted under this directory" and "is this pid still the process
+# I scanned" - through bin/fm-proc-cwd-lib.sh, the one owner of both;
+# firstmate's own test-fixture cleanup shares them, so a reaper cannot be
+# written that checks only one. The fail-closed policy built on top of them - a
+# scan that cannot establish a safe result refuses destructive teardown - stays
+# here.
 
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
@@ -1703,7 +1649,7 @@ task_pids_under_roots() {  # <dir>...
   local dir dir_pids pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
-    if ! dir_pids=$(pids_with_cwd_under "$dir"); then
+    if ! dir_pids=$(fm_pids_with_cwd_under "$dir"); then
       TASK_PIDS_FAILED_DIR=$dir
       return 1
     fi
@@ -1725,7 +1671,7 @@ reap_task_backend_process_group() {  # <label>
     return 0
     ;;
   esac
-  leader_start=$(task_process_identity "$leader") || {
+  leader_start=$(fm_proc_reap_identity "$leader") || {
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
@@ -1742,14 +1688,14 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
+  fm_proc_reap_identity_matches "$leader" "$leader_start" || return 0
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
+  if fm_proc_reap_identity_matches "$leader" "$leader_start" \
      && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
@@ -1782,12 +1728,12 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(fm_proc_reap_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
           echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
         fi
-        if task_pid_list_contains "$TASK_PIDS" "$pid"; then
+        if fm_proc_pid_in_list "$TASK_PIDS" "$pid"; then
           echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
         fi
@@ -1811,8 +1757,7 @@ EOF
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if fm_proc_safe_to_signal "$pid" "$identity" "$current_pids"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1827,8 +1772,7 @@ EOF
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if fm_proc_safe_to_signal "$pid" "$identity" "$current_pids"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
@@ -1843,8 +1787,7 @@ EOF
       for i in "${!remaining_pids[@]}"; do
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
-        if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
+        if fm_proc_safe_to_signal "$pid" "$identity" "$current_pids"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
