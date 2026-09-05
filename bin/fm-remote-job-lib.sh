@@ -1086,7 +1086,7 @@ fm_remote_job_active_claim_identity() { # <job> <state>
   fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
   group=$(fm_remote_job_process_pgid "$pid") || return 1
   [ "$group" = "$pid" ] || return 1
-  printf '%s\t%s\t%s\n' "$pid" "$actual_start" "$group"
+  printf '%s\t%s\t%s\t%s\n' "$pid" "$actual_start" "$group" "$recorded_start"
 }
 
 fm_remote_job_active_claim_snapshot() { # <state>
@@ -1102,29 +1102,53 @@ fm_remote_job_active_claim_snapshot() { # <state>
 
 fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
   printf '%s\n%s\n' "$1" "$2" |
-    awk -F '\t' 'NF == 4 && !seen[$1 FS $2]++'
+    awk -F '\t' 'NF == 5 && !seen[$1 FS $2]++'
 }
 
 fm_remote_job_signal_claim_snapshot() { # <snapshot> <state> <signal>
-  local snapshot=$1 state=$2 signal=$3 pid recorded_start group id job identity own_group
+  local snapshot=$1 state=$2 signal=$3 pid actual_start group recorded_start id job identity own_group
   own_group=$(fm_remote_job_process_pgid "$$") || return 1
-  while IFS=$'\t' read -r pid recorded_start group id; do
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
     [ -n "$pid" ] || continue
+    case "$recorded_start" in linux:*:*) ;; *) continue ;; esac
     fm_remote_job_safe_id "$id" || continue
     job="$state/jobs/$id"
     identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
-    [ "$identity" = "$pid"$'\t'"$recorded_start"$'\t'"$group" ] || continue
+    [ "$identity" = "$pid"$'\t'"$actual_start"$'\t'"$group"$'\t'"$recorded_start" ] || continue
     [ "$group" != "$own_group" ] || continue
     kill -"$signal" -- "-$group" 2>/dev/null || true
   done <<< "$snapshot"
 }
 
+fm_remote_job_claim_snapshot_legacy_groups() { # <snapshot>
+  local snapshot=$1 pid actual_start group recorded_start id groups=''
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
+    [ -n "$pid" ] && [ -n "$actual_start" ] && [ -n "$id" ] || continue
+    case "$recorded_start" in linux:*:*) continue ;; esac
+    case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
+  done <<< "$snapshot"
+  printf '%s\n' "${groups# }"
+}
+
+fm_remote_job_report_legacy_claims() { # <snapshot>
+  local snapshot=$1 pid actual_start group recorded_start id seen=''
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
+    [ -n "$pid" ] && [ -n "$actual_start" ] && [ -n "$id" ] || continue
+    case "$recorded_start" in linux:*:*) continue ;; esac
+    case " $seen " in *" $pid "*) continue ;; esac
+    seen="$seen $pid"
+    printf 'remote-job: NEEDING MANUAL CLEANUP: active claim pid %s recorded identity %s\n' \
+      "$pid" "$recorded_start" >&2
+  done <<< "$snapshot"
+}
+
 fm_remote_job_claim_snapshot_has_live_identity() { # <snapshot>
   local snapshot=$1 process_snapshot pid group status actual_start
-  local claim_pid recorded_start recorded_group _ recorded_boot recorded_ticks actual_boot actual_ticks
+  local claim_pid recorded_start recorded_group claim_start _ recorded_boot recorded_ticks actual_boot actual_ticks
   process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 0
-  while IFS=$'\t' read -r claim_pid recorded_start recorded_group _; do
+  while IFS=$'\t' read -r claim_pid recorded_start recorded_group claim_start _; do
     [ -n "$claim_pid" ] && [ "$recorded_group" = "$claim_pid" ] || continue
+    case "$claim_start" in linux:*:*) ;; *) continue ;; esac
     case "$recorded_start" in linux:*:*) ;; *) return 0 ;; esac
     recorded_boot=${recorded_start#linux:}
     recorded_ticks=${recorded_boot##*:}
@@ -1182,15 +1206,16 @@ fm_remote_job_group_all_members_scoped() { # <group> <root> <state>
   return "$found"
 }
 
-fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal>
-  local snapshot=$1 root=$2 state=$3 signal=$4 pid recorded_start group identity own_group
+fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal> [excluded-groups]
+  local snapshot=$1 root=$2 state=$3 signal=$4 excluded_groups=${5:-}
+  local pid recorded_start group identity own_group
   local groups='' signalled_groups=''
   own_group=$(fm_remote_job_process_pgid "$$") || return 1
   while IFS=$'\t' read -r _ _ group; do
     case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
   done <<< "$snapshot"
   for group in $groups; do
-    if [ "$group" != "$own_group" ] &&
+    if [ "$group" != "$own_group" ] && [[ " $excluded_groups " != *" $group "* ]] &&
       fm_remote_job_group_all_members_scoped "$group" "$root" "$state" &&
       fm_remote_job_snapshot_group_has_identity "$snapshot" "$group" "$root" "$state"; then
       kill -"$signal" -- "-$group" 2>/dev/null || true
@@ -1229,7 +1254,7 @@ fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT
 }
 
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 root state signal current known='' claim_current claim_known='' i actual_start recorded_start
+  local pid=$1 root state signal current known='' claim_current claim_known='' legacy_groups i actual_start recorded_start
   local snapshot_waited=0 snapshot_fifo=${FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO:-}
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
@@ -1241,13 +1266,14 @@ fm_remote_job_stop_worker_tree() { # <pid>
       known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
       claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
       claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+      legacy_groups=$(fm_remote_job_claim_snapshot_legacy_groups "$claim_known") || return 1
       if [ "$snapshot_waited" -eq 0 ] && [ -n "$snapshot_fifo" ]; then
         case "$snapshot_fifo" in /*) ;; *) return 1 ;; esac
         [ -p "$snapshot_fifo" ] || return 1
         IFS= read -r _ < "$snapshot_fifo" || return 1
         snapshot_waited=1
       fi
-      [ -z "$current" ] || fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal"
+      [ -z "$current" ] || fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal" "$legacy_groups"
       [ -z "$claim_current" ] || fm_remote_job_signal_claim_snapshot "$claim_current" "$state" "$signal"
       i=0
       while [ "$i" -lt 50 ]; do
@@ -1257,6 +1283,10 @@ fm_remote_job_stop_worker_tree() { # <pid>
         claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
         if ! fm_remote_job_snapshot_has_live_identity "$known" &&
           ! fm_remote_job_claim_snapshot_has_live_identity "$claim_known"; then
+          if [ -n "$(fm_remote_job_claim_snapshot_legacy_groups "$claim_known")" ]; then
+            fm_remote_job_report_legacy_claims "$claim_known"
+            return 1
+          fi
           return 0
         fi
         i=$((i + 1))

@@ -987,6 +987,8 @@ This is cleanup and host-portability evidence, not a repeat of every live backen
 The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, a directly backgrounded same-group supervisor, and independent restart supervisors from the same queue, plus a separate queue that must survive.
 It directly proves signalling skips a fully scoped snapshot whose recorded process start identity no longer matches.
 The exact kernel PID/PGID reuse race runs only when a private fixture user/PID namespace exposes writable `ns_last_pid`; it ran on this host and left the unrelated recycled identity alive.
+The same private-namespace race replaces a pre-change active-claim leader while preserving its legacy second-resolution start rendering, then proves cleanup sends no group signal, preserves the replacement, reports its PID and recorded identity as needing manual cleanup, and returns failure.
+Only kernel start identities authorize active-claim group signals; legacy identity reconstruction remains supported for worker locks while draining pre-change records.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
@@ -1002,6 +1004,7 @@ bin/fm-lint.sh
 
 ```text
 ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
+ok - legacy active claim reports manual cleanup without signalling a recycled group
 ok - active claim identity stops a job descendant after it changes directory outside the root
 ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```

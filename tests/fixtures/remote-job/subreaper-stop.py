@@ -29,7 +29,7 @@ def stop_process(process):
         process.wait(timeout=3)
 
 
-def pid_reuse_case(repo):
+def pid_reuse_case(repo, legacy_claim=False):
     if os.getpid() != 1:
         print("private PID namespace did not make the fixture process PID 1")
         return 77
@@ -51,14 +51,25 @@ def pid_reuse_case(repo):
     os.mkfifo(fifo)
     environment = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                        FM_REMOTE_JOB_STATE_ROOT=str(state),
-                       FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO=str(fifo))
+                       FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO=str(fifo), TZ="UTC0", LC_ALL="C")
     leader = stop = unrelated = None
     release_fd = None
     try:
+        while time.time() % 1 > 0.5:
+            time.sleep(0.01)
         leader = subprocess.Popen(["sleep", "300"], env=environment, cwd=root,
                                   start_new_session=True)
         leader_start = process_start(leader.pid)
         assert os.getpgid(leader.pid) == leader.pid
+        legacy_start = subprocess.check_output(
+            ["/bin/ps", "-p", str(leader.pid), "-o", "lstart="], env=environment, text=True)
+        if legacy_claim:
+            claim = state / "jobs/job-legacy/.claim"
+            claim.mkdir(parents=True)
+            (claim.parent / "state").write_text("running\n")
+            (claim / "armed").touch()
+            (claim / "group").write_text(f"{leader.pid}\n")
+            (claim / "group_start").write_text(legacy_start)
         stop = subprocess.Popen(
             ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; fm_remote_job_stop_worker_tree "$2"',
              "fixture", str(repo), str(leader.pid)],
@@ -79,15 +90,29 @@ def pid_reuse_case(repo):
         leader.wait(timeout=3)
         time.sleep(0.05)
         last_pid.write_text(str(leader.pid - 1))
-        unrelated = subprocess.Popen(["sleep", "300"], cwd=outside, start_new_session=True)
+        unrelated = subprocess.Popen(["sleep", "300"], env=environment, cwd=outside,
+                                     start_new_session=True)
         assert unrelated.pid == leader.pid
         assert os.getpgid(unrelated.pid) == leader.pid
         assert process_start(unrelated.pid) != leader_start
+        if legacy_claim:
+            replacement_legacy = subprocess.check_output(
+                ["/bin/ps", "-p", str(unrelated.pid), "-o", "lstart="],
+                env=environment, text=True)
+            if replacement_legacy != legacy_start:
+                print("legacy replacement crossed the ps lstart second boundary")
+                return 77
         os.write(release_fd, b"release\n")
         os.close(release_fd)
         release_fd = None
         stdout, stderr = stop.communicate(timeout=10)
-        assert stop.returncode == 0, (stdout, stderr)
+        if legacy_claim:
+            assert stop.returncode != 0, (stdout, stderr)
+            assert "NEEDING MANUAL CLEANUP" in stderr, (stdout, stderr)
+            assert f"pid {leader.pid}" in stderr, (stdout, stderr)
+            assert legacy_start.strip() in stderr, (stdout, stderr)
+        else:
+            assert stop.returncode == 0, (stdout, stderr)
         assert unrelated.poll() is None, "stop signalled the unrelated recycled identity"
         return 0
     finally:
@@ -100,7 +125,7 @@ def pid_reuse_case(repo):
 
 
 if len(sys.argv) > 1 and sys.argv[1] == "--pid-reuse-case":
-    sys.exit(pid_reuse_case(Path(sys.argv[2]).resolve()))
+    sys.exit(pid_reuse_case(Path(sys.argv[2]).resolve(), len(sys.argv) > 3 and sys.argv[3] == "legacy"))
 
 repo = Path(sys.argv[1]).resolve()
 if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
@@ -242,12 +267,14 @@ fm_remote_job_signal_scope_snapshot "$7" "$3" "$4" TERM
         extra_pids.discard(candidate.pid)
 
 
-def run_kernel_pid_reuse_case():
+def run_kernel_pid_reuse_case(legacy_claim=False):
     unshare = shutil.which("unshare")
     if not unshare:
         return "unshare is unavailable"
     command = [unshare, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc",
                sys.executable, __file__, "--pid-reuse-case", str(repo)]
+    if legacy_claim:
+        command.append("legacy")
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 timeout=20)
@@ -379,6 +406,11 @@ done
         print(f"skip - kernel PID/PGID reuse race: {kernel_skip}")
     else:
         print("ok - stop leaves a kernel-recycled unrelated PID/PGID untouched")
+    legacy_skip = run_kernel_pid_reuse_case(True)
+    if legacy_skip:
+        print(f"skip - legacy claim PID/PGID reuse containment: {legacy_skip}")
+    else:
+        print("ok - legacy active claim reports manual cleanup without signalling a recycled group")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
