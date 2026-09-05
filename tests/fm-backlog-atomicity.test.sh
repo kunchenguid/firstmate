@@ -1488,26 +1488,6 @@ test_recovery_reports_an_owned_row_read_failure() {
   pass "session start reports owned backlog rows it cannot read"
 }
 
-test_orca_cleanup_recovery_never_transitions_the_backlog() {
-  local case_dir id meta out
-  id=atomic-orca-cleanup-recovery-b8
-  case_dir=$(make_home orca-cleanup-recovery)
-  add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=orca"
-  meta="$(home_of "$case_dir")/state/$id.meta"
-
-  out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "session start treated cleanup recovery as a launched worker: $out"
-  assert_present "$meta" "session start removed the cleanup recovery record"
-
-  out=$(run_teardown "$case_dir" "$id") \
-    || fail "cleanup recovery teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "cleanup recovery teardown completed work that never launched"
-  assert_absent "$meta" "cleanup recovery teardown retained its task record"
-  pass "Orca cleanup recovery is excluded from backlog lifecycle transitions"
-}
 
 test_recovery_marks_an_owned_record_in_flight() {
   local case_dir id out
@@ -2420,7 +2400,6 @@ test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
-test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record

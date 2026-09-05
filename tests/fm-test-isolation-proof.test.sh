@@ -199,8 +199,7 @@ test_candidates_exclude_serial_classes() {
     tests/fm-backend-herdr-smoke.test.sh \
     tests/fm-afk-inject-e2e.test.sh \
     tests/fm-pi-primary-live-e2e.test.sh \
-    tests/fm-pr-check-security.test.sh \
-    tests/fm-backend-cmux-smoke.test.sh; do
+    tests/fm-pr-check-security.test.sh; do
     printf '%s\n' "$listed" | grep -Fxq "$banned" \
       && fail "serial-class script must not be a parallel candidate: $banned"
   done

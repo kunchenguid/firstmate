@@ -28,7 +28,7 @@
 #      literal-path match only fires for the default NM_HOME (~/.no-mistakes); a
 #      relocated NM_HOME is covered by signal 1.
 #
-# A NORMAL firstmate session - a real primary checkout, a real treehouse/Orca
+# A NORMAL firstmate session - a real primary checkout, a real treehouse
 # crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
 # returns 0 and the lifecycle proceeds exactly as before.
 #

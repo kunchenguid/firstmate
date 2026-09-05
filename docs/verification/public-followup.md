@@ -167,7 +167,7 @@ Primary harnesses (`claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `ki
 Nothing here reads or renders harness-specific state.
 The only supervision surfaces touched are the session-start digest, which `bin/fm-supervision-instructions.sh` already renders per harness without knowing this section exists, and the wake payload produced by the existing relay poll, which every harness protocol consumes identically.
 
-Runtime backends (tmux, herdr, zellij, orca, cmux): not applicable after inspection.
+Runtime backends (tmux, herdr): not applicable after inspection.
 No command here reads `state/<id>.meta`'s backend fields, resolves an endpoint, or captures a pane.
 The lifecycle integrations are backlog-handoff warnings, promotion rechain hints, and `bin/fm-teardown.sh`'s owed-reply refusal plus non-blocking open-loop and legacy `x_request=` warnings.
 They inspect home, task, parent-binding, and registration records rather than backend fields or endpoints, so they behave identically on every backend.

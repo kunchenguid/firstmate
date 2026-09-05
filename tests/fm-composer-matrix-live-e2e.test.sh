@@ -10,11 +10,7 @@
 # isolated tmux server and requires the real fm_tmux_composer_state to reach
 # `empty`, failing loudly with the harness name and version. It also proves:
 #   - the strict blank-row posture live: a plain shell pane with a blank
-#     cursor row must classify unknown and defer injection;
-#   - the zellij false-positive regression live (when zellij is installed): a
-#     pane whose content changes for reasons unrelated to submission must NOT
-#     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     cursor row must classify unknown and defer injection.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -38,7 +34,6 @@ command -v tmux >/dev/null 2>&1 || { echo "not ok - FM_COMPOSER_MATRIX_LIVE=1 bu
 
 SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
-ZELLIJ_SESSION="fm-cmx-live-zj-$$"
 CHECKED=0
 FAILED=0
 
@@ -48,10 +43,6 @@ note() { printf '# %s\n' "$1"; }
 
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  [ -z "${ZJ_BG:-}" ] || kill "$ZJ_BG" 2>/dev/null || true
-  if command -v zellij >/dev/null 2>&1; then
-    zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
-  fi
 }
 trap cleanup EXIT
 
@@ -146,73 +137,6 @@ else
   printf 'not ok - strict posture live: blank shell row classified %s, expected unknown\n' "${verdict:-unreadable}" >&2
 fi
 tmux -L "$SOCKET" kill-window -t "$SESSION:strictblank" 2>/dev/null || true
-
-# --- 3. zellij: real classifier + the false-positive regression -------------
-if command -v zellij >/dev/null 2>&1; then
-  zj_version=$(zellij --version 2>/dev/null | head -1)
-  [ -n "$zj_version" ] || zj_version='version-unknown'
-  export FM_ROOT_OVERRIDE="$ROOT"
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-backend.sh"
-  fm_backend_source zellij 2>/dev/null \
-    || fail "zellij ($zj_version): adapter source failed"
-
-  zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
-  zellij --session "$ZELLIJ_SESSION" options --default-shell bash >/dev/null 2>&1 &
-  ZJ_BG=$!
-  i=0
-  while [ "$i" -lt 10 ] && ! fm_backend_zellij_session_exists "$ZELLIJ_SESSION"; do
-    i=$((i + 1))
-    sleep 0.5
-  done
-  fm_backend_zellij_session_exists "$ZELLIJ_SESSION" \
-    || fail "zellij ($zj_version): probe session setup failed"
-  panes=$(fm_backend_zellij_cli "$ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
-    || fail "zellij ($zj_version): pane discovery command failed"
-  pane_id=$(printf '%s' "$panes" | jq -r '.[]? | select(.is_plugin == false) | .id' 2>/dev/null | head -1)
-  case "$pane_id" in
-    ''|*[!0-9]*) fail "zellij ($zj_version): pane discovery returned no terminal pane" ;;
-  esac
-  target="$ZELLIJ_SESSION:$pane_id"
-
-  fm_backend_zellij_send_literal "$target" 'while sleep 1; do date; done' \
-    || fail "zellij ($zj_version): clock probe setup write failed"
-  fm_backend_zellij_send_key "$target" Enter \
-    || fail "zellij ($zj_version): clock probe setup submit failed"
-  sleep 2
-  probe='# audit-probe-never-submitted'
-  fm_backend_zellij_send_literal "$target" "$probe" \
-    || fail "zellij ($zj_version): false-positive probe write failed"
-  sleep 0.5
-  probe_capture=$(fm_backend_zellij_capture "$target" 40 2>/dev/null) \
-    || fail "zellij ($zj_version): false-positive probe capture failed"
-  case "$probe_capture" in
-    *"$probe"*) ;;
-    *) fail "zellij ($zj_version): false-positive probe text was not visible after typing" ;;
-  esac
-  verdict=$(fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
-    "$target" 2 0.5 2>/dev/null)
-  case "$verdict" in
-    pending|unknown)
-      CHECKED=$((CHECKED + 1))
-      pass "zellij ($zj_version): unrelated pane change never confirms delivery (verdict: $verdict)"
-      ;;
-    send-failed)
-      FAILED=1
-      printf 'not ok - zellij (%s): false-positive probe text was not typed (send-failed)\n' "$zj_version" >&2
-      ;;
-    *)
-      FAILED=1
-      printf 'not ok - zellij (%s): false-positive probe returned unexpected verdict %s (expected pending or unknown)\n' \
-        "$zj_version" "${verdict:-none}" >&2
-      ;;
-  esac
-  kill "$ZJ_BG" 2>/dev/null || true
-  ZJ_BG=
-  zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
-else
-  note "harness absent, not verified here: zellij (false-positive regression not exercised)"
-fi
 
 # --- refuse a vacuous pass ---------------------------------------------------
 [ "$FAILED" -eq 0 ] || fail "live composer-matrix guard observed failures above"

@@ -1328,33 +1328,6 @@ test_housekeeping_herdr_resumed_stale_cleared() {
   pass "resumed herdr stale clears through backend-aware busy state"
 }
 
-test_housekeeping_orca_persistent_stale_resolves_terminal() {
-  local dir state key
-  dir=$(make_supercase stale-orca-persistent)
-  state="$dir/state"
-  fm_write_meta "$state/orca-w8.meta" "window=fm-orca-w8" "terminal=term-orca-w8" "backend=orca"
-  printf 'working\n' > "$state/orca-w8.status"
-  key=$(printf '%s' "orca-w8" | tr ':/.' '___')
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  (
-    fm_backend_capture() {
-      [ "$1" = orca ] || fail "expected orca capture backend, got $1"
-      [ "$2" = "term-orca-w8" ] || fail "expected Orca terminal target, got $2"
-      printf 'idle prompt\n'
-    }
-    fm_backend_busy_state() {
-      [ "$1" = orca ] || fail "expected orca busy backend, got $1"
-      [ "$2" = "term-orca-w8" ] || fail "expected Orca busy target, got $2"
-      printf 'idle'
-    }
-    fm_backend_capture orca term-orca-w8 40 >/dev/null
-    [ "$(fm_backend_busy_state orca term-orca-w8)" = idle ] || fail "Orca busy stub did not report idle"
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  ) || fail "Orca persistent stale housekeeping failed"
-  [ -s "$state/.subsuper-escalations" ] || fail "persistent Orca stale was not escalated"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "Orca stale marker not cleared after escalation"
-  pass "persistent Orca stale resolves the terminal from metadata"
-}
 
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
@@ -2649,7 +2622,6 @@ test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
-test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup

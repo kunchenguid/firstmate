@@ -155,7 +155,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # a composer locator and the cursor-anchored read can only ever answer
   # `unknown`. Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
-  # herdr, zellij, cmux, and orca use for every harness including this one.
+  # herdr uses for every harness including this one.
   # Gated on Cursor's own structural process identity, never on the verdict
   # alone, so the strict blank-row posture that owns `unknown` for every other
   # harness is untouched.
