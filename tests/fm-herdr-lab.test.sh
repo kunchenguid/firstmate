@@ -275,7 +275,12 @@ SH
         FM_AFK_PI_HERDR_E2E=1 FM_HERDR_SUBMIT_CONFIRM_LIVE=1 FM_SEND_MARKER_HERDR_E2E=1 \
         FM_EXIT_TEST_MODE="$mode" FM_EXIT_TEST_STATE="$TMP_ROOT/exit-state" \
         FM_EXIT_TEST_LOG="$TMP_ROOT/exit-log" \
-        bash "$ROOT/tests/$suite.test.sh" 2>&1) || rc=$?
+        python3 -c 'import os, signal, sys
+# A background Bash can inherit ignored SIGINT, which Bash cannot trap again.
+# Establish the signal-delivery precondition before exec of the suite itself.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+os.execvp("bash", ["bash", *sys.argv[1:]])' "$ROOT/tests/$suite.test.sh" 2>&1) || rc=$?
       [ "$rc" -ne 0 ] || fail "$suite ignored $mode during provisioning: $out"
       [ -s "$TMP_ROOT/exit-log" ] || fail "$suite did not tear down after $mode: $out"
     done

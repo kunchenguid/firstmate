@@ -1818,9 +1818,15 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+    # Persisted session output can precede the TUI repaint. Synchronize on the
+    # rendered processing result before asserting the answer's visible count.
+    wait_for_text "$TMP_ROOT/followup-$label-pane" "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case did not render the completed monitoring result"
+    pane=$(cat "$TMP_ROOT/followup-$label-pane")
+    if [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -ne 1 ]; then
+      printf '%s\n' "$pane" >&2
+      fail "Pi follow-up $label case did not render exactly one captain answer"
+    fi
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then

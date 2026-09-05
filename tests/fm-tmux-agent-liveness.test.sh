@@ -23,7 +23,7 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+PATH_SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -39,6 +39,22 @@ trap cleanup_all EXIT
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
 # private socket and never touch the host's real sessions.
 mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude" "$LAB/bin/decoy" "$LAB/wt"
+# A multicall coreutils dispatcher selects its applet from argv[0] and exits
+# when invoked through a harness-named symlink. Choose a binary that actually
+# supports the fixture's renamed invocation, independently of the host PATH.
+SLEEP_BIN=
+for candidate in "$PATH_SLEEP_BIN" /bin/sleep /usr/bin/sleep; do
+  [ -x "$candidate" ] || continue
+  ln -sf "$candidate" "$LAB/bin/probe-sleep"
+  if "$LAB/bin/probe-sleep" 0 >/dev/null 2>&1; then SLEEP_BIN=$candidate; break; fi
+done
+if [ -z "$SLEEP_BIN" ]; then
+  CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+  [ -n "$CC_BIN" ] || fail "renamed process fixture needs standalone sleep or a C compiler"
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c"
+  SLEEP_BIN="$LAB/bin/spin"
+  "$CC_BIN" -o "$SLEEP_BIN" "$LAB/spin.c" || fail "could not build the renamed process fixture"
+fi
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -47,8 +63,8 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
+# Stand-in "harness" binaries. These are SYMLINKS to the chosen native
+# executable, never copies: a copied platform binary fails code-signing validation
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
