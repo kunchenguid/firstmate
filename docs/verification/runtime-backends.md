@@ -1281,6 +1281,31 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
   This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
 
+### 2026-09-05 quiet routine outcomes on Pi 0.85.0
+
+Verified on Linux x86_64 with Node v22.23.2 and TypeScript 5.9.3.
+The global Pi 0.85.0 SDK import failed with `ERR_MODULE_NOT_FOUND: Cannot find package '@earendil-works/pi-server'`, so the runtime checks used an isolated npm installation of `@earendil-works/pi-coding-agent@0.85.0` plus `@earendil-works/pi-server@0.85.0`, with its real pi-ai, pi-tui, and typebox dependencies linked into the package-local layout the test helpers expect.
+The global installation and active session were not modified, no credentials were read or copied, and no provider request left the machine.
+With that isolated package selected through `FM_PI_PACKAGE_DIR`, both runtime suites completed without skips:
+
+```sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh tests/fm-pi-branch-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh tests/fm-pi-watch-extension.test.sh
+bin/fm-test-run.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - real Pi SDK 0.85.0 renders captain entries, hides routine delivery and history without turns, preserves ordinary messages and saved evidence, and excludes captain entries from model context
+ok - real Pi SDK 0.85.0 rejects a post-construction 429 to watcher-owned main delivery without losing its durable row
+ok - real Pi SDK 0.85.0 queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.0
+```
+
+The strict typecheck used the global package's declarations with the locally installed TypeScript binary on `PATH`.
+The delivered-report regression covers repeated turn completion, preserved stopped previews, unchanged blockers, fleet no-change and routine-action outcomes, on-demand retrieval, and the counterfactual that the same summary with a captain verdict remains visible.
+The live renderer check reconstructs historical `display: true` routine messages through stock InteractiveMode and reopens the saved session to prove their data survived; only content is hidden, not Pi's historical outer spacer or previously printed terminal scrollback.
+The existing sequence processing, replay, fallback, lease, and watcher tests remain passing; the CLI's live primary session was not restarted for this verification.
+
 ### 2026-08-28 Pi 0.84.4 SDK compatibility refresh
 
 The credential-free live guard and strict typecheck were rerun against the installed `@earendil-works/pi-coding-agent` 0.84.4 package after the Pi primary compatibility repair.

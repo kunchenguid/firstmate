@@ -742,10 +742,10 @@ if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[0].message.content)) {
   throw new Error(`routine note still has boilerplate: ${sentToMain[0].message.content}`);
 }
-// A routine note is rendered as a custom message. A captain outcome is a
+// A routine note is hidden as a custom message. A captain outcome is a
 // versioned custom session entry whose exact store summary is its payload.
-if (sentToMain[0].message.display !== true) {
-  throw new Error(`routine note must render: display=${sentToMain[0].message.display}`);
+if (sentToMain[0].message.display !== false) {
+  throw new Error(`routine note must stay hidden: display=${sentToMain[0].message.display}`);
 }
 writeFileSync(`${home}/state/delivered-routine-note`, sentToMain[0].message.content);
 const captainEntries = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
@@ -857,16 +857,15 @@ const assertRenderedNote = (note, glyph) => {
       `renderer padding should match real Pi messages (outputPad, 0), got ${rendered.paddingX},${rendered.paddingY}`,
     );
   }
-  const glyphCalls = fgCalls.filter((call) => call.text === glyph);
-  if (glyphCalls.length !== 1 || glyphCalls[0].color === "dim") {
-    throw new Error(`icon ${glyph} must carry color, not dim: ${JSON.stringify(fgCalls)}`);
-  }
-  const restCalls = fgCalls.filter((call) => call.text !== glyph);
-  if (restCalls.length === 0 || restCalls.some((call) => call.color !== "dim")) {
-    throw new Error(`note remainder must be dim: ${JSON.stringify(fgCalls)}`);
-  }
+  if (fgCalls.some((call) => call.color !== "dim")) throw new Error("legacy note must retain dim rendering");
 };
-assertRenderedNote(sentToMain[0].message.content, "⛵");
+for (const expanded of [false, true]) {
+  const historical = renderers.get("fm-branch-merge")(sentToMain[0].message, { expanded }, renderTheme);
+  if (historical.render(120).length !== 0) throw new Error("historical routine note remained visible");
+}
+assertRenderedNote("⚓ task: approval needed", "⚓");
+assertRenderedNote("ordinary unrecognized message", "ordinary");
+assertRenderedNote("⛵ unrecognized message: keep visible", "unrecognized");
 const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   captainEntries[0],
   { expanded: false },
@@ -875,6 +874,36 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
 if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
 }
+// Representative delivered reports: event generation and verdict are distinct
+// from display. Repeating a handled routine event must not create chat or turns.
+const quietSummaries = [
+  "worker completed a turn",
+  "preview stopped; work remains preserved",
+  "publication blocker already reported, unchanged",
+  "publication blocker already reported, unchanged",
+  "fleet reviewed, nothing changed",
+];
+const beforeQuiet = sentToMain.length;
+for (const [index, summary] of quietSummaries.entries()) {
+  const fleet = index === quietSummaries.length - 1;
+  const result = await report.execute(`quiet-${index}`, {
+    task: fleet ? "fleet" : "task-9", verdict: "routine", summary,
+    ...(fleet ? { silent: true } : {}),
+  }, undefined, undefined, {});
+  if (result.isError) throw new Error(`quiet report failed: ${JSON.stringify(result)}`);
+}
+const quietMessages = sentToMain.slice(beforeQuiet);
+if (quietMessages.length !== quietSummaries.length || quietMessages.some(({ message, options }) => message.display !== false || options.triggerTurn)) {
+  throw new Error(`routine repetition created visible messages or turns: ${JSON.stringify(quietMessages)}`);
+}
+const retained = await outcomesTool.execute("read-quiet", { recent: quietSummaries.length }, undefined, undefined, {});
+const retainedRows = retained.content[0].text.trim().split("\n").map(JSON.parse);
+if (JSON.stringify(retainedRows.map((row) => row.summary)) !== JSON.stringify(quietSummaries)) throw new Error("on-demand retrieval lost routine evidence");
+// Counterfactual: identical text but a captain verdict must still be visible.
+await report.execute("quiet-counterfactual", { task: "task-9", verdict: "captain", summary: quietSummaries[2] }, undefined, undefined, {});
+const laterEntry = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").at(-1);
+if (laterEntry.data.seq !== 9 || laterEntry.data.summary !== quietSummaries[2]) throw new Error("routine repetition swallowed a later captain outcome");
+if (!entryRenderers.get("fm-branch-visible-outcome")(laterEntry, { expanded: false }, renderTheme).text.includes(quietSummaries[2])) throw new Error("captain counterfactual was filtered by text");
 process.exit(0);
 EOF
   status=$?
@@ -890,7 +919,7 @@ EOF
   # real protocol executable: it is typed branch-outcome input whose body names
   # the sequence, the exact outcome, the acknowledgement tool, and the fact
   # that nothing but that acknowledgement closes it. Routine notes remain
-  # plain rendered text rather than typed operational input.
+  # plain hidden text rather than typed operational input.
   local kind body
   kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-processing-request") \
     || fail "the processing request reaches main's model as unattributed text"
@@ -906,7 +935,7 @@ EOF
     *) fail "the processing request body lost the event-ownership boundary or the sequence-bound acknowledgement duty: $body" ;;
   esac
   if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
-    fail "routine note must stay plain rendered text, not typed operational input"
+    fail "routine note must stay plain hidden text, not typed operational input"
   fi
   pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine notes stay plain"
 }
@@ -1036,8 +1065,8 @@ if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
   throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
 }
 const sailboat = sentToMain[0];
-if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ branch-driver:")) {
-  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
+if (sailboat.message.display !== false || !sailboat.message.content.startsWith("⛵ branch-driver:")) {
+  throw new Error(`unsolicited healthy result was not a hidden durable note: ${JSON.stringify(sailboat)}`);
 }
 
 const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
@@ -1517,7 +1546,7 @@ await heartbeatReport.execute(
   {},
 );
 const fleetRoutineMerge = sentToMain[sentToMain.length - 1];
-if (fleetRoutineMerge.message.display !== true) throw new Error("a fleet routine action must render");
+if (fleetRoutineMerge.message.display !== false) throw new Error("a fleet routine action must stay hidden");
 if (!fleetRoutineMerge.message.content.startsWith("⛵ fleet: reconciled the backlog after completed work")) {
   throw new Error(`fleet routine action note changed: ${fleetRoutineMerge.message.content}`);
 }
@@ -1529,7 +1558,7 @@ await heartbeatReport.execute(
   {},
 );
 const taskRoutineMerge = sentToMain[sentToMain.length - 1];
-if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped routine outcome must render");
+if (taskRoutineMerge.message.display !== false) throw new Error("a task-scoped routine outcome must stay hidden");
 if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
   throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
 }
@@ -1858,8 +1887,8 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers } = globalThis.__t;
 import { existsSync } from "node:fs";
 
 let now = 1_000_000;
@@ -1966,6 +1995,16 @@ const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Su
 if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
   throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
 }
+const assertHealthNoteVisible = ({ message }) => {
+  if (message.display !== true) throw new Error("health note was delivered hidden");
+  for (const expanded of [false, true]) {
+    const rendered = renderers.get(message.customType)(message, { expanded }, { fg: (_color, text) => text });
+    if (rendered.text !== message.content) {
+      throw new Error(`health renderer hid or changed the notification: ${message.content}`);
+    }
+  }
+};
+assertHealthNoteVisible(pauseNotes[0]);
 
 // No provider attempt occurs inside the first five-minute cooldown. Exactly
 // one probe is accepted when it elapses, and all other wakes remain on main
@@ -2012,6 +2051,7 @@ const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes(
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
   throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
 }
+assertHealthNoteVisible(recoveryNotes[0]);
 
 // The durable report cleared both the latch and the old streak: one new
 // provider error falls back but does not latch, so a following wake still

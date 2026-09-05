@@ -171,7 +171,12 @@ test_pi_snippet_uses_effective_extension_path() {
   assert_contains "$out" "The turn-end guard extension lives at \`$turnend\`" "pi snippet did not render the turn-end guard extension path"
   assert_contains "$out" "The watcher extension lives at \`$watch\`" "pi snippet did not render the watcher extension path"
   assert_contains "$out" "MAIN must not re-drain, re-run, or acknowledge it" "pi snippet lost merged-event ownership"
-  assert_contains "$out" "MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome" "pi snippet imposed a mechanical sailboat treatment"
+  # This is the generated instruction interface delivered to the primary agent.
+  assert_contains "$out" "Routine outcomes remain hidden and turn-free" "pi snippet lost quiet routine delivery"
+  assert_contains "$out" "do not turn them into unsolicited chat updates or shipshape replies" "pi snippet invited routine follow-up spam"
+  assert_contains "$out" "MAIN may use routine outcomes to answer an explicit captain status request" "pi snippet lost requested status answers"
+  assert_contains "$out" "answer or escalate a decision, act on a blocker or failure" "pi snippet lost actionable outcome handling"
+  assert_contains "$out" "every watcher-failure alarm regardless" "pi snippet lost watcher-failure delivery"
   assert_not_contains "$out" "__FM_PI_EXT__" "renderer leaked the Pi extension path placeholder"
   assert_not_contains "$out" "__FM_PI_TURNEND_EXT__" "renderer leaked the Pi turn-end extension path placeholder"
   assert_not_contains "$out" "state/fm-primary-pi-watch.ts" "pi snippet kept the old generated state-relative extension path"

@@ -885,10 +885,17 @@ const cases = [
   ["ls", { path: "." }, { content: [{ type: "text", text: "sample.txt" }], details: {}, isError: false }],
 ];
 const renderUi = { requestRender() {} };
+const { createAllToolDefinitions } = await import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href);
+const stockDefinitions = createAllToolDefinitions(process.cwd());
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, undefined, renderUi, process.cwd());
+  // Pi resolves built-in renderers before constructing a stock tool row;
+  // an undefined definition exercises the unknown-tool fallback instead.
+  const stockDefinition = InteractiveMode.prototype.getRegisteredToolDefinition.call(
+    { session: { getToolDefinition(toolName) { return stockDefinitions[toolName]; } } }, name,
+  );
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinition, renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
@@ -1818,6 +1825,9 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
+    # Session persistence can precede Pi's scheduled terminal render.
+    wait_for_text "$TMP_ROOT/followup-rendered.txt" "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case did not render the monitoring result"
     pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
@@ -2136,7 +2146,7 @@ TS
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
-    tail -12 "$snapshot" | grep -Fq "Working..." || break
+    tail -12 "$snapshot" | grep -Fq "Working" || break
     sleep 0.05
     i=$((i + 1))
   done
@@ -3154,6 +3164,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -3218,18 +3229,36 @@ export default function (pi: ExtensionAPI): void {
           stream.end();
           return;
         }
-        // Wake as soon as the run is aborted so Escape settles the turn promptly.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, model.id === "delayed-boat" ? 90000 : 1500);
-          options?.signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
-        });
+        // Hold the stock-row probe until the shell has captured its active TUI.
+        // A fixed response delay can expire before a loaded runner captures it.
+        if (model.id === "delayed") {
+          writeFileSync("state/working.ready", "ready\n");
+          for (let attempt = 0; attempt < 1200; attempt += 1) {
+            if (existsSync("state/working.release") || options?.signal?.aborted) break;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          unlinkSync("state/working.ready");
+          if (!existsSync("state/working.release") && !options?.signal?.aborted) {
+            output.stopReason = "error";
+            output.errorMessage = "working-row fixture release timed out";
+            stream.push({ type: "error", reason: "error", error: output });
+            stream.end();
+            return;
+          }
+        } else {
+          // Wake as soon as the run is aborted so Escape settles the turn promptly.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 90000);
+            options?.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
         if (options?.signal?.aborted) {
           output.stopReason = "aborted";
           stream.push({ type: "error", reason: "aborted", error: output });
@@ -3662,7 +3691,7 @@ JS
   done
   cp "$working_snapshot" "$boat_frame_one"
   assert_contains "$(cat "$boat_frame_one")" '\__/' "Calm did not show the working ship during a real provider wait"
-  assert_not_contains "$(cat "$boat_frame_one")" "Working..." "Calm left Pi's stock working row visible while the ship was shown"
+  assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
   boat_hull_line=$(grep -F '\__/' "$boat_frame_one" | head -1)
@@ -3868,7 +3897,7 @@ JS
     || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
   [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
     || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
-  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working..." \
+  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working" \
     "the second working period left Pi's stock working row visible"
 
   # Clear the resumed run before the Calm-off stock-row probe.
@@ -3901,14 +3930,18 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq "Working..." "$working_snapshot"; then
+    if [ -f "$project/state/working.ready" ] && grep -Fq "Working" "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm off did not keep Pi's stock working row"
+  [ -f "$project/state/working.ready" ] || fail "the stock working-row capture did not occur during an active provider operation"
+  assert_not_contains "$(cat "$working_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the stock working-row fixture completed before its active capture"
+  # Pi 0.85.0 renders "Working"; punctuation and spinner frames are not the contract.
+  assert_contains "$(cat "$working_snapshot")" "Working" "Calm off did not keep Pi's stock working row"
   assert_not_contains "$(cat "$working_snapshot")" '\__/' "Calm off showed the working ship"
+  : >"$project/state/working.release"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
 
