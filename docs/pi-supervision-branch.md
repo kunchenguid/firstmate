@@ -116,10 +116,11 @@ The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event 
 All `routine` outcomes are hidden by default, independently of Calm and the heartbeat-only `silent` flag; their durable store records and hidden session messages remain intact.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including requested results, progress, and already-reported unchanged blockers; doubt still escalates.
 After the updated extension reaches the home, `/reload` or restarting Pi activates this presentation and refreshes the branch prompt; no local preference switch is needed.
-On normal transcript reconstruction, the registered message renderer also hides historical `fm-branch-merge` messages with the known routine sailboat prefix, while legacy captain and unrecognized messages remain visible.
+On normal transcript reconstruction, the registered message renderer also hides historical `fm-branch-merge` messages beginning with `⛵ <task>: `, where the task token contains only ASCII letters, digits, dots, underscores, or hyphens.
+Provider-failure and recovery health notes, legacy captain messages, and unrecognized formats remain visible.
 Pi may retain its outer spacer for those historical rows; new hidden messages do not mount a transcript row.
 This does not delete saved history, change model context, erase previously printed terminal scrollback, or filter exports and external clients that render saved data independently.
-Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
+The branch prompt's "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Heartbeat routing
