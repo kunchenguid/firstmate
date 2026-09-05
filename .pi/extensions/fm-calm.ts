@@ -16,7 +16,7 @@
 // unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
 // registration synchronous because restored rows capture the registry before
 // session_start; and collision-check only the later first-activation path, when
-// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
+// getAllTools() is reliable.
 // and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
 import { randomUUID } from "node:crypto";
 import {
