@@ -1156,8 +1156,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
+  # one into the same endpoint, and only tmux, herdr and thurbox have a
+  # recovery-grade classifier that can (bin/fm-control-lib.sh owns that
+  # capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
@@ -1167,6 +1168,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  if [ "$BACKEND" = thurbox ]; then
+    # thurbox's own `dead` covers a PARKED session (row alive, pane gone) as
+    # well as an ordinary live pane with a shell in it. Every other backend's
+    # `dead` endpoint still has a pane to type into; a parked one does not, so
+    # it must be resumed before the replacement harness can be delivered.
+    fm_backend_thurbox_relaunch_prepare "$RELAUNCH_TARGET" || {
+      echo "error: task $ID's thurbox session is parked and could not be resumed for relaunch" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1192,6 +1203,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  if [ "$BACKEND" = thurbox ]; then
+    # Re-hydrated for the same reason as herdr's fields above: the meta-write
+    # step below echoes thurbox_session_id unconditionally, and a relaunch
+    # never runs the fresh-spawn branch that would otherwise set it.
+    THURBOX_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" thurbox_session_id)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config

@@ -651,6 +651,20 @@ out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$reader
 assert_contains "$out" '|rc=1' "a stream with no blocked edge must be a clean timeout, not an escalation"
 pass "working, idle and done edges never escalate; the wait reports a clean timeout"
 
+new_case events-reader-crash; d=$CASE_DIR
+cat > "$d/reader" <<'SH'
+#!/usr/bin/env bash
+printf '{"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"working","name":"t"}\n'
+exit 3
+SH
+chmod +x "$d/reader"
+mkdir -p "$d/state"
+out=$(FM_BACKEND_THURBOX_EVENTS_FORCE=1 FM_BACKEND_THURBOX_EVENT_READER="$d/reader" \
+  adapter "$d" "fm_backend_thurbox_wait_transition 5 '$d/state' '$TARGET'; echo \"|rc=\$?\"")
+assert_contains "$out" '|rc=2' \
+  "a reader that exits with a real error must fail closed (2), never be mistaken for a clean timeout (1)"
+pass "a reader that fails mid-stream is not mistaken for a clean timeout"
+
 new_case events-dedupe; d=$CASE_DIR
 cat > "$d/stream" <<'NDJSON'
 {"event":"changed","session":"11111111-2222-3333-4444-555555555555","state":"blocked","name":"t"}
@@ -922,9 +936,30 @@ case "${1:-}:${2:-}" in
         printf '{"error":"no agent named '"'"'%s'"'"' in agents.toml"}\n' "${3:-}"; exit 1 ;;
     esac
     ;;
-  session:list)   printf '[]\n' ;;
+  session:list)
+    # FM_THURBOX_FAKE_STOPPED_FILE models a session parked (`session stop`) at
+    # some point after it was created: its row still exists, but `stopped`
+    # reads whatever that file currently holds until `session start` flips it.
+    if [ -n "${FM_THURBOX_FAKE_STOPPED_FILE:-}" ] && [ -f "$FM_THURBOX_FAKE_STOPPED_FILE" ]; then
+      printf '[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","name":"x","stopped":%s}]\n' \
+        "$(cat "$FM_THURBOX_FAKE_STOPPED_FILE")"
+    else
+      printf '[]\n'
+    fi
+    ;;
   session:create) printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","name":"x"}\n' ;;
-  session:get)    printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"uncovered","stopped":false,"cwd":"/tmp"}\n' ;;
+  session:get)
+    stopped=false
+    if [ -n "${FM_THURBOX_FAKE_STOPPED_FILE:-}" ] && [ -f "$FM_THURBOX_FAKE_STOPPED_FILE" ]; then
+      stopped=$(cat "$FM_THURBOX_FAKE_STOPPED_FILE")
+    fi
+    printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"uncovered","stopped":%s,"cwd":"/tmp"}\n' "$stopped"
+    ;;
+  session:start)
+    # "A session that is already running is left alone": idempotent either way.
+    [ -z "${FM_THURBOX_FAKE_STOPPED_FILE:-}" ] || printf 'false' > "$FM_THURBOX_FAKE_STOPPED_FILE"
+    printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}\n'
+    ;;
   session:capture) printf '{"output":"","cursor_row":0,"foreground_process":"bash","foreground_command":"/bin/bash -i","foreground_cwd":"%s"}\n' "${FM_THURBOX_FAKE_CWD:-/tmp}" ;;
   *) printf '{}\n' ;;
 esac
@@ -1046,5 +1081,41 @@ for _tbx_h in claude codex opencode; do
   unset FM_FAKE_LAUNCH_LOG
 done
 pass "the thurbox launch slot costs a non-thurbox backend nothing: no placeholder, no stray whitespace"
+
+# --- relaunch into a PARKED session ------------------------------------------
+#
+# fm_backend_thurbox_agent_state reports a PARKED session (`session stop`) as
+# `dead`, exactly like every other backend's agent-free endpoint, so
+# fm-spawn.sh's relaunch gate accepts it. But a parked session's pane is gone,
+# not merely shell-occupied, so fm_backend_thurbox_target_ready refuses every
+# write into it until `session start` puts the pane back. The property under
+# test is that relaunch actually resumes the session before typing the
+# replacement harness, never that it merely passes the gate.
+
+spawn_case_thurbox parkedrelaunch
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" "$SPAWN_PROJ" claude --mode no-mistakes --yolo off)
+status=$?
+[ "$status" -eq 0 ] || { printf '%s\n' "--- initial spawn output ---" "$out" >&2; fail "the initial thurbox spawn for the relaunch case must succeed"; }
+
+parked_dir=$(dirname "$SPAWN_HOME")
+FM_THURBOX_FAKE_STOPPED_FILE="$parked_dir/stopped-flag"
+export FM_THURBOX_FAKE_STOPPED_FILE
+printf 'true' > "$FM_THURBOX_FAKE_STOPPED_FILE"
+: > "$FM_THURBOX_LOG"
+
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" --relaunch)
+status=$?
+[ "$status" -eq 0 ] || { printf '%s\n' "--- relaunch output ---" "$out" >&2; fail "a relaunch into a parked thurbox session must succeed"; }
+tr '\037' ' ' < "$FM_THURBOX_LOG" > "$parked_dir/calls-readable"
+start_line=$(grep -n '^session start ' "$parked_dir/calls-readable" | head -1 | cut -d: -f1)
+send_line=$(grep -n '^session send ' "$parked_dir/calls-readable" | head -1 | cut -d: -f1)
+[ -n "$start_line" ] || fail "relaunch must resume the parked session with 'session start' before typing into it"
+[ -n "$send_line" ] || fail "relaunch must still type the replacement harness after resuming the session"
+[ "$start_line" -lt "$send_line" ] \
+  || fail "the session must be resumed BEFORE the replacement harness is typed into it, not after"
+assert_contains "$(thurbox_typed_lines)" 'claude' \
+  "the replacement harness must actually be typed once the parked session is resumed"
+unset FM_THURBOX_FAKE_STOPPED_FILE
+pass "a relaunch into a parked thurbox session resumes the pane before typing the replacement harness"
 
 echo "all fm-backend-thurbox tests passed"

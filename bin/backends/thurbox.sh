@@ -325,6 +325,22 @@ fm_backend_thurbox_target_ready() {  # <target>
   [ "$stopped" != true ]
 }
 
+# fm_backend_thurbox_relaunch_prepare: un-park a PARKED session before a
+# replacement agent is typed into it.
+#
+# fm_backend_thurbox_agent_state reports a parked session as `dead` (docs
+# "Parked sessions"), which is exactly what fm-spawn.sh's relaunch gate wants -
+# an agent-free endpoint safe to reuse. But `dead` there does not mean "a live
+# pane with a shell in it" the way it does for every other backend: a parked
+# session has no pane at all, so fm_backend_thurbox_target_ready refuses every
+# write into it and the replacement harness would never be typed. `session
+# start` puts the pane back and is idempotent - a session that is already
+# running is left alone - so this is safe to call unconditionally.
+fm_backend_thurbox_relaunch_prepare() {  # <target>
+  fm_backend_thurbox_target_ready "$1" && return 0
+  thurbox-cli session start "$FM_BACKEND_THURBOX_SESSION" --json >/dev/null 2>&1
+}
+
 # --- container and task creation ---------------------------------------------
 
 # fm_backend_thurbox_container_ensure: thurbox has NO session-container layer
@@ -1080,6 +1096,17 @@ EOF
   local reader_args=(--for-secs "$timeout")
   [ -z "$since" ] || reader_args+=(--since "$since")
 
+  # The reader runs inside a process substitution, so its own exit status is
+  # not directly available to this shell; a killed or crashed `watch` and an
+  # ordinary `--for-secs` expiry both just end the stream. Recording the exit
+  # status from inside that subshell is what tells them apart: expiry exits 0
+  # (verified against 2.18.0), while a runtime or stream error exits nonzero.
+  # Without this, a reader that keeps dying immediately looks identical to a
+  # healthy empty window, and the caller would relaunch it in a tight loop
+  # instead of falling back to polling.
+  local reader_status_file
+  reader_status_file=$(mktemp "${TMPDIR:-/tmp}/fm-thurbox-watch-status.XXXXXX" 2>/dev/null) || return 2
+
   local line seq session state_field agent from_field heuristic record
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -1104,10 +1131,16 @@ EOF
       # being swallowed by the early return.
       fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"
       printf '%s' "$record"
+      rm -f "$reader_status_file" 2>/dev/null || true
       return 0
     fi
     fm_backend_thurbox_watch_cursor_set "$cursor_file" "$seq"
-  done < <("${reader[@]}" "${reader_args[@]}" 2>/dev/null)
+  done < <("${reader[@]}" "${reader_args[@]}" 2>/dev/null; printf '%s\n' "$?" >"$reader_status_file")
+
+  local reader_status
+  reader_status=$(cat "$reader_status_file" 2>/dev/null)
+  rm -f "$reader_status_file" 2>/dev/null || true
+  [ "$reader_status" = 0 ] || return 2
 
   return 1
 }
