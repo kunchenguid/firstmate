@@ -80,7 +80,7 @@ test_no_secret_leaked_to_status() {
 
 test_send_passes_body() {
   local fakebin body_file stdin_file
-  fakebin=$(fm_fakebin fm-mail)
+  fakebin=$(fm_fakebin "$TMP_ROOT")
   stdin_file="$TMP_ROOT/stdin_capture.txt"
 
   # Fake python3 that reads stdin (the body pipe) and writes it to a file.
@@ -107,7 +107,7 @@ SH
 
 test_poll_error_propagates() {
   local fakebin
-  fakebin=$(fm_fakebin fm-mail)
+  fakebin=$(fm_fakebin "$TMP_ROOT")
 
   # Fake python3 that exits with an error (simulating IMAP failure).
   cat > "$fakebin/python3" <<'SH'
@@ -129,11 +129,13 @@ SH
 
 test_poll_dedupes_surfaces_by_uid() {
   local fakebin homedir_bin
-  fakebin=$(fm_fakebin fm-mail)
+  fakebin=$(fm_fakebin "$TMP_ROOT")
 
-  # Fake python3 that emits one UID'd poll_list line (uid \t date \t from \t subj).
+  # Fake python3 that emits the mailbox generation guard then one UID'd
+  # poll_list line (uidvalidity, uid \t date \t from \t subj).
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
+printf 'uidvalidity\t10001\n'
 printf '42\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
 SH
   chmod +x "$fakebin/python3"
@@ -142,7 +144,7 @@ SH
   # into the temp home's state (never the repo's).
   homedir_bin="$HOME_DIR/bin"
   mkdir -p "$homedir_bin"
-  ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
 
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -163,6 +165,44 @@ SH
   pass "fm-mail: poll surfaces each new uid exactly once"
 }
 
+test_poll_resurfaces_uid_after_generation_change() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # First mailbox generation surfaces uid 77 under uidvalidity 30003.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t30003\n'
+printf '77\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first-generation poll must succeed"
+  assert_contains "$out" "woke for 77" "first generation wakes uid 77"
+
+  # Recreated mailbox: same numeric uid 77 under a new UIDVALIDITY.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t40004\n'
+printf '77\t2026-09-06T00:00:00Z\tbob@example.com\tAgain\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "second-generation poll must succeed"
+  assert_contains "$out" "woke for 77" "reused uid wakes again under a new generation"
+  pass "fm-mail: generation change prevents a reused uid from being suppressed"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -171,3 +211,4 @@ test_no_secret_leaked_to_status
 test_send_passes_body
 test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
+test_poll_resurfaces_uid_after_generation_change

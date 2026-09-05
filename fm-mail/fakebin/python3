@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-echo "fm-mail poll error: connection refused" >&2
-exit 1
