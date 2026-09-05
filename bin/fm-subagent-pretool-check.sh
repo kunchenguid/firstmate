@@ -35,6 +35,8 @@
 #   bin/fm-subagent-pretool-check.sh --tool '<tool-name>'
 #
 # Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
+# Antigravity stdin uses .toolCall.name; --antigravity selects its
+# native stdout deny object with exit 0 rather than the default exit-2 transport.
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):

@@ -16,6 +16,8 @@
 #   <PreToolUse JSON on stdin> | bin/fm-cd-pretool-check.sh
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
+# Antigravity stdin uses .toolCall.args.CommandLine; --antigravity selects its
+# native stdout deny object with exit 0 rather than the default exit-2 transport.
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
 # Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
 # adapters extract the exact command string. --cursor selects Cursor's own deny

@@ -242,7 +242,7 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the identity-gated Pi/Antigravity separator region described by the shared classifier.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
@@ -270,7 +270,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent with a well-formed active foreground process becomes `alive`, and an unexpected or contradictory read becomes `unreadable`.
-Herdr can retain Pi's last idle registration after Pi exits, so a complete live-process proof may override a registration only when the pane root's process subtree is exactly root shell -> `treehouse` -> childless sleeping task shell, with no surviving sibling or descendant.
+Herdr can retain Pi's last idle registration after Pi exits, so a complete live-process proof may override a registration only when the pane contains a childless sleeping root shell or exactly root shell -> `treehouse` -> childless sleeping task shell, with no surviving sibling or descendant.
 Any malformed process response, extra branch, foreground job, unrecognized shell, or unreadable operating-system process row preserves the conservative refusal.
 Unlike tmux process-name inspection, positive Herdr liveness composes native registration with a nonempty foreground process shape and does not guess any worker runtime from a generic interpreter name.
 

@@ -14,6 +14,8 @@
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
+# Antigravity stdin uses .toolCall.args.CommandLine; --antigravity selects its
+# native stdout deny object with exit 0 rather than the default exit-2 transport.
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
 # Claude and Codex. Cursor delivers the same .tool_input.command shape with
 # tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs

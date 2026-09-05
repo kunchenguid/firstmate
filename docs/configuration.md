@@ -340,9 +340,7 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
-For Antigravity primary and secondmate launches, start the interactive TUI with `agy --dangerously-skip-permissions --add-dir "$PWD" --model <gemini-model> --effort <low|medium|high>` so the tracked `.agents/hooks.json` loads from the exact Firstmate home.
-Antigravity otherwise chooses `~/.gemini/antigravity-cli` as its terminal workspace even when launched from another shell directory.
-Omitting `--add-dir` leaves the session conversational but suppresses `.agents/hooks.json`, the session-start reminder, and the foreground supervision wait (`bin/fm-watch.sh`), leaving background fleet events unmonitored and requiring repeated manual wakes.
+For Antigravity primary and secondmate setup, [README](../README.md#install-and-launch) owns the `--add-dir "$PWD"` requirement and unmonitored-session failure mode.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

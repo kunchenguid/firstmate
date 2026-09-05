@@ -19,7 +19,7 @@ It is verified for crewmates, scouts, second mates, and interactive primary sess
 | Interrupt | One `Escape`; the active turn cancels and the TUI remains open. |
 | Exit | `/quit`, then one Enter. |
 | Skills | Antigravity automatically discovers skills under `.agents/skills/` from the added workspace. |
-| Primary | Interactive TUI launched with `--add-dir "$PWD"`. Uses one foreground `bin/fm-watch.sh` terminal call; see `../../../../../docs/supervision-protocols/antigravity.md`. Omitting `--add-dir` suppresses `.agents/hooks.json` and foreground watch, leaving the session conversational but unmonitored. |
+| Primary | See the [primary supervision protocol](../../../../../docs/supervision-protocols/antigravity.md). |
 
 ## Version and sign-in
 
@@ -39,7 +39,6 @@ A bare command or path merely containing the substring `agy` is not accepted as 
 ## Workspace, instructions, and hooks
 
 Antigravity discovers `.agents/hooks.json`, `AGENTS.md`, and `.agents/skills/` from a directory passed with `--add-dir`.
-Without `--add-dir`, Antigravity defaults its workspace to `~/.gemini/antigravity-cli`, never loads the Firstmate home's `.agents/hooks.json`, and silently suppresses the session-start reminder.
 Hook discovery is independent of the argument's position in the repeated `--add-dir` list.
 Hook commands run with the directory containing `hooks.json` as their working directory.
 The tracked root hook injects the normal startup reminder with `PreInvocation` and gates terminal/delegation tools with `PreToolUse`.
@@ -63,8 +62,7 @@ Those guards are primary-scoped and remain inert in isolated worker copies where
 A live Gemini turn on 1.1.26 identified the built-in delegation tools as `invoke_subagent` and `send_message`; both are denied by the guard's existing delegation-shape classification in a Firstmate primary.
 Antigravity hooks are synchronous and expose no verified asynchronous background-task-to-model wake.
 The primary therefore uses the named foreground supervision protocol rather than borrowing another harness's background mechanics.
-An interactive primary must be launched with `--add-dir "$PWD"` (or the exact Firstmate repository path) so `.agents/hooks.json` loads.
-Omitting `--add-dir` leaves the session conversational and interactive but suppresses `.agents/hooks.json`, the session-start nudge, and the foreground supervision call (`bin/fm-watch.sh`), leaving background fleet events unmonitored and requiring repeated manual wakes.
+For primary launch setup, including `--add-dir "$PWD"` and the unmonitored-session failure mode, see [README](../../../../../README.md#install-and-launch).
 Headless `--print` is not a primary host because it has no persistent conversation for later fleet notifications.
 
 ## Verification boundary
