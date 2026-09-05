@@ -55,6 +55,8 @@
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$ROOT/bin/fm-stdlib.sh"
 cd "$ROOT" || exit 1
 
 JOBS=4
@@ -64,11 +66,7 @@ LIST_EXCLUSIONS=0
 POOL=portable
 
 usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "$0" >&2
+  usage_render_header "$0" >&2
 }
 
 die() {
@@ -82,14 +80,6 @@ log() {
 
 now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
-}
-
-now_ms() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
-  else
-    echo $(($(date +%s) * 1000))
-  fi
 }
 
 # Serial exclusions relative to the scout-proposed parallel pool (pure units,
