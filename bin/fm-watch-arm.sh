@@ -69,6 +69,7 @@ WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
+WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-$GRACE}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 # Git Bash/MSYS pays a much higher fork cost while the watcher completes its
 # required pre-lock migration, so its bounded default covers that cold start.
@@ -80,7 +81,7 @@ CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Longest this arm will wait for an identity-matched holder whose beacon has aged
 # to beat again. Fixed rather than configurable: it exists to keep a turn
 # boundary short, which is a property of the model and not a local preference.
-BUSY_HOLDER_WAIT_MAX=${FM_ARM_BUSY_HOLDER_WAIT_MAX:-30}
+BUSY_HOLDER_WAIT_MAX=30
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -245,9 +246,10 @@ clear_stale_recorded_watcher_lock() {
 HEALTHY_PID=
 HEALTHY_IDENTITY=
 healthy_watcher() {
+  local grace=${1:-$GRACE}
   HEALTHY_PID=
   HEALTHY_IDENTITY=
-  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
+  fm_watcher_healthy "$STATE" "$WATCH" "$grace" "$FM_HOME" || return 1
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
   HEALTHY_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
 }
@@ -293,16 +295,16 @@ wait_for_busy_holder() {
   # turn for 150s. The cap is safe because the beacon is beaten at every PHASE
   # boundary now, so a holder that is genuinely working reappears in seconds
   # rather than minutes; anything slower is left alone and retried next turn.
-  budget=$(( GRACE / 2 ))
+  budget=$(( WATCHER_STALE_GRACE / 2 ))
   [ "$budget" -le "$BUSY_HOLDER_WAIT_MAX" ] || budget=$BUSY_HOLDER_WAIT_MAX
   [ "$budget" -ge 1 ] || budget=1
   deadline=$(( $(date +%s) + budget + 1 ))
   while :; do
-    if healthy_watcher; then
+    if healthy_watcher "$WATCHER_STALE_GRACE"; then
       [ "$HEALTHY_PID" = "$holder" ] && return 0
       return 2
     fi
-    fm_watcher_busy_holder "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 2
+    fm_watcher_busy_holder "$STATE" "$WATCH" "$WATCHER_STALE_GRACE" "$FM_HOME" || return 2
     [ "$FM_WATCHER_BUSY_PID" = "$holder" ] || return 2
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 1
