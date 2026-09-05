@@ -236,6 +236,28 @@ def save_retry_pos(pos_path, order_len, window, pos):
         pass
 
 
+def load_turn(path):
+    """Return the durable alternating-turn flag (0=new,1=retry) for a single
+    contended slot."""
+    if not path:
+        return 0
+    try:
+        return int(open(path).read().strip() or '0') % 2
+    except (OSError, ValueError):
+        return 0
+
+
+def save_turn(path, turn):
+    """Persist the alternating-turn flag."""
+    if not path:
+        return
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(str(turn % 2) + '\n')
+    except OSError:
+        pass
+
+
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
     # cursor are considered as new, then previously unfetchable retry-set uids
@@ -282,15 +304,27 @@ def cmd_poll_list():
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
         retry_candidates = retry_scan_window(retry_order, retry_pos, window)
-        # Reserve a quarter of the cap (at least one) for retry successes so a
-        # sustained new-mail flood cannot starve recovered metadata, but never
-        # let the reservation fully suppress new mail: when both classes have
-        # candidates, new mail always keeps at least one slot.
-        retry_budget = max(1, cap // 4) if retry_candidates else 0
-        new_budget = cap - retry_budget
-        if new_candidates and new_budget < 1:
-            new_budget = 1
-            retry_budget = cap - 1
+        if cap == 1 and new_candidates and retry_candidates:
+            # A single contended slot alternates between new surfacing and
+            # retry recovery, so a sustained new-mail flood can never starve
+            # recovered metadata indefinitely, and a retry backlog can never
+            # delay new mail for more than one poll.
+            if load_turn(os.environ.get('FM_MAIL_TURN', '')) == 0:
+                new_budget, retry_budget = 1, 0
+                save_turn(os.environ.get('FM_MAIL_TURN', ''), 1)
+            else:
+                new_budget, retry_budget = 0, 1
+                save_turn(os.environ.get('FM_MAIL_TURN', ''), 0)
+        else:
+            # Reserve a quarter of the cap (at least one) for retry successes
+            # so a sustained new-mail flood cannot starve recovered metadata,
+            # but never let the reservation fully suppress new mail: when both
+            # classes have candidates, new mail always keeps at least one slot.
+            retry_budget = max(1, cap // 4) if retry_candidates else 0
+            new_budget = cap - retry_budget
+            if new_candidates and new_budget < 1:
+                new_budget = 1
+                retry_budget = cap - 1
         out = []
         new_emitted = 0
         retry_emitted = 0
