@@ -830,12 +830,17 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
+  local completion_args=()
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
   else
     fm_backlog_close_marker_record_completion "$STATE" "$1" "$DATA" \
       || fail "could not preserve pending completion for $1: $FM_BACKLOG_TRANSITION_ERROR"
-    fm_backlog_done "$DATA" "$1" || fail "could not close answered captain-held task $1: $FM_BACKLOG_TRANSITION_ERROR"
+    if [ "${FM_BACKLOG_CLOSE_VALIDATED_MODE-}" = retain ]; then
+      completion_args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+    fi
+    fm_backlog_done "$DATA" "$1" "${completion_args[@]+"${completion_args[@]}"}" \
+      || fail "could not close answered captain-held task $1: $FM_BACKLOG_TRANSITION_ERROR"
   fi
 }
 

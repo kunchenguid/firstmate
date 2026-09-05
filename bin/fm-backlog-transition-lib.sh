@@ -879,6 +879,8 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 
 fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-data-dir>
   local state=$1 id=$2 data=$3 marker args=()
+  FM_BACKLOG_CLOSE_VALIDATED_MODE=
+  FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   fm_backlog_close_marker_validate "$marker" "$data" "$id" "$state" || return 1
@@ -887,6 +889,7 @@ fm_backlog_close_marker_record_completion() {  # <state-dir> <id> <authorized-da
   if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = local%20main ]; then
     args[1]="local main"
   fi
+  FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
   fm_backlog_record_completion "$FM_BACKLOG_CLOSE_VALIDATED_DATA" "$id" \
     "${args[@]+"${args[@]}"}"
 }
