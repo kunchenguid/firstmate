@@ -14,12 +14,15 @@
 #                        Send one message. A "-" body reads plain text from
 #                        stdin.
 #   poll                 Surface NEW unseen mail as a `check` wake so firstmate
-#                        answers it concisely. Only mail newer than the last
-#                        poll is surfaced; nothing is ever marked read
-#                        (BODY.PEEK). poll is OPERATOR-INVOKED: it has no
-#                        scheduler or daemon. A captain or an `at`/cron job
-#                        decides when to run it; this home offers no email
-#                        service wiring of its own.
+#                        answers it concisely. Only UNSEEN mail newer than the
+#                        last poll is surfaced; already-read mail never wakes a
+#                        poll, no message is ever marked read (BODY.PEEK), and
+#                        every surfaced message is keyed by its immutable IMAP
+#                        UID so expunge renumbering never re-wakes or loses
+#                        mail. poll is OPERATOR-INVOKED: it has no scheduler or
+#                        daemon. A captain or an `at`/cron job decides when to
+#                        run it; this home offers no email service wiring of its
+#                        own.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -117,14 +120,14 @@ if cmd == 'read':
     try:
         M = connect_mailbox()
         M.select('INBOX')
-        typ, data = M.search(None, 'UNSEEN')
+        typ, data = M.uid('search', None, 'UNSEEN')
         ids = (data[0] or b'').split()
         if not ids:
             print('(no unseen mail)')
             M.logout()
             sys.exit(0)
         for i in ids[-20:]:
-            typ, msg = M.fetch(i, '(BODY.PEEK[HEADER])')
+            typ, msg = M.uid('fetch', i, '(BODY.PEEK[])')
             if typ != 'OK' or not msg or not msg[0]:
                 continue
             mi = email.message_from_bytes(msg[0][1])
@@ -180,11 +183,11 @@ if cmd == 'poll_list':
     try:
         M = connect_mailbox()
         M.select('INBOX')
-        typ, data = M.search(None, 'ALL')
+        typ, data = M.uid('search', None, 'UNSEEN')
         ids = [x for x in (data[0] or b'').split()]
         out = []
-        for i in ids[-50:]:
-            typ, msg = M.fetch(i, '(BODY.PEEK[HEADER])')
+        for i in ids:
+            typ, msg = M.uid('fetch', i, '(BODY.PEEK[HEADER])')
             if typ != 'OK' or not msg or not msg[0]:
                 continue
             mi = email.message_from_bytes(msg[0][1])
