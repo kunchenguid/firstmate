@@ -1888,7 +1888,8 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_contains "$show" "state: queued" "the finished work's row still reads as worked on"
   assert_contains "$show" "held: yes" "cleanup lifted the captain hold"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+  assert_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
     "the deliverable was not recorded on the still-open row"
   assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
   assert_absent "$home/state/$id.backlog-close" \
@@ -1945,7 +1946,8 @@ test_teardown_never_closes_a_captain_held_task() {
   show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
   assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
   assert_contains "$show" "Ship attachments by reference." "the captain's words were not recorded"
-  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+  assert_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
     "the answer lost the recorded deliverable"
   pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
 }
@@ -1990,7 +1992,8 @@ SH
   show=$(tasks_in "$home" show "$id" --full) || fail "a failed cleanup erased the captain call"
   assert_contains "$show" "state: in_flight" "a failed cleanup changed the row before cleanup succeeded"
   assert_contains "$show" "hold_kind: captain" "a failed cleanup dropped the captain hold"
-  assert_not_contains "$show" "Deliverable of the finished work" \
+  assert_not_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
     "the deliverable was recorded before destructive cleanup succeeded"
 
   printf 'Accept the completed report.\n' > "$home/interrupted-answer.txt"
@@ -2000,7 +2003,8 @@ SH
     "the answer discarded the pending cleanup record before replay"
   show=$(tasks_in "$home" show "$id" --full) || fail "the answer erased the interrupted row"
   assert_contains "$show" "state: done" "the answer did not close the captain call"
-  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+  assert_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
     "the answer lost the completion carried by the pending cleanup record"
 
   fm_fake_exit0 "$home/fakebin" treehouse
@@ -2016,7 +2020,8 @@ SH
   show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
   assert_contains "$show" "state: done" "session start reopened the answered captain call"
   assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+  assert_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report data/$id/report.md\\\"} -->" \
     "session start did not preserve the pending completed report"
   json=$(run_bearings "$home") || fail "Bearings failed after interrupted cleanup replay"
   printf '%s' "$json" | jq -e --arg id "$id" \
@@ -2070,7 +2075,8 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
-  assert_contains "$show" "Deliverable of the finished work: report  team; records/$id/report.md" \
+  assert_contains "$show" \
+    "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"report  team; records/$id/report.md\\\"} -->" \
     "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
@@ -2125,7 +2131,7 @@ test_merge_approval_releases_before_zero_done_retention() {
   assert_no_grep "$id" "$home/data/backlog.md" \
     "zero-retention cleanup kept the completed row in the active backlog"
   assert_grep "$id" "$archive" "zero-retention cleanup did not archive the completed row"
-  assert_grep "Deliverable of the finished work: PR $pr" "$archive" \
+  assert_grep "<!-- firstmate-completion.v1 {\"value\":\"PR $pr\"} -->" "$archive" \
     "zero-retention archival lost completion provenance"
   assert_grep "Merge the approved change." "$archive" \
     "zero-retention archival lost the recorded merge approval"
