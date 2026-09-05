@@ -965,6 +965,53 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
 }
 
+# A secondmate has no Codex account axis: bin/fm-spawn.sh refuses --codex-home
+# for kind=secondmate, but only after the running agent has been stopped. The
+# control plane refuses the same flag before it touches anything, even when the
+# secondmate already runs on codex and the account itself is signed in.
+test_secondmate_relaunch_with_codex_home_refuses_before_stop() {
+  local dir home out rc acct before after
+  dir=$(new_case smcodexhome sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  before=$(cat "$home/state/sm8.meta")
+  out=$(run_control "$dir" sm8 relaunch --codex-home "$acct"); rc=$?
+  expect_code 1 "$rc" "--codex-home on a secondmate relaunch should be refused"$'\n'"$out"
+  assert_contains "$out" "a secondmate launch has no Codex account axis" \
+    "the refusal should name the missing axis the way fm-spawn does"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "the refusal must land before the running secondmate is stopped"
+  after=$(cat "$home/state/sm8.meta")
+  [ "$before" = "$after" ] || fail "a pre-stop refusal must leave the record byte-identical"
+  [ ! -e "$home/state/sm8.control-relaunch" ] || fail "a profile refusal must happen before any journal is written"
+  pass "fm-control relaunch: --codex-home on a secondmate refuses before the agent is touched"
+}
+
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   local dir home out rc
   dir=$(new_case smexplicit sm4)
@@ -1703,6 +1750,7 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
+test_secondmate_relaunch_with_codex_home_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one

@@ -46,6 +46,8 @@
 #              With no --codex-home, a relaunch that stays on codex carries the
 #              recorded codex_home= forward unchanged, a relaunch onto another
 #              harness drops it, and the flag on a non-codex target is refused.
+#              A secondmate has no Codex account axis (bin/fm-spawn.sh refuses
+#              it), so the flag on a secondmate is refused here as well.
 #              Either way the account is validated BEFORE the old agent is
 #              stopped, so a signed-out account never strands the task.
 #              A prefixed raw-command basename cannot reconstruct its launch
@@ -710,6 +712,8 @@ resolve_relaunch_profile() {
   # still running rather than after it has been stopped for a launch fm-spawn
   # must refuse (bin/fm-codex-home-lib.sh owns the check).
   if [ "$CODEX_HOME_SET" = 1 ]; then
+    [ "$KIND" != secondmate ] \
+      || die "--codex-home applies to ship and scout relaunches only; a secondmate launch has no Codex account axis, so relaunching $ID with it would stop the running agent for a launch that must be refused"
     [ "$TARGET_HARNESS" = codex ] \
       || die "--codex-home applies only to harness codex; this relaunch targets '$TARGET_HARNESS'"
     TARGET_CODEX_HOME=$NEW_CODEX_HOME
