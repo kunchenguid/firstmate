@@ -450,6 +450,7 @@ HOOK="$ROOT/bin/fm-claude-approval-hook.sh"
 NOTIFY_PERMISSION='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}'
 NOTIFY_IDLE='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}'
 POST_TOOL_USE='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"PostToolUse","tool_name":"Bash"}'
+POST_TOOL_USE_FAILURE='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_use_id":"toolu_01","error":"Exit code 128","is_interrupt":false}'
 
 test_approval_gate_opens_on_permission_notification() {
   local state gen
@@ -492,6 +493,26 @@ test_approval_gate_closed_by_tool_that_ran() {
   [ "$(fm_busy_classify tmux w1 claude t1 "$state")" = "busy claude-hook" ] \
     || fail "clearing the gate must leave the turn busy, not idle"
   pass "a tool that actually ran closes the gate, and PostToolUse is a no-op otherwise"
+}
+
+test_approval_gate_closed_by_tool_that_failed() {
+  local state gen seq_before seq_after
+  state=$(new_state_dir gate-close-failure)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  seq_before=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
+  printf '%s' "$POST_TOOL_USE_FAILURE" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  seq_after=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
+  [ "$seq_before" = "$seq_after" ] \
+    || fail "PostToolUseFailure must not write while no gate is open"
+  printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen "$gen"
+  fm_busy_approval_wait "$state" t1 claude || fail "gate did not open"
+  printf '%s' "$POST_TOOL_USE_FAILURE" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  fm_busy_approval_wait "$state" t1 claude \
+    && fail "an approved tool that then failed still proves the gate was answered"
+  [ "$(fm_busy_classify tmux w1 claude t1 "$state")" = "busy claude-hook" ] \
+    || fail "a failed tool must leave the turn busy, not idle"
+  pass "an approved tool that failed closes the gate through PostToolUseFailure"
 }
 
 test_approval_gate_closed_by_turn_end() {
@@ -575,6 +596,7 @@ test_boolean_view_never_promotes_unknown
 test_approval_gate_opens_on_permission_notification
 test_approval_gate_ignores_idle_notification
 test_approval_gate_closed_by_tool_that_ran
+test_approval_gate_closed_by_tool_that_failed
 test_approval_gate_closed_by_turn_end
 test_approval_gate_refuses_untrusted_and_stale_records
 test_approval_hook_stale_gen_refused_silently

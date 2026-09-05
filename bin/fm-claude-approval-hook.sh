@@ -16,13 +16,14 @@
 # notification_type=permission_prompt, which is a semantic source in exactly the
 # sense bin/fm-busy-lib.sh requires: a machine-readable lifecycle event the
 # harness itself publishes, never a reading of rendered pane text. This script is
-# the adapter that turns it into one busy-contract event, and PostToolUse is the
-# resume half: a tool that actually ran proves the gate was answered.
+# the adapter that turns it into one busy-contract event, and PostToolUse or
+# PostToolUseFailure is the resume half: a tool that actually ran proves the gate
+# was answered, whether or not the tool then succeeded.
 #
 # Usage: fm-claude-approval-hook.sh <state-dir> <id> --gen <gen>
 #   The hook payload arrives as JSON on stdin. bin/fm-spawn.sh registers this
-#   script for Notification and PostToolUse with the same gen it embeds in the
-#   task's other Claude hooks.
+#   script for Notification, PostToolUse, and PostToolUseFailure with the same
+#   gen it embeds in the task's other Claude hooks.
 #
 # Contract with the record owner: this script never writes the record itself.
 # bin/fm-busy-event.sh stays its only writer and bin/fm-busy-lib.sh stays the
@@ -86,11 +87,13 @@ if payload_has '"hook_event_name"[[:space:]]*:[[:space:]]*"Notification"'; then
   exit 0
 fi
 
-if payload_has '"hook_event_name"[[:space:]]*:[[:space:]]*"PostToolUse"'; then
-  # The resume half. A tool that ran is proof the gate was answered, but this
-  # hook fires after EVERY tool call, so it stays a cheap read that writes only
-  # while the record still stands at the gate. Answering "no" runs no tool, so
-  # that path is closed by the turn's own Stop instead.
+if payload_has '"hook_event_name"[[:space:]]*:[[:space:]]*"PostToolUse(Failure)?"'; then
+  # The resume half. A tool that ran is proof the gate was answered, and Claude
+  # reports a failed tool through PostToolUseFailure instead of PostToolUse, so
+  # both count: the outcome is irrelevant to the gate. This fires after EVERY
+  # tool call, so it stays a cheap read that writes only while the record still
+  # stands at the gate. Answering "no" runs no tool, so that path is closed by
+  # the turn's own Stop instead.
   fm_busy_approval_wait "$STATE" "$ID" claude || exit 0
   apply approval-answered
 fi

@@ -268,6 +268,7 @@ test_claude_hooks_semantic_lifecycle() {
 CLAUDE_NOTIFY_PERMISSION='{"session_id":"s1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}'
 CLAUDE_NOTIFY_IDLE='{"session_id":"s1","hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}'
 CLAUDE_POST_TOOL_USE='{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash"}'
+CLAUDE_POST_TOOL_USE_FAILURE='{"session_id":"s1","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_use_id":"toolu_01","error":"Exit code 128","is_interrupt":false}'
 
 feed_claude_hook() {  # <settings.json> <hook-event> <payload>
   local cmd
@@ -289,7 +290,7 @@ test_claude_approval_gate_wiring() {
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
   settings="$WT_DIR/.claude/settings.local.json"
-  for ev in Notification PostToolUse; do
+  for ev in Notification PostToolUse PostToolUseFailure; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
 
@@ -312,7 +313,16 @@ test_claude_approval_gate_wiring() {
     && fail "a tool that ran proves the gate was answered"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy claude-hook" ] || fail "clearing the gate must not end the turn, got '$out'"
-  pass "the spawn wires Claude's permission notification to the approval gate and closes it on a tool that ran"
+
+  feed_claude_hook "$settings" Notification "$CLAUDE_NOTIFY_PERMISSION"
+  fm_busy_approval_wait "$state" "$id" claude || fail "the gate did not reopen"
+  feed_claude_hook "$settings" PostToolUseFailure "$CLAUDE_POST_TOOL_USE_FAILURE" \
+    || fail "the PostToolUseFailure hook command failed"
+  fm_busy_approval_wait "$state" "$id" claude \
+    && fail "an approved tool that then failed still proves the gate was answered"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a failed tool must not end the turn either, got '$out'"
+  pass "the spawn wires Claude's permission notification to the approval gate and closes it on a tool that ran, success or failure"
 }
 
 test_claude_hooks_stale_incarnation_harmless() {

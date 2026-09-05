@@ -6,7 +6,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. `Notification` and `PostToolUse` carry the approval gate below. |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. `Notification`, `PostToolUse`, and `PostToolUseFailure` carry the approval gate below. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
@@ -33,7 +33,7 @@ Inspect the pane to identify which dialog is on screen, and report it rather tha
 
 A turn that stops at Claude's tool-permission dialog fires no closing hook, so the task keeps classifying `busy` and would be read as ordinary work while it waits for a keystroke firstmate cannot send.
 Claude publishes that gate as a structured `Notification` payload carrying `notification_type` `permission_prompt`, distinct from the `idle_prompt` notification a finished turn leaves behind, and `../../../bin/fm-claude-approval-hook.sh` turns it into the approval-gate event that `../../../bin/fm-busy-lib.sh` classifies and `../../../bin/fm-crew-state.sh` reports as `parked`.
-`PostToolUse` closes the gate, because a tool that ran is proof the dialog was answered; `PreToolUse` runs before the dialog and cannot.
+`PostToolUse` or `PostToolUseFailure` closes the gate, because a tool that ran is proof the dialog was answered whatever its outcome; `PreToolUse` runs before the dialog and cannot.
 A parked worker surfaces through the ordinary stale wake instead of being absorbed as working, and a steering doorbell waits rather than being typed into the dialog, where its keys would answer it.
 Firstmate cannot answer this gate either, so report the dialog for the operator to clear promptly instead of steering, interrupting, or relaunching the worker.
 `../../../docs/verification/supervision.md` owns the captured payloads and the hook ordering.
