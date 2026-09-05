@@ -34,9 +34,17 @@ cleanup_remote_job_fixture() {
     fm_remote_job_resolve_stop_owner "$pid" &&
       fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" || true
   fi
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   rm -rf -- "$TMP_ROOT"
 }
-trap cleanup_remote_job_fixture EXIT
+cleanup_remote_job_exit() {
+  local test_status=$?
+  cleanup_remote_job_fixture || exit 1
+  exit "$test_status"
+}
+trap cleanup_remote_job_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
@@ -54,7 +62,7 @@ exit "${FM_PROBE_EXIT:-0}"
 SH
 cat > "$REMOTE_ROOT/bin/fm-timeout-job.sh" <<'SH'
 #!/bin/bash
-sleep 3
+while :; do sleep 1; done
 SH
 cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 #!/bin/bash
@@ -73,7 +81,11 @@ cat > "$REMOTE_ROOT/bin/fm-shutdown-job.sh" <<'SH'
 #!/bin/bash
 trap '' HUP INT TERM
 printf 'started\n' > "$1"
-sleep 3
+if [ "$#" -gt 2 ]; then
+  while [ ! -e "$3" ]; do sleep 0.05; done
+else
+  sleep 3
+fi
 printf 'ran\n' > "$2"
 SH
 cat > "$REMOTE_ROOT/bin/fm-output-job.sh" <<'SH'
@@ -318,7 +330,7 @@ FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
-[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the worker did not terminate an over-time job"
+[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the worker did not terminate an over-time job (exit=$FM_REMOTE_JOB_EXIT)"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out job could not be reaped"
 pass "the worker enforces the job timeout and publishes its result"
 
@@ -570,9 +582,12 @@ pass "the worker refuses symlinked job fields before command execution"
 
 QUARANTINE_STARTED="$TMP_ROOT/quarantine-started"
 QUARANTINE_SIDE_EFFECT="$TMP_ROOT/quarantine-side-effect"
-FM_REMOTE_JOB_TIMEOUT=5
+QUARANTINE_RELEASE="$TMP_ROOT/quarantine.release"
+# This case tests uncertain shutdown, so work must remain active through the
+# start/quarantine observations and replacement's bounded ownership acquisition.
+FM_REMOTE_JOB_TIMEOUT=$(fm_test_timeout 30)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-shutdown-job.sh "$QUARANTINE_STARTED" "$QUARANTINE_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-shutdown-job.sh "$QUARANTINE_STARTED" "$QUARANTINE_SIDE_EFFECT" "$QUARANTINE_RELEASE" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
 for _ in $(seq 1 "$((100 * FM_TEST_TIMEOUT_SCALE))"); do
@@ -600,7 +615,14 @@ set -e
 [ "$REPLACEMENT_RC" -ne 0 ] || fail "a replacement worker ignored quarantined ownership"
 assert_present "$STATE_ROOT/worker.lock/quarantine" "a replacement removed quarantined ownership"
 kill -KILL -- "-$GROUP_PID" 2>/dev/null || true
-sleep 3
+quarantine_group_stopped() {
+  local inventory
+  inventory=$(ps -eo pgid=,stat=) || return 1
+  awk -v group="$GROUP_PID" '$1 == group && $2 !~ /^Z/ { alive=1 } END { exit alive }' <<< "$inventory"
+}
+fm_test_wait_until 100 quarantine_group_stopped \
+  || fail "the explicitly terminated quarantine command group survived"
+touch "$QUARANTINE_RELEASE"
 assert_absent "$QUARANTINE_SIDE_EFFECT" "the quarantined command mutated after explicit termination"
 pass "failed shutdown quarantines ownership against replacement workers"
 
