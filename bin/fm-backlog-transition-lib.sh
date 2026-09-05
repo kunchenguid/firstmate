@@ -365,10 +365,7 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
   }
   latest_line=$(printf '%s\n' "$body" \
     | sed -n '/^<!-- firstmate-completion\.v1 /p' | tail -1)
-  if [ -z "$deliverable" ]; then
-    [ -z "$latest_line" ] || return 0
-    deliverable=none
-  fi
+  [ -n "$deliverable" ] || deliverable=none
   encoded=$(printf '%s' "$deliverable" | LC_ALL=C perl -MJSON::PP -e '
     local $/;
     print encode_json({value => scalar <STDIN>});
