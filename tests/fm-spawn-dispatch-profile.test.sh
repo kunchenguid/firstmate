@@ -932,6 +932,7 @@ run_launch_environment_inheritance() {
   local route=$1 home=$2 dest=$3 fakebin=$4 generation=$5
   if [ "$route" = local ]; then
     (
+      # shellcheck source=/dev/null
       . "$ROOT/bin/fm-config-inherit-lib.sh"
       FM_INHERITABLE_CONFIG=launch-env-allowlist \
         propagate_inheritable_config "$home/config" "$dest/config"
