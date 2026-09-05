@@ -240,7 +240,8 @@ fm_lint_write_diff_file() {
 # them, so changed-file mode tests can assert exactly which files fm-lint.sh
 # selected without depending on real ShellCheck findings. When
 # FM_TEST_MODE_LOG is set, it records the effective analysis mode, treating
-# ShellCheck's default as full analysis.
+# ShellCheck's default as full analysis. When FM_TEST_ULIMIT_LOG is set, it
+# records the virtual-address-space limit (ulimit -v, in KiB) it runs under.
 fm_lint_stub_shellcheck() {
   local fakebin=$1 log=$2
   : > "$log"
@@ -257,6 +258,9 @@ while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
 done
 if [ -n "\${FM_TEST_MODE_LOG:-}" ]; then
   printf '%s\n' "\$mode" >> "\$FM_TEST_MODE_LOG"
+fi
+if [ -n "\${FM_TEST_ULIMIT_LOG:-}" ]; then
+  ulimit -v >> "\$FM_TEST_ULIMIT_LOG"
 fi
 [ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
@@ -289,6 +293,63 @@ SH
     || fail "fast lint mode did not lint the requested root"
   assert_grep $'analysis_mode\tfast' "$telemetry" "telemetry did not record fast analysis mode"
   pass "fm-lint.sh --fast disables ShellCheck extended analysis"
+}
+
+test_shellcheck_runs_under_a_memory_cap() {
+  local tmp fakebin log ulimit_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-memory-cap)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  ulimit_log="$tmp/ulimit.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  if ! bash -c 'ulimit -v 8388608 && [ "$(ulimit -v)" = 8388608 ]' 2>/dev/null; then
+    pass "fm-lint.sh memory cap (skipped: ulimit -v unsupported on this platform)"
+    return 0
+  fi
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_ULIMIT_LOG="$ulimit_log" "$LINT" "$fixture" 2>&1) \
+    || fail "lint under default memory cap failed"$'\n'"$out"
+  [ "$(cat "$ulimit_log")" = "$((4096 * 1024))" ] \
+    || fail "default ShellCheck memory cap was not 4096 MB: $(cat "$ulimit_log")"
+
+  : > "$ulimit_log"
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_LINT_SHELLCHECK_MAX_MB=512 FM_TEST_ULIMIT_LOG="$ulimit_log" "$LINT" "$fixture" 2>&1) \
+    || fail "lint under explicit memory cap failed"$'\n'"$out"
+  [ "$(cat "$ulimit_log")" = "$((512 * 1024))" ] \
+    || fail "FM_LINT_SHELLCHECK_MAX_MB was not honored: $(cat "$ulimit_log")"
+  pass "fm-lint.sh bounds ShellCheck memory (default 4096 MB, FM_LINT_SHELLCHECK_MAX_MB override)"
+}
+
+test_rejects_malformed_memory_cap() {
+  local tmp fakebin log fixture value out rc
+  tmp=$(fm_test_tmproot fm-lint-memory-cap-invalid)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$fixture"
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  for value in abc 4G 0 -1; do
+    rc=0
+    out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+      FM_LINT_SHELLCHECK_MAX_MB="$value" "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] \
+      || fail "FM_LINT_SHELLCHECK_MAX_MB=$value should exit 2, got $rc"$'\n'"$out"
+    case "$out" in
+      *"FM_LINT_SHELLCHECK_MAX_MB must be a positive integer"*) ;;
+      *) fail "FM_LINT_SHELLCHECK_MAX_MB=$value did not report the memory cap clearly:"$'\n'"$out" ;;
+    esac
+    [ ! -s "$log" ] || fail "FM_LINT_SHELLCHECK_MAX_MB=$value still ran ShellCheck"
+  done
+  pass "fm-lint.sh rejects a malformed FM_LINT_SHELLCHECK_MAX_MB with a clear message"
 }
 
 test_ci_defaults_to_full_analysis() {
@@ -997,6 +1058,8 @@ SH
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
+test_shellcheck_runs_under_a_memory_cap
+test_rejects_malformed_memory_cap
 test_ci_defaults_to_full_analysis
 test_ci_rejects_explicit_fast_mode
 test_fast_mode_catches_a_real_lint_defect
