@@ -206,7 +206,7 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb unstamped
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
@@ -219,7 +219,13 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  _fm_classify_matches "$line" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  unstamped=$(printf '%s' "$line" | awk '{
+    colon = index($0, ":")
+    head = substr($0, 1, colon)
+    gsub(/ \[at=[0-9]+\]/, "", head)
+    print head substr($0, colon + 1)
+  }')
+  _fm_classify_matches "$unstamped" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
