@@ -26,6 +26,7 @@
 # Results travel in variables rather than stdout so a caller keeps the reason
 # without a subshell swallowing it.
 
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_CODEX_HOME_ERROR=
 FM_CODEX_HOME_PATH=
 
@@ -33,6 +34,7 @@ fm_codex_home_expand() {
   local path=${1:-} home
   FM_CODEX_HOME_ERROR=
   FM_CODEX_HOME_PATH=
+  # shellcheck disable=SC2088 # the literal ~ and ~/ spellings are the patterns being matched
   case "$path" in
     '')
       FM_CODEX_HOME_ERROR="codex home is empty"
