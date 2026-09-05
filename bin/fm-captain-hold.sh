@@ -122,7 +122,16 @@
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
-# unchanged. An entry that exists as a task id is always that task.
+# unchanged. An entry that exists as a task id is always that task. On the
+# Beads backend an attested legacy markdown id that resolves to no task is
+# accepted through the migrated row fm-hold-migration produced, found by the
+# authoritative evidence first: a row whose notes carry the marker line
+# "migrated from data/backlog.md id <legacy id>", alone or followed by
+# " on <date>". Only when no row carries that line is the legacy id tried under
+# the configured beads prefix, and that name-only guess is accepted solely for
+# a single row still held for the captain; two such rows refuse rather than
+# attest, and `complete` names each prefix-resolved row beside its attested
+# legacy id so the guess stays auditable.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -175,10 +184,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-# Resolve the configured backlog once for diagnostics; keep startup non-fatal so
-# commands retain their existing read-error handling.
-CAPTAIN_BACKLOG_FILE=$(fm_backlog_file "$DATA" 2>/dev/null) \
-  || CAPTAIN_BACKLOG_FILE="${DATA%/}/backlog.md"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -283,13 +288,20 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
 
 # Mutations address the configured data directory's backlog from its root, the
 # way bin/fm-backlog-transition-lib.sh addresses every transition, so a home
-# with a relocated data directory keeps one backlog.
+# with a relocated data directory keeps one backlog. The explicit --file file
+# belongs to the markdown backend only; a non-markdown backend is addressed by
+# the root's own tasks-axi configuration, exactly like the transition library's
+# mutate path.
 tasks_axi() {
   local data file root
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
-  file=$(fm_backlog_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
   root=$(fm_backlog_root "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
-  (cd "$root" && tasks-axi "$@" --file "$file")
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    file=$(fm_backlog_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
+    (cd "$root" && tasks-axi "$@" --file "$file")
+  else
+    (cd "$root" && tasks-axi "$@")
+  fi
 }
 
 require_tasks_axi() {
@@ -428,7 +440,7 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
+  show=$(task_show "$id") || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -441,23 +453,219 @@ verify_hold_durable() {  # <task-id>
   fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
 }
 
+# --- migrated legacy-id resolution on the Beads backend ---------------------
+#
+# A home that moved its backlog from markdown to Beads no longer carries the
+# legacy hold ids a scout report attested: the migration rehomed every held
+# row under a prefixed fm- id and recorded its markdown identity in the row's
+# notes as "migrated from data/backlog.md id <legacy id>", alone or followed by
+# " on <date>" (fm-hold-migration wrote the dated form on 2026-09-04). When an
+# attested legacy id resolves to no task, the beads backend accepts the row the
+# migration produced, found by scanning the configured graph's notes for either
+# form of that marker line, and only when no row carries the marker by
+# prepending the configured prefix to the legacy id - a name-only guess, so it
+# is accepted solely for a row still held for the captain and only when it is
+# the single such row. A markdown home keeps its legacy rows verbatim, so its
+# exact-id resolution is unchanged.
+
+CAPTAIN_MIGRATION_SCAN_LOADED=0
+CAPTAIN_MIGRATION_SCAN_JSON=
+NL_SEP=$'\n'
+
+# Section-aware [beads] extraction from a .tasks.toml: only keys inside the
+# [beads] section, comments stripped. Prints "<key> <value>" lines.
+captain_beads_toml_entries() {  # <toml-file>
+  [ -f "$1" ] || return 0
+  LC_ALL=C awk '
+    function trim(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); return v }
+    BEGIN { inbeads = 0 }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+      line = trim(line)
+      if (line ~ /^\[[^]]+\]$/) { inbeads = (line == "[beads]"); next }
+      if (!inbeads) next
+      if (line ~ /^(prefix|path|binary)[[:space:]]*=/) {
+        key = line
+        sub(/[[:space:]]*=.*/, "", key)
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/^"|"$/, "", line); gsub(/^'\''|'\''$/, "", line)
+        printf "%s %s\n", key, line
+      }
+    }
+  ' "$1"
+}
+
+captain_beads_setting() {  # <entries-output> <setting>
+  printf '%s\n' "$1" | sed -n "s/^$2 //p" | head -1
+}
+
+# Read the configured beads graph's row listing for a migration-note scan.
+# The listing is deliberately re-read per unresolvable key: the cache below
+# lives and dies with the command-substitution subshell every resolve_entry
+# call site runs in, so it cannot persist across keys - bounded by a scout
+# report's handful of attested ids. Returns 0 when the listing loads, and 2
+# with the reason on stderr when the graph cannot be read.
+captain_migration_scan_load() {  # <resolved-data-dir>
+  local data=$1 root entries bd_bin bd_path
+  [ "$CAPTAIN_MIGRATION_SCAN_LOADED" = 1 ] && return 0
+  root=$(fm_backlog_root "$data") || {
+    printf 'fm-captain-hold: the configured data directory cannot be resolved for a migration scan: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 2
+  }
+  if [ "$(fm_tasks_axi_backend "$root")" != beads ]; then
+    CAPTAIN_MIGRATION_SCAN_LOADED=1
+    return 0
+  fi
+  entries=$(captain_beads_toml_entries "$root/.tasks.toml")
+  bd_bin=$(captain_beads_setting "$entries" binary)
+  bd_path=$(captain_beads_setting "$entries" path)
+  bd_bin=${bd_bin:-bd}
+  if [ -z "$bd_path" ]; then
+    printf 'fm-captain-hold: the beads backend carries no graph path in %s, so a migrated hold cannot be found\n' "$root/.tasks.toml" >&2
+    return 2
+  fi
+  # A relative [beads] path resolves against the backlog root, the same rule
+  # every other .tasks.toml path consumer uses, never against the process CWD.
+  case "$bd_path" in
+    /*) ;;
+    *) bd_path="$root/$bd_path" ;;
+  esac
+  command -v "$bd_bin" >/dev/null 2>&1 || {
+    printf 'fm-captain-hold: the beads binary %s is not on PATH, so a migrated hold cannot be found\n' "$bd_bin" >&2
+    return 2
+  }
+  command -v jq >/dev/null 2>&1 || {
+    printf 'fm-captain-hold: jq is required to scan the beads graph for a migrated hold\n' >&2
+    return 2
+  }
+  local bd_err
+  bd_err=$(mktemp "${TMPDIR:-/tmp}/fm-captain-hold-bd.XXXXXX") || {
+    printf 'fm-captain-hold: cannot stage the beads graph read diagnostics\n' >&2
+    return 2
+  }
+  if ! CAPTAIN_MIGRATION_SCAN_JSON=$(BEADS_DIR="$bd_path" "$bd_bin" list --all --json 2>"$bd_err"); then
+    printf 'fm-captain-hold: reading the beads graph at %s failed (%s), so a migrated hold cannot be found\n' \
+      "$bd_path" "$(sanitize_field "$(head -c 200 "$bd_err" | tr '\n' ' ')")" >&2
+    rm -f "$bd_err"
+    return 2
+  fi
+  rm -f "$bd_err"
+  CAPTAIN_MIGRATION_SCAN_LOADED=1
+  return 0
+}
+
+# Resolve one attested legacy id to the migrated row that carries it on the
+# beads backend. Prints "<row id> <how>" and returns 0 when exactly one
+# migration matches, returns 1 when none does, and returns 2 with the reason on
+# stderr when the scan itself cannot run or is ambiguous. The marker note is the
+# authoritative evidence and is scanned first; the bare configured prefix is a
+# guess, so it only runs when no marker line matches any identity and it accepts
+# a row solely when that row is itself still held for the captain.
+resolve_migrated_entry() {  # <origin-or-empty> <entry>
+  local origin=$1 entry=$2 data root entries prefix derived show
+  local candidate candidate_matches prefixed matches count prefixed_matches prefixed_count
+  data=$(fm_backlog_data_absolute "$DATA") || {
+    printf 'fm-captain-hold: the migrated hold of %s cannot be resolved: %s\n' \
+      "$entry" "${FM_BACKLOG_TRANSITION_ERROR:-the configured data directory $DATA cannot be resolved}" >&2
+    return 2
+  }
+  root=$(fm_backlog_root "$data") || {
+    printf 'fm-captain-hold: the migrated hold of %s cannot be resolved: %s\n' \
+      "$entry" "${FM_BACKLOG_TRANSITION_ERROR:-the configured data directory $DATA cannot be resolved}" >&2
+    return 2
+  }
+  [ "$(fm_tasks_axi_backend "$root")" = beads ] || return 1
+  # Every identity this entry could have been migrated under: the raw entry,
+  # and - for a pre-collapse channel key - the derived legacy identity its
+  # origin would have minted, because fm-hold-migration recorded the DERIVED
+  # id in each migrated row's marker note.
+  CAPTAIN_MIGRATION_IDENTITIES=$entry
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    derived=$(legacy_hold_id "$origin" "$entry")
+    if [ "$derived" != "$entry" ]; then
+      CAPTAIN_MIGRATION_IDENTITIES="$CAPTAIN_MIGRATION_IDENTITIES $derived"
+    fi
+  fi
+  captain_migration_scan_load "$data" || return 2
+  matches=
+  if [ -n "$CAPTAIN_MIGRATION_SCAN_JSON" ]; then
+    for candidate in $CAPTAIN_MIGRATION_IDENTITIES; do
+      candidate_matches=$(printf '%s\n' "$CAPTAIN_MIGRATION_SCAN_JSON" | jq -r \
+        --arg exact "migrated from data/backlog.md id $candidate" \
+        --arg dated "migrated from data/backlog.md id $candidate on " \
+        '.[] | select(((.notes // "") | split("\n")) | any(. == $exact or startswith($dated))) | .id' 2>/dev/null) || {
+        printf 'fm-captain-hold: the beads graph scan for the migrated hold of %s could not be parsed\n' "$candidate" >&2
+        return 2
+      }
+      matches="${matches}${matches:+$NL_SEP}${candidate_matches}"
+    done
+    count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
+    case "$count" in
+      0) : ;;
+      1) printf '%s migrated-note' "$(printf '%s\n' "$matches" | sed '/^$/d' | sed -n 1p)"; return 0 ;;
+      *)
+        printf 'fm-captain-hold: the migrated hold of %s is ambiguous: %s rows carry its marker line (identities tried: %s)\n' \
+          "$entry" "$count" "$(printf '%s' "$CAPTAIN_MIGRATION_IDENTITIES" | tr ' ' ',')" >&2
+        return 2
+        ;;
+    esac
+  fi
+  # No marker line anywhere: a mechanical migration keeps the legacy id under
+  # the configured prefix, but that name alone is evidence of nothing, so only
+  # a row still held for the captain - and only one of them - is accepted.
+  entries=$(captain_beads_toml_entries "$root/.tasks.toml")
+  prefix=$(captain_beads_setting "$entries" prefix)
+  [ -n "$prefix" ] || return 1
+  prefixed_matches=
+  for candidate in $CAPTAIN_MIGRATION_IDENTITIES; do
+    case "$prefix" in
+      *-) prefixed="$prefix$candidate" ;;
+      *) prefixed="$prefix-$candidate" ;;
+    esac
+    show=$(task_show "$prefixed" 2>/dev/null) || continue
+    [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
+    prefixed_matches="${prefixed_matches}${prefixed_matches:+$NL_SEP}$prefixed"
+  done
+  prefixed_count=$(printf '%s\n' "$prefixed_matches" | sed '/^$/d' | wc -l | tr -d ' ')
+  case "$prefixed_count" in
+    0) return 1 ;;
+    1) printf '%s migrated-prefix' "$prefixed_matches"; return 0 ;;
+  esac
+  printf 'fm-captain-hold: the migrated hold of %s is ambiguous: %s captain-held rows carry the configured prefix (identities tried: %s)\n' \
+    "$entry" "$prefixed_count" "$(printf '%s' "$CAPTAIN_MIGRATION_IDENTITIES" | tr ' ' ',')" >&2
+  return 2
+}
+
 # Resolve one inventory entry or channel key to the task that carries it: the
-# exact task id when it exists, else the legacy derived identity.
-resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
-  local origin=$1 entry=$2 legacy
+# exact task id when it exists, else the legacy derived identity, else - on the
+# beads backend - the migrated row the markdown-to-beads hold migration wrote.
+# Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
+# migrated-prefix, so a caller can record which evidence carried the attestation.
+resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
+  local origin=$1 entry=$2 legacy migrated rc
   if task_show "$entry" >/dev/null 2>&1; then
-    printf '%s' "$entry"
+    printf '%s exact' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     if task_show "$legacy" >/dev/null 2>&1; then
-      printf '%s' "$legacy"
+      printf '%s legacy' "$legacy"
       return 0
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $CAPTAIN_BACKLOG_FILE"
   fi
-  fail "no captain-held task $entry in $CAPTAIN_BACKLOG_FILE"
+  rc=0
+  migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?
+  case "$rc" in
+    0) printf '%s' "$migrated"; return 0 ;;
+    2) return 2 ;;
+  esac
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    legacy=$(legacy_hold_id "$origin" "$entry")
+    fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
+  fi
+  fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
 }
 
 body_hold_set_timestamp() {  # <decoded-task-body>
@@ -687,7 +895,7 @@ command_answer() {
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
+  show=$(task_show "$id") || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -921,7 +1129,16 @@ command_answers() {
         continue
         ;;
     esac
-    if ! id=$(resolve_entry "$origin" "$key" 2>/dev/null); then
+    resolve_rc=0
+    id=$(resolve_entry "$origin" "$key" 2>"$err") || resolve_rc=$?
+    id=${id%% *}
+    if [ "$resolve_rc" = 2 ]; then
+      reason=$(tr -d '\n' < "$err")
+      printf 'skipped: %s (migrated-hold scan refused%s)\n' "$key" "${reason:+: $reason}"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [ "$resolve_rc" -ne 0 ]; then
       printf 'skipped: %s (no captain-held task with that id)\n' "$key"
       skipped=$((skipped + 1))
       continue
@@ -994,7 +1211,8 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc resolved
+  local resolved_how attested_by_prefix=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1025,7 +1243,16 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      if ! resolved=$(resolve_entry "$origin" "$entry"); then
+        # resolve_entry has already refused on stderr naming the entry.
+        exit 1
+      fi
+      resolved_how=${resolved##* }
+      resolved=${resolved%% *}
+      verify_hold_durable "$resolved"
+      if [ "$resolved_how" = migrated-prefix ]; then
+        attested_by_prefix="${attested_by_prefix}${attested_by_prefix:+ }$entry=$resolved"
+      fi
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -1063,11 +1290,12 @@ $raw_open
 EOF
     fi
   fi
-  printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
+  printf 'complete: %s captain-call inventory reviewed%s%s\n' "$origin" "${keys:+ ($keys)}" \
+    "${attested_by_prefix:+ [attested through the configured prefix: $attested_by_prefix]}"
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys entry key open resolved
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -1079,7 +1307,11 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      if ! resolved=$(resolve_entry "$origin" "$entry"); then
+        # resolve_entry has already refused on stderr naming the entry.
+        exit 1
+      fi
+      verify_hold_durable "${resolved%% *}"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF

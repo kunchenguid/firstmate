@@ -22,12 +22,12 @@ document:
     evidence destination, and unique safety facts, then review the complete
     branch diff again after every documentation or lint fix.
 
-# Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
+# Pin lint to the same owner CI invokes instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
-# `bin/fm-lint.sh` owns the complete lint definition, including GitHub workflow
-# lint via pinned actionlint in `bin/fm-lint-workflows.sh`, and
-# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
+# `bin/fm-lint.sh` owns the context-sensitive ShellCheck modes and GitHub
+# workflow lint via pinned actionlint in `bin/fm-lint-workflows.sh`.
+# Invocation wiring is asserted by `tests/fm-lint.test.sh` and
+# `tests/fm-lint-workflows.test.sh`.
 #
 # Pin the test baseline to the repository's own runner rather than leaving each
 # gate agent to chain `bash tests/a.test.sh && bash tests/b.test.sh` by hand.

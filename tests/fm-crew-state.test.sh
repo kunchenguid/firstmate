@@ -82,7 +82,20 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# FM_FAKE_TMUX_MISSING: the window is authoritatively gone - every addressed
+# call fails, but the session inventory still answers successfully and simply
+# omits the window, which is what proves absence.
+# FM_FAKE_TMUX_UNREADABLE: tmux itself cannot answer - it fails to execute (a
+# trimmed PATH) or errors non-definitively - so even the inventory fails, with
+# a message that is NOT one of the definitive no-session/no-server/no-socket
+# responses that fm_backend_tmux_agent_state owns as death.
+[ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
+  list-windows)
+    # A successful but empty inventory: it omits the crew's window, so absence
+    # is proved by the answer rather than by an addressed call failing. Only
+    # reached once display-message has already failed.
+    ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
@@ -108,13 +121,25 @@ case "${1:-}" in
     case "${2:-}" in
       read)
         [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
+        [ "${FM_FAKE_HERDR_READ_FAIL:-0}" = 1 ] && exit 1
         if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
         else printf 'all quiet\n> \n'; fi
+        exit 0 ;;
+      get)
+        if [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ]; then
+          printf '{"error":{"code":"pane_not_found","message":"no such pane"}}\n'
+          exit 1
+        fi
+        printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
         exit 0 ;;
     esac ;;
   agent)
     case "${2:-}" in
       get)
+        if [ "${FM_FAKE_HERDR_HUSK:-0}" = 1 ]; then
+          printf '{"error":{"code":"agent_not_found","message":"no agent in pane"}}\n'
+          exit 0
+        fi
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
         printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
         exit 0 ;;
@@ -166,12 +191,15 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_UNREADABLE=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
+  FM_FAKE_HERDR_READ_FAIL=0
+  FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -865,6 +893,94 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+# Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
+# stalls under load made pane_readable's capture fail, and the fallback read
+# that single failure as "backend target gone" - text the stale sweep matches
+# as positive death - so a busy box briefly scored dozens of live claims dead.
+# The reader must separate the two outcomes: only a successful herdr answer
+# proving the pane absent may say gone; a CLI that failed to answer is unknown
+# and unreachable, never death.
+test_no_run_herdr_cli_failure_reads_unreachable_not_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr cli-failure fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-cli-dead)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-cli
+  make_fakebin "$d" >/dev/null
+  # A herdr whose server is up but whose endpoint calls cannot answer at all:
+  # every pane/agent invocation exits non-zero, the busiest-box form of a
+  # stalled CLI (capture and pane get alike fail). `status` still answers so
+  # the reader probes the endpoint instead of waiting out a server start.
+  cat > "$d/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = status ] && { printf '{"server":{"running":true}}\n'; exit 0; }
+exit 1
+SH
+  chmod +x "$d/fakebin/herdr"
+  fm_write_meta "$d/state/feat-herdr-cli.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-herdr-cli)
+  assert_contains "$out" "state: unknown" "a failed herdr CLI must stay unknown"
+  assert_contains "$out" "source: none" "a failed herdr CLI has no state source"
+  assert_contains "$out" "backend unreachable" "a failed herdr CLI must read as unreachable, not gone"
+  assert_not_contains "$out" "backend target gone" "a failed herdr CLI is not positive death evidence"
+  pass "a herdr CLI that fails to answer reads unknown/unreachable, never gone"
+}
+
+# Decision follow-up (2026-09-05 review): an `alive` endpoint answer is
+# authoritative even when the heavy scrollback read failed - the live state is
+# classified by the normal flow, never discarded as unreachable.
+test_no_run_herdr_alive_with_failed_read_stays_live() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr alive/read-fail test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-alive-readfail)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-alive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-alive.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  # The 200-line scrollback read fails while the cheap pane get / agent get
+  # pair answers: the pane is present and its agent is working.
+  FM_FAKE_HERDR_READ_FAIL=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  local out; out=$(run_crew_state "$d" feat-herdr-alive)
+  assert_contains "$out" "state: working" "an alive endpoint with a failed scrollback read stays live"
+  assert_not_contains "$out" "backend unreachable" "an authoritative alive answer is never unreachable"
+  assert_not_contains "$out" "backend target gone" "an authoritative alive answer is never death"
+  pass "an alive endpoint whose scrollback read failed stays working"
+}
+
+# Decision follow-up (2026-09-05 review): a husk pane (pane present,
+# agent_not_found) is authoritative death evidence - it keeps the gone-class
+# text so the stale sweep may still reclaim it, never unknown/unreachable.
+test_no_run_herdr_husk_dead_still_reads_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr husk test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-husk-dead)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-husk
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-husk.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  # The pane exists and answers pane get, but no agent is registered in it,
+  # and the scrollback read fails besides.
+  FM_FAKE_HERDR_READ_FAIL=1
+  FM_FAKE_HERDR_HUSK=1
+  local out; out=$(run_crew_state "$d" feat-herdr-husk)
+  assert_contains "$out" "state: unknown" "a husk pane has no live current state"
+  assert_contains "$out" "backend target gone" "a husk pane keeps its gone-class death evidence"
+  assert_contains "$out" "agent gone, pane shell remains" "the husk verdict names what actually died"
+  assert_not_contains "$out" "backend unreachable" "a husk pane is not an unreachable backend"
+  pass "a husk pane (agent gone) still reads gone for reclaim"
+}
+
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
 # herdr's agent.get reports generation state ("working" only while the model is
 # actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
@@ -1044,7 +1160,37 @@ test_dead_window_ignores_stale_status_log() {
   assert_contains "$out" "state: unknown" "dead window -> unknown"
   assert_contains "$out" "source: none" "dead window -> none source"
   assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
+  assert_contains "$out" "backend target gone" "an inventory that omits the window is positive death evidence"
   pass "dead window ignores stale status log"
+}
+
+# Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
+# reached the same false-death path as herdr. A tmux that cannot answer at all
+# - a trimmed PATH, or any non-definitive error - made every live crew report
+# "backend target gone", the text the stale sweep matches as positive death.
+# Absence must be proved by tmux's own answer: a window inventory that omits
+# the recorded window, or one of its definitive no-session/no-server/no-socket
+# responses. Anything else is a tmux that failed to answer: unknown, never
+# death. (A socket-connection error is deliberately NOT in this test's scope -
+# fm_backend_tmux_agent_state classifies it as `missing` so fm-bootstrap and
+# fm-session-start can respawn after a genuine server death.)
+test_no_run_tmux_unreadable_reads_unreachable_not_gone() {
+  reset_fakes
+  local d; d=$(new_case tmux-unreadable)
+  make_repo_on_branch "$d/wt" fm/feat-tmux-unread
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-tmux-unread.meta" "window=fm:fm-feat-tmux-unread" \
+    "worktree=$d/wt" "kind=ship"
+  printf 'done: old completion event\n' > "$d/state/feat-tmux-unread.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_UNREADABLE=1
+  local out; out=$(run_crew_state "$d" feat-tmux-unread)
+  assert_contains "$out" "state: unknown" "an unreadable tmux must stay unknown"
+  assert_contains "$out" "source: none" "an unreadable tmux has no state source"
+  assert_contains "$out" "backend unreachable" "an unreadable tmux reads as unreachable, not gone"
+  assert_not_contains "$out" "backend target gone" "an unreadable tmux is not positive death evidence"
+  pass "a tmux that fails to answer reads unknown/unreachable, never gone"
 }
 
 # A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
@@ -1752,6 +1898,9 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_cli_failure_reads_unreachable_not_gone
+test_no_run_herdr_alive_with_failed_read_stays_live
+test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
@@ -1760,6 +1909,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
