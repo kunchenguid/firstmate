@@ -51,12 +51,11 @@
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # writes a resolution block while preserving the leading hold-set stamp until
 # the close succeeds (the previous body is preserved and archived through
-# tasks-axi --archive-body). The default close delegates to
-# bin/fm-backlog-transition-lib.sh so its completion-provenance contract also
-# applies; with `--release`, it instead lifts the hold with `tasks-axi unhold`
-# so a captain-gated WORK item resumes instead of closing. It then restores
-# resolution-first body ordering. An exact retry also completes unfinished
-# ordering normalization and is idempotent only when its requested close mode
+# tasks-axi --archive-body). It then closes the task with `tasks-axi done` - or,
+# with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
+# WORK item resumes instead of closing - and restores resolution-first body
+# ordering. An exact retry also completes unfinished ordering normalization and
+# is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
@@ -167,8 +166,8 @@
 # lifecycle without necessarily touching the task's status log, so a consumer
 # that bounds repeated work per call cannot use the task id alone.
 # bin/fm-teardown.sh asks it before its automatic
-# backlog close and, on 0, returns the row to Queued with its deliverable
-# recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
+# backlog close and, on 0, returns the row to Queued instead
+# (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
 # captain's words or evidence-backed `reconcile close` closes the call.
 # bin/fm-watch.sh asks it when an ordinary
@@ -429,7 +428,12 @@ origin_open_decisions() {  # <origin-id>
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
-  fm_backlog_body_has_captain_resolution "$1"
+  case "$1" in
+    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
+    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
+    *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
+  esac
+  return 1
 }
 
 # The recorded decision digest of either record format, from the show-escaped
@@ -880,20 +884,11 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   rm -f -- "$tmp"
 }
 
-close_answered() {  # <task-id> <release-0-or-1> <assert-none-0-or-1>
-  local completion_args=()
+close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
   else
-    fm_backlog_close_marker_record_completion "$STATE" "$1" "$DATA" \
-      || fail "could not preserve pending completion for $1: $FM_BACKLOG_TRANSITION_ERROR"
-    if [ "${FM_BACKLOG_CLOSE_VALIDATED_MODE-}" = retain ]; then
-      completion_args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-    elif [ "$3" = 1 ]; then
-      completion_args=(--completion-none)
-    fi
-    fm_backlog_done "$DATA" "$1" "${completion_args[@]+"${completion_args[@]}"}" \
-      || fail "could not close answered captain-held task $1: $FM_BACKLOG_TRANSITION_ERROR"
+    tasks_axi "done" "$1" >/dev/null
   fi
 }
 
@@ -920,8 +915,7 @@ remove_interrupted_answer_stamp() {  # <task-id>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind kind body decoded_body
-  local outcome recorded_mode occurrence completion_value completion_none=0
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -939,15 +933,7 @@ command_answer() {
   show=$(task_show "$id") || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
-  kind=$(show_field_value "$show" kind)
   body=$(show_field "$show" body)
-  decoded_body=$(decode_shown_value "$body") \
-    || fail "could not decode the existing body for $id"
-  completion_value=$(fm_completion_last_record_field value "$decoded_body") \
-    || fail "could not read completion provenance for $id"
-  if [ "$kind" = captain ] || [ -z "$completion_value" ] || [ "$completion_value" = none ]; then
-    completion_none=1
-  fi
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
@@ -1004,7 +990,7 @@ command_answer() {
         answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
-      if ! close_answered "$id" "$release" "$completion_none"; then
+      if ! close_answered "$id" "$release"; then
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
@@ -1013,7 +999,7 @@ command_answer() {
       return 0
     fi
     write_resolution_record "$id" "$outcome" "$body"
-    if ! close_answered "$id" "$release" "$completion_none"; then
+    if ! close_answered "$id" "$release"; then
       fail "could not close answered captain-held task $id"
     fi
     remove_interrupted_answer_stamp "$id"
