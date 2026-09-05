@@ -507,7 +507,7 @@ class FakeConn:
         return ('OK', [])
     def uid(self, cmd, *args):
         if cmd == 'search':
-            return ('OK', [b'51 52 53 54 55 41'])
+            return ('OK', [b'51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 41'])
         if cmd == 'fetch':
             return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
     def logout(self):
@@ -520,8 +520,9 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_poll_list())
 PYEOF
-  # cap=4 reserves retry_budget = max(1, 4//4) = 1. Five new uids (51-55) would
-  # fill the cap alone; the recovering retry uid 41 must still take its slot.
+  # cap=4 reserves retry_budget = max(1, 4//4) = 1. Twenty new uids (51-70)
+  # exceed the new window (max(4*4, 4+10) = 16) and would fill the cap alone;
+  # the recovering retry uid 41, sliced separately, must still take its slot.
   {
     printf 'uidvalidity=90009\n'
     printf '41\n'
@@ -531,6 +532,55 @@ PYEOF
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
   assert_contains "$out" $'41\t\ta@b.c\tgood\tretry' "recovered metadata surfaces despite the new-mail flood"
   pass "fm-mail: the reserved retry budget survives a new-mail flood"
+}
+
+test_poll_cap_one_never_suppresses_new_mail() {
+  local harness out
+  harness="$TMP_ROOT/cap-one-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'61 41'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # cap=1 with a retry present would compute new_budget=0; the fix guarantees
+  # new mail keeps at least one slot, so uid 61 surfaces and the retry waits.
+  {
+    printf 'uidvalidity=90009\n'
+    printf '41\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '41\n' > "$HOME_DIR/state/.mail-retry"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
+  assert_contains "$out" $'61\t\ta@b.c\tgood\tok' "new mail keeps its slot when the cap is one"
+  pass "fm-mail: a cap of one never suppresses new mail while retries exist"
 }
 
 test_poll_fails_closed_when_retry_unwritable() {
@@ -1156,6 +1206,7 @@ test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_rotation_advances_past_failures
 test_poll_retry_surfaces_under_new_mail_flood
+test_poll_cap_one_never_suppresses_new_mail
 test_poll_fails_closed_when_retry_unwritable
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail

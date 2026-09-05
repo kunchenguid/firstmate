@@ -242,32 +242,26 @@ def cmd_poll_list():
             new_uids = list(unseen)
             retry = set()
             retry_order = []
-        candidates = []
-        seen_cand = set()
-        for u in new_uids:
-            if u in seen_cand:
-                continue
-            candidates.append(u)
-            seen_cand.add(u)
-        for u in retry_order:
-            if u in seen_cand:
-                continue
-            candidates.append(u)
-            seen_cand.add(u)
-        # Scan a bounded window of candidates rather than exactly the cap, so a
-        # repeatedly unfetchable uid (a corrupt message) cannot starve later
-        # mail. A new unfetchable uid is still surfaced with a degraded row and
-        # recorded in the cursor, so it is never missed; a retry-set uid that
-        # fails again emits nothing and stays in the retry set. A quarter of
-        # the cap (at least one) is reserved for retry successes, so a
-        # sustained new-mail flood can never starve recovered metadata.
-        retry_budget = max(1, cap // 4) if retry_order else 0
-        new_budget = cap - retry_budget
+        # Bound the expensive fetch work with a window, applied to each class
+        # separately so a large new-mail backlog cannot slice retry candidates
+        # out of the scan. Retries rotate past failures, so the bounded retry
+        # window still advances.
         window = max(cap * 4, cap + 10)
+        new_candidates = new_uids[:window]
+        retry_candidates = retry_order[:window]
+        # Reserve a quarter of the cap (at least one) for retry successes so a
+        # sustained new-mail flood cannot starve recovered metadata, but never
+        # let the reservation fully suppress new mail: when both classes have
+        # candidates, new mail always keeps at least one slot.
+        retry_budget = max(1, cap // 4) if retry_candidates else 0
+        new_budget = cap - retry_budget
+        if new_candidates and new_budget < 1:
+            new_budget = 1
+            retry_budget = cap - 1
         out = []
         new_emitted = 0
         retry_emitted = 0
-        for u in candidates[:window]:
+        for u in new_candidates + retry_candidates:
             is_retry = u in retry
             if is_retry:
                 if retry_emitted >= retry_budget:
