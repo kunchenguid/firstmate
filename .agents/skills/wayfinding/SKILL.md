@@ -102,6 +102,7 @@ Start those pieces.
 
 A backlog dependency that names a stage, a release, or a final acceptance is a claim about another system's state, and claims go stale.
 Before dispatching such an item, reconcile it against the project's official main and its current completion authority: confirm from that project's own authority that the named thing actually closed there, not from a status line, a summary, a report, or the memory of it closing.
+A trailing commit id on an openspec `tasks.md` checkbox is that box's own evidence citation, never the Change's landing commit - check a Change's dependency against the project's main line itself, a merged PR or a landed sha there, not against an id quoted inside its task list.
 Dispatching on a stale named dependency puts a worker on a base that the thing it was waiting for has since moved.
 
 ## Proof at the right boundary
