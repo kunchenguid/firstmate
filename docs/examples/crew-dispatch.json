@@ -20,7 +20,12 @@
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex-1" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex-2" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex-3" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex-4" },
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "codexHome": "~/.codex-5" },
     { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
   ]
 }

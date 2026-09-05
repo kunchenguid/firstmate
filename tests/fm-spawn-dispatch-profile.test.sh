@@ -795,6 +795,178 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# --- Codex account axis (--codex-home) ---------------------------------------
+# A Codex account is a directory holding that account's auth.json. Fixtures use
+# placeholder files only; no real credential is ever read or copied.
+make_codex_account() {  # <dir>
+  mkdir -p "$1"
+  printf '%s\n' '{"placeholder":"fixture"}' > "$1/auth.json"
+}
+
+CODEX_LAUNCH_TAIL="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox"
+
+test_codex_home_forwards_the_account_and_records_it() {
+  local rec id out status launch acct
+  id=profile-codex-home-z20
+  rec=$(make_spawn_case profile-codex-home codex "$id")
+  read_case_record "$rec"
+  acct="$CASE_DIR/accounts/codex-2"
+  make_codex_account "$acct"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --codex-home "$acct")
+  status=$?
+  expect_code 0 "$status" "codex spawn with a valid --codex-home should succeed"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep "codex_home=$acct" "$HOME_DIR/state/$id.meta" "meta did not record the expanded codex_home="
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$acct' $CODEX_LAUNCH_TAIL" \
+    "codex launch did not forward the selected account as a CODEX_HOME prefix"
+  pass "codex --codex-home prefixes the launch with CODEX_HOME and records codex_home= in meta"
+}
+
+test_codex_home_expands_tilde_against_the_launching_home() {
+  local rec id out status launch user_home
+  id=profile-codex-home-tilde-z21
+  rec=$(make_spawn_case profile-codex-home-tilde codex "$id")
+  read_case_record "$rec"
+  # fm_test_run_spawn launches under HOME=<home>/user-home, the launching user's
+  # home the profile's `~/` must expand against (the file is inherited byte-exact
+  # into homes on other machines with other users).
+  user_home="$HOME_DIR/user-home"
+  make_codex_account "$user_home/.codex-1"
+
+  # shellcheck disable=SC2088  # the literal ~/ spelling is the input under test
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home '~/.codex-1')
+  status=$?
+  expect_code 0 "$status" "codex spawn with a ~/ codex home should succeed"$'\n'"$out"
+  assert_grep "codex_home=$user_home/.codex-1" "$HOME_DIR/state/$id.meta" \
+    "meta must record the expanded account path, not the ~/ spelling"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$user_home/.codex-1' env -u CURSOR_AGENT" \
+    "codex launch must carry the ~/ home expanded against the launching user's HOME"
+  assert_not_contains "$launch" "CODEX_HOME='~" "codex launch must not pass an unexpanded ~/ path"
+  pass "codex --codex-home expands ~/ against the launching user's HOME at spawn time"
+}
+
+test_codex_without_codex_home_stays_on_the_default_account() {
+  local rec id out status launch
+  id=profile-codex-home-off-z22
+  rec=$(make_spawn_case profile-codex-home-off codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn without --codex-home should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" "codex launch must add no account prefix when no account was selected"
+  assert_no_grep "codex_home=" "$HOME_DIR/state/$id.meta" \
+    "meta must carry no codex_home= line when no account was selected"
+  pass "codex without --codex-home writes no CODEX_HOME prefix and no codex_home= line"
+}
+
+# refuse_codex_home_case <case-name> <id> <harness> <spawn-args...>
+# Runs a spawn expected to refuse, then proves nothing was created or launched.
+refuse_codex_home_case() {
+  local name=$1 id=$2 harness=$3 rec out status
+  shift 3
+  rec=$(make_spawn_case "$name" "$harness" "$id")
+  read_case_record "$rec"
+  REFUSE_OUT=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$@")
+  status=$?
+  [ "$status" -ne 0 ] || fail "$name: spawn should have been refused"$'\n'"$REFUSE_OUT"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$name: a refused spawn must not publish a task record"
+  [ ! -s "$LAUNCH_LOG" ] || fail "$name: a refused spawn must not launch anything"$'\n'"$(cat "$LAUNCH_LOG")"
+}
+
+test_codex_home_refuses_an_account_with_no_auth_json() {
+  local acct
+  acct="$TMP_ROOT/profile-codex-home-noauth/accounts/codex-4"
+  mkdir -p "$acct"
+  refuse_codex_home_case profile-codex-home-noauth profile-codex-home-noauth-z23 codex --codex-home "$acct"
+  assert_contains "$REFUSE_OUT" "codex home '$acct' has no non-empty auth.json" \
+    "refusal must name the account directory and the missing sign-in"
+  pass "codex --codex-home refuses an account directory with no auth.json instead of falling back"
+}
+
+test_codex_home_refuses_an_empty_auth_json() {
+  local acct
+  acct="$TMP_ROOT/profile-codex-home-emptyauth/accounts/codex-5"
+  mkdir -p "$acct"
+  : > "$acct/auth.json"
+  refuse_codex_home_case profile-codex-home-emptyauth profile-codex-home-emptyauth-z24 codex --codex-home "$acct"
+  assert_contains "$REFUSE_OUT" "has no non-empty auth.json" "refusal must treat an empty auth.json as signed out"
+  pass "codex --codex-home refuses an account whose auth.json is empty"
+}
+
+test_codex_home_refuses_a_missing_directory() {
+  refuse_codex_home_case profile-codex-home-nodir profile-codex-home-nodir-z25 codex \
+    --codex-home "$TMP_ROOT/profile-codex-home-nodir/accounts/absent"
+  assert_contains "$REFUSE_OUT" "is not a directory" "refusal must name the missing directory"
+  pass "codex --codex-home refuses a missing account directory"
+}
+
+test_codex_home_refuses_a_relative_path() {
+  refuse_codex_home_case profile-codex-home-relative profile-codex-home-relative-z26 codex --codex-home accounts/codex-1
+  assert_contains "$REFUSE_OUT" "must be an absolute path or start with ~/" "refusal must explain the accepted spellings"
+  pass "codex --codex-home refuses a relative path"
+}
+
+test_codex_home_refuses_an_empty_value() {
+  refuse_codex_home_case profile-codex-home-empty profile-codex-home-empty-z27 codex --codex-home ''
+  assert_contains "$REFUSE_OUT" "--codex-home requires a non-empty value" "refusal must name the empty flag"
+  pass "codex --codex-home refuses an empty value"
+}
+
+test_codex_home_refuses_a_non_codex_harness() {
+  local acct
+  acct="$TMP_ROOT/profile-codex-home-claude/accounts/codex-1"
+  make_codex_account "$acct"
+  refuse_codex_home_case profile-codex-home-claude profile-codex-home-claude-z28 claude --codex-home "$acct"
+  assert_contains "$REFUSE_OUT" "--codex-home applies only to harness codex; this spawn resolved harness 'claude'" \
+    "refusal must name the harness that has no Codex account axis"
+  pass "--codex-home is refused on a non-codex harness"
+}
+
+test_codex_home_refuses_a_secondmate_launch() {
+  local rec id sm out status acct
+  id=profile-codex-home-secondmate-z29
+  rec=$(make_spawn_case profile-codex-home-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  acct="$CASE_DIR/accounts/codex-1"
+  make_codex_account "$acct"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate --codex-home "$acct")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate spawn with --codex-home should be refused"$'\n'"$out"
+  assert_contains "$out" "a --secondmate launch has no Codex account axis" "refusal must say the axis is crewmate-only"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused secondmate spawn must not publish a record"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused secondmate spawn must not launch"
+  pass "--codex-home is refused on a --secondmate launch"
+}
+
+test_batch_forwards_codex_home_to_every_pair() {
+  local rec id1 id2 out status acct
+  id1=profile-codex-home-batch-a-z30
+  id2=profile-codex-home-batch-b-z31
+  rec=$(make_spawn_case profile-codex-home-batch codex "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  acct="$CASE_DIR/accounts/codex-3"
+  make_codex_account "$acct"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --codex-home "$acct")
+  status=$?
+  expect_code 0 "$status" "batch spawn with a shared --codex-home should succeed"$'\n'"$out"
+  assert_grep "codex_home=$acct" "$HOME_DIR/state/$id1.meta" "first batch task did not record the shared account"
+  assert_grep "codex_home=$acct" "$HOME_DIR/state/$id2.meta" "second batch task did not record the shared account"
+  pass "batch dispatch forwards a shared --codex-home to every pair"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -826,5 +998,16 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_codex_home_forwards_the_account_and_records_it
+test_codex_home_expands_tilde_against_the_launching_home
+test_codex_without_codex_home_stays_on_the_default_account
+test_codex_home_refuses_an_account_with_no_auth_json
+test_codex_home_refuses_an_empty_auth_json
+test_codex_home_refuses_a_missing_directory
+test_codex_home_refuses_a_relative_path
+test_codex_home_refuses_an_empty_value
+test_codex_home_refuses_a_non_codex_harness
+test_codex_home_refuses_a_secondmate_launch
+test_batch_forwards_codex_home_to_every_pair
 
 echo "# all fm-spawn-dispatch-profile tests passed"

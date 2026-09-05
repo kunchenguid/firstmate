@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Shared quota-axi compatibility floor for the bootstrap diagnostic.
+# Shared quota-axi compatibility floor for the bootstrap diagnostic, plus the
+# per-account Codex quota read.
 # Usage: . bin/fm-quota-axi-lib.sh
 #
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
@@ -8,8 +9,38 @@
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
 # turns a failing check into the operator-facing MISSING diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
+#
+# fm_quota_axi_read_codex_home <codex-home> [quota-axi flags...]
+#   quota-axi reads the Codex account from CODEX_HOME, the same variable the
+#   codex CLI reads, so one ChatGPT account's evidence is one read with that
+#   account's home exported. This helper expands and validates the home through
+#   bin/fm-codex-home-lib.sh (a missing or empty auth.json refuses with that
+#   reason on stderr instead of silently reporting the default account), then
+#   runs `CODEX_HOME=<expanded> quota-axi --provider codex` with any extra flags
+#   appended, so the default TOON and the skill's narrow --json fallback share
+#   one entry point. The output is that home's provider-level Codex evidence
+#   and bounds only candidates carrying that codexHome (quota-array-dispatch
+#   owns how it is ranked).
+
+# shellcheck source=bin/fm-codex-home-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-codex-home-lib.sh"
 
 FM_QUOTA_AXI_MIN=0.1.29
+
+fm_quota_axi_read_codex_home() {
+  local home
+  fm_codex_home_validate "${1:-}" || {
+    echo "error: codex quota read refused: $FM_CODEX_HOME_ERROR" >&2
+    return 1
+  }
+  home=$FM_CODEX_HOME_PATH
+  shift
+  command -v quota-axi >/dev/null 2>&1 || {
+    echo "error: quota-axi is not installed" >&2
+    return 1
+  }
+  CODEX_HOME=$home quota-axi --provider codex "$@" </dev/null
+}
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
