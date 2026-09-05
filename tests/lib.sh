@@ -33,6 +33,12 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git processes must not inherit host signing, hooks, or other global
+# and system preferences. This affects only the sourcing test and its children;
+# config tests can still set local config, use -c, or supply their own env after
+# sourcing. Never write the developer's config or disable real project signing.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
