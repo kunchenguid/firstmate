@@ -223,7 +223,7 @@ mail_record_evidence() {
   return 1
 }
 
-fm_mail_rollback_wake_locked() {
+mail_rollback_wake_locked() {
   # Remove a just-appended wake row plus any partial journal/cursor evidence.
   # Runs under the held FM_WAKE_QUEUE_LOCK, so the rewrite cannot race an
   # acknowledgement; failure means the poll already fails closed so the next
@@ -295,7 +295,7 @@ wake_for() {
   if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
     if mail_record_evidence "$generation" "$id"; then
       :
-    elif fm_mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
+    elif mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
       echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
       status=1
     elif mail_record_evidence "$generation" "$id"; then
