@@ -1181,13 +1181,17 @@ housekeeping() {  # <state>
 
     # Idle capacity is a property of the home, not of any status file, so it is
     # scanned outside that loop: an idle fleet has no status files at all, which
-    # is exactly the state this catches. One escalation per scan cadence.
-    local idle_line
+    # is exactly the state this catches. WARN/FRONTIER-EMPTY/STALE lines still
+    # buffer every scan, but the IDLE CAPACITY block itself buffers only once
+    # per unchanged (ready ids, free counts) tuple - never once per scan.
+    local idle_line idle_show
+    fm_idle_capacity_compute "$state" "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$FM_ROOT"
+    idle_show=false
+    fm_idle_capacity_should_escalate "$state" && idle_show=true
     while IFS= read -r idle_line; do
       [ -n "$idle_line" ] || continue
       escalate_add "$state" "$idle_line"
-    done < <(fm_idle_capacity_report "$state" \
-      "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$FM_ROOT")
+    done < <(fm_idle_capacity_render "$idle_show")
   fi
 }
 

@@ -249,6 +249,14 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Concurrency cap (config/concurrency-cap)
+
+`config/concurrency-cap` is an optional local, gitignored file holding a bare integer that bounds how many workers this home runs at once.
+It is read by the idle-capacity report (`bin/fm-supervision-lib.sh`'s `fm_idle_capacity_compute`), which never proposes dispatching more work once this home's own live worker count (`state/*.meta`) is at or over the cap, regardless of any project's own free worktree slots.
+Absent, empty, or non-numeric contents fall back to a default of 13; only the first line is read.
+The cap is independent of any single project's pool size: a project can have free slots and still see no dispatch line while this home overall sits at its cap.
+A frozen or at-cap home with ready work still keeps a watcher armed so it notices once the freeze lifts or the cap has room again; only the dispatch-now line itself is suppressed.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

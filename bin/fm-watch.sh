@@ -2050,7 +2050,7 @@ EOF
       # fleet is reported on the long backed-off interval up to HEARTBEAT_MAX
       # rather than every base period.
       fm_idle_capacity_compute "$STATE" "$DATA" "$FM_ROOT"
-      if [ "$FM_IDLE_CAPACITY" = true ]; then
+      if fm_idle_capacity_should_escalate "$STATE"; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
         touch "$STATE/.last-heartbeat"
         wake "heartbeat"

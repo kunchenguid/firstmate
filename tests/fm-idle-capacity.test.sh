@@ -58,9 +58,18 @@ SH
   printf '%s\n' "$home"
 }
 
-add_ready() {  # <home> <id>
-  tasks-axi add "$2" "ready fixture $2" --kind ship \
-    --file "$1/data/backlog.md" >/dev/null
+add_ready() {  # <home> <id> [--repo <name>]
+  local home=$1 id=$2; shift 2
+  tasks-axi add "$id" "ready fixture $id" --kind ship "$@" \
+    --file "$home/data/backlog.md" >/dev/null
+}
+
+# Register a project by name pointing at a physical repository path, in the
+# same "- <name> [<mode>] - <desc>; repository: <path> (added <date>)" shape
+# data/projects.md uses (AGENTS.md section 2; bin/fm-project-mode.sh).
+register_project() {  # <home> <name> <path>
+  printf -- '- %s [no-mistakes] - %s; repository: %s (added 2026-01-01)\n' \
+    "$2" "$2" "$3" >> "$1/data/projects.md"
 }
 
 add_hold() {  # <home> <id> <reason> [--until <date>]
@@ -159,38 +168,40 @@ test_report_fails_soft_on_unreadable_pool() {
   pass "report: an unreadable worktree pool degrades to one WARN line"
 }
 
-test_report_dedupes_pool_roots() {
+test_report_resolves_named_project_pool() {
   local home out
-  home=$(make_home dedupe-pools 2)
-  add_ready "$home" idle-a
-  # Two registry entries naming the home's own root, one with a trailing slash.
-  printf -- '- A [no-mistakes] - a; repository: %s (added 2026-01-01)\n' "$home" \
-    > "$home/data/projects.md"
-  printf -- '- B [no-mistakes] - b; repository: %s/ (added 2026-01-01)\n' "$home" \
-    >> "$home/data/projects.md"
+  home=$(make_home named-project 2)
+  add_ready "$home" idle-a --repo proj-x
+  register_project "$home" proj-x "$home"
   out=$(report "$home")
   case "$out" in
-    *"free_slots=2"*) ;;
-    *) fail "one repository named three times must be counted once, got: $out" ;;
+    *"IDLE CAPACITY: ready=1 held=0 free_slots=2 live=0"*) ;;
+    *) fail "a ready item's own named project must resolve to its registered pool, got: $out" ;;
   esac
-  pass "report: repeated references to one repository count its pool once"
+  pass "report: a ready item's repo field resolves its own project's pool by name"
 }
 
-test_report_warns_when_one_pool_of_several_is_unreadable() {
+test_report_one_unreadable_project_never_hides_a_readable_sibling() {
   local home out
   home=$(make_home partial-pools 2)
   add_ready "$home" idle-a
+  add_ready "$home" idle-gone --repo Gone
   printf -- '- Gone [no-mistakes] - gone; repository: %s/no-such-repo (added 2026-01-01)\n' \
     "$TMP_ROOT" > "$home/data/projects.md"
   out=$(report "$home")
   case "$out" in
     *WARN*) ;;
-    *) fail "an unreadable pool among readable ones must warn, got: $out" ;;
+    *) fail "an unresolvable project among ready projects must warn, got: $out" ;;
   esac
   case "$out" in
-    *"free_slots="*) fail "a partial pool read must not report a confident count: $out" ;;
+    *"Gone: ready=1 free_slots=unknown"*) ;;
+    *) fail "the unresolvable project must be named unknown, not silenced, got: $out" ;;
   esac
-  pass "report: one unreadable pool warns instead of under-reporting free slots"
+  case "$out" in
+    *"-: ready=1 free_slots=2"*) ;;
+    *) fail "a resolvable sibling project must still report its own free slots, got: $out" ;;
+  esac
+  pass "report: one unresolvable project reports unknown without hiding a readable sibling's own count"
 }
 
 # --- freeze -----------------------------------------------------------------
@@ -222,16 +233,27 @@ test_freeze_expired_unsilences() {
   pass "freeze: an expired until date un-silences the line"
 }
 
-test_freeze_keeps_predicate_false() {
+test_freeze_keeps_idle_capacity_false_but_arms_the_recheck() {
   local home verdict
   home=$(make_home freeze-predicate 3)
   add_ready "$home" idle-a
   printf '%s\n' 'captain paused dispatch' '2099-01-01' \
     > "$home/state/.dispatch-freeze"
   verdict=$(predicate_needed "$home")
+  [ "$verdict" = "true false" ] \
+    || fail "a frozen home with ready work must keep a watcher armed for the recheck at its own until date, got: $verdict"
+  pass "freeze: idle-capacity escalation stays false while frozen, but a watcher stays armed for the recheck"
+}
+
+test_freeze_with_no_ready_work_needs_no_watcher() {
+  local home verdict
+  home=$(make_home freeze-empty-predicate 3)
+  printf '%s\n' 'captain paused dispatch' '2099-01-01' \
+    > "$home/state/.dispatch-freeze"
+  verdict=$(predicate_needed "$home")
   [ "$verdict" = "false false" ] \
-    || fail "a frozen home must not be forced to hold a watcher, got: $verdict"
-  pass "freeze: the idle branch of the predicate stays false while frozen"
+    || fail "a frozen home with no ready work has nothing to recheck, got: $verdict"
+  pass "freeze: an empty queue needs no recheck watcher even while frozen"
 }
 
 # --- hold hygiene -----------------------------------------------------------
@@ -268,9 +290,40 @@ test_hold_with_until_is_not_stale() {
   backdate_row "$home" dated-hold 2
   out=$(report "$home")
   case "$out" in
-    *HOLD_STALE*) fail "a dated hold must not be named, got: $out" ;;
+    *HOLD_STALE*) fail "a dated hold must not be named stale, got: $out" ;;
   esac
-  pass "hold hygiene: a hold carrying a due date is left alone"
+  case "$out" in
+    *HOLD_DUE*) fail "a hold whose due date has not arrived must not be named due, got: $out" ;;
+  esac
+  pass "hold hygiene: a hold carrying a future due date is left alone"
+}
+
+test_hold_past_due_reported() {
+  local home out
+  home=$(make_home hold-due 3)
+  add_hold "$home" overdue-hold "captain has not ruled" --until 2000-01-01
+  out=$(report "$home")
+  case "$out" in
+    *"HOLD_DUE: overdue-hold"*"d overdue"*) ;;
+    *) fail "a hold whose due date has passed must be reported due, not skipped, got: $out" ;;
+  esac
+  case "$out" in
+    *HOLD_STALE*) fail "a due hold must be reported as due, not also as stale, got: $out" ;;
+  esac
+  pass "hold hygiene: HOLD_DUE names a dated hold whose own due date has passed"
+}
+
+test_hold_due_today_reported() {
+  local home out today
+  home=$(make_home hold-due-today 3)
+  today=$(date +%Y-%m-%d)
+  add_hold "$home" today-hold "captain has not ruled" --until "$today"
+  out=$(report "$home")
+  case "$out" in
+    *"HOLD_DUE: today-hold 0d overdue"*) ;;
+    *) fail "a hold due exactly today must already be reported due, got: $out" ;;
+  esac
+  pass "hold hygiene: a hold due exactly today is reported due, matching the freeze boundary"
 }
 
 test_fresh_hold_is_not_stale() {
@@ -318,6 +371,71 @@ test_predicate_unchanged_when_work_in_flight() {
   [ "$verdict" = "true false" ] \
     || fail "in-flight work must still carry the predicate on its own, got: $verdict"
   pass "state 2: in-flight work still carries the predicate without the idle branch"
+}
+
+# --- concurrency cap ---------------------------------------------------------
+
+test_cap_default_is_thirteen() {
+  local home out i
+  home=$(make_home cap-default 3)
+  add_ready "$home" idle-a
+  for i in $(seq 1 12); do : > "$home/state/live-$i.meta"; done
+  out=$(report "$home")
+  case "$out" in
+    *"IDLE CAPACITY: ready=1"*) ;;
+    *) fail "12 live workers must still be under the default cap of 13, got: $out" ;;
+  esac
+  pass "concurrency cap: the default of 13 applies with no config/concurrency-cap file"
+}
+
+test_cap_at_configured_value_suppresses_the_line() {
+  local home out i
+  home=$(make_home cap-at-limit 3)
+  add_ready "$home" idle-a
+  printf '2\n' > "$home/config/concurrency-cap"
+  for i in 1 2; do : > "$home/state/live-$i.meta"; done
+  out=$(report "$home")
+  [ -z "$out" ] \
+    || fail "live work at the configured cap must print no idle-capacity line, got: $out"
+  pass "concurrency cap: no line prints once live workers reach the configured cap"
+}
+
+test_cap_under_configured_value_still_reports() {
+  local home out
+  home=$(make_home cap-under-limit 3)
+  add_ready "$home" idle-a
+  printf '2\n' > "$home/config/concurrency-cap"
+  : > "$home/state/live-1.meta"
+  out=$(report "$home")
+  case "$out" in
+    *"IDLE CAPACITY: ready=1 held=0 free_slots=3 live=1"*) ;;
+    *) fail "one live worker under a cap of 2 must still report idle capacity, got: $out" ;;
+  esac
+  pass "concurrency cap: still reports while under the configured cap"
+}
+
+test_cap_malformed_file_falls_back_to_default() {
+  local home out
+  home=$(make_home cap-malformed 3)
+  add_ready "$home" idle-a
+  printf 'not-a-number\n' > "$home/config/concurrency-cap"
+  out=$(report "$home")
+  case "$out" in
+    *"IDLE CAPACITY: ready=1"*) ;;
+    *) fail "a malformed cap file must fall back to the default rather than fail closed, got: $out" ;;
+  esac
+  pass "concurrency cap: a malformed config value falls back to the default of 13"
+}
+
+test_cap_zero_blocks_idle_capacity_with_no_in_flight_work() {
+  local home verdict
+  home=$(make_home cap-zero 3)
+  add_ready "$home" idle-a
+  printf '0\n' > "$home/config/concurrency-cap"
+  verdict=$(predicate_needed "$home")
+  [ "$verdict" = "false false" ] \
+    || fail "a cap of zero with no in-flight work must block idle-capacity dispatch entirely, got: $verdict"
+  pass "concurrency cap: a cap of zero blocks idle-capacity when nothing is already running"
 }
 
 # --- state 1: present + live (the turn-end guard) ---------------------------
@@ -511,27 +629,51 @@ test_away_idle_scan_buffers_idle_capacity() {
   pass "state 4: away + idle still buffers the line with no status file to scan"
 }
 
+test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple() {
+  local home count
+  home=$(make_home away-idle-repeat 3)
+  cp -R "$ROOT/bin" "$home/bin"
+  add_ready "$home" idle-a
+  : > "$home/state/.afk"
+  run_away_scan "$home" >/dev/null 2>&1 || true
+  run_away_scan "$home" >/dev/null 2>&1 || true
+  count=$(grep -c "IDLE CAPACITY: ready=1 held=0 free_slots=3 live=0" \
+    "$home/state/.subsuper-escalations" 2>/dev/null || true)
+  [ "$count" -eq 1 ] \
+    || fail "an unchanged (ready ids, free counts) tuple must escalate once, not once per scan (saw $count): $(cat "$home/state/.subsuper-escalations" 2>/dev/null)"
+  pass "away scan: an unchanged idle-capacity tuple escalates once across repeated scans, not once per scan"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_report_counts_and_disposition
 test_report_frontier_empty
 test_report_silent_when_nothing_applies
 test_report_fails_soft_on_unreadable_pool
-test_report_dedupes_pool_roots
-test_report_warns_when_one_pool_of_several_is_unreadable
+test_report_resolves_named_project_pool
+test_report_one_unreadable_project_never_hides_a_readable_sibling
 test_freeze_silences_line
 test_freeze_expired_unsilences
-test_freeze_keeps_predicate_false
+test_freeze_keeps_idle_capacity_false_but_arms_the_recheck
+test_freeze_with_no_ready_work_needs_no_watcher
 test_hold_stale_reported
 test_hold_with_event_is_not_stale
 test_hold_with_until_is_not_stale
+test_hold_past_due_reported
+test_hold_due_today_reported
 test_fresh_hold_is_not_stale
 test_predicate_true_on_idle_capacity
 test_predicate_false_when_both_false
 test_predicate_unchanged_when_work_in_flight
+test_cap_default_is_thirteen
+test_cap_at_configured_value_suppresses_the_line
+test_cap_under_configured_value_still_reports
+test_cap_malformed_file_falls_back_to_default
+test_cap_zero_blocks_idle_capacity_with_no_in_flight_work
 test_guard_banner_names_idle_capacity
 test_guard_banner_names_idle_only_need
 test_guard_silent_without_idle_capacity
 test_teardown_prints_idle_capacity
 test_away_live_scan_buffers_idle_capacity
 test_away_idle_scan_buffers_idle_capacity
+test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple
