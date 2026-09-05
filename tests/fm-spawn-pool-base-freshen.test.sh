@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
-# These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# A treehouse pool can return a clean detached worktree whose base was left
+# behind: origin/main advanced after the slot was allocated, or a local-only
+# project landed work on the primary checkout's default branch that origin never
+# received.
+# These tests drive the real spawn path with a fake terminal, then prove the base
+# rule bin/fm-spawn.sh's header owns: the slot starts from whichever of origin's
+# tip and that same branch in the primary checkout CONTAINS the other, except that
+# a pull-request delivery keeps origin's tip and is told how far ahead the primary
+# was, while an unreachable origin, an unclean slot, or two diverged candidates
+# stop the launch instead of guessing.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -559,6 +564,10 @@ test_dirty_slot_survives_even_when_the_primary_is_ahead() {
   id='pool-local-only-dirty-r13'
   rec=$(make_local_only_case local-only-dirty "$id" 2)
   read_case_record "$rec"
+  # Diverge the two candidates as well, so the slot is BOTH unclean and
+  # unresolvable: the operator must be pointed at the work only they can save,
+  # not at a ref reconciliation, whichever gate is reached first.
+  push_forge_only_commit
   printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
@@ -567,6 +576,8 @@ test_dirty_slot_survives_even_when_the_primary_is_ahead() {
   [ "$status" -ne 0 ] || fail "spawn launched from a dirty slot while the primary was ahead"
   assert_contains "$out" "refusing to discard uncommitted work" \
     "a dirty slot was not refused as uncommitted work"
+  assert_not_contains "$out" "have diverged" \
+    "a dirty slot was reported as a divergence instead of as unsaved work"
   assert_grep 'work the captain has not committed' "$POOL_DIR/uncommitted.txt" \
     "spawn discarded uncommitted work while catching the slot up"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
@@ -574,20 +585,53 @@ test_dirty_slot_survives_even_when_the_primary_is_ahead() {
   pass "a dirty slot keeps its work and its base even when the primary has landed work ahead of it"
 }
 
-test_diverged_candidates_refuse_rather_than_guess() {
-  local rec id out status before publisher
-  id='pool-diverged-r14'
-  rec=$(make_local_only_case diverged "$id" 2)
+test_pull_request_delivery_keeps_the_forge_tip() {
+  local rec id out status head frozen landed
+  id='pool-pr-delivery-r15'
+  rec=$(make_local_only_case pr-delivery "$id" 3)
   read_case_record "$rec"
-  # Push a commit the primary's branch does not contain, so neither candidate
-  # contains the other and no base can be chosen without discarding one history.
-  publisher="$CASE_DIR/publisher"
+  frozen=$INITIAL_SHA
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a direct-PR spawn should still launch when the primary leads origin"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  landed=$(git -C "$PROJECT_DIR" rev-parse main)
+  [ "$landed" != "$frozen" ] || fail "fixture did not advance the primary past the frozen origin tip"
+  [ "$(git -C "$POOL_DIR" rev-parse origin/main)" = "$frozen" ] \
+    || fail "fixture did not leave origin frozen at the tip the slot was allocated from"
+  [ "$head" = "$frozen" ] \
+    || fail "a pull-request delivery started at $head, not origin's tip $frozen"
+  [ ! -e "$POOL_DIR/landed-3.txt" ] \
+    || fail "a pull-request delivery based its branch on commits origin has never seen"
+  assert_contains "$out" "is 3 commits ahead of origin/main" \
+    "the spawn did not report how far ahead the withheld primary branch was"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the spawn did not say why the primary's branch was not used as the base"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed withheld candidate: %s\n' "$(printf '%s\n' "$out" | grep 'ahead of origin/main')"
+  fi
+  pass "a pull-request delivery keeps origin's tip and reports the primary branch it withheld"
+}
+
+# Push a commit the primary's branch does not contain, so neither candidate
+# contains the other and no base can be chosen without discarding one history.
+push_forge_only_commit() {
+  local publisher="$CASE_DIR/publisher"
   git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
   printf 'pushed straight to the forge\n' > "$publisher/forge-only.txt"
   git -C "$publisher" add forge-only.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm forge-only
   git -C "$publisher" push --quiet origin main
+}
+
+test_diverged_candidates_refuse_rather_than_guess() {
+  local rec id out status before
+  id='pool-diverged-r14'
+  rec=$(make_local_only_case diverged "$id" 2)
+  read_case_record "$rec"
+  push_forge_only_commit
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode local-only --yolo off)
@@ -615,6 +659,7 @@ test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_local_only_landings_beat_a_frozen_origin
 test_dirty_slot_survives_even_when_the_primary_is_ahead
+test_pull_request_delivery_keeps_the_forge_tip
 test_diverged_candidates_refuse_rather_than_guess
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

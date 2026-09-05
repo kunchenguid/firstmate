@@ -149,9 +149,13 @@
 #   CONTAINS the other, so the slot is never moved backwards. A local-only project
 #   lands work on the primary checkout's branch and never pushes, so following
 #   origin alone would start every task hundreds of commits stale; diverged
-#   candidates are refused. The refresh reports the exact commit count a slot was
-#   behind when it moved. Relaunch reuses the recorded worktree without fetching
-#   or resetting its base.
+#   candidates are refused. The primary checkout's branch is only offered to a
+#   delivery that lands locally (a local-only ship, or a scout's report): a
+#   no-mistakes or direct-PR ship opens a pull request against origin, so every
+#   commit origin has never seen would ride along inside it, and those tasks keep
+#   origin's tip and are told how far ahead the primary's branch was. The refresh
+#   reports the exact commit count a slot was behind when it moved. Relaunch
+#   reuses the recorded worktree without fetching or resetting its base.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses a fresh spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
@@ -2083,8 +2087,9 @@ EOF
 }
 
 # Choose the commit a fresh pooled worktree must start from, between the two
-# candidates a pool slot can already see. Sets SPAWN_BASE_REV and SPAWN_BASE_LABEL,
-# or sets SPAWN_BASE_ERROR and returns 1.
+# candidates a pool slot can already see. Sets SPAWN_BASE_REV and SPAWN_BASE_LABEL
+# (and SPAWN_BASE_WITHHELD when a candidate was rejected for the delivery rather
+# than for its history), or sets SPAWN_BASE_ERROR and returns 1.
 #   origin/<default>  the forge tip, authoritative for a PR-delivered project.
 #   <default> in the primary checkout  where a local-only project's landed work
 #     actually lives: bin/fm-merge-local.sh advances that branch and nothing is
@@ -2098,14 +2103,30 @@ EOF
 # lacks it keeps the origin tip instead. Genuinely diverged candidates are refused
 # rather than guessed at, because either choice would silently discard the other
 # history's work from the base.
+# The primary checkout's branch is a candidate only for a delivery that lands
+# locally. A no-mistakes or direct-PR ship pushes fm/<id> and opens a pull request
+# against origin, so a base carrying commits origin has never seen would put every
+# one of them inside that pull request while the review diff, anchored on the same
+# base, would never show them. Those deliveries keep origin's tip and record the
+# withheld candidate in SPAWN_BASE_WITHHELD, so the drift is reported rather than
+# silently inherited.
 SPAWN_BASE_REV=""
 SPAWN_BASE_LABEL=""
 SPAWN_BASE_ERROR=""
-resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev>
-  local worktree=$1 primary=$2 default=$3 origin_rev=$4 primary_rev primary_default
+SPAWN_BASE_WITHHELD=""
+delivery_opens_pull_request() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev> <mode>
+  local worktree=$1 primary=$2 default=$3 origin_rev=$4 mode=${5:-} primary_rev primary_default ahead unit
   SPAWN_BASE_REV="$origin_rev"
   SPAWN_BASE_LABEL="origin/$default"
   SPAWN_BASE_ERROR=""
+  SPAWN_BASE_WITHHELD=""
   primary_rev=$(primary_head_commit "$primary" 2>/dev/null || true)
   [ -n "$primary_rev" ] || return 0
   [ "$primary_rev" != "$origin_rev" ] || return 0
@@ -2117,6 +2138,13 @@ resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <orig
   # PRIMARY's own default branch, which need not be the one resolved in the slot.
   primary_default=$(default_branch "$primary" 2>/dev/null || printf '%s' "$default")
   if git -C "$worktree" merge-base --is-ancestor "$origin_rev" "$primary_rev" 2>/dev/null; then
+    if delivery_opens_pull_request "$mode"; then
+      ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null || true)
+      [ -n "$ahead" ] || ahead=0
+      if [ "$ahead" -eq 1 ] 2>/dev/null; then unit=commit; else unit=commits; fi
+      SPAWN_BASE_WITHHELD="$primary_default in the primary checkout is $ahead $unit ahead of origin/$default, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+      return 0
+    fi
     SPAWN_BASE_REV="$primary_rev"
     SPAWN_BASE_LABEL="$primary_default in the primary checkout"
     return 0
@@ -2125,8 +2153,8 @@ resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <orig
   return 1
 }
 
-freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
-  local worktree=$1 primary=$2 default target expected actual status behind unit
+freshen_spawn_worktree_base() {  # <worktree> <primary-checkout> <mode>
+  local worktree=$1 primary=$2 mode=${3:-} default target expected actual status behind unit
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2160,12 +2188,15 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
     fi
     return 1
   fi
-  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected"; then
+  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected" "$mode"; then
     echo "error: cannot resolve a base for pooled worktree '$worktree': $SPAWN_BASE_ERROR; refusing to launch rather than guess which history to build on" >&2
     return 1
   fi
   expected=$SPAWN_BASE_REV
   target=$SPAWN_BASE_LABEL
+  if [ -n "$SPAWN_BASE_WITHHELD" ]; then
+    echo "note: pooled worktree '$worktree': $SPAWN_BASE_WITHHELD" >&2
+  fi
   # Count the drift BEFORE the reset, so the report below carries the exact number
   # of commits this slot would otherwise have started behind rather than an adjective.
   behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null || true)
@@ -2716,7 +2747,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the

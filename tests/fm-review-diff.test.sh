@@ -14,6 +14,9 @@
 #   (f) mode=local-only project whose origin is frozen behind its local default
 #       branch -> base must be the local default, so the review shows the task's
 #       own work and not every locally landed commit
+#   (g) same repository state but a pull-request delivery -> base must stay
+#       origin/<default>, so the review shows everything that delivery's PR would
+#       carry rather than hiding the unpushed commits under it
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -229,9 +232,25 @@ test_frozen_origin_loses_to_the_local_default_branch() {
   pass "fm-review-diff anchors a local-only project on the local default branch, not a frozen origin"
 }
 
+test_pull_request_delivery_stays_on_the_frozen_origin() {
+  local case_dir out
+  case_dir=$(make_local_only_case pr-delivery-base)
+  write_task_meta "$case_dir" "mode=direct-PR"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "pr-delivery-base: a pull-request delivery must be reviewed against the branch its PR targets"
+  assert_contains "$out" 'task-change.txt' "pr-delivery-base: the task's own change must be in the diff"
+  assert_contains "$out" 'landed-1.txt' \
+    "pr-delivery-base: commits the PR would carry must stay visible to the captain"
+  pass "fm-review-diff anchors a pull-request delivery on origin, showing everything its PR would carry"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_frozen_origin_loses_to_the_local_default_branch
+test_pull_request_delivery_stays_on_the_frozen_origin
