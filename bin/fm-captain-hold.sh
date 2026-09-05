@@ -43,13 +43,13 @@
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
 #
-# `answer` records the captain's exact words and closes the call in the same
+# `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # writes a resolution block while preserving the leading hold-set stamp until
 # the close succeeds (the previous body is preserved and archived through
-# tasks-axi --archive-body). It then closes the task with `tasks-axi done` - or,
+# tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
-# WORK item resumes instead of closing - and restores resolution-first body
+# WORK item resumes without closing - and restores resolution-first body
 # ordering. An exact retry also completes unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
@@ -62,9 +62,9 @@
 # `held:` bit, prove the captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
-# "A keyed answer closes its matching captain-held task" is a single
+# "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and closes each named
+# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and resolves each named
 # task through the very same `answer` path above, so every guard applies
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:

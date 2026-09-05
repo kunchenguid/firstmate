@@ -53,8 +53,9 @@
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that closed the row
-# first simply retires the record.
+# closes a row that reads as an open captain call. An answer that closes the row
+# first applies any supported retained artifact from the validated record, then
+# replay simply retires the record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -347,7 +348,7 @@ fm_backlog_row_artifact_supported() {
 # artifacts on the row, and return it to Queued, the conventional post-cleanup
 # shape for an open captain call.
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only bin/fm-captain-hold.sh answer closes the call.
+# fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp

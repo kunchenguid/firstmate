@@ -1140,8 +1140,8 @@ test_queued_item_prose_never_hides_it() {
 # The collapsed captain-call contract: any due, unblocked captain-held task is
 # Captain's Call whatever its kind; a date-deferred hold is a dated gate until
 # due; deferral wording in the reason changes nothing, because only structured
-# fields classify; and Recently Landed excludes only what closed while still
-# held for the captain.
+# fields classify; and Recently Landed applies the shared delivery selector to
+# Done rows.
 test_collapsed_captain_call_deferral_and_landed() {
   local home fakebin json
   home=$(make_home collapsed-call)

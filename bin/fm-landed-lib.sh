@@ -26,6 +26,11 @@
 # as shipped work even when its text names an artifact. Older kindless local-only
 # completions cannot be distinguished from answered calls and stay out; merged
 # PRs and reported scouts remain distinct.
+#
+# The sole compatibility fallback keeps a structured Done row whose three
+# parsed artifact fields are absent when it does not retain hold-kind captain.
+# That preserves rows closed before artifact-aware selection without admitting
+# answered captain calls.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
