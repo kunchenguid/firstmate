@@ -51,6 +51,8 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash

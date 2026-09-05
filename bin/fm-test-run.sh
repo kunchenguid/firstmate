@@ -29,6 +29,11 @@
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
+#   --check-herdr-leaks
+#                   snapshot fm-remote and fm-lab-* Herdr servers before and
+#                   after the suite. Fail for new identities and warn for
+#                   pre-existing identities that remain. Read-only; never stops
+#                   a server.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0
@@ -76,6 +81,17 @@
 #                   sinks that block finalization are explicitly out of scope.
 #   -h, --help      print this header
 #
+# Environment:
+#   FM_TEST_TIMEOUT_SCALE  integer 1..100 (default 1) multiplying cooperating
+#                          fixtures' condition-wait and operation budgets on
+#                          loaded runners. Poll cadence and production defaults
+#                          stay fixed; timeout-specific cases retain their
+#                          explicit deadlines. Set only from measured runner
+#                          slowdown (e.g. FM_TEST_TIMEOUT_SCALE=3), not to hide
+#                          a failing condition. The automatic --changed script
+#                          limit scales too. Explicit whole-script and wall
+#                          budgets remain independent hard limits.
+#
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
@@ -111,10 +127,167 @@ set -eu
 
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
+    python3 -c 'import time; print(int(time.monotonic() * 1000))'
   else
     echo $(($(date +%s) * 1000))
   fi
+}
+
+herdr_portable_identity_from_ps() { # <pid> <session>
+  awk -v pid="$1" -v expected="$2" '
+    $1 == pid && $7 !~ /^Z/ && $8 ~ /(^|\/)herdr$/ && $9 == "server" {
+      for (i = 10; i <= NF; i++) {
+        name = ""
+        if ($i == "--session") name = $(i + 1)
+        else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+        if (name == expected) {
+          printf "%s %s %s %s %s\t%s\n", $2, $3, $4, $5, $6, name
+          exit
+        }
+      }
+    }
+  '
+}
+
+herdr_candidate_from_ps() { # <pid> <session>
+  awk -v pid="$1" -v expected="$2" '
+    $1 == pid && $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
+      for (i = 5; i <= NF; i++) {
+        name = ""
+        if ($i == "--session") name = $(i + 1)
+        else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+        if (name == expected) found = 1
+      }
+    }
+    END { exit !found }
+  '
+}
+
+herdr_portable_candidate_status() { # <pid> <session>
+  local pid=$1 session=$2 listing
+  if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
+    LC_ALL=C ps -p "$pid" -o pid= >/dev/null 2>&1 && return 1
+    return 2
+  fi
+  printf '%s\n' "$listing" | herdr_candidate_from_ps "$pid" "$session" && return 0
+  return 1
+}
+
+herdr_portable_process_identity() { # <pid> <session>
+  local pid=$1 session=$2 listing identity confirmed cwd lsof_bin status
+  if ! listing=$(LC_ALL=C TZ=UTC0 ps -ww -p "$pid" -o pid=,lstart=,stat=,args= 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  identity=$(printf '%s\n' "$listing" | herdr_portable_identity_from_ps "$pid" "$session")
+  if [ -z "$identity" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  lsof_bin=$(command -v lsof 2>/dev/null) || return 1
+  if ! listing=$(LC_ALL=C "$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  cwd=$(printf '%s\n' "$listing" | awk 'substr($0, 1, 1) == "n" { print substr($0, 2); exit }')
+  if [ -z "$cwd" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  if ! listing=$(LC_ALL=C TZ=UTC0 ps -ww -p "$pid" -o pid=,lstart=,stat=,args= 2>/dev/null); then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  confirmed=$(printf '%s\n' "$listing" | herdr_portable_identity_from_ps "$pid" "$session")
+  if [ -z "$confirmed" ]; then
+    status=0
+    herdr_portable_candidate_status "$pid" "$session" || status=$?
+    [ "$status" -eq 2 ] && return 2
+    return 1
+  fi
+  [ "$confirmed" = "$identity" ] || return 1
+  printf 'portable-unverified:%s\t%s\n' "${identity%%$'\t'*}" "$cwd"
+}
+
+herdr_server_snapshot() { # <output> <processes> <candidates>
+  local output=$1 processes=$2 candidates=$3 proc_root pid session stat_line confirmed_stat
+  local start confirmed_start cwd identity listing status
+  local -a stat_fields=()
+  proc_root=${FM_TEST_RUN_PROC_ROOT:-/proc}
+  ps -ww -u "$(id -u)" -o pid=,stat=,args= > "$processes" || return 1
+  awk '
+    $2 !~ /^Z/ && $3 ~ /(^|\/)herdr$/ && $4 == "server" {
+      for (i = 5; i <= NF; i++) {
+        name = ""
+        if ($i == "--session") name = $(i + 1)
+        else if ($i ~ /^--session=/) { name = $i; sub(/^--session=/, "", name) }
+        if (name == "fm-remote" || name ~ /^fm-lab-/) print $1, name
+      }
+    }
+  ' "$processes" > "$candidates" || return 1
+  : > "$output"
+  while read -r pid session; do
+    [ -n "$pid" ] && [ -n "$session" ] || continue
+    if [ ! -d "$proc_root" ]; then
+      status=0
+      identity=$(herdr_portable_process_identity "$pid" "$session") || status=$?
+      [ "$status" -ne 2 ] || continue
+      [ "$status" -eq 0 ] || return 1
+      start=${identity%%$'\t'*}
+      cwd=${identity#*$'\t'}
+      printf '%s\t%s\t%s\t%s\n' "$pid" "$start" "$session" "$cwd" >> "$output"
+      continue
+    fi
+    if ! IFS= read -r stat_line < "$proc_root/$pid/stat"; then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    stat_fields=()
+    read -r -a stat_fields <<< "${stat_line##*) }"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    start=${stat_fields[19]}
+    if ! cwd=$(readlink "$proc_root/$pid/cwd" 2>/dev/null); then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! listing=$(LC_ALL=C ps -ww -p "$pid" -o pid=,stat=,args= 2>/dev/null); then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! printf '%s\n' "$listing" | herdr_candidate_from_ps "$pid" "$session"; then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! IFS= read -r confirmed_stat < "$proc_root/$pid/stat"; then
+      [ ! -d "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    stat_fields=()
+    read -r -a stat_fields <<< "${confirmed_stat##*) }"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    confirmed_start=${stat_fields[19]}
+    [ "$confirmed_start" = "$start" ] || return 1
+    printf '%s\t%s\t%s\t%s\n' "$pid" "$start" "$session" "$cwd" >> "$output"
+  done < "$candidates"
+  LC_ALL=C sort -t$'\t' -k1,1n -k2,2n "$output" -o "$output"
+}
+
+herdr_baseline_has_identity() { # <baseline> <pid> <start>
+  case "$3" in portable-unverified:*) return 1 ;; esac
+  awk -F '\t' -v pid="$2" -v start="$3" '
+    $1 == pid && $2 == start { found = 1 }
+    END { exit !found }
+  ' "$1"
 }
 
 RUN_STARTED_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -122,6 +295,9 @@ RUN_STARTED_MS=$(now_ms)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# shellcheck source=tests/timing-helpers.sh
+. "$ROOT/tests/timing-helpers.sh"
 
 MODE=
 LIST_ONLY=0
@@ -138,6 +314,7 @@ JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
+CHECK_HERDR_LEAKS=0
 JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
@@ -152,7 +329,7 @@ PER_SCRIPT_TIMEOUT_SECS=0
 # stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
 # failure instead of an unbounded suite, which is the shape that silently
 # outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+CHANGED_DEFAULT_TIMEOUT_SECS=$((900 * FM_TEST_TIMEOUT_SCALE))
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -283,6 +460,7 @@ family_for_basename() {
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-procevent-lavish-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -606,6 +784,7 @@ tests/fm-peek-remote.test.sh 1018
 tests/fm-pending-reply.test.sh 24679
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
+tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-procevent-lavish-live-e2e.test.sh 5
 tests/fm-pi-watch-extension.test.sh 42970
@@ -1245,6 +1424,35 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
+    .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
+    .pi/extensions/lib/fm-branch-dispatch.ts)
+      # The portable suites that actually load these files, named one by one.
+      # Left unmapped, a Pi extension library resolves through the reference
+      # scan, which widens to each referencing suite's WHOLE family - and
+      # these suites sit in four different families, so that pulls in dozens
+      # of suites with nothing to do with Pi.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-wake-queue.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      # Whether an arriving outcome still lets the captain type is a fact only
+      # a real Pi TUI can answer, so the live guards are selected too.
+      printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/lib/fm-operational-input.ts)
+      # The same rule for the operational-input library, whose reach is wider:
+      # every Pi extension that classifies or encodes operational text.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
+      printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
@@ -1697,6 +1905,10 @@ while [ "$#" -gt 0 ]; do
       EXCLUDE_FAMILIES+=("${1#--exclude-family=}")
       shift
       ;;
+    --check-herdr-leaks)
+      CHECK_HERDR_LEAKS=1
+      shift
+      ;;
     --fail-on-gate-skip)
       [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr not found')"
       FAIL_ON_GATE_SKIP=$2
@@ -1992,6 +2204,17 @@ TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
 AGG_RC=0
+HERDR_BASELINE_OK=1
+
+if [ "$CHECK_HERDR_LEAKS" -eq 1 ]; then
+  if ! herdr_server_snapshot "$RUN_TMP/herdr-baseline" \
+    "$RUN_TMP/herdr-processes-before" "$RUN_TMP/herdr-candidates-before"; then
+    log "could not inspect Herdr server processes before the suite"
+    : > "$RUN_TMP/herdr-baseline"
+    HERDR_BASELINE_OK=0
+    AGG_RC=1
+  fi
+fi
 
 # Family accumulators as TSV lines updated in-memory via temp files.
 # family -> count, duration_ms, failed
@@ -2303,6 +2526,32 @@ if [ -n "$MAX_WALL_MS" ]; then
   printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
   if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
     log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+    AGG_RC=1
+  fi
+fi
+
+if [ "$CHECK_HERDR_LEAKS" -eq 1 ]; then
+  if herdr_server_snapshot "$RUN_TMP/herdr-final" \
+    "$RUN_TMP/herdr-processes-after" "$RUN_TMP/herdr-candidates-after"; then
+    : > "$RUN_TMP/herdr-leaks"
+    while IFS=$'\t' read -r pid start session cwd; do
+      [ -n "$pid" ] || continue
+      if [ "$HERDR_BASELINE_OK" -eq 1 ] &&
+        herdr_baseline_has_identity "$RUN_TMP/herdr-baseline" "$pid" "$start"; then
+        log "WARNING: pre-existing Herdr server remains after suite: pid=$pid start=$start cwd=$cwd session=$session"
+      else
+        printf '%s\t%s\t%s\t%s\n' "$pid" "$start" "$session" "$cwd" >> "$RUN_TMP/herdr-leaks"
+      fi
+    done < "$RUN_TMP/herdr-final"
+    if [ -s "$RUN_TMP/herdr-leaks" ]; then
+      log "Herdr servers started during the suite (pid start session cwd):"
+      cat "$RUN_TMP/herdr-leaks" >&2
+      AGG_RC=1
+    elif [ "$HERDR_BASELINE_OK" -eq 1 ]; then
+      log "no new fm-remote or fm-lab-* Herdr server survived the suite"
+    fi
+  else
+    log "could not inspect Herdr server processes after the suite"
     AGG_RC=1
   fi
 fi

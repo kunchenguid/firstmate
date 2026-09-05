@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
 // dispatcher) and the supervision-branch extension (the handler), carried over
@@ -205,56 +205,63 @@ export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
 // actor acquired the requested rows.
 export type EligibleRowsSnapshotResult = "published" | "main-owned" | "error";
 
-function runGrantScript(state: string, grantScript: string, args: readonly string[]): number | null {
-  try {
-    const result = spawnSync("bash", [grantScript, ...args], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        FM_STATE_OVERRIDE: state,
-        FM_WAKE_QUEUE: `${state}/.wake-queue`,
-        FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
-      },
-    });
-    return result.status;
-  } catch {
-    return null;
-  }
+// Awaited rather than synchronous because every caller runs on the Pi thread
+// that draws the captain's TUI (lib/fm-async-exec.ts). The grant script itself
+// is unchanged, and so is each result: a null status still means the script
+// could not be run at all.
+async function runGrantScript(
+  state: string,
+  grantScript: string,
+  args: readonly string[],
+): Promise<number | null> {
+  const result = await runCommandAsync("bash", [grantScript, ...args], {
+    env: {
+      ...process.env,
+      FM_STATE_OVERRIDE: state,
+      FM_WAKE_QUEUE: `${state}/.wake-queue`,
+      FM_WAKE_QUEUE_LOCK: `${state}/.wake-queue.lock`,
+    },
+  });
+  return result.status;
 }
 
-export function activateEligibleRowsOwner(
+export async function activateEligibleRowsOwner(
   state: string,
   grantScript: string,
   ownerPid: number,
   generation: string,
-): boolean {
-  return runGrantScript(state, grantScript, ["activate", String(ownerPid), generation]) === 0;
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["activate", String(ownerPid), generation])) === 0;
 }
 
-export function writeEligibleRowsSnapshot(
+export async function writeEligibleRowsSnapshot(
   state: string,
   seqs: readonly string[],
   grantScript: string,
   generation: string,
-): EligibleRowsSnapshotResult {
+): Promise<EligibleRowsSnapshotResult> {
   if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return "error";
-  const status = runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
+  const status = await runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
   if (status === 0) return "published";
   if (status === 3) return "main-owned";
   return "error";
 }
 
-export function releaseEligibleRowsSnapshot(state: string, grantScript: string, generation: string): boolean {
-  return runGrantScript(state, grantScript, ["release", generation]) === 0;
+export async function releaseEligibleRowsSnapshot(
+  state: string,
+  grantScript: string,
+  generation: string,
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["release", generation])) === 0;
 }
 
-export function deactivateEligibleRowsOwner(
+export async function deactivateEligibleRowsOwner(
   state: string,
   grantScript: string,
   ownerPid: number,
   generation: string,
-): boolean {
-  return runGrantScript(state, grantScript, ["deactivate", String(ownerPid), generation]) === 0;
+): Promise<boolean> {
+  return (await runGrantScript(state, grantScript, ["deactivate", String(ownerPid), generation])) === 0;
 }
 
 export interface BranchDispatchOffer {

@@ -537,3 +537,127 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Behavior-test timing and fixture cleanup
+
+The runner contracts were verified on 2026-09-05 with GNU Bash 5.3.9 on Linux 6.18.33.2-microsoft-standard-WSL2.
+The runner's [header and help](../../bin/fm-test-run.sh) own the timeout-scale setting and its bounds.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-test-run.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - fixture cleanup finds cwd and open-fd users, escalates to KILL, and preserves other fixtures
+ok - runner validates and propagates bounded fixture timeout scaling
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=130318
+```
+
+The cleanup regression starts TERM-resistant processes with either a fixture working directory or an open fixture file, verifies their removal, and verifies that another fixture's process remains alive.
+This run exercised the procfs cleanup path; the macOS lsof path was not reverified on this host.
+
+The restart and public-followup regressions were also verified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-secondmate-restart.test.sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 tests/fm-public-followup.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - T10 pending persist answers are polled as one fleet
+FM_TEST_END 2026-09-05T06:37:27Z tests/fm-secondmate-restart.test.sh exit=0 duration_ms=25567 gate_skip=false
+FM_TEST_END 2026-09-05T06:40:40Z tests/fm-public-followup.test.sh exit=0 duration_ms=143763 gate_skip=false
+```
+
+The concurrent-persistence case advances its fixture epoch after the confirmed mate's modeled relaunch, while a separate real-time process-group deadline detects a stalled polling loop.
+The public-followup run completed its assertions and quiesced the fixture workers before directory removal.
+
+Remote reconcile fixture isolation was verified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-secondmate-reconcile.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - remote reconcile retains durable delivery when its isolated fixture pane is absent
+FM_TEST_END 2026-09-05T08:20:53Z tests/fm-secondmate-reconcile.test.sh exit=0 duration_ms=28687 gate_skip=false
+fm-test-run: no fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+The fake remote transport owns a strict Herdr fixture, so its doorbell cannot start a host server even when the modeled pane is absent.
+The regression verifies attempted doorbell delivery, durable inbox publication, cooldown commitment, and rejection of unexpected fixture operations.
+
+Elapsed-budget clock handling and queued-expiry ordering were reverified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-test-run.test.sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-remote-job.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - runner elapsed budgets survive backward wall-clock changes
+FM_TEST_END 2026-09-05T13:12:49Z tests/fm-test-run.test.sh exit=0 duration_ms=141925 gate_skip=false
+ok - the worker expires queued jobs before they can mutate
+ok - failed shutdown quarantines ownership against replacement workers
+FM_TEST_END 2026-09-05T13:00:26Z tests/fm-remote-job.test.sh exit=0 duration_ms=56911 gate_skip=false
+fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+The Python elapsed clock is monotonic; the budget regression moves wall time backward during deliberately slow selection and still requires a budget failure.
+The queued-expiry fixture holds its lane until the queued deadline is durably in the past, then checks timeout publication and absence of command side effects.
+
+The eight timing-sensitive suites passed three consecutive loaded runs on 2026-09-05 with the same Bash and kernel versions.
+Eight Python busy loops were individually pinned to CPUs 0 through 7 of the host's 12 available CPUs throughout all three rounds.
+Each loop executed this command with its assigned CPU as the final argument:
+
+```sh
+python3 -c 'import os,sys; os.sched_setaffinity(0, {int(sys.argv[1])}); exec("while True: pass")' "$cpu"
+```
+
+Each round used the following runner invocation, with `result_json` naming a separate result file.
+The runner scheduled the watcher family first and then up to four secondmate suites concurrently.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=3 bin/fm-test-run.sh \
+  --check-herdr-leaks --per-script-timeout-secs 2700 --json "$result_json" \
+  tests/fm-watch-triage.test.sh \
+  tests/fm-remote-secondmate-trace-context.test.sh \
+  tests/fm-remote-transport-lanes.test.sh \
+  tests/fm-remote-reply.test.sh \
+  tests/fm-secondmate-reconcile.test.sh \
+  tests/fm-remote-secondmate-lifecycle-e2e.test.sh \
+  tests/fm-secondmate-harness.test.sh \
+  tests/fm-remote-job.test.sh
+```
+
+Scale 3 reflects the reduction from 12 available CPUs to four nominally unoccupied CPUs and the measured slowdown of these fixtures under that load.
+For example, the default-scale remote-job run above took 56,911 ms, while the loaded rounds took 77,354, 81,216, and 73,718 ms.
+The explicit 2,700-second script limit was not reached; all condition assertions and timeout-specific deadlines remained enforced.
+
+Observed summary output, in round order:
+
+```text
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=755756
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=805272
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=769137
+```
+
+Every round also reported:
+
+```text
+fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+All 24 suite executions passed without gate skips.
+After the third round, all eight load processes were terminated and reaped, and a procfs inventory found no surviving remote-job worker or test Herdr server.
+The fresh-turn watcher cases pin their clock and marker age together while retaining the companion over-age assertions.
+The quarantine fixture holds its command through replacement refusal, verifies that its explicitly killed process group has no live members, then releases the barrier and checks that no side effect occurred.
+These runs exercise fake backend fixtures and process cleanup; they do not claim live harness coverage or upstream CI validation.

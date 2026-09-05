@@ -23,7 +23,7 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+command -v sleep >/dev/null || { echo "skip: sleep not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -39,6 +39,16 @@ trap cleanup_all EXIT
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
 # private socket and never touch the host's real sessions.
 mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude" "$LAB/bin/decoy" "$LAB/wt"
+COMPILER_LOG="$LAB/compiler.log"
+: > "$COMPILER_LOG"
+for compiler in cc gcc; do
+  cat > "$LAB/shim/$compiler" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$compiler' >> "$COMPILER_LOG"
+exit 97
+SH
+  chmod +x "$LAB/shim/$compiler"
+done
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -47,24 +57,36 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+make_named_process() {
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+exec -a "$0" bash -c 'while :; do sleep 60; done'
+SH
+  chmod +x "$1"
+}
+
+make_named_process "$LAB/bin/claude-link"
+make_named_process "$LAB/bin/pi"
+make_named_process "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+make_named_process "$LAB/bin/muse-bin-0.1.0-R708.1"
+make_named_process "$LAB/bin/musescore"
+make_named_process "$LAB/bin/amuse"
+make_named_process "$LAB/bin/muse-binary"
+make_named_process "$LAB/bin/muse-bind"
+
+BASH_BIN=$(command -v bash) || fail "bash not found"
+ln -s "$BASH_BIN" "$LAB/bin/node"
+cat > "$LAB/bin/run-cursor-process" <<SH
+#!/usr/bin/env bash
+exec -a "\$1" "$LAB/bin/node" -c 'while :; do sleep 60; done'
+SH
+chmod +x "$LAB/bin/run-cursor-process"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -145,9 +167,9 @@ assert_sources_disagree() {  # <target> <label>
 }
 
 # --- a harness-named foreground process -------------------------------------
-# Invoking the symlink by its harness name proves the ordinary positive path
-# with a real process. macOS exposes different names for the symlink through
-# tmux and ps, while Linux can expose the symlink name through both, so the
+# Invoking the fixture by its harness name proves the ordinary positive path
+# with a real process.
+# macOS and Linux expose different process-name surfaces, so the
 # version-string case below owns the cross-platform divergence assertion.
 
 new_window agent "$LAB/bin/claude-link" 900
@@ -176,27 +198,21 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # Giving a genuine harness-named executable the version-string argv[0] that
 # Claude Code 2.1.220 reports drives the two sources apart on both supported
 # platforms and proves the surviving source carries the verdict. This needs a
-# real executable file rather than a symlink, because macOS takes the title
-# from the resolved target's name, so it is skipped where no C compiler exists.
+# real executable path rather than a symlink, because the install path is the
+# surviving ownership signal.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
-  "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
-  "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
-  new_window titled "$LAB/bin/claude/2.1.220"
-  wait_for_state "$SESSION:titled" alive \
-    || fail "a version-named executable under a harness install path must classify alive"
-  assert_sources_disagree "$SESSION:titled" "version-string process name"
-  pass "tmux liveness: a version-named executable under a harness install path classifies alive"
+make_named_process "$LAB/bin/claude/2.1.220"
+make_named_process "$LAB/bin/decoy/2.1.220"
+new_window titled "$LAB/bin/claude/2.1.220"
+wait_for_state "$SESSION:titled" alive \
+  || fail "a version-named executable under a harness install path must classify alive"
+assert_sources_disagree "$SESSION:titled" "version-string process name"
+pass "tmux liveness: a version-named executable under a harness install path classifies alive"
 
-  new_window path-decoy "$LAB/bin/decoy/2.1.220"
-  wait_for_state "$SESSION:path-decoy" ambiguous \
-    || fail "a version-named executable without a whole harness path component must stay ambiguous"
-  pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
-else
-  echo "skip: no C compiler, so the version-string process-name case cannot build its executable"
-fi
+new_window path-decoy "$LAB/bin/decoy/2.1.220"
+wait_for_state "$SESSION:path-decoy" ambiguous \
+  || fail "a version-named executable without a whole harness path component must stay ambiguous"
+pass "tmux liveness: a version-named executable under a decoy path stays ambiguous"
 
 # --- neither source names a harness: no invented agent ----------------------
 
@@ -268,8 +284,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+: > "$LAB/bin/cursor-agent"
+: > "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -289,7 +305,7 @@ cursor_screen() {  # <composer-text> <ghost 0|1>
 
 open_composer_pane() {  # <window> <binary> <composer-text> <ghost 0|1>
   local window=$1 binary=$2 text=$3 ghost=$4
-  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' 900"
+  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$LAB/bin/run-cursor-process' '$binary'"
   local i=0
   while [ "$i" -lt 100 ]; do
     case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
@@ -349,6 +365,9 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+[ ! -s "$COMPILER_LOG" ] || fail "tmux liveness fixture invoked a compiler"
+pass "tmux liveness: all process cases run without a compiler"
 
 cleanup_all
 trap - EXIT

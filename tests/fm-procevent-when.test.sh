@@ -10,7 +10,6 @@
 # path ends in a captured terminal outcome that reaches the durable wake queue
 # instead of a silent retry.
 set -u
-umask 077
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

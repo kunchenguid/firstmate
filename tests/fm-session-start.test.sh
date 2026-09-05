@@ -61,8 +61,9 @@ new_world() {
   home="$w/home"
   fakebin="$w/fakebin"
   mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
-  git init -q -b main "$root"
-  git -C "$root" commit -q --allow-empty -m init
+  fm_git init -q -b main "$root"
+  fm_git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m init
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
@@ -71,6 +72,10 @@ new_world() {
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
+  # Later cases replace this entry with a stub, so use a regular wrapper:
+  # writing through a symlink would try to overwrite the installed jq binary.
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v jq)" > "$fakebin/jq"
+  chmod +x "$fakebin/jq"
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
@@ -719,7 +724,7 @@ EOF
     and .home == $home
     and (.generated_epoch | type) == "number"
   ' "$home/state/home-summary.json" >/dev/null \
-    || fail "a locked session start did not publish the home summary ledger"
+    || fail "a locked session start did not publish the home summary ledger: $(cat "$home/state/.home-summary-refresh.log" 2>/dev/null)"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
@@ -761,7 +766,7 @@ EOF
   mkdir -p "$home/other-secondmate/state"
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
-  git -C "$root" checkout -q -B fm/read-only-tangle
+  fm_git -C "$root" checkout -q -B fm/read-only-tangle
 
   sleep 300 &
   holder_pid=$!
@@ -2318,7 +2323,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  git -C "$root" checkout -q -B fm/reemit-tangle
+  fm_git -C "$root" checkout -q -B fm/reemit-tangle
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \

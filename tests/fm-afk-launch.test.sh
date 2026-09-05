@@ -31,14 +31,24 @@ SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
+HERDR_E2E_SESSION=
+HERDR_E2E_HOME=
 GLOBAL_CLEANUP() {
+  local status=$?
+  if [ -n "$HERDR_E2E_SESSION" ]; then
+    herdr_safe_stop_and_delete "$HERDR_E2E_SESSION" || status=1
+    rm -rf "$HERDR_E2E_HOME"
+  fi
   rm -f "$SLEEPER" 2>/dev/null || true
   local s
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
+  return "$status"
 }
-trap GLOBAL_CLEANUP EXIT
+trap 'GLOBAL_CLEANUP || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
@@ -841,14 +851,17 @@ e2e_herdr() {
   SESSION="fm-lab-afk-launch-e2e-$$"
   export HERDR_SESSION="$SESSION"
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
+  HERDR_E2E_SESSION=$SESSION
+  HERDR_E2E_HOME=$home_tmp
   E2E_HERDR_CLEANUP() {
     # shellcheck disable=SC2031 # Cleanup reads the caller's resolved target; it does not reassign it.
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
       FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
-    herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
+    herdr_safe_stop_and_delete "$SESSION" || { fail "herdr e2e: lab teardown failed"; return 1; }
+    HERDR_E2E_SESSION=
     rm -rf "$home_tmp" 2>/dev/null || true
   }
-  fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
+  "$HERDR_LAB_HELPER" provision "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
   fm_backend_herdr_server_ensure "$SESSION" || { E2E_HERDR_CLEANUP; fail "herdr e2e: lab server did not start"; return 0; }
 

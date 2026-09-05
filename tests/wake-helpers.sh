@@ -298,6 +298,7 @@ SH
 
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
+  limit=$((limit * FM_TEST_TIMEOUT_SCALE))
   while [ "$i" -lt "$limit" ]; do
     if ! is_live_non_zombie "$pid"; then
       wait "$pid"

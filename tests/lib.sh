@@ -35,10 +35,21 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=commit.gpgsign
+export GIT_CONFIG_VALUE_0=false
+export GIT_CONFIG_KEY_1=tag.gpgsign
+export GIT_CONFIG_VALUE_1=false
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# shellcheck source=tests/timing-helpers.sh
+. "$ROOT/tests/timing-helpers.sh"
 
 # --- reporters --------------------------------------------------------------
 
@@ -93,6 +104,79 @@ fm_test_cleanup() {
       [ -n "$d" ] && rm -rf "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
+}
+
+# Worker shutdown can leave a reparented descendant finishing a fixture write.
+# Observe filesystem users independently of that worker's process ancestry.
+fm_test_fixture_quiet() {
+  local root=$1 proc targets cwd cmd parent pid busy=0
+  if [ -d /proc/self/fd ]; then
+    if [ -z "${2:-}" ]; then
+      # Batch readlink for routine polling: one subprocess per PID made the
+      # cleanup wait itself costly on a loaded host with hundreds of processes.
+      if find /proc -maxdepth 3 \
+        \( -path '/proc/[0-9]*/cwd' -o -path '/proc/[0-9]*/fd/*' \) \
+        -type l -exec readlink {} + 2>/dev/null |
+        awk -v root="$root" '$0 == root || index($0, root "/") == 1 { busy=1 } END { exit !busy }'; then
+        return 1
+      fi
+      return 0
+    fi
+    for proc in /proc/[0-9]*; do
+      targets=$(readlink "$proc/cwd" "$proc"/fd/* 2>/dev/null) || true
+      case $'\n'"$targets"$'\n' in
+        *$'\n'"$root"$'\n'*|*$'\n'"$root"/*)
+          busy=1
+          if [ -n "${2:-}" ]; then
+            cwd=$(readlink "$proc/cwd" 2>/dev/null) || cwd=unavailable
+            cmd=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null) || cmd=unavailable
+            parent=$(awk '/^PPid:/ {print $2}' "$proc/status" 2>/dev/null) || parent=unavailable
+            printf 'fixture cleanup %s: pid=%s ppid=%s cwd=%s cmdline=%s\n' \
+              "$2" "${proc##*/}" "$parent" "$cwd" "$cmd" >&2
+            case "$2" in
+              TERM|KILL) kill "-$2" "${proc##*/}" 2>/dev/null || true ;;
+            esac
+          fi
+          ;;
+      esac
+    done
+    [ "$busy" = 0 ]
+  else
+    # macOS has no procfs; lsof reports PID, command, cwd and open file names.
+    command -v lsof >/dev/null 2>&1 || {
+      printf 'not ok - fixture quiescence requires procfs or lsof\n' >&2
+      return 1
+    }
+    targets=$(lsof -nP +D "$root" 2>&1) || true
+    if [ -n "${2:-}" ] && [ -n "$targets" ]; then
+      printf 'fixture cleanup %s:\n%s\n' "$2" "$targets" >&2
+      case "$2" in
+        TERM|KILL)
+          for pid in $(lsof -t +D "$root" 2>/dev/null); do
+            ps -p "$pid" -o pid=,ppid=,command= >&2 || true
+            kill "-$2" "$pid" 2>/dev/null || true
+          done
+          ;;
+      esac
+    fi
+    [ -z "$targets" ]
+  fi
+}
+
+fm_test_wait_fixture_quiet() {
+  local root=$1 owner
+  # Only the creating test may stop this fixture's remaining filesystem users.
+  IFS= read -r owner < "$root/.fm-test-fixture" || return 1
+  [ "$owner" = "$$" ] || return 1
+  fm_test_wait_until 100 fm_test_fixture_quiet "$root" && return 0
+  fm_test_fixture_quiet "$root" TERM || true
+  fm_test_wait_until 20 fm_test_fixture_quiet "$root" && return 0
+  fm_test_fixture_quiet "$root" KILL || true
+  if ! fm_test_wait_until 20 fm_test_fixture_quiet "$root"; then
+    printf 'not ok - fixture users did not exit; fixture retained: %s\n' "$root" >&2
+    fm_test_fixture_quiet "$root" diagnostics || true
+    return 1
   fi
 }
 
@@ -239,6 +323,11 @@ SH
 
 # --- deterministic git identity and fixtures --------------------------------
 
+# fm_git <args...>: run fixture Git operations without host configuration.
+fm_git() {
+  git "$@"
+}
+
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
 # fixture commits never depend on the host git config.
 fm_git_identity() {
@@ -252,19 +341,19 @@ fm_git_identity() {
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  fm_git -C "$dir" init -q
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
-  git -C "$dir" add README.md
-  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  fm_git -C "$dir" add README.md
+  fm_git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
 # fm_git_add_origin <repo> <bare>: clone <repo> bare into <bare> and register it
 # as <repo>'s origin via a file:// URL (so later clones resolve an absolute path).
 fm_git_add_origin() {
   local repo=$1 remote=$2 remote_abs
-  git clone --quiet --bare "$repo" "$remote"
+  fm_git clone --quiet --bare "$repo" "$remote"
   remote_abs=$(cd "$remote" && pwd)
-  git -C "$repo" remote add origin "file://$remote_abs"
+  fm_git -C "$repo" remote add origin "file://$remote_abs"
 }
 
 # fm_git_worktree <repo> <worktree> <branch>: initialize <repo> with one commit
@@ -273,7 +362,7 @@ fm_git_worktree() {
   local repo=$1 worktree=$2 branch=$3
   fm_git_init_commit "$repo"
   fm_git_add_origin "$repo" "$repo.origin.git"
-  git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
+  fm_git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
 # --- state/<id>.meta writers ------------------------------------------------

@@ -42,11 +42,13 @@ SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
 cleanup_all() {
-  herdr_safe_stop_and_delete "$SESSION"
+  herdr_safe_stop_and_delete "$SESSION" || return 1
   rm -rf "$SCRATCH"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -176,5 +178,5 @@ pass "happy path: a genuinely fresh workspace's seeded default tab is still prun
 
 fm_backend_herdr_kill "$SESSION:$HAPPY_PANE"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

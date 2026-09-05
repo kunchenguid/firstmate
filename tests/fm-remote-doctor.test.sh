@@ -20,7 +20,26 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 JOB_LABEL=dev.firstmate.remote-job
 CASE_N=0
 DOCTOR_WORKER_PID=
-trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+DOCTOR_WORKER_HOME=
+doctor_cleanup() {
+  local status=$? pid
+  # Refresh replaces the serving PID; read the current owner before cleanup.
+  pid=
+  if [ -n "$DOCTOR_WORKER_HOME" ]; then
+    pid=$(cat "$DOCTOR_WORKER_HOME/.firstmate/remote-job/worker.pid" 2>/dev/null || true)
+  fi
+  if [ -n "$pid" ]; then
+    # shellcheck source=bin/fm-remote-job-lib.sh
+    . "$ROOT/bin/fm-remote-job-lib.sh"
+    fm_remote_job_resolve_stop_owner "$pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" || status=1
+  fi
+  fm_test_cleanup || status=1
+  return "$status"
+}
+trap 'doctor_cleanup || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
@@ -567,9 +586,17 @@ mkdir -p "$CASE_HOME/.local/bin"
 for tool in herdr tasks-axi treehouse claude; do
   ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
 done
-HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
-  "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
-DOCTOR_WORKER_PID=$!
+# The replacement worker rebuilds PATH from this private account, so tools
+# installed only in the runner's Nix profile must be exposed there explicitly.
+ln -s "$(command -v jq)" "$CASE_HOME/.local/bin/jq"
+# Use the production Linux launcher, including its isolated process group.
+# A directly backgrounded supervisor shares the test's group and cannot be
+# safely stopped as a tree when doctor replaces stale code.
+DOCTOR_WORKER_HOME=$CASE_HOME
+HOME="$CASE_HOME" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux bash -c '
+  . "$1/bin/fm-remote-job-lib.sh"
+  fm_remote_job_start_linux_worker "$1" "$HOME"
+' _ "$ROOT" || fail "could not launch the stale-identity fixture worker"
 for _ in $(seq 1 100); do
   [ -f "$CASE_HOME/.firstmate/remote-job/worker.ready" ] && break
   sleep 0.05
@@ -583,20 +610,17 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable: the running remo
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=fixable: the remote job worker identity is stale' \
   "doctor probed through stale worker code"
 doctor --fix
-expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale worker identity"
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale worker identity: $DOCTOR_OUT"
 assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not report refreshing the stale worker"
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worker was not confirmed ready"
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "doctor did not probe tools through the refreshed worker"
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
-kill -TERM "$DOCTOR_WORKER_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null || break
-  sleep 0.05
-done
-if kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null; then
-  kill -KILL "$DOCTOR_WORKER_PID" 2>/dev/null || true
-fi
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+fm_remote_job_resolve_stop_owner "$DOCTOR_WORKER_PID" || fail "the refreshed worker owner was not validated"
+fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START" \
+  || fail "the refreshed worker tree did not stop"
 DOCTOR_WORKER_PID=
 pass "doctor refreshes stale worker identity before probing tools"
 

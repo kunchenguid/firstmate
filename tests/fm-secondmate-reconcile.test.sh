@@ -69,7 +69,7 @@ write_remote_snapshot() {  # <path> <mate-id> <host> <invalidity-json> [state]
 # genuinely seeded remote-home fixture, exactly like the ssh stub proven in
 # tests/fm-send-remote-delivery.test.sh.
 make_remote_ssh_stub() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
@@ -87,14 +87,36 @@ while IFS= read -r -d '' a; do rargs+=("$a"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$argv_b64")
 cmd=${rargs[0]}
 rc=0
-if [ "${FM_TEST_RECONCILE_REMOTE_DELAY:-0}" -gt 0 ]; then
-  sleep "$FM_TEST_RECONCILE_REMOTE_DELAY"
+if [ -n "${FM_TEST_RECONCILE_REMOTE_RELEASE:-}" ]; then
+  : > "$FM_TEST_RECONCILE_REMOTE_ENTERED"
+  . "$FM_REMOTE_CODE_ROOT/tests/timing-helpers.sh"
+  fm_test_wait_until 600 test -e "$FM_TEST_RECONCILE_REMOTE_RELEASE" || exit 1
 fi
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
 exit "$rc"
 SH
-  chmod +x "$fb/fake-ssh"
+  # The remote doorbell uses Herdr even though delivery itself is durable inbox
+  # publication. Never let that probe resolve to the host's real CLI and start
+  # an unowned fm-remote server. Model the absent fixture pane explicitly.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+log="$(dirname "$0")/herdr.log"
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  'status --json --session fm-remote')
+    printf '{"server":{"running":true}}\n' ;;
+  'pane read p1 --source recent --lines 200 --format ansi --session fm-remote'|\
+  'pane read p1 --source recent --lines 200 --session fm-remote'|\
+  'pane send-text p1 '*' --session fm-remote')
+    printf '{"error":{"code":"pane_not_found"}}\n'
+    exit 1 ;;
+  *)
+    printf '%s\n' "$*" >> "$log.unexpected"
+    exit 1 ;;
+esac
+SH
+  chmod +x "$fb/fake-ssh" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -874,13 +896,14 @@ META
 }
 
 test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later() {
-  local home rhome fakebin snap warm started elapsed watcher i requests beat_before beat_after processing beacon_advanced=0
+  local home rhome fakebin snap warm snapshot_pid watcher i requests beat_before beat_after processing beacon_advanced=0
   fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-offpath")
   rhome=$(make_remote_secondmate_home remote-offpath-mate)
   rhome=$(cd "$rhome" && pwd -P)
   home=$(make_remote_parent_home remote-offpath remote-offpath-mate "$rhome" remote-offpath-host)
   jq -n --arg home "$rhome" '{
-    schema:"fm-secondmate-home-summary.v1",generated:"2026-09-01T22:00:00Z",generated_epoch:1900,home:$home,
+    schema:"fm-secondmate-home-summary.v1",hold_classifier_schema:"fm-captain-hold-buckets.v1",
+    generated:"2026-09-01T22:00:00Z",generated_epoch:1900,home:$home,
     valid:false,reason:"in-flight backlog item has no child metadata: stale-row",
     invalidity:{kind:"orphan_in_flight",ids:["stale-row"]},state:"no_active_work",
     active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
@@ -896,19 +919,26 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     || fail "the warm remote ledger did not carry its inventory mismatch"
   touch "$home/state/home-summary.json"
 
-  started=$(date +%s)
-  snap=$(FM_TEST_RECONCILE_REMOTE_DELAY=30 \
-    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
-    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$home/state" FM_SNAPSHOT_BUDGET=1 FM_SNAPSHOT_NOW_EPOCH=2000 \
-    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
-    || fail "Bearings failed while the remote queue was delayed"
-  printf '%s\n' "$snap" | FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
-    "$RECONCILE" request --snapshot - > "$home/request.out" \
-    || fail "the reconcile notify request could not be recorded"
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 5 ] \
-    || fail "Bearings and request publication waited past the collector budget behind remote delivery (${elapsed}s)"
+  (
+    snap=$(FM_TEST_RECONCILE_REMOTE_RELEASE="$home/snapshot.release" \
+      FM_TEST_RECONCILE_REMOTE_ENTERED="$home/snapshot.entered" \
+      FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
+      PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$home/state" FM_SNAPSHOT_BUDGET=1 FM_SNAPSHOT_NOW_EPOCH=2000 \
+      FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+      || fail "Bearings failed while the remote queue was delayed"
+    printf '%s\n' "$snap" | FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      "$RECONCILE" request --snapshot - > "$home/request.out" \
+      || fail "the reconcile notify request could not be recorded"
+    printf '%s' "$snap" > "$home/snapshot.json"
+    touch "$home/request.completed"
+  ) &
+  snapshot_pid=$!
+  fm_test_wait_until 100 test -e "$home/request.completed" \
+    || fail "Bearings and request publication blocked behind held remote delivery"
+  wait "$snapshot_pid" || fail "Bearings and request publication failed"
+  assert_present "$home/snapshot.entered" "the slow remote collector was never exercised"
+  snap=$(cat "$home/snapshot.json")
   printf '%s' "$snap" | jq -e '.secondmates | any(.id == "remote-offpath-mate" and .freshness == "cached" and .age_seconds == 100)' >/dev/null \
     || fail "the delayed queue did not leave an age-labeled cached mismatch row"
   requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
@@ -922,7 +952,8 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     [ ! -e "$lock" ] || fail "the request path left a mate lifecycle lock held: $lock"
   done
 
-  FM_TEST_RECONCILE_REMOTE_DELAY=4 \
+  FM_TEST_RECONCILE_REMOTE_RELEASE="$home/delivery.release" \
+    FM_TEST_RECONCILE_REMOTE_ENTERED="$home/delivery.entered" \
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 \
@@ -930,7 +961,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   watcher=$!
   i=0
   processing=''
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt "$((100 * FM_TEST_TIMEOUT_SCALE))" ]; do
     processing=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '.processing-*.json' -print -quit)
     [ -n "$processing" ] && [ -e "$home/state/.last-watcher-beat" ] && break
     kill -0 "$watcher" 2>/dev/null || break
@@ -938,9 +969,11 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     sleep 0.05
   done
   [ -n "$processing" ] || fail "supervision did not claim the durable reconcile request"
+  fm_test_wait_until 100 test -e "$home/delivery.entered" \
+    || fail "the remote delivery never reached its barrier"
   beat_before=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
   i=0
-  while [ -e "$processing" ] && [ "$i" -lt 70 ]; do
+  while [ -e "$processing" ] && [ "$i" -lt "$((70 * FM_TEST_TIMEOUT_SCALE))" ]; do
     sleep 0.05
     beat_after=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
     if [ "$beat_after" -gt "$beat_before" ]; then
@@ -951,6 +984,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   done
   [ "$beacon_advanced" -eq 1 ] \
     || fail "the watcher beacon stalled behind delayed reconcile delivery"
+  touch "$home/delivery.release"
   # Delivery is detached from the watcher loop.
   # Observe the durable lifecycle itself rather than using watcher liveness as a proxy.
   # A watcher may exit after it has launched the delivery child.
@@ -958,7 +992,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
       || [ ! -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
       || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \
-      && [ "$i" -lt 600 ]; do
+      && [ "$i" -lt "$((600 * FM_TEST_TIMEOUT_SCALE))" ]; do
     i=$((i + 1))
     sleep 0.05
   done
@@ -976,6 +1010,11 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     "$home/state/.meta-remote-offpath-mate.lock"; do
     [ ! -e "$lock" ] || fail "later supervision delivery left a mate lifecycle lock held: $lock"
   done
+  assert_grep 'pane send-text p1 ' "$fakebin/herdr.log" \
+    "the remote delivery did not exercise its fixture doorbell"
+  assert_absent "$fakebin/herdr.log.unexpected" \
+    "remote reconcile attempted an unexpected Herdr operation"
+  pass "remote reconcile retains durable delivery when its isolated fixture pane is absent"
   pass "Bearings records locally, returns before a delayed remote queue, and supervision delivers later"
 }
 

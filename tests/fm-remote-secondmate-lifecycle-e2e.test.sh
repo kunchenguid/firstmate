@@ -25,23 +25,34 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
-    worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
-      wait_attempt=$((wait_attempt + 1))
-      sleep 0.05
-    done
+  [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] || worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+  if [ -n "$worker_pid" ]; then
+    if ! { fm_remote_job_resolve_stop_owner "$worker_pid" &&
+      fm_remote_job_stop_worker_tree "$FM_REMOTE_JOB_STOP_PID" "$FM_REMOTE_JOB_STOP_START"; }; then
+      printf 'not ok - remote worker tree did not stop; fixture retained: %s\n' "$TMP_ROOT" >&2
+      return 1
+    fi
   fi
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || return 1
   rm -rf -- "$TMP_ROOT"
 }
-trap cleanup EXIT
+# A cleanup failure must fail even a suite that does not enable errexit.
+cleanup_exit() {
+  local test_status=$?
+  cleanup || exit 1
+  exit "$test_status"
+}
+trap cleanup_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -275,7 +286,7 @@ remote_env() {
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
-  FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
+  FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=$(fm_test_timeout 10) \
   "$@"
 }
 
@@ -335,7 +346,7 @@ provision_wait=0
 while [ ! -f "$TMP_ROOT/provision.entered" ]; do
   kill -0 "$provision_one" 2>/dev/null || fail "first provisioning attempt exited before cloning"
   provision_wait=$((provision_wait + 1))
-  [ "$provision_wait" -le 250 ] || fail "first provisioning attempt never reached cloning"
+  [ "$provision_wait" -le "$((250 * FM_TEST_TIMEOUT_SCALE))" ] || fail "first provisioning attempt never reached cloning"
   sleep 0.02
 done
 PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/concurrent-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
@@ -368,7 +379,7 @@ seed_wait=0
 while [ ! -f "$TMP_ROOT/seed.entered" ]; do
   kill -0 "$seed_fail_pid" 2>/dev/null || fail "failing seed exited before remote provisioning"
   seed_wait=$((seed_wait + 1))
-  [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
+  [ "$seed_wait" -le "$((250 * FM_TEST_TIMEOUT_SCALE))" ] || fail "failing seed never reached remote provisioning"
   sleep 0.02
 done
 FM_SECONDMATE_CHARTER='Successful seed charter.' FM_SECONDMATE_SCOPE='successful seed' \
@@ -841,7 +852,7 @@ spawn_inherit_wait=0
 while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
   spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
+  [ "$spawn_inherit_wait" -le "$((1500 * FM_TEST_TIMEOUT_SCALE))" ] || fail "remote spawn never reached its blocked inheritance write"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -952,7 +963,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   inherit_wait=$((inherit_wait + 1))
   # Match the earlier spawn/inheritance wait: a loaded portable runner can
   # spend several seconds in the remote entrypoint before reaching this write.
-  [ "$inherit_wait" -le 1500 ] || fail "first inheritance transaction never reached its blocked write"
+  [ "$inherit_wait" -le "$((1500 * FM_TEST_TIMEOUT_SCALE))" ] || fail "first inheritance transaction never reached its blocked write"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1031,7 +1042,8 @@ FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCAL_HOME" \
   || fail "local fixture did not publish its home ledger"
 remote_env "$ROOT/bin/fm-on.sh" ios fm-home-summary-refresh.sh >/dev/null \
   || fail "remote fixture did not publish its home ledger"
-SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+# This case proves ledger selection; collector deadline behavior has its own tests.
+SNAPSHOT=$(FM_SNAPSHOT_BUDGET=$(fm_test_timeout 5) remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
   fail "fleet snapshot did not select the remote structured-home projection"
@@ -1239,7 +1251,7 @@ handoff_wait=0
 while [ ! -f "$TMP_ROOT/handoff.entered" ]; do
   kill -0 "$handoff_holder_pid" 2>/dev/null || fail "handoff lock holder exited before acquiring the route lock"
   handoff_wait=$((handoff_wait + 1))
-  [ "$handoff_wait" -le 250 ] || fail "handoff lock holder never acquired the route lock"
+  [ "$handoff_wait" -le "$((250 * FM_TEST_TIMEOUT_SCALE))" ] || fail "handoff lock holder never acquired the route lock"
   sleep 0.02
 done
 rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
@@ -1252,7 +1264,7 @@ launch_wait=0
 while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   kill -0 "$spawn_retirement_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
   launch_wait=$((launch_wait + 1))
-  [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
+  [ "$launch_wait" -le "$((1500 * FM_TEST_TIMEOUT_SCALE))" ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &

@@ -37,8 +37,10 @@ cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare the isolated Herdr lab session"
 
 # The dispatcher is a separately linted production boundary. Its dynamic
 # adapter source edges stop at each independently linted canonical adapter.
@@ -52,7 +54,7 @@ HERDR_VERSION=$(herdr --version 2>/dev/null | head -1)
 
 if ! fm_backend_herdr_events_capable "$SESSION"; then
   echo "skip: this herdr build is below the events.subscribe capability (protocol < 16 or events surface absent)"
-  cleanup_all
+  cleanup_all || exit 1
   trap - EXIT
   exit 0
 fi
@@ -132,5 +134,5 @@ grep -q "$TARGET" "$STATE/.wake-queue" || fail "the stale record must name the t
 grep -q 'herdr: agent blocked' "$STATE/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
 pass "real herdr: the watcher fast-path enqueues a stale wake naming the task window from the live blocked transition"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

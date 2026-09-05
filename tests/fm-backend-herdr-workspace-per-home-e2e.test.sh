@@ -70,13 +70,17 @@ SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
+  local status=$?
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
+  herdr_safe_stop_and_delete "$SESSION" || status=1
   rm -rf "$TMP_ROOT"
+  return "$status"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -261,5 +265,5 @@ pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate'
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT

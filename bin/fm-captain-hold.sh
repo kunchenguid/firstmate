@@ -10,8 +10,8 @@
 # keyed-answer intake every channel feeds.
 #
 # There is no separate decision type. A captain call is an ordinary backlog
-# task held for the captain (`tasks-axi hold <id> --kind captain`), and its
-# identity is simply the task id. Older installs created derived
+# task held for the captain through this script's mandatory `hold` subcommand,
+# and its identity is simply the task id. Older installs created derived
 # `<origin>-decision-<key>` identities through bin/fm-decision-hold.sh; those
 # rows are already plain task ids, so they keep working here unchanged, and
 # the legacy inputs noted below resolve them without a migration.
@@ -36,18 +36,22 @@
 # task first when no work item exists to hold (--title required to create; the
 # optional --origin records provenance in the new task's body and supplies the
 # default repo from that origin's metadata). Prefer holding the work item the
-# question gates over minting a new row. Repeating `hold` with the same id is
-# idempotent; a task already closed is refused rather than reopened. `--until`
-# records the captain's own deferral date through `tasks-axi hold --until`, so
-# a "revisit later" answer is stored as a date instead of a live card.
+# question gates over minting a new row. The command records a UTC `Captain
+# hold set:` timestamp in the task body: repeating an active hold preserves the
+# existing timestamp, while re-holding released work starts a new lifecycle.
+# A task already closed is refused rather than reopened. `--until` records the
+# captain's own deferral date through `tasks-axi hold --until`, so a "revisit
+# later" answer is stored as a date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
-# act. It requires a non-empty captain decision file of at most 8192 bytes,
-# writes a resolution block at the top of the task body (the previous body is
-# preserved below the block and archived through tasks-axi --archive-body),
-# then closes the task with `tasks-axi done` - or, with `--release`, lifts the
-# hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
-# closing. An exact retry is idempotent only when its requested close mode
+# act. It requires a non-empty captain decision file of at most 8192 bytes and
+# writes a resolution block while preserving the leading hold-set stamp until
+# the close succeeds (the previous body is preserved and archived through
+# tasks-axi --archive-body). It then closes the task with `tasks-axi done` - or,
+# with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
+# WORK item resumes instead of closing - and restores resolution-first body
+# ordering. An exact retry also completes unfinished ordering normalization and
+# is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
@@ -451,8 +455,49 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fail "no captain-held task $entry in $CAPTAIN_BACKLOG_FILE"
 }
 
+body_hold_set_timestamp() {  # <decoded-task-body>
+  printf '%s\n' "$1" \
+    | sed -n \
+      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\)$/\1/p' \
+      -e '1s/^Captain hold set: \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/\1/p' \
+    | head -1
+}
+
+write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
+  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
+  body=$(decode_shown_value "$body") \
+    || fail "could not decode the existing body for $id"
+  existing=$(body_hold_set_timestamp "$body")
+  if [ "$preserve" = 1 ] && [ -n "$existing" ]; then
+    return 0
+  fi
+  if [ -n "$existing" ]; then
+    body=${body#"Captain hold set: $existing"}
+    case "$body" in
+      $'\n\n'*) body=${body#$'\n\n'} ;;
+      $'\n'*) body=${body#$'\n'} ;;
+    esac
+  fi
+  new_body=$(printf 'Captain hold set: %s' "$hold_set")
+  if [ -n "$body" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-stamp.XXXXXX") \
+    || fail "cannot stage the hold-set stamp"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the hold-set stamp for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the hold-set stamp on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -478,12 +523,22 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
+  hold_set=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+  case "$hold_set" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) : ;;
+    *) fail "FM_CAPTAIN_HOLD_NOW must be a UTC YYYY-MM-DDTHH:MM:SSZ timestamp" ;;
+  esac
   acquire_task_control_lock "$id"
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
+    existing_hold_kind=$(show_field_value "$show" hold_kind)
+    existing_held=$(show_field_value "$show" held)
+    if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
+      preserve_hold_set=1
+    fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
@@ -507,6 +562,14 @@ command_hold() {
         || fail "could not create task $id"
     fi
   fi
+  # Publish the timestamp before the captain-hold annotation. A concurrent
+  # snapshot may see the harmless stamp by itself, but can never see a newly
+  # held task without the timestamp that defines this hold lifecycle's age.
+  show=$(task_show "$id") || fail "task $id disappeared before recording its hold-set stamp"
+  write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
+  show=$(task_show "$id") || fail "task $id disappeared while recording its hold-set stamp"
+  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+    || fail "task $id did not retain its hold-set stamp"
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
@@ -518,17 +581,29 @@ command_hold() {
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+    || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
 
-# Record a resolution block at the top of the task body, preserving the
-# previous body below it and archiving the pristine original.
+# Record a resolution block beneath any leading active hold-set stamp,
+# preserving the previous body below it and archiving the pristine original.
+# Successful closure removes the stamp to restore resolution-first ordering.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp
+  local id=$1 mode=$2 body=$3 new_body tmp hold_set
   new_body=$(resolution_block "$mode")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
+  hold_set=$(body_hold_set_timestamp "$body")
+  if [ -n "$hold_set" ]; then
+    body=${body#"Captain hold set: $hold_set"}
+    case "$body" in
+      $'\n\n'*) body=${body#$'\n\n'} ;;
+      $'\n'*) body=${body#$'\n'} ;;
+    esac
+    new_body=$(printf 'Captain hold set: %s\n\n%s' "$hold_set" "$new_body")
+  fi
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
@@ -547,10 +622,32 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
 
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
-    tasks_axi unhold "$1" >/dev/null || fail "could not release captain-held task $1"
+    tasks_axi unhold "$1" >/dev/null
   else
-    tasks_axi "done" "$1" >/dev/null || fail "could not close answered captain-held task $1"
+    tasks_axi "done" "$1" >/dev/null
   fi
+}
+
+remove_interrupted_answer_stamp() {  # <task-id>
+  local id=$1 show body existing tmp
+  show=$(task_show "$id") || fail "task $id disappeared after closing"
+  body=$(decode_shown_value "$(show_field "$show" body)") \
+    || fail "could not decode the closed body for $id"
+  existing=$(body_hold_set_timestamp "$body")
+  [ -n "$existing" ] || return 0
+  body=${body#"Captain hold set: $existing"}
+  case "$body" in
+    $'\n\n'*) body=${body#$'\n\n'} ;;
+    $'\n'*) body=${body#$'\n'} ;;
+  esac
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-normalize.XXXXXX") \
+    || fail "cannot stage the closed body for $id"
+  if ! printf '%s\n' "$body" > "$tmp" \
+    || ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not restore the resolution record ordering for $id"
+  fi
+  rm -f -- "$tmp"
 }
 
 command_answer() {
@@ -588,6 +685,7 @@ command_answer() {
         || fail "task $id records this answer with mode released; a closed task cannot replay that release"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
         publish_parent_hold "$id" $((occurrence - 1)) resolved "answered (repaired)"
       else
@@ -603,6 +701,7 @@ command_answer() {
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
     write_resolution_record "$id" repaired "$body"
+    remove_interrupted_answer_stamp "$id"
     show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
@@ -626,13 +725,19 @@ command_answer() {
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
-      close_answered "$id" "$release"
+      if ! close_answered "$id" "$release"; then
+        fail "could not close answered captain-held task $id"
+      fi
+      remove_interrupted_answer_stamp "$id"
       publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
     write_resolution_record "$id" "$outcome" "$body"
-    close_answered "$id" "$release"
+    if ! close_answered "$id" "$release"; then
+      fail "could not close answered captain-held task $id"
+    fi
+    remove_interrupted_answer_stamp "$id"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
@@ -648,6 +753,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    remove_interrupted_answer_stamp "$id"
     publish_parent_hold "$id" $((occurrence - 1)) resolved released
     printf 'released: %s\n' "$id"
     return 0

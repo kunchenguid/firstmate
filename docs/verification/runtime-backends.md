@@ -948,6 +948,119 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### 2026-09-05 host portability and test cleanup
+
+Verified on WSL2 Linux x86_64 with Bash 5.3.9, jq 1.8.1, and Herdr 0.7.5 protocol 17.
+The remote fixtures exercise the installed Nix profile, a subreaper-adopted worker, and replacement of a stale worker launched through the production Linux process-group boundary.
+The startup fixture keeps the real summary-publication assertion while making jq available outside system directories.
+These fixture changes are independent of the primary agent harness.
+
+```sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-on.test.sh tests/fm-remote-job-orphan-reap.test.sh tests/fm-remote-doctor.test.sh tests/fm-herdr-lab.test.sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-session-start.test.sh
+bin/fm-test-run.sh tests/fm-test-run.test.sh
+```
+
+The corresponding summary lines were:
+
+```text
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=85649
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=152354
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=147368
+```
+
+On a clean baseline, the leak check reports:
+
+```text
+fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+`tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
+It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
+The runner records each matching server's PID and Linux `/proc` start time before the suite, then revalidates that the same start identity still belongs to the same server and session after collecting its working directory.
+If the PID is replaced during that inventory boundary, the snapshot fails closed and the replacement is reported as new by the final inventory instead of entering the baseline.
+On hosts without `/proc`, it records the process start time under the C locale and UTC with a revalidated working directory, but fails closed for every survivor because second-resolution identity cannot prove that a PID was not reused.
+A still-live portable PID whose command or named session changes during inspection fails the inventory instead of being treated as an exited candidate.
+It warns with PID, start time, working directory, and session only when a kernel identity proves that a pre-existing process remains, so shared-host contamination stays visible without misclassifying a replacement.
+The runner regression separately proves both identity paths reject new and reused identities, rejects same-session and changed-session replacements during collection, and rejects unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
+Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
+This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
+
+The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, a directly backgrounded same-group supervisor, and independent restart supervisors from the same queue, plus a separate queue that must survive.
+It directly proves signalling skips a fully scoped snapshot whose recorded process start identity no longer matches.
+The exact kernel PID/PGID reuse race runs only when a private fixture user/PID namespace exposes writable `ns_last_pid`; it ran on this host and left the unrelated recycled identity alive.
+The same private-namespace race replaces a pre-change active-claim leader while preserving its legacy second-resolution start rendering, then proves cleanup sends no group signal, preserves the replacement, reports its PID and recorded identity as needing manual cleanup, and returns failure.
+On Linux, only kernel start identities authorize active-claim group signals, including replacement-worker reclaim; legacy claims receive only individually scope-checked signals and manual-cleanup reporting, while worker locks retain legacy identity compatibility.
+Darwin continues to create and execute claims with the supported portable process identity when Linux kernel identity is unavailable.
+When a recorded active-claim leader is gone but its execution group survives, cleanup individually signals only fully scoped processes, reports every remaining group member with PID, kernel start identity, and working directory, and fails for manual cleanup.
+An armed running claim whose ownership record is unreadable or malformed is retained as unsafe state, restricts cleanup to individually scope-validated signals, and immediately fails with the claim path and validation reason without waiting for the preserved command.
+New Linux claims require a kernel start identity before the waiting child is armed, so an identity inventory failure returns 125 without executing the staged command.
+Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
+The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
+The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, and waits for a replacement child after the initial cleanup snapshot before releasing a FIFO barrier.
+It proves that cleanup promptly signals newly discovered scoped identities, prevents further respawn, and preserves another queue.
+The legacy identity regression probes installed locales for two that render the same process start differently under EST5, then exercises locale-only reconstruction with that pair or prints an explicit skip naming every locale probed.
+This host exposed only `C`, `C.utf8`, and `POSIX`, whose `ps lstart` renderings were identical, so only the locale-only case skipped here.
+The worker-stop regression runs a tracked job that changes its working directory to the account home, then proves its active claim PID and kernel start identity stop it without reaching another queue or an unrelated process.
+The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
+The Linux supervisor and serving-worker leases expose their validated current start identity to the shared stop boundary, which refuses PID-only calls and revalidates that identity before every signal.
+The serving-owner resolver rejects an earlier validated identity that no longer matches instead of replacing it with a fresh PID lookup.
+The public orphan reaper also passes a private-namespace PID-reuse regression at the boundary between candidate validation and cleanup: it reports the mismatch and leaves the unrelated replacement alive.
+Linux stop authority requires the boot identifier and kernel start ticks, while Darwin retains its portable process start identity.
+
+```sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks --per-script-timeout-secs 300 --json .no-mistakes/host-repro/local-recovery-final.json tests/fm-test-run.test.sh tests/fm-remote-job-orphan-reap.test.sh tests/fm-remote-job.test.sh
+bin/fm-test-run.sh --jobs 1 --check-herdr-leaks --per-script-timeout-secs 300 tests/fm-remote-job.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh
+bin/fm-lint.sh
+```
+
+```text
+ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
+ok - legacy active claim reports manual cleanup without signalling a recycled group
+ok - replacement-worker reclaim preserves a legacy recycled group
+ok - mismatched supervisor replacement refuses a recycled PID
+ok - orphan reaper refuses a recycled PID after candidate validation
+ok - active claim identity stops a job descendant after it changes directory outside the root
+ok - leaderless active claim fails closed with surviving process metadata
+ok - malformed armed claim fails closed with its path and reason
+ok - missing kernel claim identity prevents command side effects
+ok - Darwin portable claim identity executes commands without Linux kernel identity
+ok - ensure replaces a live supervisor lease serving an old root
+ok - supervisor publishes a replacement after the stop snapshot
+ok - zombie serving ownership recovers its scoped supervisor without respawn
+```
+
+The runner and orphan suites passed, while the first three-suite command reported `FM_TEST_SUMMARY total=3 failed=1 skipped_gate=0 duration_ms=193238` at the remote-job assertion `a queued sibling poll preempted a running poll`.
+The separate caller run reported `FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=76424`; that rerun does not establish that the unchanged sibling-poll timing assertion is stable.
+Both runs reported no new Herdr survivors, and full pinned ShellCheck and actionlint passed.
+
+The signal-injection fixture also passes when its runner is a background Bash job with inherited ignored SIGINT.
+It restores the signal disposition before executing each suite, retaining the nonzero-exit and teardown assertions.
+The tmux liveness fixture uses Bash `exec -a` processes and runs with failing `cc` and `gcc` shims, so Nix multicall coreutils does not dispatch from a harness-shaped applet name and no compiler is required.
+The Pi follow-up fixture waits for the rendered monitoring result before counting the answer; native Pi 0.84.4 can persist a completed session record while its screen still shows the empty composer.
+The count remains exactly one, including Calm-enabled, Calm-disabled, absent-extension, adjacent-notification, and restarted-session cases.
+
+```sh
+bash -c 'bin/fm-test-run.sh --jobs 1 tests/fm-herdr-lab.test.sh & wait "$!"'
+bash tests/fm-tmux-agent-liveness.test.sh
+bash tests/fm-calm-pi-extension.test.sh
+```
+
+All three commands passed on this host.
+The native Pi cases ran; checks requiring the separately importable Pi SDK reported its absence as their existing prerequisite skip.
+
+Repeated ensure calls also reproduced a live-owner rejection when the worker started under EST5 and a caller used JST-9.
+Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
+Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
+The subreaper regression records legacy ownership in the live worker's selected installed locale and EST5 timezone, then checks timezone reconstruction from a C locale and JST-9 caller.
+When two installed locales produce observably different `ps lstart` text, it separately checks locale reconstruction while holding EST5 constant and asserts that rendering precondition first.
+It pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
+The previous implementation fails that check; the corrected implementation reports:
+
+```text
+ok - repeated ensure across timezones and delayed readiness preserves owners without new workers
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
@@ -1398,3 +1511,33 @@ The live probe loads the tracked watcher extension through Pi's real resource lo
 It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
 The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
 A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+### 2026-09-04 off-thread supervision outcome delivery
+
+The real-TUI responsiveness guard, focused extension suite, store suite, and strict typecheck were run on macOS 26.5.0 arm64, Node v24.13.1, tmux 3.6a, against the signed Pi launcher 0.82.0 for the TUI arms and the npm `@earendil-works/pi-coding-agent` 0.81.1 package for the typecheck.
+The lab used a scratch `FM_HOME`, a scratch project holding a copy of the tracked extension, a private tmux socket, a scratch session directory, and `--offline`; only `/new` was ever sent, so no model turn ran and no request left the machine, and the captain's own Pi session was not touched.
+
+```sh
+FM_PI_BRANCH_RESPONSIVENESS_E2E=1 bash tests/fm-pi-branch-responsiveness-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+pi 0.82.0 keystroke echo, worst observed: floor 22.6 ms, extension idle 35.6 ms, extension delivering 36.8 ms
+ok - supervision outcome delivery keeps the real Pi 0.82.0 TUI echoing keystrokes at its unloaded floor
+ok - outcome delivery keeps the event loop running and interleaved reports stay ordered and exactly once
+ok - a session replaced mid-delivery cancels cleanly and the stored outcome still arrives exactly once
+ok - a failing store script surfaces to the branch and its outcome is neither lost nor delivered twice
+ok - a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated
+skip: installed Pi 0.81.1 predates the stock renderer contract 0.84.4 this case compares against
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
+```
+
+That skip is the renderer case declining to render a verdict on a Pi older than the contract it compares against: since 0.84.4 the stock renderer no longer supplies an implicit reset at multiline boundaries and the extension emits that reset itself, so an older installed Pi differs legitimately.
+It names the installed version and the floor rather than degrading quietly, and a package whose version cannot be read at all is still a failure.
+
+The same guard against the pre-change extension in the same lab measured a 676.9 ms worst keystroke echo while delivering two outcomes and a 295.3 ms worst echo with nothing to deliver, against a 49.2 ms extension-free floor, and failed as designed.
+Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
+Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.

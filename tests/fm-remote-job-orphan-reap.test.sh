@@ -71,11 +71,10 @@ build_remote_root() {
   cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$root/bin/"
   chmod +x "$root/bin"/*.sh
   printf 'fixture\n' > "$root/AGENTS.md"
-  git -C "$root" init -q -b main
-  git -C "$root" config user.email test@example.com
-  git -C "$root" config user.name Test
-  git -C "$root" add AGENTS.md bin
-  git -C "$root" commit -qm 'remote job fixture'
+  fm_git -C "$root" init -q -b main
+  fm_git -C "$root" add AGENTS.md bin
+  fm_git -C "$root" -c user.email=test@example.com -c user.name=Test \
+    commit -qm 'remote job fixture'
 }
 
 pid_is_numeric() {
@@ -123,8 +122,11 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
-[ "$(ppid_of "$WORKER")" = 1 ] ||
-  fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
+# The launcher has exited before start_worker returns; Linux may adopt its
+# detached supervisor under a subreaper (for example systemd --user), not PID 1.
+ADOPTER=$(ppid_of "$WORKER")
+pid_is_numeric "$ADOPTER" && [ "$ADOPTER" -gt 0 ] && [ "$ADOPTER" != "$$" ] ||
+  fail "the detached worker was not adopted outside the fixture shell"
 
 # The exact teardown shape that leaked in production: a fixture cleanup removes
 # the worker's state root and then stops only the single recorded worker pid -
@@ -137,7 +139,7 @@ kill -KILL "$SERVE" 2>/dev/null || true
 wait_gone "$SERVE" 10 || fail "the recorded serving child did not stop"
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
 wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
-pass "removing the state root and killing the recorded worker pid leaves the tree running at ppid 1"
+pass "removing the state root and killing the recorded worker pid leaves the adopted tree running"
 
 # A worker whose code root is intact is never a reap candidate, which is what
 # keeps the account's healthy LaunchAgent worker out of scope.
@@ -203,3 +205,8 @@ pass "the reaper stops an abandoned worker's whole tree"
 out=$("$REAPER" 2>&1) || fail "a repeat reaper run failed: $out"
 assert_not_contains "$out" "$STALE" "the reaper reported an already-stopped worker"
 pass "the reaper is idempotent"
+
+if [ "$(uname -s)" = Linux ]; then
+  python3 "$ROOT/tests/fixtures/remote-job/subreaper-stop.py" "$ROOT" ||
+    fail "subreaper stop and supervisor ownership regression failed"
+fi

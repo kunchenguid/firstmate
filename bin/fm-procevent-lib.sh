@@ -164,6 +164,8 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
     printf 'argv:\n'
     printf '%s\n' "$@"
   } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+    # Read by fm-procevent.sh after publishing the registration.
+    # shellcheck disable=SC2034
     FM_PROCEVENT_REGISTRATION_TOKEN=$registration_token
     return 0
   fi

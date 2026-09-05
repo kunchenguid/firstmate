@@ -319,9 +319,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone) and return the row to
-# Queued, which is the shape every other captain call has and what
-# bin/fm-fleet-snapshot.sh's captain_actionable requires. The hold itself is
-# untouched; only bin/fm-captain-hold.sh answer closes the call. The links are
+# Queued, the conventional post-cleanup shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
 # written into the body rather than through `tasks-axi update --report`,
 # because that flag rewrites the title of a row that is not Done.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]

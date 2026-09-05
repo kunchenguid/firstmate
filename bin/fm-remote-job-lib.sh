@@ -71,11 +71,14 @@
 # an Aqua requirement. The launch-agent renderer and repair helpers here are
 # shared by the entrypoint and remote doctor so their ownership cannot drift.
 #
+# A Linux supervisor holds supervisor.lock across serving-child restarts.
 # The Linux start path puts the worker tree in its own process group, so
 # stopping a worker signals its restart supervisor, its serving child, and any
 # job descendant together instead of leaving a supervisor to restart what was
 # just killed. fm_remote_job_stop_worker_tree owns that stop and refuses to
-# signal a group whose leader is not itself a worker, so a worker inherited
+# signal a group whose leader is not itself a worker, and includes sibling
+# supervisors bound to the same executable and queue through /proc on Linux.
+# A worker inherited
 # from an older build or from launchd's own session is still stopped safely as
 # a single process. fm_remote_job_root_is_live is the shared predicate for
 # whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
@@ -768,7 +771,7 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -902,13 +905,75 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
+fm_remote_job_process_kernel_start() { # <pid>
+  local pid=$1 value boot
+  local fields=()
+  [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ] || return 1
+  IFS= read -r value < "/proc/$pid/stat" || return 1
+  IFS=' ' read -r -a fields <<< "${value##*) }"
+  [ "${#fields[@]}" -gt 19 ] || return 1
+  value=${fields[19]}
+  IFS= read -r boot < /proc/sys/kernel/random/boot_id || return 1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  case "$boot" in ''|*[!a-f0-9-]*) return 1 ;; esac
+  printf 'linux:%s:%s\n' "$boot" "$value"
+}
+
 fm_remote_job_process_start() {
   local pid=$1 ps_bin value
+  if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" != 1 ] &&
+    [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+    fm_remote_job_process_kernel_start "$pid"
+    return
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C TZ=UTC "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+fm_remote_job_start_identity_matches() { # <pid> <recorded> <actual>
+  local pid=$1 recorded=$2 actual=$3 ps_bin value entry
+  local process_timezone='' process_lc_all='' process_lc_time='' process_lang=''
+  local process_language='' process_locpath='' process_tzdir=''
+  local locale_environment=(env -i)
+  [ "$recorded" = "$actual" ] && return 0
+  # Accept existing lstart records while old workers/jobs drain during an
+  # upgrade. New kernel identities never take this compatibility path.
+  case "$recorded" in linux:*) return 1 ;; esac
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ] && return 0
+  value=$(LC_ALL=C TZ=UTC "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ] && return 0
+  if [ -r "/proc/$pid/environ" ]; then
+    while IFS= read -r -d '' entry; do
+      case "$entry" in
+        TZ=*) process_timezone=${entry#*=} ;;
+        LC_ALL=*) process_lc_all=${entry#*=} ;;
+        LC_TIME=*) process_lc_time=${entry#*=} ;;
+        LANG=*) process_lang=${entry#*=} ;;
+        LANGUAGE=*) process_language=${entry#*=} ;;
+        LOCPATH=*) process_locpath=${entry#*=} ;;
+        TZDIR=*) process_tzdir=${entry#*=} ;;
+      esac
+    done < "/proc/$pid/environ" 2>/dev/null
+    case "$process_timezone:$process_lc_all:$process_lc_time:$process_lang:$process_language:$process_locpath:$process_tzdir" in
+      *$'\n'*|*$'\r'*) return 1 ;;
+    esac
+    [ -z "$process_timezone" ] || locale_environment+=("TZ=$process_timezone")
+    [ -z "$process_lc_all" ] || locale_environment+=("LC_ALL=$process_lc_all")
+    [ -z "$process_lc_time" ] || locale_environment+=("LC_TIME=$process_lc_time")
+    [ -z "$process_lang" ] || locale_environment+=("LANG=$process_lang")
+    [ -z "$process_language" ] || locale_environment+=("LANGUAGE=$process_language")
+    [ -z "$process_locpath" ] || locale_environment+=("LOCPATH=$process_locpath")
+    [ -z "$process_tzdir" ] || locale_environment+=("TZDIR=$process_tzdir")
+    value=$("${locale_environment[@]}" "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+    [ "$recorded" = "$value" ] && return 0
+  fi
+  value=$(env -u TZ "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ "$recorded" = "$value" ]
 }
 
 fm_remote_job_process_command() {
@@ -940,54 +1005,562 @@ fm_remote_job_root_is_live() { # <remote-root>
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ]
 }
 
-# The isolated process group that owns <pid>'s whole worker tree, echoed only
-# when signalling it is provably safe: the group is not this shell's own, not a
-# reserved id, and its leader is itself a remote job worker. A worker started
-# without group isolation (an older build, or launchd's own session) therefore
-# never yields a group, and callers fall back to signalling the single process.
-fm_remote_job_worker_process_group() { # <pid>
-  local pid=$1 pgid own_pgid leader_command
-  pgid=$(fm_remote_job_process_pgid "$pid") || return 1
-  case "$pgid" in 0|1) return 1 ;; esac
-  own_pgid=$(fm_remote_job_process_pgid "$$") || return 1
-  [ "$pgid" != "$own_pgid" ] || return 1
-  leader_command=$(fm_remote_job_process_command "$pgid" 2>/dev/null || true)
-  case "$leader_command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
-  printf '%s\n' "$pgid"
+# Linux's adoption parent is not ownership evidence. Bind sibling supervisors
+# to the same executable and queue using their kernel environment.
+# Never print the environment: it can contain unrelated private values.
+fm_remote_job_process_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
+  local pid=$1 entry root='' state='' account='' argument cwd='' readlink_bin anchored=0
+  [ -O "/proc/$pid" ] && [ -r "/proc/$pid/environ" ] || return 1
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      FM_ROOT_OVERRIDE=*) root=${entry#*=} ;;
+      FM_REMOTE_JOB_STATE_ROOT=*) state=${entry#*=} ;;
+      HOME=*) account=${entry#*=} ;;
+    esac
+  done < "/proc/$pid/environ" 2>/dev/null
+  [ -n "$state" ] || state="$account/.firstmate/remote-job"
+  case "$root:$state" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "$root" in /*) ;; *) return 1 ;; esac
+  case "$state" in /*) ;; *) return 1 ;; esac
+  while IFS= read -r -d '' argument; do
+    [ "$argument" != "$root/bin/fm-remote-job-worker.sh" ] || anchored=1
+  done < "/proc/$pid/cmdline" 2>/dev/null
+  if [ "$anchored" -eq 0 ]; then
+    if [ -x /usr/bin/readlink ]; then readlink_bin=/usr/bin/readlink
+    elif [ -x /bin/readlink ]; then readlink_bin=/bin/readlink
+    else return 1
+    fi
+    cwd=$("$readlink_bin" "/proc/$pid/cwd" 2>/dev/null) || return 1
+    case "$cwd" in
+      "$root"|"$root"/*|"$root (deleted)"|"$root"/*" (deleted)") ;;
+      *) return 1 ;;
+    esac
+  fi
+  FM_REMOTE_JOB_PROCESS_ROOT=$root
+  FM_REMOTE_JOB_PROCESS_STATE=$state
 }
 
-# Stop a worker and every descendant it leaked, TERM first and KILL only for a
-# survivor. Signals the isolated worker group when one is provable and the lone
-# process otherwise. Returns non-zero when any verified worker-group member is
-# still alive afterwards.
-fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 pgid i=0
+fm_remote_job_process_non_zombie() { # <pid>
+  local pid=$1 value state
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r value < "/proc/$pid/stat" || return 1
+  value=${value##*) }
+  state=${value%% *}
+  [ -n "$state" ] && [ "$state" != Z ]
+}
+
+fm_remote_job_scoped_process_identity() { # <pid> <root> <state>
+  local pid=$1 root=$2 state=$3 start group
+  fm_remote_job_process_non_zombie "$pid" || return 1
+  fm_remote_job_process_scope "$pid" || return 1
+  [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
+    [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+  start=$(fm_remote_job_process_start "$pid") || return 1
+  group=$(fm_remote_job_process_pgid "$pid") || return 1
+  printf '%s\t%s\n' "$start" "$group"
+}
+
+fm_remote_job_scope_snapshot() { # <root> <state>
+  local root=$1 state=$2 candidate identity
+  for candidate in /proc/[0-9]*; do
+    candidate=${candidate##*/}
+    [ "$candidate" != "$$" ] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$candidate" "$root" "$state" 2>/dev/null || true)
+    [ -n "$identity" ] || continue
+    printf '%s\t%s\n' "$candidate" "$identity"
+  done
+}
+
+fm_remote_job_active_claim_identity() { # <job> <state>
+  local job=$1 state=$2 record pid recorded_start actual_start group
+  record=$(fm_remote_job_claim_record "$job" "$state") || return 1
+  IFS=$'\t' read -r pid recorded_start <<< "$record"
+  actual_start=$(fm_remote_job_process_start "$pid") || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
+  group=$(fm_remote_job_process_pgid "$pid") || return 1
+  [ "$group" = "$pid" ] || return 1
+  printf '%s\t%s\t%s\t%s\n' "$pid" "$actual_start" "$group" "$recorded_start"
+}
+
+fm_remote_job_claim_record() { # <job> <state>
+  local job=$1 state=$2 jobs claim pid recorded_start physical
+  jobs="$state/jobs"
+  [ -d "$jobs" ] && [ ! -L "$jobs" ] || return 1
+  case "$job" in "$jobs"/job-*) ;; *) return 1 ;; esac
+  [ -d "$job" ] && [ ! -L "$job" ] || return 1
+  physical=$(CDPATH='' cd -- "$job" 2>/dev/null && pwd -P) || return 1
+  [ "$physical" = "$job" ] || return 1
+  [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ] || return 1
+  claim="$job/.claim"
+  [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
+  fm_remote_job_regular_bounded "$claim/armed" 1 || return 1
+  pid=$(fm_remote_job_read_single_line "$claim/group" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
-  pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
-  if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
+  recorded_start=$(fm_remote_job_read_single_line "$claim/group_start" 256) || return 1
+  printf '%s\t%s\n' "$pid" "$recorded_start"
+}
+
+fm_remote_job_active_claim_snapshot() { # <state>
+  local state=$1 job record pid recorded_start actual_start group id identity
+  for job in "$state"/jobs/job-*; do
+    record=$(fm_remote_job_claim_record "$job" "$state" 2>/dev/null || true)
+    [ -n "$record" ] || continue
+    IFS=$'\t' read -r pid recorded_start <<< "$record"
+    actual_start=-
+    identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
+    if [ -n "$identity" ]; then
+      IFS=$'\t' read -r _ actual_start group _ <<< "$identity"
+    else
+      group=$pid
+    fi
+    id=${job##*/}
+    fm_remote_job_safe_id "$id" || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$actual_start" "$group" "$recorded_start" "$id"
+  done
+}
+
+fm_remote_job_invalid_armed_claim_snapshot() { # <state>
+  local state=$1 job claim record
+  for job in "$state"/jobs/job-*; do
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ] || continue
+    claim="$job/.claim"
+    [ -e "$claim/armed" ] || [ -L "$claim/armed" ] || continue
+    record=$(fm_remote_job_claim_record "$job" "$state" 2>/dev/null || true)
+    [ -z "$record" ] || continue
+    printf '%s\t%s\n' "$claim" 'armed claim record is unreadable or malformed'
+  done
+}
+
+fm_remote_job_invalid_claim_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" | awk -F '\t' 'NF == 2 && !seen[$0]++'
+}
+
+fm_remote_job_report_invalid_claims() { # <snapshot>
+  local snapshot=$1 claim reason
+  while IFS=$'\t' read -r claim reason; do
+    [ -n "$claim" ] && [ -n "$reason" ] || continue
+    printf 'remote-job: NEEDING MANUAL CLEANUP: invalid armed claim %s: %s\n' "$claim" "$reason" >&2
+  done <<< "$snapshot"
+}
+
+fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" |
+    awk -F '\t' 'NF == 5 && !seen[$1 FS $2]++'
+}
+
+fm_remote_job_stop_guard_matches() { # <pid> <start>
+  local pid=$1 start=$2 actual_start
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+  [ -n "$actual_start" ] || return 1
+  fm_remote_job_start_identity_matches "$pid" "$start" "$actual_start"
+}
+
+fm_remote_job_guarded_signal() { # <guard-pid> <guard-start> <signal> <target>
+  local guard_pid=$1 guard_start=$2 signal=$3 target=$4
+  if [ -n "$guard_start" ]; then
+    fm_remote_job_stop_guard_matches "$guard_pid" "$guard_start" || {
+      fm_remote_job_report_stop_guard_mismatch "$guard_pid" "$guard_start"
+      return 1
+    }
+  fi
+  kill -"$signal" -- "$target" 2>/dev/null || true
+}
+
+fm_remote_job_report_stop_guard_mismatch() { # <pid> <start>
+  printf 'remote-job: NEEDING MANUAL CLEANUP: pid %s no longer matches validated identity %s; refusing signal\n' \
+    "$1" "$2" >&2
+}
+
+fm_remote_job_report_missing_stop_identity() { # <pid>
+  printf 'remote-job: NEEDING MANUAL CLEANUP: pid %s has no caller-validated identity; refusing signal\n' \
+    "$1" >&2
+}
+
+fm_remote_job_stop_identity_supported() { # <identity>
+  if [ "$(fm_remote_job_platform)" = darwin ]; then
+    case "$1" in ''|linux:*) return 1 ;; *) return 0 ;; esac
+  fi
+  case "$1" in linux:*:*) return 0 ;; *) return 1 ;; esac
+}
+
+fm_remote_job_signal_claim_snapshot() { # <snapshot> <state> <signal> [guard-pid] [guard-start]
+  local snapshot=$1 state=$2 signal=$3 guard_pid=${4:-} guard_start=${5:-}
+  local pid actual_start group recorded_start id job identity own_group
+  own_group=$(fm_remote_job_process_pgid "$$") || return 1
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
+    [ -n "$pid" ] || continue
+    case "$recorded_start" in linux:*:*) ;; *) continue ;; esac
+    fm_remote_job_safe_id "$id" || continue
+    job="$state/jobs/$id"
+    identity=$(fm_remote_job_active_claim_identity "$job" "$state" 2>/dev/null || true)
+    [ "$identity" = "$pid"$'\t'"$actual_start"$'\t'"$group"$'\t'"$recorded_start" ] || continue
+    [ "$group" != "$own_group" ] || continue
+    fm_remote_job_guarded_signal "$guard_pid" "$guard_start" "$signal" "-$group" || return 1
+  done <<< "$snapshot"
+}
+
+fm_remote_job_claim_snapshot_unsafe_groups() { # <snapshot>
+  local snapshot=$1 pid actual_start group recorded_start id groups=''
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
+    [ -n "$pid" ] && [ -n "$actual_start" ] && [ -n "$id" ] || continue
+    if [ "$actual_start" != - ]; then
+      case "$recorded_start" in linux:*:*) continue ;; esac
+    fi
+    case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
+  done <<< "$snapshot"
+  printf '%s\n' "${groups# }"
+}
+
+fm_remote_job_report_unsafe_claim_survivors() { # <snapshot>
+  local snapshot=$1 pid actual_start group recorded_start id seen='' process_snapshot
+  local survivor survivor_group status survivor_start cwd readlink_bin reported=1
+  process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 0
+  if [ -x /usr/bin/readlink ]; then readlink_bin=/usr/bin/readlink
+  elif [ -x /bin/readlink ]; then readlink_bin=/bin/readlink
+  else readlink_bin=; fi
+  while IFS=$'\t' read -r pid actual_start group recorded_start id; do
+    [ -n "$pid" ] && [ -n "$actual_start" ] && [ -n "$id" ] || continue
+    if [ "$actual_start" != - ]; then
+      case "$recorded_start" in linux:*:*) continue ;; esac
+    fi
+    while read -r survivor survivor_group status; do
+      [ "$survivor_group" = "$group" ] && [[ "$status" != Z* ]] || continue
+      case " $seen " in *" $survivor "*) continue ;; esac
+      seen="$seen $survivor"
+      survivor_start=$(fm_remote_job_process_start "$survivor" 2>/dev/null || printf 'unavailable')
+      cwd=unavailable
+      [ -z "$readlink_bin" ] || cwd=$("$readlink_bin" "/proc/$survivor/cwd" 2>/dev/null || printf 'unavailable')
+      printf 'remote-job: NEEDING MANUAL CLEANUP: active claim pid %s recorded identity %s; surviving pid %s start %s cwd %s\n' \
+        "$pid" "$recorded_start" "$survivor" "$survivor_start" "$cwd" >&2
+      reported=0
+    done <<< "$process_snapshot"
+  done <<< "$snapshot"
+  return "$reported"
+}
+
+fm_remote_job_claim_snapshot_has_live_identity() { # <snapshot>
+  local snapshot=$1 process_snapshot pid group status actual_start
+  local claim_pid recorded_start recorded_group claim_start _ recorded_boot recorded_ticks actual_boot actual_ticks
+  process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 0
+  while IFS=$'\t' read -r claim_pid recorded_start recorded_group claim_start _; do
+    [ -n "$claim_pid" ] && [ "$recorded_group" = "$claim_pid" ] || continue
+    [ "$recorded_start" != - ] || continue
+    case "$claim_start" in linux:*:*) ;; *) continue ;; esac
+    case "$recorded_start" in linux:*:*) ;; *) return 0 ;; esac
+    recorded_boot=${recorded_start#linux:}
+    recorded_ticks=${recorded_boot##*:}
+    recorded_boot=${recorded_boot%:*}
+    case "$recorded_ticks" in ''|*[!0-9]*) return 0 ;; esac
+    while read -r pid group status; do
+      [ "$group" = "$recorded_group" ] && [[ "$status" != Z* ]] || continue
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      case "$actual_start" in linux:*:*) ;; *) return 0 ;; esac
+      actual_boot=${actual_start#linux:}
+      actual_ticks=${actual_boot##*:}
+      actual_boot=${actual_boot%:*}
+      case "$actual_ticks" in ''|*[!0-9]*) return 0 ;; esac
+      [ "$actual_boot" != "$recorded_boot" ] || [ "$actual_ticks" -lt "$recorded_ticks" ] || return 0
+    done <<< "$process_snapshot"
+  done <<< "$snapshot"
+  return 1
+}
+
+fm_remote_job_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" |
+    awk -F '\t' 'NF == 3 && !seen[$1 FS $2]++'
+}
+
+fm_remote_job_snapshot_additions() { # <existing> <current>
+  printf '%s\n-\n%s\n' "$1" "$2" |
+    awk -F '\t' '$0 == "-" { current = 1; next }
+      NF == 3 { key = $1 FS $2; if (current) { if (!seen[key]) print } else seen[key] = 1 }'
+}
+
+fm_remote_job_snapshot_has_live_identity() { # <snapshot> [excluded-pid]
+  local snapshot=$1 excluded_pid=${2:-} pid recorded_start actual_start
+  while IFS=$'\t' read -r pid recorded_start _; do
+    [ -n "$pid" ] && [ -n "$recorded_start" ] || continue
+    [ "$pid" != "$excluded_pid" ] || continue
+    fm_remote_job_process_non_zombie "$pid" || continue
+    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+    [ "$actual_start" != "$recorded_start" ] || return 0
+  done <<< "$snapshot"
+  return 1
+}
+
+fm_remote_job_snapshot_group_has_identity() { # <snapshot> <group> <root> <state>
+  local snapshot=$1 group=$2 root=$3 state=$4 pid recorded_start recorded_group identity
+  while IFS=$'\t' read -r pid recorded_start recorded_group; do
+    [ "$recorded_group" = "$group" ] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ "$identity" = "$recorded_start"$'\t'"$recorded_group" ] && return 0
+  done <<< "$snapshot"
+  return 1
+}
+
+fm_remote_job_group_all_members_scoped() { # <group> <root> <state>
+  local group=$1 root=$2 state=$3 process_snapshot pid member_group status found=1 identity
+  process_snapshot=$(/bin/ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 1
+  while read -r pid member_group status; do
+    [ "$member_group" = "$group" ] && [[ "$status" != Z* ]] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ -n "$identity" ] && [ "${identity##*$'\t'}" = "$group" ] || return 1
+    found=0
+  done <<< "$process_snapshot"
+  return "$found"
+}
+
+fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal> [excluded-groups] [guard-pid] [guard-start] [defer-guard]
+  local snapshot=$1 root=$2 state=$3 signal=$4 excluded_groups=${5:-}
+  local guard_pid=${6:-} guard_start=${7:-} defer_guard=${8:-0}
+  local pid recorded_start group identity own_group guard_group='' guard_group_seen=0 ordered_snapshot
+  local groups='' signalled_groups=''
+  own_group=$(fm_remote_job_process_pgid "$$") || return 1
+  if [ -n "$guard_pid" ] && [ -n "$guard_start" ]; then
+    guard_group=$(fm_remote_job_process_pgid "$guard_pid") || return 1
+  fi
+  if [ "$defer_guard" -eq 1 ] && [ -n "$guard_group" ]; then
+    excluded_groups="${excluded_groups:+$excluded_groups }$guard_group"
+  fi
+  while IFS=$'\t' read -r _ _ group; do
+    if [ "$group" = "$guard_group" ]; then guard_group_seen=1; continue; fi
+    case " $groups " in *" $group "*) ;; *) groups="$groups $group" ;; esac
+  done <<< "$snapshot"
+  [ "$guard_group_seen" -eq 0 ] || groups="$groups $guard_group"
+  for group in $groups; do
+    if [ "$group" != "$own_group" ] && [[ " $excluded_groups " != *" $group "* ]] &&
+      fm_remote_job_group_all_members_scoped "$group" "$root" "$state" &&
+      fm_remote_job_snapshot_group_has_identity "$snapshot" "$group" "$root" "$state"; then
+      fm_remote_job_guarded_signal "$guard_pid" "$guard_start" "$signal" "-$group" || return 1
+      signalled_groups="$signalled_groups $group"
+    fi
+  done
+  ordered_snapshot=$(printf '%s\n' "$snapshot" |
+    awk -F '\t' -v guard="$guard_pid" '$1 != guard { print } $1 == guard { held = $0 } END { if (held != "") print held }')
+  while IFS=$'\t' read -r pid recorded_start group; do
+    [ "$defer_guard" -eq 0 ] || [ "$pid" != "$guard_pid" ] || continue
+    case " $signalled_groups " in *" $group "*) continue ;; esac
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ "$identity" = "$recorded_start"$'\t'"$group" ] || continue
+    fm_remote_job_guarded_signal "$guard_pid" "$guard_start" "$signal" "$pid" || return 1
+  done <<< "$ordered_snapshot"
+}
+
+fm_remote_job_stop_guard_process() { # <pid> <start>
+  local pid=$1 start=$2 signal i actual_start platform
+  platform=$(fm_remote_job_platform)
+  for signal in TERM KILL; do
+    [ "$platform" = darwin ] || fm_remote_job_process_non_zombie "$pid" || return 0
+    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+    if ! fm_remote_job_start_identity_matches "$pid" "$start" "$actual_start"; then
+      [ -z "$actual_start" ] && return 0
+      fm_remote_job_report_stop_guard_mismatch "$pid" "$start"
+      return 1
+    fi
+    fm_remote_job_guarded_signal "$pid" "$start" "$signal" "$pid" || return 1
+    i=0
+    while [ "$i" -lt 50 ]; do
+      [ "$platform" = darwin ] || fm_remote_job_process_non_zombie "$pid" || return 0
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      if ! fm_remote_job_start_identity_matches "$pid" "$start" "$actual_start"; then
+        [ -z "$actual_start" ] && return 0
+        fm_remote_job_report_stop_guard_mismatch "$pid" "$start"
+        return 1
+      fi
+      i=$((i + 1))
+      sleep 0.1
+    done
+  done
+  return 1
+}
+
+fm_remote_job_wait_for_supervisor_lease_release() { # <state>
+  local state=$1 i=0
+  while [ "$i" -lt 50 ]; do
+    [ ! -e "$state/supervisor.lock/pid" ] && [ ! -L "$state/supervisor.lock/pid" ] && return 0
     i=$((i + 1))
     sleep 0.1
   done
-  if [ -n "$pgid" ]; then
-    kill -0 -- "-$pgid" 2>/dev/null || return 0
-  else
-    kill -0 "$pid" 2>/dev/null || return 0
+  return 1
+}
+
+fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
+  local pid=$1 account_home=${HOME:-} lock pid_file recorded_pid recorded_start actual_start supervisor state
+  [ -n "$account_home" ] || return 1
+  fm_remote_job_prepare_state "$account_home" || return 1
+  state=$FM_REMOTE_JOB_STATE
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  pid_file=$(fm_remote_job_worker_pid_path)
+  recorded_pid=$(fm_remote_job_read_single_line "$pid_file" 64) || return 1
+  [ "$recorded_pid" = "$pid" ] || return 1
+  recorded_pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
+  [ "$recorded_pid" = "$pid" ] || return 1
+  recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+  [ -n "$actual_start" ] || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
+  fm_remote_job_process_non_zombie "$pid" && return 1
+  fm_remote_job_lock_owner_matches_process "$account_home" "$state/supervisor.lock" || return 1
+  supervisor=$FM_REMOTE_JOB_OWNER_PID
+  fm_remote_job_process_scope "$supervisor" || return 1
+  [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+}
+
+fm_remote_job_resolve_stop_owner() { # <worker-pid> [validated-start]; sets FM_REMOTE_JOB_STOP_PID/START
+  local pid=$1 owner_start=${2:-} root state
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  if [ -z "$owner_start" ]; then
+    owner_start=$(fm_remote_job_process_start "$pid") || return 1
   fi
-  if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
-  i=0
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
-    i=$((i + 1))
-    sleep 0.1
+  fm_remote_job_stop_guard_matches "$pid" "$owner_start" || {
+    fm_remote_job_report_stop_guard_mismatch "$pid" "$owner_start"
+    return 1
+  }
+  if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
+    root=$FM_REMOTE_JOB_PROCESS_ROOT
+    state=$FM_REMOTE_JOB_PROCESS_STATE
+  else
+    return 1
+  fi
+  fm_remote_job_stop_guard_matches "$pid" "$owner_start" || {
+    fm_remote_job_report_stop_guard_mismatch "$pid" "$owner_start"
+    return 1
+  }
+  if fm_remote_job_lock_owner_matches_process "${HOME:-}" "$state/supervisor.lock"; then
+    FM_REMOTE_JOB_STOP_PID=$FM_REMOTE_JOB_OWNER_PID
+    FM_REMOTE_JOB_STOP_START=$FM_REMOTE_JOB_OWNER_START
+    fm_remote_job_process_scope "$FM_REMOTE_JOB_STOP_PID" || return 1
+    [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
+      [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+    return 0
+  fi
+  FM_REMOTE_JOB_STOP_PID=$pid
+  FM_REMOTE_JOB_STOP_START=$owner_start
+}
+
+fm_remote_job_stop_worker_tree() { # <pid> <validated-start>
+  local pid=$1 expected_start=${2:-} root state signal current known='' claim_current claim_known='' legacy_groups
+  local invalid_current invalid_known='' current_groups kill_current kill_groups new_current new_groups i actual_start unsafe_survivors
+  local snapshot_waited=0 snapshot_fifo=${FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO:-}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  if [ -z "$expected_start" ]; then
+    fm_remote_job_report_missing_stop_identity "$pid"
+    return 1
+  fi
+  if ! fm_remote_job_stop_identity_supported "$expected_start"; then
+    fm_remote_job_report_stop_guard_mismatch "$pid" "$expected_start"
+    return 1
+  fi
+  if ! fm_remote_job_stop_guard_matches "$pid" "$expected_start"; then
+    fm_remote_job_report_stop_guard_mismatch "$pid" "$expected_start"
+    return 1
+  fi
+  if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
+    root=$FM_REMOTE_JOB_PROCESS_ROOT
+    state=$FM_REMOTE_JOB_PROCESS_STATE
+    for signal in TERM KILL; do
+      current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
+      known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
+      claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
+      claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+      invalid_current=$(fm_remote_job_invalid_armed_claim_snapshot "$state") || return 1
+      invalid_known=$(fm_remote_job_invalid_claim_snapshot_merge "$invalid_known" "$invalid_current") || return 1
+      legacy_groups=$(fm_remote_job_claim_snapshot_unsafe_groups "$claim_known") || return 1
+      if [ -n "$invalid_known" ]; then
+        current_groups=$(printf '%s\n' "$current" |
+          awk -F '\t' 'NF == 3 && !seen[$3]++ { groups = groups separator $3; separator = " " } END { print groups }')
+        legacy_groups="${legacy_groups:+$legacy_groups }$current_groups"
+      fi
+      if [ "$snapshot_waited" -eq 0 ] && [ -n "$snapshot_fifo" ]; then
+        case "$snapshot_fifo" in /*) ;; *) return 1 ;; esac
+        [ -p "$snapshot_fifo" ] || return 1
+        IFS= read -r _ < "$snapshot_fifo" || return 1
+        snapshot_waited=1
+      fi
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      if ! fm_remote_job_start_identity_matches "$pid" "$expected_start" "$actual_start"; then
+        fm_remote_job_report_stop_guard_mismatch "$pid" "$expected_start"
+        return 1
+      fi
+      if [ -n "$claim_current" ] &&
+        ! fm_remote_job_signal_claim_snapshot "$claim_current" "$state" "$signal" "$pid" "$expected_start"; then
+        return 1
+      fi
+      if [ -n "$current" ] &&
+        ! fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal" "$legacy_groups" \
+          "$pid" "$expected_start" 1; then
+        return 1
+      fi
+      if [ -n "$invalid_known" ]; then
+        kill_current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
+        kill_groups=$(printf '%s\n' "$kill_current" |
+          awk -F '\t' 'NF == 3 && !seen[$3]++ { groups = groups separator $3; separator = " " } END { print groups }')
+        if [ -n "$kill_current" ] &&
+          ! fm_remote_job_signal_scope_snapshot "$kill_current" "$root" "$state" KILL "$kill_groups" \
+            "$pid" "$expected_start" 1; then
+          return 1
+        fi
+        fm_remote_job_stop_guard_process "$pid" "$expected_start" || return 1
+        fm_remote_job_report_invalid_claims "$invalid_known"
+        return 1
+      fi
+      i=0
+      while [ "$i" -lt 50 ]; do
+        current=$(fm_remote_job_scope_snapshot "$root" "$state") || return 1
+        new_current=$(fm_remote_job_snapshot_additions "$known" "$current") || return 1
+        known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
+        claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
+        claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+        invalid_current=$(fm_remote_job_invalid_armed_claim_snapshot "$state") || return 1
+        invalid_known=$(fm_remote_job_invalid_claim_snapshot_merge "$invalid_known" "$invalid_current") || return 1
+        if [ -n "$invalid_known" ]; then
+          fm_remote_job_report_invalid_claims "$invalid_known"
+          return 1
+        fi
+        # A restart supervisor can publish a child after the first snapshot.
+        # Signal only newly discovered, individually revalidated identities;
+        # leave already-signalled workers time to complete graceful shutdown.
+        if [ -n "$new_current" ]; then
+          new_groups=$(printf '%s\n' "$new_current" |
+            awk -F '\t' 'NF == 3 && !seen[$3]++ { groups = groups separator $3; separator = " " } END { print groups }')
+          fm_remote_job_signal_scope_snapshot "$new_current" "$root" "$state" "$signal" \
+            "$new_groups" "$pid" "$expected_start" 1 || return 1
+        fi
+        if ! fm_remote_job_snapshot_has_live_identity "$known" "$pid" &&
+          ! fm_remote_job_claim_snapshot_has_live_identity "$claim_known"; then
+          unsafe_survivors=0
+          fm_remote_job_report_unsafe_claim_survivors "$claim_known" && unsafe_survivors=1
+          fm_remote_job_stop_guard_process "$pid" "$expected_start" || return 1
+          [ "$unsafe_survivors" -eq 0 ] || return 1
+          return 0
+        fi
+        i=$((i + 1))
+        sleep 0.1
+      done
+    done
+    return 1
+  fi
+  for signal in TERM KILL; do
+    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+    if ! fm_remote_job_start_identity_matches "$pid" "$expected_start" "$actual_start"; then
+      fm_remote_job_report_stop_guard_mismatch "$pid" "$expected_start"
+      return 1
+    fi
+    fm_remote_job_guarded_signal "$pid" "$expected_start" "$signal" "$pid" || return 1
+    i=0
+    while [ "$i" -lt 50 ]; do
+      actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+      fm_remote_job_start_identity_matches "$pid" "$expected_start" "$actual_start" || return 0
+      i=$((i + 1))
+      sleep 0.1
+    done
   done
-  if [ -n "$pgid" ]; then
-    ! kill -0 -- "-$pgid" 2>/dev/null
-  else
-    ! kill -0 "$pid" 2>/dev/null
-  fi
+  return 1
 }
 
 fm_remote_job_read_single_line() {
@@ -1005,22 +1578,32 @@ fm_remote_job_read_single_line() {
 fm_remote_job_lock_owner_matches_process() {
   local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
   fm_remote_job_prepare_state "$account_home" || return 1
-  lock=$(fm_remote_job_worker_lock_path)
+  lock=${2:-$(fm_remote_job_worker_lock_path)}
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
   actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
   recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
   FM_REMOTE_JOB_OWNER_PID=$pid
+  FM_REMOTE_JOB_OWNER_START=$actual_start
+}
+
+fm_remote_job_supervisor_lease_root_matches() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 lock recorded_root
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock="$FM_REMOTE_JOB_STATE/supervisor.lock"
+  fm_remote_job_lock_owner_matches_process "$account_home" "$lock" || return 1
+  recorded_root=$(fm_remote_job_read_single_line "$lock/root" 8192) || return 1
+  [ "$recorded_root" = "$root" ]
 }
 
 fm_remote_job_worker_owned_alive() {
-  local root=$1 account_home=$2 lock pid pid_file identity_file command ps_bin
+  local root=$1 account_home=$2 lock pid pid_file identity_file command ps_bin owner_start confirmed_start
   [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
   fm_remote_job_prepare_state "$account_home" || return 1
   lock=$(fm_remote_job_worker_lock_path)
@@ -1031,7 +1614,8 @@ fm_remote_job_worker_owned_alive() {
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   identity_file=$(fm_remote_job_worker_identity_path)
   fm_remote_job_regular_bounded "$identity_file" 256 || return 1
-  fm_remote_job_probe "$account_home" || return 1
+  # Ownership is process identity, not readiness. A delayed heartbeat must not
+  # authorize a second supervisor for the same live owner.
   if fm_remote_job_lock_owner_matches_process "$account_home"; then
     [ "$pid" = "$FM_REMOTE_JOB_OWNER_PID" ] || return 1
     return 0
@@ -1040,8 +1624,17 @@ fm_remote_job_worker_owned_alive() {
     [ ! -e "$lock/start" ] && [ ! -L "$lock/start" ] &&
     [ ! -e "$lock/command" ] && [ ! -L "$lock/command" ] || return 1
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  owner_start=$(fm_remote_job_process_start "$pid") || return 1
   command=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
-  case "$command" in *"$root/bin/fm-remote-job-worker.sh"*) FM_REMOTE_JOB_OWNER_PID=$pid; return 0 ;; esac
+  confirmed_start=$(fm_remote_job_process_start "$pid") || return 1
+  fm_remote_job_start_identity_matches "$pid" "$owner_start" "$confirmed_start" || return 1
+  case "$command" in
+    *"$root/bin/fm-remote-job-worker.sh"*)
+      FM_REMOTE_JOB_OWNER_PID=$pid
+      FM_REMOTE_JOB_OWNER_START=$owner_start
+      return 0
+      ;;
+  esac
   return 1
 }
 
@@ -1147,7 +1740,7 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid
+  local root=$1 account_home=$2 worker pid owner_start
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
@@ -1160,23 +1753,51 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     # and would immediately replace a lone process kill, so stop the whole
     # worker tree through its isolated group.
     pid=$FM_REMOTE_JOB_OWNER_PID
-    fm_remote_job_stop_worker_tree "$pid" || {
+    owner_start=$FM_REMOTE_JOB_OWNER_START
+    fm_remote_job_resolve_stop_owner "$pid" "$owner_start" || {
+      FM_REMOTE_JOB_ERROR="stale remote job worker ownership could not be validated"
+      return 1
+    }
+    pid=$FM_REMOTE_JOB_STOP_PID
+    owner_start=$FM_REMOTE_JOB_STOP_START
+    fm_remote_job_stop_worker_tree "$pid" "$owner_start" || {
       FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
       return 1
     }
     wait "$pid" 2>/dev/null || true
+    fm_remote_job_wait_for_supervisor_lease_release "$FM_REMOTE_JOB_STATE" || {
+      FM_REMOTE_JOB_ERROR="stale remote job supervisor lease was not released"
+      return 1
+    }
+    FM_REMOTE_JOB_REPAIRED=1
+  elif fm_remote_job_lock_owner_matches_process "$account_home" "$FM_REMOTE_JOB_STATE/supervisor.lock"; then
+    pid=$FM_REMOTE_JOB_OWNER_PID
+    owner_start=$FM_REMOTE_JOB_OWNER_START
+    if fm_remote_job_supervisor_lease_root_matches "$root" "$account_home"; then return 0; fi
+    fm_remote_job_stop_worker_tree "$pid" "$owner_start" || {
+      FM_REMOTE_JOB_ERROR="stale remote job supervisor did not stop safely"
+      return 1
+    }
+    wait "$pid" 2>/dev/null || true
+    fm_remote_job_wait_for_supervisor_lease_release "$FM_REMOTE_JOB_STATE" || {
+      FM_REMOTE_JOB_ERROR="stale remote job supervisor lease was not released"
+      return 1
+    }
     FM_REMOTE_JOB_REPAIRED=1
   fi
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.
   set -m
-  nohup env \
-    HOME="$account_home" \
-    FM_ROOT_OVERRIDE="$root" \
-    FM_REMOTE_JOB_STATE_ROOT="$FM_REMOTE_JOB_STATE" \
-    FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
-    "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
+  (
+    cd "$root" || exit 1
+    exec nohup env \
+      HOME="$account_home" \
+      FM_ROOT_OVERRIDE="$root" \
+      FM_REMOTE_JOB_STATE_ROOT="$FM_REMOTE_JOB_STATE" \
+      FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
+      "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null
+  ) &
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac

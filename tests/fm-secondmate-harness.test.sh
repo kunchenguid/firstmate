@@ -2116,7 +2116,7 @@ SH
 
 test_config_reread_serializes_concurrent_pushes() {
   local w head fakebin marker entered log first_out second_out first_pid first_status second_status
-  local first_instr second_instr first_line second_line
+  local first_instr second_instr first_line second_line second_pid release delivery
   w=$(new_world config-reread-serialized-pushes)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -2128,6 +2128,7 @@ test_config_reread_serializes_concurrent_pushes() {
   mv "$fakebin/tmux" "$fakebin/tmux.real"
   marker="$w/first-send.marker"
   entered="$w/first-send.entered"
+  release="$w/first-send.release"
   log="$w/config-reread-serialized.tmux.log"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -2135,7 +2136,8 @@ case "\$*" in
   *send-keys*)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
       : > "$entered"
-      sleep 1
+      . "$ROOT/tests/timing-helpers.sh"
+      fm_test_wait_until 300 test -e "$release" || exit 1
     fi
     ;;
 esac
@@ -2148,22 +2150,33 @@ SH
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
       FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
+    printf '%s\n' "$?" > "$w/first.done"
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
-    [ -e "$entered" ] && break
-    sleep 0.02
-  done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
+  fm_test_wait_until 100 test -e "$entered" \
+    || fail "first config push did not reach pointer delivery"
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"
   second_out="$w/second-push.out"
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
-    "$ROOT/bin/fm-config-push.sh" > "$second_out" 2>&1
-  second_status=$?
-  wait "$first_pid"; first_status=$?
+  (
+    touch "$w/second.started"
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      "$ROOT/bin/fm-config-push.sh" > "$second_out" 2>&1
+    printf '%s\n' "$?" > "$w/second.done"
+  ) &
+  second_pid=$!
+  fm_test_wait_until 100 test -e "$w/second.started" \
+    || fail "second config push did not start"
+  touch "$release"
+  fm_test_wait_until 300 test -e "$w/first.done" \
+    || fail "first config push did not finish"
+  fm_test_wait_until 300 test -e "$w/second.done" \
+    || fail "second config push did not finish"
+  wait "$first_pid"; wait "$second_pid"
+  first_status=$(cat "$w/first.done")
+  second_status=$(cat "$w/second.done")
   expect_code 0 "$first_status" "first serialized config push failed"
   expect_code 0 "$second_status" "second serialized config push failed"
   second_instr=$(reread_instruction_path "$w/sm") \
@@ -2177,6 +2190,17 @@ SH
   second_line=$(inbox_stream "$w/home/state" sm | grep -n -F "CONFIG_REREAD: $second_instr" | head -n 1 | cut -d: -f1)
   [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ] \
     || fail "concurrent pushes delivered generations out of order"
+  delivery=$(inbox_stream "$w/home/state" sm)
+  [ "$(printf '%s\n' "$delivery" | grep -cF "CONFIG_REREAD: $first_instr")" -eq 1 ] \
+    && [ "$(printf '%s\n' "$delivery" | grep -cF "CONFIG_REREAD: $second_instr")" -eq 1 ] \
+    || fail "concurrent pushes duplicated a generation's reread pointer"
+  assert_contains "$(cat "$first_instr")" \
+    $'-----BEGIN config/crew-harness-----\none\n-----END config/crew-harness-----' \
+    "first delivered generation was torn or replaced by the second push"
+  assert_contains "$(cat "$second_instr")" \
+    $'-----BEGIN config/crew-harness-----\ntwo\n-----END config/crew-harness-----' \
+    "second delivered generation did not preserve its exact config bytes"
+  assert_no_reread_retry_stages "$w/home" sm
   pass "B21 config reread serializes concurrent propagation and delivery"
 }
 

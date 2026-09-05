@@ -268,7 +268,7 @@ LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
 cleanup_all() {
-  local wt
+  local wt status=$?
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
@@ -282,14 +282,20 @@ cleanup_all() {
 $RECORDED_WORKTREES
 EOF
   if [ "$LAB_READY" -eq 1 ]; then
-    PATH="$HERDR_ORIGINAL_PATH" \
-      "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
-    LAB_READY=0
+    if PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"; then
+      LAB_READY=0
+    else
+      status=1
+    fi
   fi
   rm -rf "$TMP_ROOT"
+  return "$status"
 }
-trap cleanup_all EXIT
+trap 'cleanup_all || exit 1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+LAB_READY=1
 PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not provision the isolated Herdr lab"
@@ -1433,5 +1439,5 @@ PATH="$HERDR_ORIGINAL_PATH" \
 LAB_READY=0
 pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the default-session tripwire intact"
 
-cleanup_all
+cleanup_all || exit 1
 trap - EXIT
