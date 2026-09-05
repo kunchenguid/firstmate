@@ -106,7 +106,7 @@ exclusion_reason() {
     fm-backend.test.sh)
       printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
       ;;
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|fm-trace-context-spawn.test.sh)
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh)
       printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
       ;;
     fm-pr-check-security.test.sh)
@@ -201,7 +201,6 @@ fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
-fm-trace-context-spawn.test.sh
 fm-pr-check-security.test.sh
 fm-teardown.test.sh
 fm-watcher-lock.test.sh

@@ -12,12 +12,7 @@
 # preference - an absent primary file and an absent destination file both mean
 # the same unconfigured default, so the generic absence mirror below converges
 # a secondmate without deciding the release-dependent floor; explicit "on" and
-# "off" preferences propagate as files. Primary
-# config/trace-context is copied at the launch convergence point as part of the
-# default-off W3C trace-context setup, while live convergence leaves it unchanged.
-# The primary passes its frozen home-session decision into a newly launched
-# Secondmate; see docs/trace-context.md.
-# It also pushes
+# "off" preferences propagate as files. It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
@@ -63,23 +58,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist}"
-
-# Items whose value is a home-SESSION enablement decision rather than durable
-# local configuration. They are inherited at the launch convergence point, where
-# the primary also hands the new process its frozen on/off decision, and left
-# untouched by live convergence into an already-running home, whose decision is
-# already frozen for its current session (bin/fm-trace-context-lib.sh).
-FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
-
-# True when <item> is session-scoped in the sense above.
-fm_config_inherit_item_session_scoped() {  # <item>
-  local item=$1 candidate
-  for candidate in $FM_SESSION_SCOPED_INHERITABLE_CONFIG; do
-    [ "$candidate" = "$item" ] && return 0
-  done
-  return 1
-}
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget launch-env-allowlist}"
 
 # The complete declared inherited-material set as home-relative paths, one per
 # line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
@@ -457,10 +436,6 @@ propagate_inheritable_config() {
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
-    if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
-      record_inheritable_config_result "$item" unchanged "session-scoped"
-      continue
-    fi
     src="$src_config/$item"
     dest="$dest_config/$item"
     if ! source_present=$(fm_config_source_present "$src"); then

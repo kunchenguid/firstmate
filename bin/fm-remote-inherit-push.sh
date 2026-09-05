@@ -6,9 +6,7 @@
 # (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
 # the receiving bin/fm-remote-inherit.sh enforces, so the two implementations in
 # one code revision cannot drift silently. Different local and remote revisions
-# fail closed as documented by that owner. FM_CONFIG_INHERIT_LIVE=1 marks a live
-# convergence push into an already-running home and skips session-scoped items,
-# exactly as the local propagation path does.
+# fail closed as documented by that owner.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,16 +53,6 @@ EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload
 ITEMS=$(fm_config_inherit_items)
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
-  if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ]; then
-    case "$rel" in
-      config/*)
-        if fm_config_inherit_item_session_scoped "${rel#config/}"; then
-          printf 'unchanged: %s\n' "$rel"
-          continue
-        fi
-        ;;
-    esac
-  fi
   case "$rel" in
     config/*) source="$CONFIG/${rel#config/}" ;;
     data/*) source="$DATA/${rel#data/}" ;;

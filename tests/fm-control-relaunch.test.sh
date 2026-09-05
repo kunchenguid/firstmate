@@ -23,8 +23,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -88,9 +86,6 @@ case "${1:-}" in
             : > "$FM_FAKE_TRACE_PREPARE"
             while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
           fi
-          ;;
-        'export TRACEPARENT='*)
-          [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
           ;;
       esac
     fi
@@ -184,7 +179,6 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
-    FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -387,14 +381,13 @@ test_relaunch_preserves_durable_task_metadata() {
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
+  local dir control_pid link_pid rc i=0 prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
-  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
   make_mv_failure_stub "$dir"
-  prepare="$dir/trace-prepare"
-  launch_release="$dir/trace-release"
+  prepare="$dir/launch-prepare"
+  launch_release="$dir/launch-release"
   waiting="$dir/meta-writer-waiting"
   ready="$dir/meta-writer-ready"
   release="$dir/meta-writer-release"
@@ -410,7 +403,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach launch delivery"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
@@ -454,30 +447,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     || fail "relaunch erased metadata published concurrently through the X interface"
   [ "$(meta_field "$dir" rl28 x_followups)" = 1 ] \
     || fail "relaunch erased the concurrent follow-up count"
-  traceparent=$(meta_field "$dir" rl28 traceparent)
-  fm_trace_context_valid "$traceparent" \
-    || fail "concurrent metadata publication erased the replacement's trace carrier"
   pass "fm-control relaunch: delivery and concurrent task metadata publication serialize"
-}
-
-test_disabled_relaunch_clears_prior_trace_context() {
-  local dir out rc
-  dir=$(new_case trace-off rl33)
-  add_ship_task "$dir" rl33 claude
-  printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
-    >> "$dir/home/state/rl33.meta"
-  printf '%s\n' "$$" > "$dir/home/state/.lock"
-  printf '%s off\n' "$$" > "$dir/home/state/.trace-context-effective"
-
-  out=$(run_control "$dir" rl33 relaunch --note "crossing trace boundary"); rc=$?
-  expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
-  [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
-    || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
-    || fail "disabled relaunch must clear the pane carrier before replacement launch"
-  ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
-    || fail "disabled relaunch must not export a replacement trace carrier"
-  pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -1536,7 +1506,6 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
-test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring

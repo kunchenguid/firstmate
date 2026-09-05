@@ -831,38 +831,6 @@ EOF
   pass "session start stays read-only when lock ownership cannot be published"
 }
 
-test_trace_context_effective_state_is_frozen_after_lock() {
-  local rec root home fakebin out frozen
-  rec=$(new_world trace-context-session-state)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  : > "$home/config/trace-context"
-
-  FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
-  [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = off ] \
-    || fail "session start must freeze an env-off override over a present config flag"
-
-  rm "$home/config/trace-context"
-  FM_TRACE_CONTEXT=on run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
-  [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = on ] \
-    || fail "a new session start must freeze an env-on override over an absent config flag"
-  frozen=$(cat "$home/state/.trace-context-effective")
-
-  sleep 300 &
-  holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
-  out=$(FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
-  assert_contains "$out" "READ-ONLY SESSION" "trace-context refusal fixture did not enter read-only mode"
-  [ "$(cat "$home/state/.trace-context-effective")" = "$frozen" ] \
-    || fail "a lock-refused session must not mutate the frozen trace-context state"
-
-  pass "locked session start freezes trace context and lock refusal leaves it unchanged"
-}
 
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
@@ -2566,7 +2534,6 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
-test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
