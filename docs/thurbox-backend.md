@@ -179,9 +179,25 @@ The default `allow` would create a second session sharing the name, after which 
 ## Teardown
 
 `session delete --force` is required, not a convenience.
-A bare `session delete` only soft-deletes the row and leaves the pane running until the TUI's next sync, so a headless Firstmate teardown would report success while the agent kept running.
+A bare `session delete` only soft-deletes the row and leaves the pane running, so a headless Firstmate teardown would report success while the agent kept running.
 
 Firstmate's tasks are created with `--repo-path` against an already-built Treehouse worktree, never with `--worktree-branch`, so thurbox owns no worktree for them and `--force` removes none.
+
+### Absence has to be proven, not inferred
+
+Row-absence is not endpoint-absence, and the gap is not a brief reap window.
+A soft `session delete` removes the row while the pane keeps running, and thurbox then refuses to force-delete a row it can no longer resolve - `session delete <id> --force` answers `Session not found` - so that pane outlives the session indefinitely.
+Reclaiming it needs `session restore` first.
+
+Firstmate's own teardown always passes `--force` and never creates that state, so the exposure is a delete from outside: the TUI's own, or a peer's.
+
+`session list --deleted` carries a `force_deleted` mark, which is the discriminator, verified on 2.18.0: a force-deleted session left no window on thurbox's socket, a soft-deleted one left its window running.
+`fm_backend_thurbox_deleted_disposition` reads it, and both teardown-facing reads consult it once the live inventory comes back empty:
+
+- `fm_backend_thurbox_endpoint_confirmed_gone` reports proof only when the session is absent from both inventories, or present in the deleted one as force-deleted.
+- `fm_backend_thurbox_agent_state` reports `missing` only in those same cases, and `unreadable` for a soft-deleted session.
+
+That second one is the sharper edge: only `dead` and `missing` license recovery, and recovery starts a replacement agent, so answering `missing` for a session whose agent is still running would invite a second agent into one task.
 
 ### Parked sessions
 
@@ -192,6 +208,17 @@ From 2.11.1 the session row says so directly: `stopped` is on both `session get`
 `fm_backend_thurbox_agent_state` reads it off the inventory row it already holds and reports `dead` rather than `missing`, so recovery relaunches into the session instead of treating the endpoint as gone.
 
 On 2.11.0 neither read could answer, which is what the version floor exists to refuse.
+
+## Sending text
+
+`session send` delivers text as one bracketed paste, so a leading `-`, quote or newline survives intact.
+That promise is about delivery; the argument parser is a separate gate.
+
+With the text as a trailing positional, a leading `-` is read as a flag and the call is refused outright with nothing typed - verified on 2.18.0 as `unexpected argument '-x' found`, exit 2.
+The adapter therefore sends as `session send --no-enter --json <uuid> -- <text>`.
+The order is exact: every flag and the uuid must precede the `--`, because `session send <id> -- <text> --no-enter` instead refuses `--no-enter`.
+
+A steer beginning with a dash is the case this protects; Firstmate's own export lines and harness launch commands never start with one.
 
 ## Known gaps
 

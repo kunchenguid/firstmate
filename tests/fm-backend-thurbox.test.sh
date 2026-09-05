@@ -41,6 +41,34 @@ COUNT_FILE="$RESP/.count"
   printf '\n'
 } >> "$LOG"
 
+# Model clap's leading-dash refusal for `session send`, the one parser rule this
+# adapter can get wrong. A bare positional beginning with `-` is read as a flag
+# unless it follows `--`; the real CLI answers exactly this way, and a fake that
+# accepted it would let a broken argv order pass the suite forever.
+if [ "${1:-}" = session ] && [ "${2:-}" = send ]; then
+  seen_ddash=0
+  seen_id=0
+  for a in "$@"; do
+    case "$a" in
+      session|send) continue ;;
+      --) seen_ddash=1; continue ;;
+    esac
+    [ "$seen_ddash" = 1 ] && continue
+    case "$a" in
+      -*)
+        if [ "$seen_id" = 1 ]; then
+          case "$a" in
+            --no-enter|--json|--pretty|--toon|--text|--full) continue ;;
+          esac
+          printf '{"error":"unexpected argument '"'"'%s'"'"' found","suggestion":"..."}\n' "$a"
+          exit 2
+        fi
+        ;;
+      *) seen_id=1 ;;
+    esac
+  done
+fi
+
 if [ "${1:-}" = version ]; then
   printf '{"version":"%s","tmux_socket":"%s","schema_version":41}\n' \
     "${FM_THURBOX_FAKE_VERSION:-2.11.0}" "${FM_THURBOX_FAKE_SOCKET:-thurbox}"
@@ -185,6 +213,28 @@ out=$(adapter "$d" "fm_backend_thurbox_capture '$TARGET' 50; echo \"rc=\$?\"")
 assert_contains "$out" 'rc=1' "a failed capture must return 1, not an empty success"
 pass "a failed pane read propagates failure rather than reporting an empty capture"
 
+# --- send: text the shell would read as a flag -------------------------------
+#
+# `session send` promises paste delivery, so a leading `-`, quote or newline
+# survives intact - and that promise is about the PASTE, not the argument
+# parser. With the text as a trailing positional, clap reads a leading `-` as a
+# flag of its own and refuses the call outright, so nothing is typed at all.
+# Reproduced against the real 2.18.0 binary; the fake above models the same rule.
+
+new_case send-leading-dash; d=$CASE_DIR
+respond "$d" 1 "$SESSION_ROW"
+out=$(adapter "$d" "fm_backend_thurbox_send_literal '$TARGET' '-x --weird leading dash'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "text beginning with a dash must still reach the pane"
+assert_log_args "the text must be delivered after -- so the parser cannot claim it" -- '-x --weird leading dash'
+pass "steer text the argument parser would read as a flag is still delivered"
+
+new_case send-ordinary; d=$CASE_DIR
+respond "$d" 1 "$SESSION_ROW"
+out=$(adapter "$d" "fm_backend_thurbox_send_literal '$TARGET' 'ordinary text'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "ordinary text must still be delivered"
+assert_log_args "ordinary text must ride the same delivery path" -- 'ordinary text'
+pass "ordinary steer text rides the same delivery path"
+
 # --- capture shape -----------------------------------------------------------
 
 new_case capture-no-trim; d=$CASE_DIR
@@ -260,11 +310,15 @@ pass "a failed session read reports unknown rather than guessing a busy verdict"
 # load-bearing: confusing them would let a CLI error authorize tearing down a
 # live agent.
 
+# Both inventories must answer before `missing` is licensed: the live one to
+# show the session is not running, the deleted one to show it was not merely
+# soft-deleted with its pane still alive.
 new_case agent-missing; d=$CASE_DIR
 respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[]'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = missing ] || fail "a successful inventory omitting the session must read missing (got: $out)"
-pass "a successful inventory that omits the session reports missing"
+pass "a session absent from both the live and deleted inventories reports missing"
 
 new_case agent-inventory-failure; d=$CASE_DIR
 respond_exit "$d" 1 1 '{"error":"database is locked"}'
@@ -324,7 +378,7 @@ new_case ready-then-write; d=$CASE_DIR
 respond "$d" 1 "$SESSION_ROW"
 adapter "$d" "fm_backend_thurbox_send_literal '$TARGET' hello" >/dev/null 2>&1
 assert_log_args "a write gated on the readiness check must address the session the target names" \
-  session send 11111111-2222-3333-4444-555555555555 hello
+  session send --no-enter --json 11111111-2222-3333-4444-555555555555 -- hello
 pass "a write gated on the readiness check still addresses the target's own session"
 
 new_case ready-then-key; d=$CASE_DIR
@@ -370,6 +424,60 @@ respond_exit "$d" 1 1 '{"error":"unavailable"}'
 out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
 assert_contains "$out" 'rc=1' "a failed inventory is not proof of absence"
 pass "endpoint absence needs a successful inventory, never a failed read"
+
+# --- absence has to be proven, not inferred from the row -----------------------
+#
+# A soft `session delete` removes the row while the pane keeps running, and
+# thurbox will not force-delete a row it can no longer resolve, so that pane
+# outlives the session indefinitely. Row-absence therefore does NOT prove
+# endpoint-absence. `session list --deleted` carries `force_deleted`, which is
+# the discriminator: true means the window was killed, false means it is still
+# there. Verified against 2.18.0.
+
+new_case gone-soft-deleted; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false}]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=1' "a soft-deleted session whose pane may still run is NOT proven gone"
+pass "a soft-deleted endpoint is never reported as provably gone while its pane may still run"
+
+new_case gone-force-deleted; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":true}]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "a force-deleted session had its window killed and IS proven gone"
+pass "a force-deleted endpoint is proven gone"
+
+new_case gone-absent-entirely; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[]'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "a session in neither list is proven gone"
+pass "a session absent from both the live and deleted inventories is proven gone"
+
+new_case gone-deleted-read-fails; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond_exit "$d" 2 1 '{"error":"unavailable"}'
+out=$(adapter "$d" "fm_backend_thurbox_endpoint_confirmed_gone '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=1' "a failed deleted-inventory read is not proof of absence"
+pass "absence needs both inventories to answer, never a failed read"
+
+# Recovery is the sharper edge: only dead and missing license a relaunch, so
+# reporting missing for a session whose agent is still running invites a second
+# agent into the same task.
+new_case agent-soft-deleted; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":false}]'
+out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
+[ "$out" = unreadable ] || fail "a soft-deleted session must not read missing and license a relaunch (got: $out)"
+pass "a soft-deleted session reads unreadable, so recovery cannot start a second agent beside a live one"
+
+new_case agent-force-deleted; d=$CASE_DIR
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 2 '[{"id":"11111111-2222-3333-4444-555555555555","name":"x","force_deleted":true}]'
+out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
+[ "$out" = missing ] || fail "a force-deleted session is authoritatively gone (got: $out)"
+pass "a force-deleted session reports missing, which correctly licenses recovery"
 
 # --- home scoping ------------------------------------------------------------
 

@@ -1093,6 +1093,53 @@ Observed version:
 The compatibility floor is 2.11.1 rather than 2.11.0 because 2.11.0 could not
 report a parked session; see "Parked sessions" below.
 
+### 2.18.0 verification pass
+
+Re-verified 2026-09-05 against thurbox-cli 2.18.0, seven minor releases after the
+adapter was written. All twelve documented contracts below still hold and the
+2.11.1 floor stays correct. Two defects surfaced, neither caused by that drift;
+both are fixed and both carry a regression.
+
+**`session send` argument order.** With the text as a trailing positional the
+parser claims a leading dash:
+
+```sh
+thurbox-cli session send <id> '-x --weird' --no-enter --json
+```
+
+```text
+{"error":"unexpected argument '-x' found","suggestion":"..."}
+exit 2
+```
+
+Nothing is typed. The working form is `session send --no-enter --json <id> -- <text>`.
+
+**Absence proof.** A soft delete removes the row while the pane keeps running,
+and the row can then no longer be force-deleted at all:
+
+```text
+session delete <id>            -> {"deleted":true,"killed_window":false}
+session delete <id> --force    -> {"error":"Session not found: ..."}   exit 1
+tmux -L thurbox list-windows   -> tb-<name> still present
+```
+
+`session restore` reclaims it. `session list --deleted` distinguishes the two
+cases, and the window count confirms the mark is trustworthy:
+
+```text
+fmfix-hard   force_deleted=true    windows on socket: 0
+fmfix-soft   force_deleted=false   windows on socket: 1
+```
+
+**`session exec` identity.** The 2.11 leak is fixed and the help says so: the
+`THURBOX_*` namespace is scrubbed of the caller's values and replaced with the
+target's. Everything outside that namespace is still inherited, so it is safe
+for identity but is not a clean environment. The adapter still does not use it.
+
+`tests/fm-backend-thurbox-smoke.test.sh` pins both defects against the real
+binary, because a fake can only ever model the argument parser and the deleted
+inventory.
+
 ### Error stream
 
 `thurbox-cli` reports failures as a JSON object on stdout with an empty stderr and a non-zero exit.

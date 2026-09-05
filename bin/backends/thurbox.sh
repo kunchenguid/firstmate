@@ -463,11 +463,19 @@ fm_backend_thurbox_current_path() {  # <target>
 # fm_backend_thurbox_send_literal: type <text> WITHOUT submitting. thurbox
 # delivers it as one bracketed paste, so it arrives literally - no shell sees
 # it and a leading '-', quote or newline survives intact. That is why this
-# adapter passes the text as a positional argument with no escaping of its
-# own, unlike the tmux path's send-keys -l.
+# adapter passes the text with no escaping of its own, unlike the tmux path's
+# send-keys -l.
+#
+# The `--` matters and its position is exact. That paste promise is about
+# DELIVERY; the argument parser is a separate gate, and with the text as a
+# trailing positional a leading '-' is read as a flag and the call is refused
+# outright with nothing typed at all (verified against 2.18.0: `unexpected
+# argument '-x' found`, exit 2). Every flag must precede the `--` and the uuid
+# must too, because `session send <id> -- <text> --no-enter` instead refuses
+# --no-enter. A steer beginning with a dash is the case this protects.
 fm_backend_thurbox_send_literal() {  # <target> <text>
   fm_backend_thurbox_target_ready "$1" || return 1
-  thurbox-cli session send "$FM_BACKEND_THURBOX_SESSION" "$2" --no-enter --json >/dev/null 2>&1
+  thurbox-cli session send --no-enter --json "$FM_BACKEND_THURBOX_SESSION" -- "$2" >/dev/null 2>&1
 }
 
 # fm_backend_thurbox_normalize_key: firstmate's key vocabulary onto thurbox's
@@ -688,7 +696,14 @@ fm_backend_thurbox_agent_state() {  # <target>
   row=$(printf '%s' "$inventory" | jq -c --arg id "$FM_BACKEND_THURBOX_SESSION" \
     'map(select(.id == $id)) | first // empty' 2>/dev/null) || { printf 'unreadable'; return 0; }
   if [ -z "$row" ]; then
-    printf 'missing'
+    # `missing` licenses recovery, and recovery starts a replacement agent. A
+    # soft-deleted session is absent from this inventory while its agent keeps
+    # running, so answering `missing` here would invite a second agent into the
+    # same task. Only an authoritative disposition may license that.
+    case "$(fm_backend_thurbox_deleted_disposition "$FM_BACKEND_THURBOX_SESSION")" in
+      absent|force-deleted) printf 'missing' ;;
+      *) printf 'unreadable' ;;
+    esac
     return 0
   fi
   if [ "$(printf '%s' "$row" | jq -r '.stopped // empty' 2>/dev/null)" = true ]; then
@@ -735,16 +750,56 @@ fm_backend_thurbox_kill() {  # <target>
   thurbox-cli session delete "$FM_BACKEND_THURBOX_SESSION" --force --json >/dev/null 2>&1
 }
 
+# fm_backend_thurbox_deleted_disposition: what became of a session that is no
+# longer in the live inventory. Prints `force-deleted`, `soft-deleted`, or
+# `absent`, and returns 1 when the deleted inventory could not be read.
+#
+# This exists because ROW-absence is not ENDPOINT-absence. A soft
+# `session delete` removes the row while the pane keeps running, and thurbox
+# then refuses to force-delete a row it can no longer resolve
+# (`Session not found`), so that pane outlives the session indefinitely rather
+# than for a reap window. `session list --deleted` carries `force_deleted`,
+# which is the only cheap discriminator: true means the window was killed,
+# false means it is still there. Verified against 2.18.0 - a force-deleted
+# session left zero windows on thurbox's socket, a soft-deleted one left one.
+fm_backend_thurbox_deleted_disposition() {  # <session-uuid>
+  local uuid=$1 deleted row forced
+  [ -n "$uuid" ] || return 1
+  deleted=$(fm_backend_thurbox_json session list --deleted) || return 1
+  row=$(printf '%s' "$deleted" | jq -c --arg id "$uuid" \
+    'map(select(.id == $id)) | first // empty' 2>/dev/null) || return 1
+  if [ -z "$row" ]; then
+    printf 'absent'
+    return 0
+  fi
+  forced=$(printf '%s' "$row" | jq -r '.force_deleted // empty' 2>/dev/null)
+  if [ "$forced" = true ]; then
+    printf 'force-deleted'
+  else
+    printf 'soft-deleted'
+  fi
+}
+
 # fm_backend_thurbox_endpoint_confirmed_gone: a POSITIVE proof of absence for
-# teardown safety - the inventory read succeeded and does not contain the
-# session. A failed read is not proof and returns 1.
+# teardown safety.
+#
+# Absence from the live inventory is necessary but NOT sufficient: a soft
+# delete produces exactly that while the agent keeps running (see
+# fm_backend_thurbox_deleted_disposition). Proof therefore needs both reads to
+# answer, and a session sitting soft-deleted is reported as NOT proven rather
+# than allowing teardown to record a pane it never removed as gone. A failed
+# read of either inventory is not proof either.
 fm_backend_thurbox_endpoint_confirmed_gone() {  # <target>
   fm_backend_thurbox_parse_target "$1" || return 1
   local inventory hit
   inventory=$(fm_backend_thurbox_json session list) || return 1
   hit=$(printf '%s' "$inventory" | jq -r --arg id "$FM_BACKEND_THURBOX_SESSION" \
     'map(select(.id == $id)) | length' 2>/dev/null)
-  [ "$hit" = 0 ]
+  [ "$hit" = 0 ] || return 1
+  case "$(fm_backend_thurbox_deleted_disposition "$FM_BACKEND_THURBOX_SESSION")" in
+    absent|force-deleted) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_thurbox_list_live: one "<target>\t<name>" line per live session.
