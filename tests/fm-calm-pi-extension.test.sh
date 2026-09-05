@@ -3164,6 +3164,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -3228,18 +3229,36 @@ export default function (pi: ExtensionAPI): void {
           stream.end();
           return;
         }
-        // Wake as soon as the run is aborted so Escape settles the turn promptly.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, model.id === "delayed-boat" ? 90000 : 1500);
-          options?.signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
-        });
+        // Hold the stock-row probe until the shell has captured its active TUI.
+        // A fixed response delay can expire before a loaded runner captures it.
+        if (model.id === "delayed") {
+          writeFileSync("state/working.ready", "ready\n");
+          for (let attempt = 0; attempt < 1200; attempt += 1) {
+            if (existsSync("state/working.release") || options?.signal?.aborted) break;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          unlinkSync("state/working.ready");
+          if (!existsSync("state/working.release") && !options?.signal?.aborted) {
+            output.stopReason = "error";
+            output.errorMessage = "working-row fixture release timed out";
+            stream.push({ type: "error", reason: "error", error: output });
+            stream.end();
+            return;
+          }
+        } else {
+          // Wake as soon as the run is aborted so Escape settles the turn promptly.
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 90000);
+            options?.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
         if (options?.signal?.aborted) {
           output.stopReason = "aborted";
           stream.push({ type: "error", reason: "aborted", error: output });
@@ -3911,14 +3930,17 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq "Working..." "$working_snapshot"; then
+    if [ -f "$project/state/working.ready" ] && grep -Fq "Working..." "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
+  [ -f "$project/state/working.ready" ] || fail "the stock working-row capture did not occur during an active provider operation"
+  assert_not_contains "$(cat "$working_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the stock working-row fixture completed before its active capture"
   assert_contains "$(cat "$working_snapshot")" "Working..." "Calm off did not keep Pi's stock working row"
   assert_not_contains "$(cat "$working_snapshot")" '\__/' "Calm off showed the working ship"
+  : >"$project/state/working.release"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
 
