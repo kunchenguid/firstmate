@@ -1298,27 +1298,41 @@ test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
-  local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
-doc = YAML.load_file(ARGV[0])
-job = doc.fetch("jobs").fetch("tests-herdr")
-step = job.fetch("steps").find { |s|
-  s.is_a?(Hash) && s["name"] == "Run real-Herdr family (serial, required)"
-}
-raise "missing family-run step" if step.nil?
-raise "family-run step has no timeout-minutes" unless step.key?("timeout-minutes")
-puts JSON.generate(
-  "job_timeout" => job.fetch("timeout-minutes"),
-  "step_timeout" => step.fetch("timeout-minutes")
-)
-' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
-  job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
-    || fail "could not read job timeout from parsed workflow"
-  step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
-    || fail "could not read step timeout from parsed workflow"
+  #
+  # PyYAML is not a declared prerequisite, so a contributor without it skips
+  # instead of being blocked. That skip must never stand under CI: the runner's
+  # detect_gate_skip only reads the *first* non-empty line of a script's output,
+  # so a skip printed by this case - one of the last in a long file - is
+  # invisible to it, and the run is still recorded gate_skip=false under a
+  # family whose expected class is none. The tripwire would go unchecked while
+  # the timing artifact called the script fully run, so a CI runner missing the
+  # parser is a hard failure rather than a quiet degradation.
+  if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    if [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; then
+      fail "python3 PyYAML not found (required to parse .github/workflows/ci.yml as YAML)"
+    fi
+    echo "skip: python3 PyYAML not found (required to parse .github/workflows/ci.yml as YAML)"
+    return 0
+  fi
+  local timeouts job_timeout step_timeout
+  timeouts=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import sys, yaml
+
+doc = yaml.safe_load(open(sys.argv[1]))
+job = doc["jobs"]["tests-herdr"]
+step = next((s for s in job["steps"]
+             if isinstance(s, dict)
+             and s.get("name") == "Run real-Herdr family (serial, required)"), None)
+if step is None:
+    raise SystemExit("missing family-run step")
+if "timeout-minutes" not in step:
+    raise SystemExit("family-run step has no timeout-minutes")
+print(job["timeout-minutes"], step["timeout-minutes"])
+PY
+  ) || fail "could not parse tests-herdr timeouts from ci.yml"
+  read -r job_timeout step_timeout <<<"$timeouts"
+  [ -n "$job_timeout" ] && [ -n "$step_timeout" ] \
+    || fail "could not read both timeouts from parsed workflow: $timeouts"
   [ "$job_timeout" = 75 ] \
     || fail "tests-herdr job backstop must stay 75 minutes, got $job_timeout"
   [ "$step_timeout" = 20 ] \
