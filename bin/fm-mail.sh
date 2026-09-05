@@ -226,31 +226,47 @@ mail_record_evidence() {
 mail_rollback_wake_locked() {
   # Remove a just-appended wake row plus any partial journal/cursor evidence.
   # Runs under the held FM_WAKE_QUEUE_LOCK, so the rewrite cannot race an
-  # acknowledgement; failure means the poll already fails closed so the next
-  # poll's queue heal still reconciles any residual row.
-  local wake_key=$1 generation=$2 id=$3 clean_key tmp queue_status=0
+  # acknowledgement. The journal entry is removed FIRST and required: deleting
+  # the wake row while a journal entry survives would let the next heal mark
+  # the uid surfaced without a wake. If the journal cannot be verified and
+  # cleaned, fail the rollback so the row stays queued and is delivered -
+  # never suppressed.
+  local wake_key=$1 generation=$2 id=$3 clean_key tmp jtmp
   clean_key=$(printf '%s' "$wake_key" | fm_wake_clean_field)
+  # Journal evidence: only when this uid has an entry must it be removed now.
+  # When the journal is unwritable (the usual reason both records failed) no
+  # entry exists and there is nothing to clean.
+  if awk -F '\t' -v g="$generation" -v i="$id" \
+      '$1 == g && $2 == i { found=1 } END { exit found ? 0 : 1 }' \
+      "$WOKEN" 2>/dev/null; then
+    jtmp=$(mktemp "$WOKEN.rm.XXXXXX") || return 1
+    if ! awk -F '\t' -v g="$generation" -v i="$id" \
+        '!($1 == g && $2 == i)' "$WOKEN" > "$jtmp" 2>/dev/null; then
+      rm -f -- "$jtmp"
+      return 1
+    fi
+    if ! mv -f -- "$jtmp" "$WOKEN" 2>/dev/null; then
+      rm -f -- "$jtmp"
+      return 1
+    fi
+  fi
+  # Queue row: remove it (required) so nothing ackable survives without a
+  # durable record.
   tmp=$(mktemp "$FM_WAKE_QUEUE.rollback.XXXXXX") || return 1
-  awk -F '\t' -v key="$clean_key" '
+  if ! awk -F '\t' -v key="$clean_key" '
     NF >= 5 && $3 == "check" && $4 == key { next }
     { print }
-  ' "$FM_WAKE_QUEUE" > "$tmp" || queue_status=$?
-  if [ -n "$queue_status" ] && [ "$queue_status" -ne 0 ]; then
+  ' "$FM_WAKE_QUEUE" > "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi
   chmod 0600 "$tmp" 2>/dev/null || true
-  mv -f -- "$tmp" "$FM_WAKE_QUEUE" || {
+  if ! mv -f -- "$tmp" "$FM_WAKE_QUEUE"; then
     rm -f -- "$tmp"
     return 1
-  }
-  if awk -F '\t' -v g="$generation" -v i="$id" \
-      '!($1 == g && $2 == i)' "$WOKEN" > "$WOKEN.tmp.$$" 2>/dev/null; then
-    if mv -f -- "$WOKEN.tmp.$$" "$WOKEN" 2>/dev/null; then
-      :
-    fi
   fi
-  rm -f -- "$WOKEN.tmp.$$"
+  # Cursor record: best-effort; a surviving cursor line only means already
+  # surfaced, which the heal tolerates.
   if grep -vx -e "$id" "$CURSOR" > "$CURSOR.tmp.$$" 2>/dev/null; then
     if mv -f -- "$CURSOR.tmp.$$" "$CURSOR" 2>/dev/null; then
       :
