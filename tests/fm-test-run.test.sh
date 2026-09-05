@@ -1307,11 +1307,20 @@ import re
 import sys
 
 
-def section(lines, indent, header):
-    pattern = re.compile(" " * indent + header + r"\s*(?:#.*)?")
+def yaml_token(value):
+    escaped = re.escape(value)
+    return rf'(?:{escaped}|"{escaped}"|\'{escaped}\')'
+
+
+def section(lines, indent, key, value=None, sequence=False):
+    prefix = r"-\s+" if sequence else ""
+    suffix = "" if value is None else rf"\s*{yaml_token(value)}"
+    pattern = re.compile(
+        " " * indent + prefix + yaml_token(key) + ":" + suffix + r"\s*(?:#.*)?"
+    )
     matches = [i for i, line in enumerate(lines) if pattern.fullmatch(line)]
     if len(matches) != 1:
-        raise SystemExit(f"expected one workflow section: {header}")
+        raise SystemExit(f"expected one workflow section: {key}")
     start = matches[0] + 1
     end = start
     while end < len(lines):
@@ -1324,7 +1333,11 @@ def section(lines, indent, header):
 
 
 def timeout(lines, indent):
-    pattern = re.compile(" " * indent + r"timeout-minutes:\s*(\d+)\s*(?:#.*)?")
+    pattern = re.compile(
+        " " * indent
+        + yaml_token("timeout-minutes")
+        + r":\s*(\d+)\s*(?:#.*)?"
+    )
     values = [int(match[1]) for line in lines if (match := pattern.fullmatch(line))]
     if len(values) != 1:
         raise SystemExit("expected one direct timeout-minutes scalar")
@@ -1333,12 +1346,15 @@ def timeout(lines, indent):
 
 with open(sys.argv[1], encoding="utf-8") as source:
     lines = source.read().splitlines()
-jobs = section(lines, 0, "jobs:")
-job = section(jobs, 2, "tests-herdr:")
-steps = section(job, 4, "steps:")
-name = re.escape("Run real-Herdr family (serial, required)")
+jobs = section(lines, 0, "jobs")
+job = section(jobs, 2, "tests-herdr")
+steps = section(job, 4, "steps")
 step = section(
-    steps, 6, rf"- name:\s*(?:{name}|\"{name}\"|'{name}')"
+    steps,
+    6,
+    "name",
+    "Run real-Herdr family (serial, required)",
+    sequence=True,
 )
 print(json.dumps({
     "job_timeout": timeout(job, 4),

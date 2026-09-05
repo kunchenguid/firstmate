@@ -111,7 +111,10 @@ set -eu
 
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+      -e 'printf "%d\n", clock_gettime(CLOCK_MONOTONIC) * 1000'
   else
     echo $(($(date +%s) * 1000))
   fi
