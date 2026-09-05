@@ -1928,11 +1928,11 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
-# fm_backend_herdr_agent_state: recovery-grade state for the same session-start
-# sweep as the tmux classifier. It reuses the husk classifier rather than
-# creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# fm_backend_herdr_agent_state: ordinary recovery-grade state for the same
+# session-start sweep as the tmux classifier. It reuses the husk classifier
+# rather than creating a second Herdr state machine: a structurally gone pane
+# is `missing`, a confirmed agent-less pane is `dead`, a registered agent is
+# `alive`, and an unexpected or failed API read is `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -1940,6 +1940,89 @@ fm_backend_herdr_agent_state() {  # <target>
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
+    *) printf 'unreadable' ;;
+  esac
+}
+
+# fm_backend_herdr_registered_process_state: independently corroborate one
+# registered agent against the exact pane's foreground process. Herdr can retain
+# an idle/done Pi registration after Pi exits and the pane returns to its shell.
+# A different foreground process group proves the registered process is still
+# live enough that lifecycle recovery must refuse to replace it. Only the
+# existing strict lone-idle-shell proof can establish the stale-registration
+# counterfactual. Prompt helpers may transiently share the shell's group, so
+# ambiguous shell-group samples retry for the same bounded window as that proof.
+# Prints live|shell|unknown and never mutates Herdr's registry.
+fm_backend_herdr_registered_process_state() {  # <session> <pane-id>
+  local session=$1 pane=$2 attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}
+  local info shell_pid foreground_pgid count
+  while :; do
+    info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || { printf 'unknown'; return 0; }
+    if ! printf '%s' "$info" | jq -e --arg pane "$pane" '
+      .result.type == "pane_process_info"
+      and .result.process_info.pane_id == $pane
+    ' >/dev/null 2>&1; then
+      printf 'unknown'
+      return 0
+    fi
+    shell_pid=$(printf '%s' "$info" | jq -er ".result.process_info.shell_pid | select(type == \"number\" and . > 1) | floor" 2>/dev/null) || { printf 'unknown'; return 0; }
+    foreground_pgid=$(printf '%s' "$info" | jq -er ".result.process_info.foreground_process_group_id | select(type == \"number\" and . > 1) | floor" 2>/dev/null) || { printf 'unknown'; return 0; }
+    count=$(printf '%s' "$info" | jq -er ".result.process_info.foreground_processes | select(type == \"array\") | length" 2>/dev/null) || { printf 'unknown'; return 0; }
+    if [ "$foreground_pgid" != "$shell_pid" ] && [ "$count" -gt 0 ]; then
+      printf 'live'
+      return 0
+    fi
+    if [ "$foreground_pgid" = "$shell_pid" ] \
+       && fm_backend_herdr_pane_idle_shell_sample "$session" "$pane" >/dev/null; then
+      printf 'shell'
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || { printf 'unknown'; return 0; }
+    sleep 0.1
+  done
+}
+
+# fm_backend_herdr_recovery_agent_state: lifecycle-only strengthening of the
+# ordinary state read. A positive registry entry remains alive unless the exact
+# pane independently proves that only its lone idle shell remains. An unreadable
+# or contradictory process surface stays unreadable rather than turning either
+# a live agent or an arbitrary foreground command into a recovery candidate.
+fm_backend_herdr_relaunch_candidate_live() {  # <session> <pane-id>
+  local session=$1 pane=$2 out
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg pane "$pane" '
+    .result.type == "agent_info"
+    and .result.agent.pane_id == $pane
+    and (.result.agent.agent_status == "working"
+      or .result.agent.agent_status == "idle"
+      or .result.agent.agent_status == "done"
+      or .result.agent.agent_status == "blocked")
+  ' >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_registered_process_state "$session" "$pane")" = live ]
+}
+
+fm_backend_herdr_recovery_agent_state() {  # <target>
+  local target=$1 pane_state process_state
+  fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+  pane_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$pane_state" in
+    dead) printf 'missing' ;;
+    no-agent)
+      process_state=$(fm_backend_herdr_registered_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      case "$process_state" in
+        shell) printf 'dead' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
+    live)
+      process_state=$(fm_backend_herdr_registered_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      case "$process_state" in
+        live) printf 'alive' ;;
+        shell) printf 'dead' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
     *) printf 'unreadable' ;;
   esac
 }
@@ -1952,6 +2035,184 @@ fm_backend_herdr_agent_alive() {  # <target>
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# fm_backend_herdr_relaunch_candidate_create creates a fresh, unpublished task
+# endpoint in one exact recorded workspace and starts its shell in the already
+# validated worktree. It never looks up, adopts, renames, or closes an existing
+# task endpoint. Complete response-derived identities plus a matching pane read
+# are required before cleanup authority is exposed to the caller.
+fm_backend_herdr_relaunch_candidate_create() {  # <session> <workspace-id> <label> <validated-worktree>
+  local session=$1 workspace_id=$2 label=$3 expected=$4 expected_real out pane
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID=""
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID=""
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_CLEANUP_SAFE=0
+  case "$expected" in
+    /*) ;;
+    *) echo "error: herdr replacement worktree must be absolute" >&2; return 1 ;;
+  esac
+  case "$expected" in *$'\n'*|*$'\r'*|*$'\t'*) echo "error: herdr replacement worktree contains unsupported control whitespace" >&2; return 1 ;; esac
+  case "$label" in ''|*[!A-Za-z0-9._-]*) echo "error: herdr replacement label is invalid" >&2; return 1 ;; esac
+  if ! fm_backend_endpoint_atom_valid "$session" \
+     || ! fm_backend_endpoint_atom_valid "$workspace_id"; then
+    echo "error: herdr replacement session or workspace identity is invalid" >&2
+    return 1
+  fi
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || return 1
+  fm_backend_herdr_server_ensure "$session" || return 1
+  out=$(fm_backend_herdr_cli "$session" tab create \
+    --workspace "$workspace_id" --cwd "$expected_real" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: herdr replacement endpoint creation failed ambiguously" >&2
+    return 1
+  }
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID" ] \
+     || [ -z "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID" ] \
+     || ! fm_backend_endpoint_atom_valid "${FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID//:/_}" \
+     || ! fm_backend_endpoint_atom_valid "${FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID//:/_}"; then
+    echo "error: herdr replacement endpoint returned incomplete or invalid identities" >&2
+    return 1
+  fi
+  if ! printf '%s' "$out" | jq -e \
+      --arg workspace "$workspace_id" \
+      --arg tab "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID" \
+      --arg pane "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID" '
+        .result.type == "tab_created"
+        and .result.tab.tab_id == $tab
+        and .result.tab.workspace_id == $workspace
+        and .result.root_pane.pane_id == $pane
+        and .result.root_pane.workspace_id == $workspace
+        and .result.root_pane.tab_id == $tab
+      ' >/dev/null 2>&1; then
+    echo "error: herdr replacement endpoint returned contradictory identities" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2034  # caller consumes the response-derived cleanup authority
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_CLEANUP_SAFE=1
+  pane=$(fm_backend_herdr_cli "$session" pane get "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID" 2>/dev/null) || return 1
+  if ! printf '%s' "$pane" | jq -e \
+      --arg workspace "$workspace_id" \
+      --arg tab "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID" \
+      --arg pane "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID" \
+      --arg cwd "$expected_real" '
+        .result.type == "pane_info"
+        and .result.pane.workspace_id == $workspace
+        and .result.pane.tab_id == $tab
+        and .result.pane.pane_id == $pane
+        and .result.pane.foreground_cwd == $cwd
+      ' >/dev/null 2>&1; then
+    echo "error: herdr replacement endpoint did not verify in its recorded workspace and worktree" >&2
+    return 1
+  fi
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID")" = no-agent ] || {
+    echo "error: herdr replacement endpoint acquired an agent before launch ownership was established" >&2
+    return 1
+  }
+  return 0
+}
+
+fm_backend_herdr_relaunch_candidate_matches() {  # <session> <workspace-id> <tab-id> <pane-id>
+  local session=$1 workspace_id=$2 tab_id=$3 pane_id=$4 out
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e \
+    --arg workspace "$workspace_id" --arg tab "$tab_id" --arg pane "$pane_id" '
+      .result.type == "pane_info"
+      and .result.pane.workspace_id == $workspace
+      and .result.pane.tab_id == $tab
+      and .result.pane.pane_id == $pane
+    ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_relaunch_candidate_discover() {  # <session> <workspace-id> <label> <validated-worktree>
+  local session=$1 workspace_id=$2 label=$3 expected=$4 expected_real tabs panes match tab_id pane_id info
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID=
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID=
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || return 1
+  match=$(printf '%s' "$tabs" | jq -r --arg label "$label" '
+    if (.result.tabs | type) == "array"
+    then [.result.tabs[] | select(.label == $label)]
+    else error("missing result.tabs") end
+    | if length == 0 then "absent"
+      elif length == 1 then .[0].tab_id
+      else "ambiguous" end
+  ' 2>/dev/null) || return 1
+  case "$match" in
+    absent) return 2 ;;
+    ambiguous|'') return 1 ;;
+  esac
+  fm_backend_endpoint_atom_valid "${match//:/_}" || return 1
+  tab_id=$match
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace_id" 2>/dev/null) || return 1
+  pane_id=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" '
+    if (.result.panes | type) == "array"
+    then [.result.panes[] | select(.tab_id == $tab)]
+    else error("missing result.panes") end
+    | if length == 1 then .[0].pane_id else empty end
+  ' 2>/dev/null) || return 1
+  [ -n "$pane_id" ] && fm_backend_endpoint_atom_valid "${pane_id//:/_}" || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg workspace "$workspace_id" --arg tab "$tab_id" --arg pane "$pane_id" --arg cwd "$expected_real" '
+      .result.type == "pane_info"
+      and .result.pane.workspace_id == $workspace
+      and .result.pane.tab_id == $tab
+      and .result.pane.pane_id == $pane
+      and .result.pane.foreground_cwd == $cwd
+    ' >/dev/null 2>&1 || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_TAB_ID=$tab_id
+  FM_BACKEND_HERDR_RELAUNCH_CANDIDATE_PANE_ID=$pane_id
+}
+
+# Revalidate through Herdr, then submit shell self-retirement through the
+# pane's shell-aware command path. Unlike an unconditional pane close, `pane
+# run` refuses if a new foreground owner wins after the sample, so cleanup
+# cannot retire that owner. The command resolves the executing shell's identity
+# at execution time instead of signaling the previously sampled shell PID.
+# Never signal the sampled numeric shell PID, which may belong to a reused
+# process by then.
+fm_backend_herdr_relaunch_candidate_close_on_shell() {  # <session> <workspace-id> <tab-id> <pane-id> <shell-pid>
+  local session=$1 workspace_id=$2 tab_id=$3 pane_id=$4 expected_pid=$5 resampled_pid presence
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_RELAUNCH_CLOSE_POLLS:-20}
+  fm_backend_herdr_relaunch_candidate_matches "$session" "$workspace_id" "$tab_id" "$pane_id" || return 1
+  resampled_pid=$(fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id") || return 1
+  [ "$resampled_pid" = "$expected_pid" ] || return 1
+  fm_backend_herdr_clear_idle_shell_input "$session:$pane_id" "$expected_pid" || return 1
+  resampled_pid=$(fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id") || return 1
+  [ "$resampled_pid" = "$expected_pid" ] || return 1
+  fm_backend_herdr_cli "$session" pane run "$pane_id" 'kill -KILL "$$"' >/dev/null 2>&1 || true
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    [ "$presence" = dead ] && return 0
+    [ "$presence" = present ] || return 1
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$max_attempts" ] || sleep 0.1
+  done
+  return 1
+}
+
+fm_backend_herdr_relaunch_candidate_cleanup() {  # <session> <workspace-id> <tab-id> <pane-id>
+  local session=$1 workspace_id=$2 tab_id=$3 pane_id=$4 presence state shell_pid
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+  case "$presence" in
+    dead) return 0 ;;
+    present) ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_relaunch_candidate_matches "$session" "$workspace_id" "$tab_id" "$pane_id" || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  case "$state" in
+    dead) return 0 ;;
+    no-agent|live)
+      [ "$(fm_backend_herdr_recovery_agent_state "$session:$pane_id")" = dead ] || return 1
+      shell_pid=$(fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id") || return 1
+      [ -n "$shell_pid" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_relaunch_candidate_close_on_shell \
+    "$session" "$workspace_id" "$tab_id" "$pane_id" "$shell_pid"
 }
 
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
@@ -2535,6 +2796,167 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_prepare_relaunch_path: serialize shell preparation with every
+# other Firstmate mutation in the same Herdr session, then prepare an agent-free
+# endpoint shell for the exact recorded worktree already validated by the launch
+# caller. It first cancels any pending input while the same idle shell owns the pane,
+# including when the cwd already matches. Herdr's atomic `pane run` executes
+# `cd` non-persistently, so a mismatched cwd uses the interactive shell's
+# literal-input path and submits only after a second exact shell-owner check.
+# The single-quote transform is data-only shell quoting; no byte from the path
+# can become syntax. Every pre-Enter failure attempts to cancel this function's
+# buffered command only while that same idle shell still owns the pane. Success
+# requires the live foreground cwd to converge to the physical recorded path
+# while the endpoint remains positively agent-free and owned by the same shell
+# pid. Repeated calls converge safely and never append to pending input.
+fm_backend_herdr_clear_idle_shell_input() {  # <target> <shell-pid>
+  local target=$1 shell_pid=$2 resampled
+  [ "$(fm_backend_herdr_recovery_agent_state "$target")" = dead ] || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  resampled=$(fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  [ "$resampled" = "$shell_pid" ] || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" ctrl+c >/dev/null 2>&1
+}
+
+fm_backend_herdr_prepare_relaunch_path_serialized() {  # <target> <validated-worktree>
+  local target=$1 expected=$2 expected_real current current_real shell_pid resampled command quoted
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_RELAUNCH_PATH_POLLS:-20}
+  FM_BACKEND_HERDR_RELAUNCH_SHELL_PID=
+  case "$expected" in
+    /*) ;;
+    *) echo "error: herdr relaunch path must be an absolute recorded worktree" >&2; return 1 ;;
+  esac
+  case "$expected" in *$'\n'*|*$'\r'*|*$'\t'*) echo "error: herdr relaunch path contains unsupported control whitespace" >&2; return 1 ;; esac
+  [ -d "$expected" ] || { echo "error: herdr relaunch path '$expected' is unavailable" >&2; return 1; }
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || return 1
+  [ "$(fm_backend_herdr_recovery_agent_state "$target")" = dead ] || {
+    echo "error: herdr endpoint is not positively agent-free; refusing to restore its relaunch path" >&2
+    return 1
+  }
+  fm_backend_herdr_parse_target "$target" || return 1
+  shell_pid=$(fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || {
+    echo "error: herdr endpoint does not hold one provably idle shell; refusing to restore its relaunch path" >&2
+    return 1
+  }
+  fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" || {
+    echo "error: herdr endpoint changed before its shell input could be cleared" >&2
+    return 1
+  }
+  [ "$(fm_backend_herdr_recovery_agent_state "$target")" = dead ] || {
+    echo "error: herdr endpoint agent state changed after clearing shell input" >&2
+    return 1
+  }
+  fm_backend_herdr_parse_target "$target" || return 1
+  resampled=$(fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  [ "$resampled" = "$shell_pid" ] || {
+    echo "error: herdr endpoint shell identity changed after clearing shell input" >&2
+    return 1
+  }
+  current=$(fm_backend_herdr_current_path "$target" || true)
+  current_real=
+  [ -z "$current" ] || current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || current_real=
+  if [ "$current_real" = "$expected_real" ]; then
+    FM_BACKEND_HERDR_RELAUNCH_SHELL_PID=$shell_pid
+    return 0
+  fi
+
+  quoted=${expected_real//\'/\'"\'"\'}
+  command="cd -- '$quoted'"
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$command" >/dev/null 2>&1 || {
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  [ "$(fm_backend_herdr_recovery_agent_state "$target")" = dead ] || {
+    echo "error: herdr endpoint agent state changed before relaunch path submission; refusing to submit" >&2
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  fm_backend_herdr_parse_target "$target" || {
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  resampled=$(fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || {
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  [ "$resampled" = "$shell_pid" ] || {
+    echo "error: herdr endpoint shell identity changed before relaunch path submission; refusing to submit" >&2
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" enter >/dev/null 2>&1 || {
+    fm_backend_herdr_clear_idle_shell_input "$target" "$shell_pid" >/dev/null 2>&1 || true
+    return 1
+  }
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    current=$(fm_backend_herdr_current_path "$target" || true)
+    current_real=
+    [ -z "$current" ] || current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || current_real=
+    if [ "$current_real" = "$expected_real" ] \
+       && [ "$(fm_backend_herdr_recovery_agent_state "$target")" = dead ]; then
+      fm_backend_herdr_parse_target "$target" || return 1
+      resampled=$(fm_backend_herdr_pane_idle_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+      [ "$resampled" = "$shell_pid" ] || return 1
+      FM_BACKEND_HERDR_RELAUNCH_SHELL_PID=$shell_pid
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$max_attempts" ] || sleep 0.1
+  done
+  echo "error: herdr endpoint did not converge to its exact recorded worktree '$expected_real'" >&2
+  return 1
+}
+
+fm_backend_herdr_relaunch_prepared_shell_pid() {
+  printf '%s' "${FM_BACKEND_HERDR_RELAUNCH_SHELL_PID:-}"
+}
+
+# Revalidate the prepared shell immediately before using Herdr's exact-pane,
+# atomic command submission. Do not signal the sampled OS PID: it may exit and
+# be reused between any userspace identity check and a later signal.
+fm_backend_herdr_run_on_prepared_shell() {  # <target> <shell-pid> <validated-worktree> <command>
+  local target=$1 expected_pid=$2 expected=$3 command_text=$4
+  local expected_real current current_real resampled_pid
+  [ -n "$expected_pid" ] || return 1
+  expected_real=$(CDPATH='' cd -- "$expected" 2>/dev/null && pwd -P) || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  resampled_pid=$(fm_backend_herdr_pane_idle_shell_sample \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  [ "$resampled_pid" = "$expected_pid" ] || return 1
+  current=$(fm_backend_herdr_current_path "$target" || true)
+  current_real=
+  [ -z "$current" ] || current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || current_real=
+  [ "$current_real" = "$expected_real" ] || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run \
+    "$FM_BACKEND_HERDR_PANE" "$command_text" >/dev/null 2>&1
+}
+
+fm_backend_herdr_prepare_relaunch_path() {  # <target> <validated-worktree>
+  local target=$1 expected=$2 session lock_path attempt=0 result
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || {
+    echo "error: herdr relaunch could not resolve its session mutation lock; refusing unlocked shell input" >&2
+    return 1
+  }
+  while ! fm_lock_try_acquire "$lock_path"; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 50 ] || {
+      echo "error: herdr relaunch could not acquire its session mutation lock; refusing unlocked shell input" >&2
+      return 1
+    }
+    sleep 0.1
+  done
+  fm_backend_herdr_prepare_relaunch_path_serialized "$target" "$expected"
+  result=$?
+  fm_lock_release "$lock_path" || true
+  return "$result"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

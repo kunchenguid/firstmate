@@ -900,6 +900,35 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_recovery_agent_state: lifecycle-only state strong enough to stop
+# or replace an agent. Herdr cross-checks a retained native registration against
+# the exact foreground process, while tmux's ordinary classifier already owns
+# both process sources. Unsupported backends remain unverified.
+fm_backend_recovery_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_agent_state "$target" ;;
+    herdr) fm_backend_herdr_recovery_agent_state "$target" ;;
+    *) printf 'unverified' ;;
+  esac
+}
+
+# fm_backend_prepare_relaunch_path: backend-owned preparation after the old
+# agent is positively stopped and before the launch owner reuses its endpoint.
+# Only Herdr needs repair because its restored shell can drift after an agent
+# exits; tmux keeps its existing strict path refusal unchanged.
+fm_backend_prepare_relaunch_path() {  # <backend> <target> <validated-worktree>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_prepare_relaunch_path "$@" ;;
+    tmux) return 0 ;;
+    *) echo "error: backend '$backend' has no verified relaunch-path preparation" >&2; return 1 ;;
+  esac
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

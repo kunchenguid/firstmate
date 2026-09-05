@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace the running agent in the same worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. Tmux reuses its endpoint; Herdr allocates a provisional endpoint in the exact recorded workspace. | The new agent is alive on the published endpoint, and the durable record names the endpoint and harness that are actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -62,21 +62,36 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
 2. **Safe checkpoint.**
-   The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
+   The recorded worktree must exist and be a worktree root; for a ship or scout it must also differ physically from the recorded primary project checkout, and its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   Herdr lifecycle recovery corroborates native registration against the exact foreground process, so a lone idle shell proves an exited agent, only a corroborated registered agent is `alive`, and an unregistered non-shell process is `unreadable` and refuses lifecycle control.
+5. **Prepare the endpoint where required.**
+   Herdr's generic pane input cannot condition launch on an expected shell owner, so relaunch never injects into the old pane.
+   Under the named-session mutation lock, the launch owner revalidates the recorded pane's exact workspace and tab, records a unique attempt label, and creates one fresh unpublished tab in that workspace with its shell already rooted at the validated worktree.
+   Crash recovery may list only the recorded workspace to resolve exactly one tab carrying that attempt label; it never searches or adopts another workspace.
+   Tmux keeps its existing recorded endpoint and path check.
+6. **Launch and publish the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`.
+   Herdr snapshots the prior harness wiring, persists the staged replacement metadata and wiring immediately before launch submission, and makes a durable launch receipt a prerequisite of starting the agent command.
+   It proves both an exact live Herdr registration and corroborating live foreground process at the candidate and worktree, then atomically publishes the new endpoint metadata and retires the old agent-free pane when that exact cleanup remains provable.
+   An agent-free prepublication failure leaves old metadata and endpoint untouched, restores the persisted prior-wiring snapshot when replacement wiring was mutated, and closes only the exact candidate.
+   An exact live or unsettled submitted launch retains its launch-attempt provenance for strict retry or adoption, while ambiguous cleanup without admissible launch provenance is recorded as quarantined instead of being guessed safe.
+   A retry retires an exact agent-free candidate idempotently and adopts an exact live candidate only from the launch-attempt phase after restoring and verifying its staged wiring, unchanged identity, and physical recorded worktree.
+   It refuses live pre-launch or quarantined candidates and unreadable or mismatched candidates.
+   Tmux retains its existing reuse behavior.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
-- A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A Herdr launch failure **after** the old agent is stopped keeps the old durable binding, endpoint, and progress note unchanged.
+  An agent-free candidate restores any mutated prior wiring and rolls back; an exact live or unsettled submitted launch remains recoverable for retry, and ambiguous cleanup without admissible launch provenance remains recorded for strict reconciliation.
+- A non-Herdr launch failure after the agent is stopped retains the existing prior-record rollback behavior.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -99,7 +114,10 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and the recorded worktree is still valid.
+- Herdr replacement creation is reachable only after exact recorded session, workspace, tab, pane, stopped-agent, isolated-worktree-root, and project-separation checks.
+  It creates through the recorded workspace id without listing workspaces or tabs, and publication requires the response-derived candidate to host a live replacement in the recorded worktree.
+  A primary project checkout, live old agent, ambiguous process read, contradictory endpoint relation, candidate takeover, or failed launch leaves the old binding untouched.
 
 ## Capability matrix
 
@@ -120,4 +138,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-herdr-relaunch-recovery.test.sh` - portable stale-registration, process-state, exact-path, input-clearing, retry-cleanup, direct-launch validation, quoting, idempotence, and cross-backend coverage.
+- `tests/fm-control-herdr-smoke.test.sh` - stale-registration reconciliation and persistent path restoration against the real Herdr binary, on an isolated throwaway lab session.

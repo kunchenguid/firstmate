@@ -31,10 +31,11 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
-#   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. An explicit `default` model or effort clears that
+#   relaunch   Transactionally replace the running agent in the SAME worktree,
+#              on the same or a newly chosen harness/model/effort. Tmux reuses
+#              its endpoint; Herdr publishes a fresh exact-workspace endpoint
+#              only after replacement launch success. Switching harness remains
+#              one ordinary use of this verb. An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
@@ -316,7 +317,7 @@ fm_backend_validate "$BACKEND" || exit 1
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_recovery_agent_state "$BACKEND" "$T"
 }
 
 busy_verdict() {
@@ -690,7 +691,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real project project_real head head_ref head_ref_status status_output dirty children marker child_meta
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -700,6 +701,15 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
+  if [ "$KIND" != secondmate ]; then
+    project=$(fm_meta_get "$META" project)
+    [ -n "$project" ] && [ -d "$project" ] \
+      || die "task $ID's recorded project '${project:-none}' is unavailable; refusing to relaunch without proving its isolated worktree"
+    project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) \
+      || die "task $ID's recorded project $project cannot be resolved"
+    [ "$wt_real" != "$project_real" ] \
+      || die "task $ID's recorded worktree is the primary project checkout; refusing to relaunch an agent there"
+  fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
   elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then
@@ -825,8 +835,11 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
-  # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
-  # per-task harness wiring before arming the new one, so nothing to do here.
+  # The launch owner holds Herdr's session mutation lock continuously from
+  # endpoint preparation through replacement command submission. Preparing here
+  # would create an unlocked gap before that transaction begins.
+  # It also clears the previous incarnation's per-task harness wiring before
+  # arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
@@ -835,6 +848,10 @@ do_relaunch() {
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
+    fm_backend_validate_task_endpoint "$META" "$ID" \
+      || die "the replacement for $ID launched but its published endpoint binding is invalid"
+    BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+    T=$FM_BACKEND_VALIDATED_TARGET
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1

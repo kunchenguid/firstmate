@@ -272,7 +272,27 @@ The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
-The session-start sweep uses this probe.
+Lifecycle control adds one process-level reconciliation because Herdr can retain Pi's native registration after Pi exits or lose registration while a foreground process remains.
+A pane becomes agent-free for exit or replacement only when `pane process-info` and the operating-system process table prove the exact pane contains one lone idle recognized shell.
+A distinct foreground process group is `alive` only when Herdr also reports a valid registration for that exact pane.
+Without that registration it is `unreadable`, and lifecycle control refuses along with any other contradictory or unreadable process evidence.
+Herdr 0.8.2 exposes no generic pane launch operation conditioned on an expected shell owner, so lifecycle recovery never injects a replacement command into the old pane.
+After the stopped-agent proof, the launch owner takes the named-session mutation lock and revalidates the recorded pane's exact workspace and tab relation.
+It creates one fresh tab directly in that recorded workspace with its shell rooted at the validated worktree and records a unique attempt label before creation.
+Recovery may list only that recorded workspace to resolve exactly one tab carrying the recorded label, and it leaves every unrelated workspace or endpoint untouched.
+The candidate stays unpublished while its pending input is cleared and its exact shell and worktree are revalidated.
+The rollback wiring snapshot becomes deterministic before the first replacement-wiring mutation, and staged metadata plus replacement wiring are persisted immediately before the environment and launch command are queued.
+The queued command writes a durable launch receipt before starting the agent, so an unreceipted replacement cannot become an adoption candidate.
+Publication and crash adoption both require an exact live Herdr agent registration plus corroborating live foreground-process state at that endpoint.
+Only then does metadata advance atomically to the candidate, immediately relinquishing provisional cleanup authority.
+The original prior harness remains in launch provenance until its wiring retirement commits, and an interruption or cleanup failure must reconcile that identity plus any presentation binding before another relaunch can proceed.
+An agent-free prepublication failure or hard-crash recovery leaves the old metadata authoritative, restores the exact persisted prior-wiring snapshot when replacement wiring was mutated, and closes only the exactly identified candidate.
+An exact live or unsettled submitted launch retains its launch-attempt provenance for strict retry or adoption, while ambiguous cleanup without admissible launch provenance is recorded as quarantined under its exact identity instead of granting cleanup authority.
+A later retry retires an exact agent-free candidate idempotently and adopts an exact live candidate only from the launch-attempt phase after restoring and verifying its staged wiring, unchanged identity, and physical recorded worktree.
+It refuses every live pre-launch or quarantined candidate and every unreadable, mismatched, or multiply matched candidate.
+Before any candidate or old pane is retired, its exact idle shell and pane ownership are revalidated immediately at the close boundary, and retirement uses only Herdr's exact-pane operation rather than signaling a sampled OS PID.
+
+The session-start sweep uses the ordinary probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
 ## Push events and polling fallback
@@ -331,6 +351,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-herdr-relaunch-recovery.test.sh
+tests/fm-control-herdr-smoke.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh

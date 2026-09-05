@@ -960,6 +960,22 @@ test_missing_worktree_refuses_before_stopping_anything() {
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
 }
 
+test_primary_checkout_refuses_before_stopping_anything() {
+  local dir out rc
+  dir=$(new_case primary-checkout rl36)
+  add_ship_task "$dir" rl36 claude
+  awk -v wt="$dir/proj" '/^worktree=/{print "worktree=" wt; next} {print}' \
+    "$dir/home/state/rl36.meta" > "$dir/home/state/rl36.meta.tmp"
+  mv "$dir/home/state/rl36.meta.tmp" "$dir/home/state/rl36.meta"
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  out=$(run_control "$dir" rl36 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "the primary checkout must refuse before any lifecycle action"
+  assert_contains "$out" "primary project checkout" "the refusal should name the unsafe launch location"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a primary-checkout refusal must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a primary-checkout refusal must send nothing"
+  pass "fm-control relaunch: the checkpoint refuses a primary-checkout launch before touching the agent"
+}
+
 test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
@@ -1559,6 +1575,7 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_primary_checkout_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
