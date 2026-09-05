@@ -99,7 +99,7 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
-test_live_stale_watch_lock_is_actionable() {
+test_live_missing_beacon_lock_is_actionable() {
   local dir state fakebin out err status typed_status identity live
   dir=$(make_case live-stale-lock)
   state="$dir/state"
@@ -119,7 +119,7 @@ test_live_stale_watch_lock_is_actionable() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch -t 200001010000 "$state/.last-watcher-beat"
+  sleep 2
   status=0
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
@@ -137,6 +137,8 @@ test_live_stale_watch_lock_is_actionable() {
     || fail "watcher did not name the busy holder: $(cat "$out" "$err" 2>/dev/null)"
   grep -F "pid=$live" "$out" >/dev/null \
     || fail "the typed busy-holder outcome did not name the holding pid"
+  grep -E 'beacon=[0-9]+s' "$out" >/dev/null \
+    || fail "a missing beacon did not preserve the computed lock age: $(cat "$out")"
   is_live_non_zombie "$live" || fail "the identified holder was not left alone"
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
@@ -1475,7 +1477,7 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
-test_live_stale_watch_lock_is_actionable
+test_live_missing_beacon_lock_is_actionable
 test_unidentified_live_lock_holder_still_fails_loudly
 test_guard_warnings
 test_lock_single_winner_under_concurrency
