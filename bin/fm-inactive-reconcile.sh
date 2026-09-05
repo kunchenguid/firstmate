@@ -12,7 +12,7 @@
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
-# bin/fm-parent-channel-lib.sh as
+# bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh and without waiting for
