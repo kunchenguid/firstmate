@@ -406,13 +406,21 @@ normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
 
-# Adapter-authored escalations and notes use exact-byte append suppression.
-# Mirrored payload lines use their pre-rewrite source identity in
-# stage_mirror_lines instead, because delivery state can change between replays.
+# Adapter-authored escalations and notes marked new use fm-classify-lib.sh's
+# retry and emission-time contracts; unmarked ones use exact-byte append
+# suppression. Mirrored payload lines keep their source time (or its absence)
+# and use their pre-rewrite source identity in stage_mirror_lines instead,
+# because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
-append_status_once() { # <status-file> <line>
-  grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
-  printf '%s\n' "$2" >> "$1" || return 2
+append_status_once() { # <status-file> <line> [new]
+  local line=$2
+  if [ "${3:-}" = new ]; then
+    status_event_recorded "$1" "$line" && return 1
+    line=$(status_stamp_line "$line")
+  else
+    grep -Fqx -- "$line" "$1" 2>/dev/null && return 1
+  fi
+  printf '%s\n' "$line" >> "$1" || return 2
   return 0
 }
 
@@ -528,7 +536,7 @@ cmd_ingest() {
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
+    append_status_once "$status_file" "$line" new || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
@@ -589,7 +597,7 @@ EOF
     [ -n "$doc" ] || continue
     append_rc=0
     append_status_once "$status_file" "note: remote document did not transfer for $id: $doc - $reason" \
-      || append_rc=$?
+      new || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote document note"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done <<EOF
