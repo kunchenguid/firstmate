@@ -2,7 +2,8 @@
 # Review a crewmate branch against the authoritative base.
 #
 # The default branch is fetched first whenever the project has an origin remote.
-# A task whose meta records a pull-request delivery (mode=no-mistakes or mode=direct-PR) is then compared against origin/<default>, because that is the branch its pull request targets and every commit missing from origin lands inside it.
+# A task whose meta records a pull-request delivery is then compared against origin/<default>, because that is the branch its pull request targets and every commit missing from origin lands inside it.
+# Which modes those are is bin/fm-dod-lib.sh's to say, and bin/fm-spawn.sh reads the same owner when it picks the worktree's base, so the branch is reviewed against the commit it was actually built on.
 # Any other task is compared against whichever of origin/<default> and the local <default> contains the other, which is the base bin/fm-spawn.sh gave its worktree, because a local-only project's landed work lives only on the local default branch while its origin stays frozen at the last push.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
@@ -18,6 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -138,9 +141,10 @@ resolve_review_base() {
   local origin_rev local_rev
   origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
   [ -n "$origin_rev" ] || { printf '%s' "$DEFAULT"; return 0; }
-  case "$MODE" in
-    no-mistakes|direct-PR) printf '%s' "origin/$DEFAULT"; return 0 ;;
-  esac
+  if fm_delivery_opens_pull_request "$MODE"; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
   local_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
   [ -n "$local_rev" ] || { printf '%s' "origin/$DEFAULT"; return 0; }
   if git -C "$WT" merge-base --is-ancestor "$local_rev" "$origin_rev" 2>/dev/null; then

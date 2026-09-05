@@ -2,6 +2,10 @@
 # Behavior tests for the explicit per-task delivery contract (AGENTS.md section 7)
 # across bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-project-mode.sh.
 #
+# Promotion is also where a scout's base first acquires a delivery, so a mode that
+# opens a pull request is refused while the worktree's default branch still carries
+# commits origin has never seen.
+#
 # A ship task's delivery mode and yolo posture are firstmate's decision at intake,
 # so the tools refuse to guess: the spawn and a scout promotion require both flags,
 # validate them against a closed set, and the spawn additionally refuses to launch
@@ -273,6 +277,68 @@ test_promote_requires_and_records_the_delivery_contract() {
 
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
+# A scout records no delivery posture, so bin/fm-spawn.sh was free to base its
+# worktree on the primary checkout's default branch. Promotion decides the
+# delivery, so it re-reads that base: a pull-request mode must not branch from
+# commits origin has never seen, or the PR publishes every one of them.
+test_promote_refuses_a_pr_delivery_on_unpushed_local_history() {
+  local root home meta wt before out status
+  root="$TMP_ROOT/promote-unpushed"
+  home="$root/home"
+  wt="$root/wt"
+  mkdir -p "$home/state"
+  write_brief "$home" promote-u1
+
+  git init --quiet -b main "$root/project"
+  printf 'base\n' > "$root/project/README.md"
+  git -C "$root/project" add README.md
+  git -C "$root/project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm initial
+  git clone --quiet --bare "$root/project" "$root/origin.git"
+  git -C "$root/project" remote add origin "file://$root/origin.git"
+  git -C "$root/project" fetch --quiet origin
+  # Two landings that never reach origin, exactly what bin/fm-merge-local.sh leaves
+  # behind on a local-only project.
+  printf 'landed\n' > "$root/project/landed-1.txt"
+  git -C "$root/project" add landed-1.txt
+  git -C "$root/project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "land 1"
+  printf 'landed\n' > "$root/project/landed-2.txt"
+  git -C "$root/project" add landed-2.txt
+  git -C "$root/project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "land 2"
+  git -C "$root/project" worktree add --quiet --detach "$wt" main
+
+  meta="$home/state/promote-u1.meta"
+  printf 'window=fm-promote-u1\nkind=scout\nworktree=%s\n' "$wt" > "$meta"
+  before=$(git -C "$wt" rev-parse HEAD)
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" promote-u1 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion into a PR delivery accepted a base origin has never seen"
+  assert_contains "$out" "carries 2 commits origin/main does not" \
+    "the refusal did not carry the exact count of unpushed commits"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the refusal did not name the delivery that makes the base unusable"
+  assert_grep 'kind=scout' "$meta" "a refused promotion still flipped the task record"
+  assert_no_grep '^mode=' "$meta" "a refused promotion recorded a delivery mode"
+  [ ! -e "$home/data/promote-u1/ship-instructions.md" ] \
+    || fail "a refused promotion still published ship instructions"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$before" ] \
+    || fail "promotion moved the scout's worktree while refusing"
+
+  # The same base is fine for a delivery that never pushes, so the refusal is
+  # scoped to the delivery rather than to the repository state.
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" promote-u1 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "a local-only promotion should accept the primary's landed base"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "the local-only promotion did not flip the task record"
+  assert_grep 'mode=local-only' "$meta" "the local-only promotion did not record its delivery"
+  pass "fm-promote: a pull-request delivery is refused while the base carries unpushed local history"
+}
+
 test_promote_refuses_a_symlinked_task_record() {
   local home meta target original out status leftover
   home="$TMP_ROOT/promote-symlink/home"
@@ -753,6 +819,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_a_pr_delivery_on_unpushed_local_history
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy

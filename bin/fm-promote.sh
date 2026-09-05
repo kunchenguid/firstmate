@@ -21,6 +21,14 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# A scout carries no delivery posture, so bin/fm-spawn.sh let its worktree start
+# from the primary checkout's default branch when that branch led origin. This is
+# where that base first acquires a delivery, so it is re-checked here: promoting
+# into a mode that opens a pull request (bin/fm-dod-lib.sh owns which those are) is
+# refused while the worktree's default branch still carries commits origin has
+# never seen, because the branch built on it would publish every one of them inside
+# the PR. The check reads local refs only and never fetches, and it never touches
+# the worktree; the refusal names the exact commit count and both remedies.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -32,6 +40,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -132,6 +142,24 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+if fm_delivery_opens_pull_request "$MODE" && [ -n "$WT" ] && [ -d "$WT" ]; then
+  BASE_DEFAULT=$(default_branch "$WT" 2>/dev/null || true)
+  if [ -n "$BASE_DEFAULT" ]; then
+    BASE_ORIGIN_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+    BASE_LOCAL_REV=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BASE_DEFAULT^{commit}" 2>/dev/null || true)
+    if [ -n "$BASE_ORIGIN_REV" ] && [ -n "$BASE_LOCAL_REV" ]; then
+      BASE_UNPUSHED=$(git -C "$WT" rev-list --count "$BASE_ORIGIN_REV..$BASE_LOCAL_REV" 2>/dev/null || true)
+      [ -n "$BASE_UNPUSHED" ] || BASE_UNPUSHED=0
+      if [ "$BASE_UNPUSHED" -gt 0 ] 2>/dev/null; then
+        if [ "$BASE_UNPUSHED" -eq 1 ]; then BASE_UNIT=commit; else BASE_UNIT=commits; fi
+        echo "error: $BASE_DEFAULT in $WT carries $BASE_UNPUSHED $BASE_UNIT origin/$BASE_DEFAULT does not, and mode=$MODE opens a pull request against origin; refusing to promote rather than publish that unpushed local history inside the PR. Push $BASE_DEFAULT to origin first, or promote with --mode local-only." >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then

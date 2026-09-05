@@ -149,13 +149,15 @@
 #   CONTAINS the other, so the slot is never moved backwards. A local-only project
 #   lands work on the primary checkout's branch and never pushes, so following
 #   origin alone would start every task hundreds of commits stale; diverged
-#   candidates are refused. The primary checkout's branch is only offered to a
-#   delivery that lands locally (a local-only ship, or a scout's report): a
-#   no-mistakes or direct-PR ship opens a pull request against origin, so every
-#   commit origin has never seen would ride along inside it, and those tasks keep
-#   origin's tip and are told how far ahead the primary's branch was. The refresh
-#   reports the exact commit count a slot was behind when it moved. Relaunch
-#   reuses the recorded worktree without fetching or resetting its base.
+#   candidates are refused, but only for a delivery that could have used that
+#   branch. The primary checkout's branch is offered solely to a delivery that
+#   lands locally (a local-only ship, or a scout's report): a no-mistakes or
+#   direct-PR ship opens a pull request against origin, so every commit origin has
+#   never seen would ride along inside it. Those tasks resolve straight to origin's
+#   tip whether the primary's branch merely leads it or has diverged from it, and
+#   are told how many commits it carried that origin does not. The refresh reports
+#   the exact commit count a slot was behind when it moved. Relaunch reuses the
+#   recorded worktree without fetching or resetting its base.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses a fresh spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
@@ -2109,18 +2111,15 @@ EOF
 # one of them inside that pull request while the review diff, anchored on the same
 # base, would never show them. Those deliveries keep origin's tip and record the
 # withheld candidate in SPAWN_BASE_WITHHELD, so the drift is reported rather than
-# silently inherited.
+# silently inherited. That test is reached before the divergence refusal, because a
+# delivery this function has already decided will never read the primary's branch
+# must not be stopped by the state of that branch: only a delivery that could have
+# built on it faces the genuine ambiguity of which history to choose.
+# bin/fm-dod-lib.sh owns which modes open a pull request; do not restate the list.
 SPAWN_BASE_REV=""
 SPAWN_BASE_LABEL=""
 SPAWN_BASE_ERROR=""
 SPAWN_BASE_WITHHELD=""
-delivery_opens_pull_request() {  # <mode>
-  case "$1" in
-    no-mistakes|direct-PR) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev> <mode>
   local worktree=$1 primary=$2 default=$3 origin_rev=$4 mode=${5:-} primary_rev primary_default ahead unit
   SPAWN_BASE_REV="$origin_rev"
@@ -2137,14 +2136,14 @@ resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <orig
   # Name the branch the commit actually came from: primary_head_commit resolves the
   # PRIMARY's own default branch, which need not be the one resolved in the slot.
   primary_default=$(default_branch "$primary" 2>/dev/null || printf '%s' "$default")
+  if fm_delivery_opens_pull_request "$mode"; then
+    ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null || true)
+    [ -n "$ahead" ] || ahead=0
+    if [ "$ahead" -eq 1 ] 2>/dev/null; then unit=commit; else unit=commits; fi
+    SPAWN_BASE_WITHHELD="$primary_default in the primary checkout carries $ahead $unit origin/$default does not, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
+    return 0
+  fi
   if git -C "$worktree" merge-base --is-ancestor "$origin_rev" "$primary_rev" 2>/dev/null; then
-    if delivery_opens_pull_request "$mode"; then
-      ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null || true)
-      [ -n "$ahead" ] || ahead=0
-      if [ "$ahead" -eq 1 ] 2>/dev/null; then unit=commit; else unit=commits; fi
-      SPAWN_BASE_WITHHELD="$primary_default in the primary checkout is $ahead $unit ahead of origin/$default, but mode=$mode opens a pull request against origin; starting from origin's tip so those unpushed commits cannot ride along inside it"
-      return 0
-    fi
     SPAWN_BASE_REV="$primary_rev"
     SPAWN_BASE_LABEL="$primary_default in the primary checkout"
     return 0

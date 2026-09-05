@@ -604,8 +604,8 @@ test_pull_request_delivery_keeps_the_forge_tip() {
     || fail "a pull-request delivery started at $head, not origin's tip $frozen"
   [ ! -e "$POOL_DIR/landed-3.txt" ] \
     || fail "a pull-request delivery based its branch on commits origin has never seen"
-  assert_contains "$out" "is 3 commits ahead of origin/main" \
-    "the spawn did not report how far ahead the withheld primary branch was"
+  assert_contains "$out" "carries 3 commits origin/main does not" \
+    "the spawn did not report how much the withheld primary branch carried"
   assert_contains "$out" "opens a pull request against origin" \
     "the spawn did not say why the primary's branch was not used as the base"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -624,6 +624,87 @@ push_forge_only_commit() {
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm forge-only
   git -C "$publisher" push --quiet origin main
+}
+
+test_pull_request_delivery_ignores_a_diverged_primary() {
+  local rec id out status head forge
+  id='pool-pr-diverged-r17'
+  rec=$(make_local_only_case pr-diverged "$id" 2)
+  read_case_record "$rec"
+  push_forge_only_commit
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a PR delivery should not be blocked over a branch it never reads"$'\n'"$out"
+  forge=$(git -C "$POOL_DIR" rev-parse origin/main)
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$forge" ] || fail "a PR delivery started at $head, not origin's tip $forge"
+  assert_not_contains "$out" "have diverged" \
+    "a PR delivery was refused over a divergence in a branch it does not build on"
+  assert_grep 'pushed straight to the forge' "$POOL_DIR/forge-only.txt" \
+    "the slot did not receive the commit that exists only on origin"
+  pass "a pull-request delivery resolves to origin's tip even when the primary's branch has diverged"
+}
+
+# The set of delivery modes that open a pull request has one owner
+# (bin/fm-dod-lib.sh) because three tools must land on the SAME commit: the spawn
+# picks a fresh slot's base, promotion re-checks that base when a scout finally
+# acquires a delivery, and the review diff anchors the captain's review. A second
+# copy drifting is how a branch gets built on one base and reviewed against
+# another, so this drives all three over one repository state per mode and
+# requires their verdicts to match.
+test_base_consumers_agree_on_which_modes_open_a_pull_request() {
+  local mode id scout_id rec out status spawn_verdict review_verdict promote_verdict base_line
+  for mode in no-mistakes direct-PR local-only; do
+    id="pool-agree-${mode}-r18"
+    rec=$(make_local_only_case "agree-$mode" "$id" 2)
+    read_case_record "$rec"
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off)
+    status=$?
+    expect_code 0 "$status" "spawn should launch for mode=$mode"$'\n'"$out"
+    if [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+      spawn_verdict=origin
+    else
+      spawn_verdict=primary
+    fi
+
+    git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+    printf 'the work under review\n' > "$POOL_DIR/task-change.txt"
+    git -C "$POOL_DIR" add task-change.txt
+    git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm "task work"
+    base_line=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+      "$ROOT/bin/fm-review-diff.sh" "$id" --stat 2>/dev/null | sed -n 's/^diff base: //p')
+    [ -n "$base_line" ] || fail "mode=$mode: fm-review-diff printed no base line"
+    if [ "$base_line" = "origin/main" ]; then
+      review_verdict=origin
+    else
+      review_verdict=primary
+    fi
+
+    scout_id="scout-agree-${mode}-r18"
+    fm_test_spawn_brief "$HOME_DIR" "$scout_id"
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$scout_id" "$POOL_DIR" \
+      > "$HOME_DIR/state/$scout_id.meta"
+    out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+      FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      "$ROOT/bin/fm-promote.sh" "$scout_id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      assert_contains "$out" "opens a pull request against origin" \
+        "mode=$mode: promotion failed for some reason other than the unpushed base"
+      promote_verdict=origin
+    else
+      promote_verdict=primary
+    fi
+
+    [ "$spawn_verdict" = "$review_verdict" ] \
+      || fail "mode=$mode: the spawn based the slot on the $spawn_verdict tip but the review anchored on the $review_verdict tip"
+    [ "$spawn_verdict" = "$promote_verdict" ] \
+      || fail "mode=$mode: the spawn treated the mode as $spawn_verdict-based but promotion treated it as $promote_verdict-based"
+  done
+  pass "spawn, promotion and the review diff read one owner for which modes open a pull request"
 }
 
 test_diverged_candidates_refuse_rather_than_guess() {
@@ -660,6 +741,8 @@ test_stale_pin_beside_other_dirt_reports_one_verdict
 test_local_only_landings_beat_a_frozen_origin
 test_dirty_slot_survives_even_when_the_primary_is_ahead
 test_pull_request_delivery_keeps_the_forge_tip
+test_pull_request_delivery_ignores_a_diverged_primary
+test_base_consumers_agree_on_which_modes_open_a_pull_request
 test_diverged_candidates_refuse_rather_than_guess
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
