@@ -224,7 +224,10 @@ if cmd == 'poll_list':
             print('%s\t%s\t%s\t%s' % (uid, idate, fr, subj))
         M.logout()
     except Exception as e:
-        print('fm-mail poll error:', e)
+        # stderr, not stdout: the bash poll's command substitution captures
+        # stdout, so a poll error printed to stdout is swallowed with the
+        # list and the poll dies rc=1 with nothing left to report.
+        print('fm-mail poll error:', e, file=sys.stderr)
         sys.exit(1)
     sys.exit(0)
 
