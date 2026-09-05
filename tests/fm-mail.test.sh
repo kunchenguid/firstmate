@@ -645,6 +645,43 @@ PYEOF
   pass "fm-mail: a cap of one never suppresses new mail while retries exist"
 }
 
+test_poll_fails_closed_when_poll_list_fails() {
+  local fakebin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  mkdir -p "$HOME_DIR/bin"
+  [ -e "$HOME_DIR/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FM_POLL_FAIL_MARKER" ]; then
+  echo 'fm-mail poll error: simulated failure' >&2
+  exit 1
+fi
+printf 'uidvalidity\t90009\n'
+printf '7\t\tfrom@x\tnew mail\tok\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  touch "$HOME_DIR/fail.marker"
+
+  out=$(FM_POLL_FAIL_MARKER="$HOME_DIR/fail.marker" FM_MAIL_USER=test FM_MAIL_PASS=pass \
+    FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when poll_list fails"
+  assert_not_contains "$out" "woke for 7" "nothing is woken from a failed poll_list"
+  assert_not_contains "$out" "no new mail" "a failed poll is not reported as no new mail"
+
+  rm -f "$HOME_DIR/fail.marker"
+  rc=0
+  out=$(FM_POLL_FAIL_MARKER="$HOME_DIR/fail.marker" FM_MAIL_USER=test FM_MAIL_PASS=pass \
+    FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "a later poll must succeed, proving the mail-seen lock was released"
+  assert_contains "$out" "woke for 7" "the later poll wakes the new mail"
+  pass "fm-mail: a failed poll_list fails closed, wakes nothing, and releases the lock"
+}
+
 test_poll_fails_closed_when_retry_clear_fails() {
   local fakebin out rc=0
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -1400,6 +1437,7 @@ test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
 test_poll_fails_closed_when_retry_clear_fails
+test_poll_fails_closed_when_poll_list_fails
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
