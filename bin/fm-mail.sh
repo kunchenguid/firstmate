@@ -418,7 +418,13 @@ mail_poll() {
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
-  list="$(run_py poll_list)"
+  if ! list="$(run_py poll_list)"; then
+    # The poll engine already printed its cause on stderr; just release the
+    # lock and fail instead of letting set -e abort the whole script with the
+    # lock still held.
+    fm_lock_release "$STATE_DIR/.mail-seen.lock"
+    return 1
+  fi
   generation="$(printf '%s\n' "$list" | head -n1 | cut -f2)"
   list="$(printf '%s\n' "$list" | tail -n +2)"
 
