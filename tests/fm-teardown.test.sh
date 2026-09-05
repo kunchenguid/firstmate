@@ -4,10 +4,12 @@
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# and GitHub reports a PR head that is an exact ancestor of the current local work,
+# or its content is already in the up-to-date default branch. Content/patch-id
+# equivalence (same diff, independently-built commit) is never accepted in place of
+# ancestry; --force remains the only escape hatch for that case.
 #
-# Covers three fixes:
+# Covers four fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
@@ -19,6 +21,9 @@
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
+#   - completion-link gate: a non-local-only ship task's backlog item can close as
+#     done only once a merged PR is actually resolved and confirmed for it, never
+#     silently with no recorded pr= and no branch-discoverable PR at all.
 #
 # Matrix:
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
@@ -34,7 +39,8 @@
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (n) no-mistakes + replayed unpushed patch, not an ancestor  -> REFUSE (patch-id dropped)
+#   (n2) same as (n), with --force                              -> ALLOW  (escape hatch)
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
@@ -952,9 +958,93 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
-  case_dir=$(make_case squash-replayed-patch)
+# The data-loss safety check (validate_worktree_teardown_safety) only calls
+# pr_is_merged on its unpushed-commits path, so a branch that is fully pushed
+# never resolves PR_URL there. backlog_done_args must resolve it independently
+# (by branch name) before it may close the backlog item as done - otherwise a
+# ship task with no pr= ever recorded and a fully-pushed branch would close
+# silently with no completion link at all.
+test_no_pr_recorded_fully_pushed_no_discoverable_pr_refuses() {
+  local case_dir rc
+  case_dir=$(make_case no-pr-fully-pushed-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  seed_backlog_in_flight "$case_dir"
+  # No append_pr_meta_*, no add_gh_pr_merged_for_head: the default gh-axi mock
+  # reports no PR for this branch, so nothing can resolve pr= here.
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "no-pr-fully-pushed-refuses: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-pr-fully-pushed-refuses: teardown must refuse to close the backlog item with no PR link at all"
+  grep -q REFUSED "$case_dir/stderr" || fail "no-pr-fully-pushed-refuses: no REFUSED line in stderr"
+  [ -d "$case_dir/wt" ] || fail "no-pr-fully-pushed-refuses: the worktree was removed despite the refusal"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "no-pr-fully-pushed-refuses: task metadata was removed despite the refusal"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "no-pr-fully-pushed-refuses: the backlog item was closed despite the refusal: $(backlog_row_state "$case_dir")"
+  pass "teardown refuses to close a fully-pushed ship task's backlog item when no PR is recorded or discoverable"
+}
+
+test_no_pr_recorded_fully_pushed_pr_discovered_allows() {
+  local case_dir rc head
+  case_dir=$(make_case no-pr-fully-pushed-allows)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  seed_backlog_in_flight "$case_dir"
+  # No append_pr_meta_*: state/task-x1.meta has no pr= or pr_head= line. The
+  # branch is fully pushed, so the safety check's own unpushed-only PR
+  # discovery never runs; backlog_done_args must resolve the PR itself.
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "no-pr-fully-pushed-allows: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-pr-fully-pushed-allows: teardown should succeed by discovering the merged PR from the branch name"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-fully-pushed-allows: teardown printed a REFUSED line"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "no-pr-fully-pushed-allows: resolved PR URL was not recorded on completion"
+  pass "teardown discovers and records a merged PR by branch name for a fully-pushed ship task with no pr= recorded"
+}
+
+test_no_pr_recorded_force_still_allows() {
+  local case_dir rc
+  case_dir=$(make_case no-pr-force-allows)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  seed_backlog_in_flight "$case_dir"
+  # No PR recorded or discoverable at all (default gh-axi mock). --force must
+  # still be able to close the backlog item, same as before this gate existed.
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-pr-force-allows: --force should still close the backlog item with no PR link at all"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "no-pr-force-allows: --force did not close the backlog item: $(backlog_row_state "$case_dir")"
+  pass "--force still closes a ship task's backlog item when no PR is recorded or discoverable"
+}
+
+setup_replayed_unpushed_patch_case() {
+  local case_dir=$1 parent_head pr_head
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
   parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -964,15 +1054,36 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+}
+
+test_replayed_unpushed_patch_refuses_without_force() {
+  local case_dir rc
+  case_dir=$(make_case squash-replayed-patch)
+  setup_replayed_unpushed_patch_case "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+  expect_code 1 "$rc" "squash-replayed-patch: teardown should refuse an unpushed local patch that only replays the merged PR head's content"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: no REFUSED line in stderr"
+  pass "squash-merged PR refuses a replayed unpushed local patch that is not the PR head's own ancestor"
+}
+
+test_replayed_unpushed_patch_allows_with_force() {
+  local case_dir rc
+  case_dir=$(make_case squash-replayed-patch-force)
+  setup_replayed_unpushed_patch_case "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-replayed-patch-force: --force should still tear down a replayed unpushed patch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch-force: teardown printed a REFUSED line"
+  pass "--force remains the escape hatch for a replayed unpushed local patch"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -3371,7 +3482,11 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
+test_no_pr_recorded_fully_pushed_no_discoverable_pr_refuses
+test_no_pr_recorded_fully_pushed_pr_discovered_allows
+test_no_pr_recorded_force_still_allows
+test_replayed_unpushed_patch_refuses_without_force
+test_replayed_unpushed_patch_allows_with_force
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags

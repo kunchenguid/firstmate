@@ -30,10 +30,15 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
+# hard-resets/removes the worktree and kills its processes. This is a
+# preservation test, not an integration test: reachable-from-any-remote means
+# the work is not LOST if the worktree is discarded, regardless of whether it
+# is yet integrated into the default branch, so a local-only ship's clean
+# branch reachable from any remote satisfies it without local-main ancestry.
+# Work has landed when it is reachable from any remote-tracking branch (a fork
+# counts as a remote, so upstream-contribution PRs pushed to a fork satisfy
+# this in any mode), OR - for a normal ship task whose commits are not so
+# reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -45,8 +50,17 @@
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# teardown refuses rather than risk discarding unlanded work. "Contains the
+# current local work" means current HEAD is an exact ancestor of the PR head;
+# content equivalence (same diff, different commit) is never accepted as proof
+# of containment.
 # Uncommitted changes are never landed.
+# Landed work is a data-loss safety floor, not a completion proof: a non-local-only
+# ship task closes its backlog item as done only once a merged PR is actually
+# resolved and confirmed for it (by recorded pr=, or discovered by branch name),
+# refusing otherwise even when the branch is fully landed on some remote with no
+# recorded pr= at all - the two checks run independently, and passing the safety
+# floor never substitutes for the missing completion link.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1087,43 +1101,20 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
-}
-
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# for both the PR state and head. "Contained" means current HEAD is an exact
+# ancestor of that PR head - a patch-id/content equivalence check was tried here
+# previously and dropped: it proved only that some independently-built commit
+# had the same diff as an unpushed local commit, not that the local commit's
+# exact content was ever actually reviewed and merged, and it compared each
+# commit in isolation so a reordering or partial replay could still pass. An
+# unpushed commit that only replays a merged PR's patch, without being that PR
+# head's own ancestor, now refuses like any other unlanded work; --force
+# remains the captain's explicit escape hatch (it skips this whole check).
+# Returns non-zero when the PR is not merged, the current work is not contained
+# in the PR head, no PR is found, or any gh error occurs - the caller then
+# falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1147,8 +1138,6 @@ pr_is_merged() {
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
-    landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1239,10 +1228,17 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# other ship carries the PR recorded on its own record - closing the backlog
+# item as done otherwise asserts a completion nothing has actually confirmed,
+# so a PR-based ship with no PR_URL yet must resolve one (by branch name) and
+# have GitHub confirm it merged and containing current HEAD before it may
+# close; a branch fully pushed to some remote with no pr= ever recorded
+# (validate_worktree_teardown_safety's own PR discovery only runs on its
+# unpushed-commits path, so it never reaches PR_URL here on its own) would
+# otherwise close silently with no completion link at all.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
+  local data_relative branch
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1252,8 +1248,25 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      elif [ "$FORCE" = "--force" ]; then
+        # --force already authorized discarding this task's data-loss safety
+        # proof above; it also authorizes closing the backlog item without a
+        # confirmed PR link, same as this function's behavior before this gate
+        # existed. Best-effort only: record PR_URL if something already
+        # resolved it, never refuse here.
+        [ -z "$PR_URL" ] || BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      else
+        branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+        if [ -z "$PR_URL" ]; then
+          pr_is_merged "$branch" || true
+        fi
+        if [ -n "$PR_URL" ]; then
+          BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        else
+          echo "REFUSED: task $ID's backlog item cannot be closed done because no merged PR is recorded (pr=) or discoverable by branch name $branch." >&2
+          echo "Record it with bin/fm-pr-check.sh $ID <PR-url> once merged, land the PR first, or get the captain's explicit OK to discard, then --force." >&2
+          return 1
+        fi
       fi
       ;;
   esac
@@ -2887,11 +2900,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -2907,6 +2915,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # Best-effort: drop the local task branch so the shared repo does not
+  # accumulate refs. This runs only AFTER the return above has proved (via
+  # post_lock_cleanup_check, or the captain's own --force) that the branch's
+  # work is safe to lose - never before, so a stale-lock recheck that finds
+  # newly-unsafe state can still abort teardown before the branch name itself
+  # is discarded.
+  if [ "$branch" != "HEAD" ] && [ -d "$WT" ]; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
