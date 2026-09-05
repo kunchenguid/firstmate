@@ -1423,12 +1423,14 @@ pass "the adapter derives physical identity without newline path corruption"
 # without inspecting implementation source.
 REPLY_RUNTIME="$TMP_ROOT/reply-runtime"
 REPLY_HOME="$TMP_ROOT/reply-home"
+REPLY_HOME_LINK="$TMP_ROOT/reply-home-link"
 REPLY_BIN="$TMP_ROOT/reply-bin"
 REPLY_LOG="$TMP_ROOT/reply-argv.log"
 RESTART_LOG="$TMP_ROOT/reply-restart.log"
 mkdir -p "$REPLY_RUNTIME/bin" "$REPLY_BIN"
 new_home "$REPLY_HOME"
 chmod 700 "$REPLY_HOME/state"
+ln -s "$REPLY_HOME" "$REPLY_HOME_LINK"
 export GENERATION_RUNNER="$ROOT/bin/fm-procevent.sh"
 cp "$ROOT/bin/fm-procevent-lavish.sh" "$ROOT/bin/fm-procevent-lib.sh" \
   "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$REPLY_RUNTIME/bin/"
@@ -1501,6 +1503,7 @@ SH
 chmod +x "$REPLY_BIN/lavish-axi"
 REPLY_ART="$TMP_ROOT/reply-artifact.html"
 reply_status="$REPLY_HOME/state/reply-host.status"
+reply_status_spelled="$REPLY_HOME_LINK/state/reply-host.status"
 printf '<h1>reply fixture</h1>\n' > "$REPLY_ART"
 reply_id=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
@@ -1525,8 +1528,8 @@ assert_absent "$REPLY_HOME/state/procevent/$reply_id.pending-reply" \
   "newline-only reply input poisoned pending reply state"
 assert_absent "$RESTART_LOG" "newline-only reply input restarted the listener"
 
-FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
-  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
+FM_HOME="$REPLY_HOME_LINK" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status_spelled" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" "First change applied." >/dev/null
 upgraded_generation_out=$(FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   "$ROOT/bin/fm-procevent.sh" generation "$reply_id" --if-matches lavish -- \

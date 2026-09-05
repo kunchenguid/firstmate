@@ -233,6 +233,22 @@ host_status_path_validate() {  # <path>
   fi
 }
 
+host_status_path_resolve() {  # <path>
+  local host_status=$1 parent name physical_parent
+  case "$host_status" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$host_status" in *$'\n'*) return 1 ;; esac
+  parent=${host_status%/*}
+  name=${host_status##*/}
+  [ -n "$parent" ] && [ -n "$name" ] || return 1
+  physical_parent=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$parent" 2>/dev/null) \
+    || return 1
+  [ "$physical_parent" = "$STATE" ] || return 1
+  printf '%s/%s\n' "$physical_parent" "$name"
+}
+
 reply_record_write() {  # <generation> <status-path> <input-path> <output-path>
   {
     printf 'generation=%s\nstatus=%s\nreply:\n' "$1" "$2"
@@ -403,7 +419,8 @@ cmd_reply() {
   [ -d "$reg" ] && [ ! -L "$reg" ] || die "Lavish source is not armed: $id"
   registration="$reg/$id.source"
   pending=$(pending_reply_path "$id")
-  host_status=${FM_LAVISH_HOST_STATUS_FILE-}
+  host_status=$(host_status_path_resolve "${FM_LAVISH_HOST_STATUS_FILE-}") \
+    || die "FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
   host_status_path_validate "$host_status" \
     || die "FM_LAVISH_HOST_STATUS_FILE is not this home's task status log"
   generation_line=$("$SCRIPT_DIR/fm-procevent.sh" generation "$id" --upgrade-legacy --if-matches lavish -- \
