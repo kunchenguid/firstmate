@@ -152,6 +152,48 @@ test_unrelated_malformed_syntax_allows() {
   pass "push-guard: allows unparseable syntax that never mentions git"
 }
 
+test_commit_message_heredoc_mentioning_git_and_push_allows() {
+  local cmd out rc
+  # Regression: a `git commit -m "$(cat <<'EOF' ... EOF)"` heredoc whose message
+  # body mentions "git" and "push" far apart (as any commit about this guard's
+  # own commits will) breaks this classifier's paren-balance tracking inside
+  # the $(...) substitution - a stray ")" in ordinary prose reads as closing
+  # the substitution early. The fail-closed unclassifiable-push path must not
+  # fire on that distant, unrelated mention; only proximate git-push text
+  # (tested elsewhere) should ever trigger it.
+  cmd=$(cat <<'OUTER'
+git commit -m "$(cat <<'EOF'
+fix(bin): document the push-guard (fm-push-guard-pretool-check.sh)
+
+This closes a gap in git history left after an earlier change (see #1234).
+EOF
+)"
+OUTER
+)
+  out=$("$CHECK" --command "$cmd" 2>&1); rc=$?
+  expect_code 0 "$rc" "a commit message mentioning git and push far apart must allow"
+  [ -z "$out" ] || fail "commit-message heredoc produced output: $out"
+  pass "push-guard: allows a git commit whose heredoc message mentions git and push far apart"
+}
+
+test_heredoc_fed_shell_running_a_real_push_denies() {
+  local cmd out rc
+  # A heredoc whose body is fed through cat into sh -c is genuinely executable
+  # (unlike a heredoc used only as a commit-message argument), so this must
+  # still deny even though the heredoc-body content is a real git push.
+  cmd=$(cat <<'OUTER'
+sh -c "$(cat <<'EOF'
+git push origin main
+EOF
+)"
+OUTER
+)
+  out=$("$CHECK" --command "$cmd" 2>&1); rc=$?
+  expect_code 2 "$rc" "a heredoc-fed shell running a real git push must deny"
+  assert_contains "$out" '[unclassifiable-push]' "the heredoc-fed push deny must carry a reason code"
+  pass "push-guard: denies a heredoc-fed sh -c that actually runs git push"
+}
+
 test_command_flag_direct() {
   local out rc
   out=$("$CHECK" --command 'git push origin main' 2>&1); rc=$?
@@ -324,6 +366,8 @@ test_registrations_present() {
 test_full_acceptance_matrix
 test_unclassifiable_push_fails_closed
 test_unrelated_malformed_syntax_allows
+test_commit_message_heredoc_mentioning_git_and_push_allows
+test_heredoc_fed_shell_running_a_real_push_denies
 test_command_flag_direct
 test_bare_push_denied_on_main
 test_bare_push_denied_on_master

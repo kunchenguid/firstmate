@@ -164,15 +164,30 @@ function classifyPushArgs(words, dir) {
   return null;
 }
 
+// The fail-closed trigger for text this classifier cannot tokenize: `git` and
+// `push` within the same short run of text, not merely present anywhere in
+// the command. A heredoc body or a long commit message routinely mentions
+// both words far apart (this very file's own commit messages do), and a
+// naive "contains both words" test would fail closed on ordinary prose - most
+// visibly on the exact `git commit -m "$(cat <<'EOF' ... EOF)"` shape used to
+// land this guard's own commits, whose heredoc body breaks this classifier's
+// paren-balance tracking in a `$(...)` substitution. Requiring proximity
+// keeps the fail-closed net tight to an actual attempted invocation
+// (`git push "unterminated`) while not misfiring on distant, unrelated
+// mentions of the two words.
+function mentionsGitPushNearby(command) {
+  return /\bgit\b[^\n]{0,80}\bpush\b/.test(command);
+}
+
 // Find every reachable `git push` site in `command`, recursing into subshells,
 // brace groups, command/backtick substitutions, `eval` payloads, and a
 // literal `sh -c`/`bash -c`/`zsh -c` payload - the same reachability surface
 // bin/fm-arm-command-policy.mjs traces for its own protected commands, because
 // none of those constructs stop a `git push` from executing.
 function findSites(command, depth) {
-  if (depth > 12) return { sites: [], unparseable: /\bgit\b/.test(command) && /\bpush\b/.test(command) };
+  if (depth > 12) return { sites: [], unparseable: mentionsGitPushNearby(command) };
   const lexed = new Lexer(command).tokenize();
-  if (lexed.error) return { sites: [], unparseable: /\bgit\b/.test(command) && /\bpush\b/.test(command) };
+  if (lexed.error) return { sites: [], unparseable: mentionsGitPushNearby(command) };
 
   const { nodes } = splitProgram(lexed.tokens);
   const sites = [];
@@ -210,7 +225,7 @@ function findSites(command, depth) {
           sites.push(...nested.sites);
           unparseable ||= nested.unparseable;
         } else if (payload) {
-          unparseable ||= /\bgit\b/.test(command) && /\bpush\b/.test(command);
+          unparseable ||= mentionsGitPushNearby(command);
         }
         break;
       }
@@ -222,7 +237,7 @@ function findSites(command, depth) {
         sites.push(...nested.sites);
         unparseable ||= nested.unparseable;
       } else if (payloads.length > 0) {
-        unparseable ||= /\bgit\b/.test(command) && /\bpush\b/.test(command);
+        unparseable ||= mentionsGitPushNearby(command);
       }
     }
 
