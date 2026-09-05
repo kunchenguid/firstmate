@@ -484,6 +484,82 @@ SH
   pass "fm-mail: a rollback failure never releases a wake the drain could acknowledge without a durable record"
 }
 
+test_poll_retry_surfaces_under_new_mail_flood() {
+  local harness out
+  harness="$TMP_ROOT/retry-budget-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'51 52 53 54 55 41'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # cap=4 reserves retry_budget = max(1, 4//4) = 1. Five new uids (51-55) would
+  # fill the cap alone; the recovering retry uid 41 must still take its slot.
+  {
+    printf 'uidvalidity=90009\n'
+    printf '41\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '41\n' > "$HOME_DIR/state/.mail-retry"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
+  assert_contains "$out" $'41\t\ta@b.c\tgood\tretry' "recovered metadata surfaces despite the new-mail flood"
+  pass "fm-mail: the reserved retry budget survives a new-mail flood"
+}
+
+test_poll_fails_closed_when_retry_unwritable() {
+  local fakebin homedir_bin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '77\t\t(no header)\tunfetchable header - see fm-mail read\tdegraded\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.mail-retry"
+  chmod 0400 "$HOME_DIR/state/.mail-retry"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when the retry record cannot be written"
+  assert_not_contains "$out" "woke for 77" "no wake is emitted before the retry record"
+  assert_not_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "77" "a failed retry write must not cursor-record the uid"
+  chmod 0600 "$HOME_DIR/state/.mail-retry"
+  pass "fm-mail: a failed retry write fails the poll instead of losing recovery"
+}
+
 test_poll_retry_rotation_advances_past_failures() {
   local harness out1 out2 rc1=0 rc2=0
   harness="$TMP_ROOT/retry-rotate-harness.py"
@@ -1079,6 +1155,8 @@ test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_rotation_advances_past_failures
+test_poll_retry_surfaces_under_new_mail_flood
+test_poll_fails_closed_when_retry_unwritable
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain
