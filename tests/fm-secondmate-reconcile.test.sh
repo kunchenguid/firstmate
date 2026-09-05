@@ -96,7 +96,27 @@ env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
 exit "$rc"
 SH
-  chmod +x "$fb/fake-ssh"
+  # The remote doorbell uses Herdr even though delivery itself is durable inbox
+  # publication. Never let that probe resolve to the host's real CLI and start
+  # an unowned fm-remote server. Model the absent fixture pane explicitly.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+log="$(dirname "$0")/herdr.log"
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  'status --json --session fm-remote')
+    printf '{"server":{"running":true}}\n' ;;
+  'pane read p1 --source recent --lines 200 --format ansi --session fm-remote'|\
+  'pane read p1 --source recent --lines 200 --session fm-remote'|\
+  'pane send-text p1 '*' --session fm-remote')
+    printf '{"error":{"code":"pane_not_found"}}\n'
+    exit 1 ;;
+  *)
+    printf '%s\n' "$*" >> "$log.unexpected"
+    exit 1 ;;
+esac
+SH
+  chmod +x "$fb/fake-ssh" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -990,6 +1010,11 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     "$home/state/.meta-remote-offpath-mate.lock"; do
     [ ! -e "$lock" ] || fail "later supervision delivery left a mate lifecycle lock held: $lock"
   done
+  assert_grep 'pane send-text p1 ' "$fakebin/herdr.log" \
+    "the remote delivery did not exercise its fixture doorbell"
+  assert_absent "$fakebin/herdr.log.unexpected" \
+    "remote reconcile attempted an unexpected Herdr operation"
+  pass "remote reconcile retains durable delivery when its isolated fixture pane is absent"
   pass "Bearings records locally, returns before a delayed remote queue, and supervision delivers later"
 }
 

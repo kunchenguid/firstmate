@@ -575,3 +575,20 @@ FM_TEST_END 2026-09-05T06:40:40Z tests/fm-public-followup.test.sh exit=0 duratio
 
 The concurrent-persistence case advances its fixture epoch after the confirmed mate's modeled relaunch, while a separate real-time process-group deadline detects a stalled polling loop.
 The public-followup run completed its assertions and quiesced the fixture workers before directory removal.
+
+Remote reconcile fixture isolation was verified on 2026-09-05 with the same Bash and kernel versions.
+
+```sh
+FM_TEST_TIMEOUT_SCALE=1 bin/fm-test-run.sh --jobs 1 --check-herdr-leaks tests/fm-secondmate-reconcile.test.sh
+```
+
+Relevant observed output:
+
+```text
+ok - remote reconcile retains durable delivery when its isolated fixture pane is absent
+FM_TEST_END 2026-09-05T08:20:53Z tests/fm-secondmate-reconcile.test.sh exit=0 duration_ms=28687 gate_skip=false
+fm-test-run: no fm-remote or fm-lab-* Herdr server survived the suite
+```
+
+The fake remote transport owns a strict Herdr fixture, so its doorbell cannot start a host server even when the modeled pane is absent.
+The regression verifies attempted doorbell delivery, durable inbox publication, cooldown commitment, and rejection of unexpected fixture operations.
