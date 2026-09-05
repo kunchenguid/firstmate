@@ -916,11 +916,14 @@ fm_lock_try_acquire() {
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
+  # Resolve this frame's identity BEFORE any lock can be created: a lock whose
+  # recorded owner could not be resolved is worse than no lock, because the
+  # reclaim paths below compare against that recorded pid.
+  fm_current_pid current || return 1
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
 
-  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
@@ -1475,7 +1478,7 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
 fm_autoarm_reset_owned() {  # <state-dir> <gen>
   local state=$1 gen=$2 lock pid
   lock="$state/.claude-autoarm.lock"
-  fm_current_pid pid || return 1
+  fm_current_pid pid || return 2
   fm_lock_try_acquire "$lock" || return 2
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
@@ -1594,9 +1597,9 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   if [ -n "$recorded" ] && [ -n "$lock_pid" ] \
     && owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid 2>/dev/null) \
     && [ "$owner" = "$lock_pid" ] \
-    && [ -z "$(sed -n '2p' "$epoch" 2>/dev/null)" ]; then
+    && [ -z "$(sed -n '2p' "$epoch" 2>/dev/null)" ] \
+    && fm_current_pid self_pid; then
     line1=$(sed -n '1p' "$epoch" 2>/dev/null || true)
-    fm_current_pid self_pid || self_pid=$$
     tmp="$epoch.tmp.$self_pid"
     if [ -n "$line1" ] \
       && printf '%s\n%s\n' "$line1" "$recorded" > "$tmp" 2>/dev/null \

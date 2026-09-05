@@ -1162,11 +1162,11 @@ test_frame_identity_is_per_subshell_and_stable() {
   # so checking the pid out here would only prove they are gone.
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1"
-    fm_self_pid_set; printf "top %s\n" "$FM_SELF_PID" >> "$2"
-    fm_self_pid_set; printf "top %s\n" "$FM_SELF_PID" >> "$2"
-    kill -0 "$FM_SELF_PID" 2>/dev/null && printf "live yes\n" >> "$2"
-    ( fm_self_pid_set; printf "sibA %s\n" "$FM_SELF_PID" >> "$2" ) &
-    ( fm_self_pid_set; printf "sibB %s\n" "$FM_SELF_PID" >> "$2" ) &
+    fm_current_pid me; printf "top %s\n" "$me" >> "$2"
+    fm_current_pid me; printf "top %s\n" "$me" >> "$2"
+    kill -0 "$me" 2>/dev/null && printf "live yes\n" >> "$2"
+    ( fm_current_pid me; printf "sibA %s\n" "$me" >> "$2" ) &
+    ( fm_current_pid me; printf "sibB %s\n" "$me" >> "$2" ) &
     wait
   ' _ "$LIB" "$out"
   top1=$(awk '$1=="top"{print $2}' "$out" | sed -n 1p)
@@ -1180,6 +1180,37 @@ test_frame_identity_is_per_subshell_and_stable() {
   grep -qx "live yes" "$out" \
     || fail "the frame identity did not name a live process while that frame was running"
   pass "frame identity is per-subshell, stable within a frame, and a real pid"
+}
+
+test_lock_acquisition_refuses_unobtainable_frame_identity() {
+  local dir state lockdir status owner_count
+  dir=$(make_case frame-identity-unavailable)
+  state="$dir/state"
+  lockdir="$state/.identity.lock"
+  # Bash 4+ answers from $BASHPID, so the fallback only runs with BASHPID unset.
+  # Shadowing `sh` with a stub that answers nothing is what makes the fallback
+  # unable to report a pid, while every other command the lock path needs still
+  # resolves from the untouched rest of PATH.
+  mkdir -p "$dir/stub"
+  printf '#!/bin/sh\nexit 1\n' > "$dir/stub/sh"
+  chmod 0755 "$dir/stub/sh"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    (
+      unset BASHPID
+      PATH="$3:$PATH"
+      if fm_lock_try_acquire "$2"; then
+        exit 0
+      fi
+      exit 41
+    )
+  ' _ "$LIB" "$lockdir" "$dir/stub"
+  status=$?
+  expect_code 41 "$status" "lock acquisition must refuse when its frame identity cannot be obtained"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "identity failure created a lock"
+  owner_count=$(find "$state" -maxdepth 1 -name '.identity.lock.owner.*' -print | wc -l | tr -d ' ')
+  [ "$owner_count" -eq 0 ] || fail "identity failure left $owner_count owner directories"
+  pass "lock acquisition refuses an unavailable frame identity without reusing an inherited pid"
 }
 
 test_sibling_subshells_get_exclusive_lock_ownership() {
@@ -1382,6 +1413,7 @@ test_singleton_start
 test_stale_beacon_holder_is_not_reported_as_a_failure
 test_recovering_holder_is_attached_to_not_replaced
 test_frame_identity_is_per_subshell_and_stable
+test_lock_acquisition_refuses_unobtainable_frame_identity
 test_sibling_subshells_get_exclusive_lock_ownership
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
