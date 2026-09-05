@@ -19,10 +19,14 @@
 #                        poll, no message is ever marked read (BODY.PEEK), and
 #                        every surfaced message is keyed by its immutable IMAP
 #                        UID so expunge renumbering never re-wakes or loses
-#                        mail. poll is OPERATOR-INVOKED: it has no scheduler or
-#                        daemon. A captain or an `at`/cron job decides when to
-#                        run it; this home offers no email service wiring of its
-#                        own.
+#                        mail. The cursor also records the mailbox generation
+#                        (UIDVALIDITY) so a recreated mailbox cannot reuse a
+#                        numeric uid and suppress a new wake, and overlapping
+#                        polls are serialized so the same mail is never
+#                        double-surfaced. poll is OPERATOR-INVOKED: it has no
+#                        scheduler or daemon. A captain or an `at`/cron job
+#                        decides when to run it; this home offers no email
+#                        service wiring of its own.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -90,7 +94,7 @@ run_py() {
   local py_script rc=0
   py_script="$(mktemp)"
   cat > "$py_script" <<'PYEOF'
-import imaplib, ssl, sys, os, email
+import imaplib, ssl, sys, os, email, re
 from email.header import decode_header, make_header
 
 USER = os.environ['FM_MAIL_USER']; PW = os.environ['FM_MAIL_PASS']
@@ -140,6 +144,14 @@ if cmd == 'read':
                 if part.get_content_type() == 'text/plain':
                     preview = part.get_payload(decode=True).decode('utf-8', 'replace').strip()
                     break
+            if not preview:
+                for part in mi.walk():
+                    if part.get_content_type() == 'text/html':
+                        raw = part.get_payload(decode=True).decode('utf-8', 'replace')
+                        raw = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', raw)
+                        preview = re.sub(r'<[^>]+>', ' ', raw)
+                        preview = ' '.join(preview.split())
+                        break
             if preview:
                 first = preview.splitlines()[0] if preview else preview
                 print('Body:', (first[:200] if first else ''))
@@ -183,6 +195,8 @@ if cmd == 'poll_list':
     try:
         M = connect_mailbox()
         M.select('INBOX')
+        ur = M.untagged_responses.get('UIDVALIDITY')
+        uidv = ur[-1].decode() if ur else ''
         typ, data = M.uid('search', None, 'UNSEEN')
         ids = [x for x in (data[0] or b'').split()]
         out = []
@@ -196,7 +210,9 @@ if cmd == 'poll_list':
             subj = dec(mi.get('Subject'))
             fr = dec(mi.get('From'))
             out.append((uid, idate, fr, subj))
-        # Deliver each message's uid/date so the bash layer diffs against cursor.
+        # Emit the mailbox generation guard first, then each message's
+        # uid/date so the bash layer diffs against cursor.
+        print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj in out:
             print('%s\t%s\t%s\t%s' % (uid, idate, fr, subj))
         M.logout()
@@ -263,15 +279,35 @@ case "${1:-}" in
     run_py seen "$CURSOR" || true
     ;;
   poll)
-    # List recent mail (uid,date,from,subj), then diff against already-surfaced
-    # uids to find NEW messages and surface one wake each. Never marks anything
-    # read. The cursor file holds one surfaced uid per line.
+    # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
+    # then diff against already-surfaced uids to find NEW messages and surface
+    # one wake each. Never marks anything read. The cursor file holds the
+    # generation guard line followed by one surfaced uid per line. A single
+    # flock serializes overlapping polls so two runs cannot both load the same
+    # pre-diff cursor and double-surface the same mail.
+    exec 9>"$STATE_DIR/.mail-seen.lock"
+    flock 9
     LIST="$(run_py poll_list)"
+    GENERATION="$(printf '%s\n' "$LIST" | head -n1 | cut -f2)"
+    LIST="$(printf '%s\n' "$LIST" | tail -n +2)"
+
     declare -A SEEN
+    STORED_GEN=""
     [ -f "$CURSOR" ] || : > "$CURSOR"
     while IFS= read -r u; do
-      [ -n "$u" ] && SEEN["$u"]=1
+      case "$u" in
+        "uidvalidity="*) STORED_GEN="${u#uidvalidity=}" ;;
+        *) [ -n "$u" ] && SEEN["$u"]=1 ;;
+      esac
     done < "$CURSOR"
+
+    # A recreated/restored mailbox has a new UIDVALIDITY; a numeric uid can be
+    # reused, so a stale cursor must not suppress its wake.
+    if [ -n "$GENERATION" ] && [ "$STORED_GEN" != "$GENERATION" ]; then
+      SEEN=()
+      STORED_GEN="$GENERATION"
+    fi
+
     woke=0
     while IFS= read -r line; do
       [ -z "$line" ] && continue
@@ -281,10 +317,19 @@ case "${1:-}" in
       if [ -z "${SEEN[$uid]:-}" ]; then
         wake_for "$uid" "mail from $fr - ${subj:-no subject}"
         echo "fm-mail: woke for $uid"
-        printf '%s\n' "$uid" >> "$CURSOR"
+        SEEN["$uid"]=1
         woke=$((woke + 1))
       fi
     done <<< "$LIST"
+    flock -u 9
+    exec 9>&-
+    {
+      printf 'uidvalidity=%s\n' "$STORED_GEN"
+      for u in "${!SEEN[@]}"; do
+        printf '%s\n' "$u"
+      done
+    } > "$CURSOR.new"
+    mv "$CURSOR.new" "$CURSOR"
     if [ "$woke" -eq 0 ]; then
       echo "fm-mail: no new mail"
     fi
