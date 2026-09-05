@@ -198,6 +198,12 @@ SH
 cat > "$FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 {
   first=1
   for arg in "$@"; do

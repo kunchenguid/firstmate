@@ -305,6 +305,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -2547,7 +2549,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if ! TREEHOUSE_HOME_ROOT=$(fm_treehouse_root_for_home "$FM_ROOT" "$FM_HOME"); then
+    echo "error: could not resolve the Treehouse root for this home's worker pool" >&2
+    exit 1
+  fi
+  if [ -n "$TREEHOUSE_HOME_ROOT" ]; then
+    # An installed Treehouse without --root would silently hand this home a
+    # worktree of whichever clone owns the shared pool identity, which is the
+    # exact cross-home leak this root binding exists to prevent. Refuse before
+    # any worker endpoint holds work in another home's clone.
+    if ! fm_treehouse_supports_root; then
+      echo "error: this home needs its own Treehouse pool root, but the installed treehouse has no --root option; upgrade treehouse to v2.2.0 or newer and rerun" >&2
+      exit 1
+    fi
+    TREEHOUSE_GET_COMMAND="treehouse get --root $(printf '%q' "$TREEHOUSE_HOME_ROOT")"
+  else
+    TREEHOUSE_GET_COMMAND='treehouse get'
+  fi
+  spawn_send_text_line "$WT_TARGET" "$TREEHOUSE_GET_COMMAND"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

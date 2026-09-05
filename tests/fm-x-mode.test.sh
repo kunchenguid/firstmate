@@ -810,6 +810,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  printf '%s\n' '      --root string   Worktree root directory'
   exit 0
 fi
 exit 0

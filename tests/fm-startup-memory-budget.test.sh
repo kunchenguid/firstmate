@@ -64,6 +64,7 @@ case "$*" in
   *display-message*'#{cursor_y}'*) printf '%s\n' 0 ;;
   *capture-pane*) printf '❯\n' ;;
 esac
+  printf '%s\n' '      --root string   Worktree root directory'
 exit 0
 SH
   chmod +x "$fakebin"/*
