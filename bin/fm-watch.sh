@@ -177,6 +177,29 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+# Liveness beacon for the arm layer: a fresh mtime here means this watcher made
+# PROGRESS, not merely that time passed. It is touched at every phase boundary of
+# the poll loop, and only ever by the watcher process itself.
+#
+# Before the 2026-09-04 supervision investigation this was a single touch per
+# iteration, so the beacon measured a whole iteration rather than the current
+# phase. When one iteration on a busy home grew to 100-350s against a 300s grace
+# - dominated by an unbounded rescan of ~1,883 already-settled pending-reply
+# records - a perfectly healthy watcher read as dead, and the arm layer reported
+# a working fleet's supervision as broken.
+#
+# The invariant that makes the beacon mean anything: only the watcher process
+# touches it, and only on completing a unit of work. There is deliberately no
+# timer, no background ticker, and no beat inside a blocking wait, because a
+# watcher genuinely stuck inside one phase MUST stop beating - that is the
+# signal the arm layer reads, not a defect to paper over. Every phase is
+# separately bounded so no single one can legitimately outlive the grace: checks
+# by CHECK_TIMEOUT, the signal linger by SIGNAL_GRACE, backend reads by their own
+# callers.
+beat() {
+  touch "$STATE/.last-watcher-beat"
+}
+
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -1424,15 +1447,25 @@ fi
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    # A live, identity-matched holder whose beacon has aged is a SUSPECTED STALL,
+    # not a proven wedge and not a failure. It leaves through its own typed exit
+    # status so the arm layer can wait for the holder to beat again rather than
+    # reporting a working fleet's supervision as broken - which is exactly what a
+    # bare exit 1 caused on 2026-09-04, when a healthy watcher's single poll
+    # iteration had simply outgrown the grace.
+    #
+    # Nothing on this path signals, kills or replaces that holder. Age alone
+    # cannot distinguish a slow phase from a stuck one, and the captain ruled on
+    # 2026-09-05 that a running monitor process is never terminated on age.
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
-        exit 1
+        echo "watcher: busy holder pid=$FM_LOCK_HELD_PID beacon=${beat_age}s (grace ${WATCHER_STALE_GRACE}s)"
+        exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
       fi
     elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
-      exit 1
+      echo "watcher: busy holder pid=$FM_LOCK_HELD_PID beacon=none (grace ${WATCHER_STALE_GRACE}s)"
+      exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
     fi
     echo "watcher: already running pid $FM_LOCK_HELD_PID"
   else
@@ -1600,9 +1633,17 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Start of an iteration is itself a phase boundary. Every phase below ends
+  # with its own beat, so the beacon's age is the age of the CURRENT phase.
+  beat
+
+  # Iteration boundary, distinct from the beacon and read by nothing in
+  # production. The beacon used to double as this marker because it was touched
+  # exactly once per iteration; now that it tracks phase progress it can advance
+  # several times inside one iteration, so "a whole cycle has elapsed" needs its
+  # own observable. Supervision never reads this file - only the regression suite
+  # does, to wait for a complete cycle without depending on the phase beacon.
+  touch "$STATE/.last-poll-cycle"
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -1619,7 +1660,12 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  # The tick beats between records through this callback, so a home with many
+  # open records stays visibly alive part-way through the phase rather than only
+  # at its end. beat runs in this process; the tick is called directly, never in
+  # a command substitution, so the beacon is still only ever touched here.
+  FM_PENDING_REPLY_TICK_BEAT=beat fm_pending_reply_tick "$STATE" || true
+  beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -1628,6 +1674,7 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+  beat
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
@@ -1639,10 +1686,12 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  beat
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+  beat
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
@@ -1656,6 +1705,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  beat
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1668,6 +1718,11 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # One beat per check: each check is separately bounded by CHECK_TIMEOUT, so
+      # a sweep of many checks stays inside the grace without any beat during a
+      # single check's blocking wait - which would be a wall-clock beat and would
+      # hide a check that never returns.
+      beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1741,6 +1796,7 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    beat
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
@@ -1883,6 +1939,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
+    # One beat per window: the stale scan reads every recorded window's pane, and
+    # on a large fleet that is the longest phase of the poll. Beating per window
+    # keeps the beacon measuring progress through the scan; a read that never
+    # returns still stops the beats, which is the point.
+    beat
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
@@ -2099,6 +2160,11 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Final phase boundary of the iteration: everything above completed, so record
+  # that progress before blocking. Without this the whole terminal wait would be
+  # charged to the last phase that happened to beat.
+  beat
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
