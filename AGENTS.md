@@ -92,6 +92,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
+  gitnexus-mirrors/<project>  dedicated read-only mirror clone the GitNexus main-index step indexes instead of the project clone, one per registered project; refreshed after every fleet-sync fast-forward and local-only landing; bin/fm-gitnexus-reindex.sh owns the mirror, flag, and never-mutate-the-clone contract
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown

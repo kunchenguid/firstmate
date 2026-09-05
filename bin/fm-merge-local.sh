@@ -9,6 +9,9 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+# After landing, fail-softly refreshes that project's GitNexus main-index
+# (bin/fm-gitnexus-reindex.sh owns the mirror, flag, and never-mutate-the-clone
+# contract); an index failure never fails the landing.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -72,3 +75,6 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+# Fail-soft: bin/fm-gitnexus-reindex.sh owns its own WARN-and-continue
+# contract and never touches this clone, only a mirror it owns.
+"$FM_ROOT/bin/fm-gitnexus-reindex.sh" "$PROJ" || true

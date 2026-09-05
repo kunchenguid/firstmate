@@ -20,6 +20,9 @@
 # that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
+# After a successful fast-forward (or recovery), fail-softly refreshes that
+# project's GitNexus main-index (bin/fm-gitnexus-reindex.sh owns the mirror,
+# flag, and never-mutate-the-clone contract); an index failure never fails a sync.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -437,6 +440,9 @@ sync_project() {
   else
     echo "$label: synced $before..$after"
   fi
+  # Fail-soft: bin/fm-gitnexus-reindex.sh owns its own WARN-and-continue
+  # contract and never touches this clone, only a mirror it owns.
+  "$FM_ROOT/bin/fm-gitnexus-reindex.sh" "$PROJ" || true
   return 0
 }
 
