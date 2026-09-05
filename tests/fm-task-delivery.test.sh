@@ -747,6 +747,47 @@ EOF
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
 }
 
+test_spawn_refreshes_legacy_worker_roles() {
+  local rec home proj fakebin kind id out brief project_kind
+  rec=$(make_home worker-roles)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  # AGENTS.md and its import are instruction inputs, not implementation-source
+  # assertions: launching a worker must never rewrite either project's files.
+  cp "$ROOT/AGENTS.md" "$home/AGENTS.md"
+  for project_kind in firstmate unrelated; do
+    if [ "$project_kind" = firstmate ]; then
+      cp "$ROOT/AGENTS.md" "$proj/AGENTS.md"
+    else
+      printf 'Use this project coding standard.\n' > "$proj/AGENTS.md"
+    fi
+    printf '@AGENTS.md\n' > "$proj/CLAUDE.md"
+    cp "$proj/AGENTS.md" "$proj/agents-before"
+    for kind in no-mistakes direct-PR local-only scout; do
+      id="roles-$project_kind-$kind"
+      write_brief "$home" "$id"
+      if [ "$kind" = scout ]; then
+        out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --scout)
+      else
+        out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode "$kind" --yolo off)
+      fi
+      assert_not_contains "$out" 'could not render' "worker role rendering failed"
+      brief="$home/data/$id/launch-brief.md"
+      assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
+      assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
+      assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
+      assert_grep 'Other projects retain their own instructions unchanged' "$brief" "$project_kind $kind displaced project guidance"
+      assert_no_grep '# Worker role' "$home/data/$id/brief.md" "spawn rewrote the source brief"
+      cmp -s "$proj/agents-before" "$proj/AGENTS.md" || fail "spawn changed project AGENTS.md"
+      [ "$(cat "$proj/CLAUDE.md")" = '@AGENTS.md' ] || fail "spawn changed the project import"
+    done
+  done
+  cmp -s "$ROOT/AGENTS.md" "$home/AGENTS.md" || fail "worker spawn changed the primary contract"
+  pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
+}
+
+test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
