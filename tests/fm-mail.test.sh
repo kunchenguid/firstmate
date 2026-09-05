@@ -534,6 +534,68 @@ PYEOF
   pass "fm-mail: the reserved retry budget survives a new-mail flood"
 }
 
+test_poll_cap_one_alternates_new_and_retry() {
+  local harness out1 out2 rc1=0 rc2=0
+  harness="$TMP_ROOT/cap-one-turn-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_TURN': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'90 100'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # uid 90 is cursor-recorded and in the retry set (recovered degraded mail);
+  # uid 100 is new unseen mail. cap=1 leaves one contended slot, so the poll
+  # alternates: the first poll surfaces new mail and the next surfaces the
+  # recovered retry metadata, and neither class can starve the other.
+  {
+    printf 'uidvalidity=90009\n'
+    printf '90\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '90\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-turn"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first contended poll must succeed"
+  assert_contains "$out1" $'100\t\ta@b.c\tgood\tok' "the first contended slot surfaces new mail"
+  assert_not_contains "$out1" $'90\t' "the retry recovery waits its turn"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second contended poll must succeed"
+  assert_contains "$out2" $'90\t\ta@b.c\tgood\tretry' "the second contended slot surfaces the recovered retry metadata"
+  assert_not_contains "$out2" $'100\t' "new mail waits its turn"
+  pass "fm-mail: a single contended slot alternates between new mail and retry recovery"
+}
+
 test_poll_cap_one_never_suppresses_new_mail() {
   local harness out
   harness="$TMP_ROOT/cap-one-harness.py"
@@ -1261,6 +1323,7 @@ test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_cap_one_never_suppresses_new_mail
+test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record

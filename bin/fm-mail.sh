@@ -158,6 +158,10 @@ WOKEN="$STATE_DIR/.mail-woken"
 # per-poll retry window marches through every uid; it is cleared with the set.
 RETRY="$STATE_DIR/.mail-retry"
 RETRY_POS="$STATE_DIR/.mail-retry-pos"
+# Alternating-turn flag for a single contended wake slot (new surfacing vs
+# retry recovery) at cap 1; cleared with the retry machinery on a generation
+# change so a new mailbox starts with new mail first.
+TURN="$STATE_DIR/.mail-turn"
 
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
@@ -166,7 +170,7 @@ run_py() {
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
-  FM_MAIL_RETRY_POS="$RETRY_POS" \
+  FM_MAIL_RETRY_POS="$RETRY_POS" FM_MAIL_TURN="$TURN" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
     "$PY" "$PY_BIN" "$@"
 }
@@ -428,6 +432,7 @@ mail_poll() {
     : > "$WOKEN"
     : > "$RETRY"
     : > "$RETRY_POS"
+    : > "$TURN"
   fi
 
   if ! mail_heal "$generation"; then
