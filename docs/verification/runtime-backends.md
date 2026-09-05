@@ -620,6 +620,18 @@ ok - an ordinary non-lock treehouse return failure still aborts even when the po
 ok - a copy whose repository is another home's clone is never treated as this task's returned copy
 ```
 
+The child-worktree call site, where a return that does not converge falls through to an `rm -rf` of the copy, is pinned separately by `tests/fm-secondmate-safety.test.sh`.
+
+```sh
+bin/fm-test-run.sh tests/fm-secondmate-safety.test.sh
+```
+
+Its child-copy convergence line from that run is:
+
+```text
+ok - secondmate force teardown leaves a child copy the pool proves treehouse already returned
+```
+
 Rerun both halves after a Treehouse upgrade: the commands above refresh the version-scoped observation, and the regression file pins the decision logic.
 
 ## Herdr

@@ -2021,6 +2021,94 @@ SH
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
 
+test_secondmate_force_teardown_keeps_child_copy_already_returned() {
+  local home subhome childproj childwt childwt_canon fakebin log err rc pool
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (pool listing proof)"; return 0; }
+  home="$TMP_ROOT/force-returned-home"
+  subhome="$TMP_ROOT/force-returned-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-returned-child-worktree"
+  err="$TMP_ROOT/force-returned-child.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" force-child-returned
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-returned-child-fake")
+  log="$TMP_ROOT/force-returned-child-fake/tmux.log"
+  pool="$TMP_ROOT/force-returned-child-fake/pool.json"
+  childwt_canon=$(cd "$childwt" && pwd -P)
+  # The pool lists exactly this child copy as an available, unleased slot with no
+  # live process: treehouse auto-returned it when the shell it opened there exited.
+  cat > "$pool" <<EOF
+[{"name":"1","path":"$childwt_canon","status":"available","flavor":"git","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
+EOF
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+case "${1:-}" in
+  return)
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    printf 'worktree %s is not managed by treehouse\n' "$target" >&2
+    exit 1
+    ;;
+  status)
+    cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-returned-child-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_STATUS_FILE="$pool" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "force teardown refused a child copy the pool proves is already back in it"
+  [ -d "$childwt" ] || fail "force teardown erased a child copy treehouse had already returned to the pool"
+  [ "$(git -C "$childwt" status --porcelain 2>/dev/null | wc -l)" -eq 0 ] \
+    || fail "force teardown mutated the already-returned child copy"
+  grep -F 'already returned before this cleanup ran' "$err" >/dev/null \
+    || fail "force teardown did not report the child worktree already-returned convergence"
+  [ "$(grep -c -F "treehouse return --force $childwt" "$log")" -eq 1 ] \
+    || fail "force teardown did not attempt the child worktree return exactly once"
+  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
+  [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear the parent task record"
+  pass "secondmate force teardown leaves a child copy the pool proves treehouse already returned"
+}
+
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data config projects; do
@@ -2951,6 +3039,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
+test_secondmate_force_teardown_keeps_child_copy_already_returned
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home
