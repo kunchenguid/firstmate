@@ -557,6 +557,7 @@ test_optional_event_time() {
   line='done [at=1700000000]: old event'
   [ "$(status_stamp_line "$line")" = "$line" ] || fail "writer replaced an old emission time"
   (
+    # shellcheck disable=SC2329 # status_stamp_line invokes this clock stub indirectly.
     date() { return 1; }
     [ "$(status_stamp_line 'done: clock unavailable')" = 'done: clock unavailable' ]
   ) || fail "clock failure lost the event"
