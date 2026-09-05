@@ -1087,12 +1087,14 @@ select_family() {
   [ "$found" -eq 1 ] || die "no tests mapped to family '$want'"
 }
 
-families_for_test_reference() {
-  local needle=$1 s
+families_for_test_reference() {  # <needle>...
+  local s needle
   local found=0
+  local -a needles=()
+  for needle in "$@"; do needles+=(-e "$needle"); done
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    if grep -Fq "$needle" "$s"; then
+    if grep -Fq "${needles[@]}" "$s"; then
       family_for_basename "$(basename "$s")"
       found=1
     fi
@@ -1377,6 +1379,10 @@ families_for_changed_path() {
     .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
+      ;;
+    tests/git-config-helpers.sh)
+      families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh)
       families_for_test_reference "$(basename "$path")" \
