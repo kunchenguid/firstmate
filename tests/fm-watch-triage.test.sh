@@ -27,6 +27,32 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
+watch_fixture_cleanup() {
+  local test_status=$?
+  fm_test_wait_fixture_quiet "$TMP_ROOT" || exit 1
+  fm_test_cleanup
+  exit "$test_status"
+}
+trap watch_fixture_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A just-touched filesystem mtime may briefly lead the host's epoch clock.
+# Pin both sides of fresh-turn age assertions to the same fixture epoch.
+freeze_case_epoch() { # <fakebin> <epoch>
+  local fakebin=$1 epoch=$2 real_date
+  real_date=$(command -v date)
+  {
+    printf '#!/usr/bin/env bash\nTEST_EPOCH=%q\nREAL_DATE=%q\n' "$epoch" "$real_date"
+    cat <<'SH'
+if [ "${1:-}" = +%s ]; then printf '%s\n' "$TEST_EPOCH"
+else exec "$REAL_DATE" "$@"
+fi
+SH
+  } > "$fakebin/date"
+  chmod +x "$fakebin/date"
+}
+
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-cycle-drain.err"
@@ -2603,7 +2629,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # automatic interrupt or restart.
 
 test_busy_pane_below_turn_age_bound_is_absorbed() {
-  local dir state fakebin out capture_file window key sig pid
+  local dir state fakebin out capture_file window key sig pid turn_epoch
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-fresh"
   printf 'Working... (12.3s)' > "$capture_file"
@@ -2612,7 +2638,9 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   printf 'working: setup complete\n' > "$state/busy-fresh.status"
   sig=$(seen_sig "$state/busy-fresh.status"); printf '%s' "$sig" > "$state/.seen-busy-fresh_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  touch "$state/busy-fresh.turn-ended"
+  turn_epoch=$(date +%s)
+  set_mtime "$turn_epoch" "$state/busy-fresh.turn-ended"
+  freeze_case_epoch "$fakebin" "$turn_epoch"
   prime_turnend_seen "$state/busy-fresh.turn-ended"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -2716,7 +2744,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
 }
 
 test_busy_pane_turn_end_touch_resets_age() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
+  local dir state fakebin out capture_file window key pane_hash sig pid turn_epoch
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-reset"
   printf 'Working...' > "$capture_file"
@@ -2732,7 +2760,9 @@ test_busy_pane_turn_end_touch_resets_age() {
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   printf '1\n' > "$state/.wedge-escalations-$key"
   # The worker's most recent turn just completed: touching turn-ended resets age.
-  touch "$state/busy-reset.turn-ended"
+  turn_epoch=$(date +%s)
+  set_mtime "$turn_epoch" "$state/busy-reset.turn-ended"
+  freeze_case_epoch "$fakebin" "$turn_epoch"
   prime_turnend_seen "$state/busy-reset.turn-ended"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
