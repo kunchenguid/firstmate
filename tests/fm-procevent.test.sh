@@ -1914,6 +1914,63 @@ pe "$RESTART_FOREIGN_HOME" retire restart-foreign-src >/dev/null
 pe "$RESTART_FOREIGN_OTHER_HOME" retire restart-foreign-donor >/dev/null
 pass "restart rejects a foreign replacement claim for the requested generation"
 
+RESTART_DEAD_HOME="$TMP_ROOT/restart-dead-home"; new_home "$RESTART_DEAD_HOME"
+RESTART_DEAD_LOCAL_STARTED="$TMP_ROOT/restart-dead-local-started"
+RESTART_DEAD_LOCAL_TERM="$TMP_ROOT/restart-dead-local-term"
+RESTART_DEAD_LOCAL_RELEASE="$TMP_ROOT/restart-dead-local-release"
+RESTART_DEAD_DONOR_STARTED="$TMP_ROOT/restart-dead-donor-started"
+RESTART_DEAD_DONOR_TERM="$TMP_ROOT/restart-dead-donor-term"
+RESTART_DEAD_DONOR_RELEASE="$TMP_ROOT/restart-dead-donor-release"
+pe_register "$RESTART_DEAD_HOME" lavish restart-dead-src -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_DEAD_LOCAL_STARTED" \
+  "$RESTART_DEAD_LOCAL_TERM" "$RESTART_DEAD_LOCAL_RELEASE" >/dev/null
+restart_dead_generation_out=$(pe "$RESTART_DEAD_HOME" generation restart-dead-src \
+  --if-matches lavish -- "$RESTART_FOREIGN_BLOCKER" "$RESTART_DEAD_LOCAL_STARTED" \
+  "$RESTART_DEAD_LOCAL_TERM" "$RESTART_DEAD_LOCAL_RELEASE") \
+  || fail "generation did not identify the dead-claim fixture"
+restart_dead_generation=${restart_dead_generation_out#generation: }
+pe_register "$RESTART_DEAD_HOME" lavish restart-dead-donor -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_DEAD_DONOR_STARTED" \
+  "$RESTART_DEAD_DONOR_TERM" "$RESTART_DEAD_DONOR_RELEASE" >/dev/null
+restart_dead_donor_source="$RESTART_DEAD_HOME/state/procevent/restart-dead-donor.source"
+RESTART_DEAD_GENERATION="$restart_dead_generation" perl -pi -e '
+  s/^registration_token=.*$/registration_token=$ENV{RESTART_DEAD_GENERATION}/
+' "$restart_dead_donor_source"
+pe "$RESTART_DEAD_HOME" reconcile >/dev/null
+wait_for "$RESTART_DEAD_LOCAL_STARTED" || fail "local dead-claim fixture did not start"
+wait_for "$RESTART_DEAD_DONOR_STARTED" || fail "dead replacement donor did not start"
+restart_dead_claim="$FM_PROCEVENT_CLAIM_ROOT/restart-dead-donor.claim"
+restart_dead_saved="$TMP_ROOT/restart-dead-saved.claim"
+cp "$restart_dead_claim" "$restart_dead_saved"
+restart_dead_runner=$(sed -n '2p' "$restart_dead_saved")
+kill -KILL -"$restart_dead_runner" 2>/dev/null || fail "could not stop the replacement donor"
+for _ in $(seq 1 50); do
+  kill -0 -"$restart_dead_runner" 2>/dev/null || break
+  sleep 0.1
+done
+kill -0 -"$restart_dead_runner" 2>/dev/null \
+  && fail "replacement donor process group did not stop"
+restart_dead_out="$TMP_ROOT/restart-dead.out"
+restart_dead_status=0
+pe "$RESTART_DEAD_HOME" restart restart-dead-src \
+  --if-generation "$restart_dead_generation" --if-matches lavish -- \
+  "$RESTART_FOREIGN_BLOCKER" "$RESTART_DEAD_LOCAL_STARTED" \
+  "$RESTART_DEAD_LOCAL_TERM" "$RESTART_DEAD_LOCAL_RELEASE" \
+  > "$restart_dead_out" 2>&1 &
+restart_dead_pid=$!
+wait_for "$RESTART_DEAD_LOCAL_TERM" || fail "restart did not signal the dead-claim fixture"
+mv "$restart_dead_saved" "$FM_PROCEVENT_CLAIM_ROOT/restart-dead-src.claim"
+wait "$restart_dead_pid" || restart_dead_status=$?
+[ "$restart_dead_status" -ne 0 ] \
+  || fail "restart accepted a dead local replacement claim"
+assert_contains "$(cat "$restart_dead_out")" "replacement source runner is not live" \
+  "restart did not reject the dead replacement runner"
+: > "$RESTART_DEAD_LOCAL_RELEASE"
+rm -f -- "$FM_PROCEVENT_CLAIM_ROOT/restart-dead-src.claim"
+pe "$RESTART_DEAD_HOME" retire restart-dead-src >/dev/null
+pe "$RESTART_DEAD_HOME" retire restart-dead-donor >/dev/null
+pass "restart rejects a dead local replacement claim for the requested generation"
+
 RESTART_LATE_HOME="$TMP_ROOT/restart-late-home"; new_home "$RESTART_LATE_HOME"
 RESTART_LATE_STARTED="$TMP_ROOT/restart-late-started"
 : > "$RESTART_LATE_STARTED"

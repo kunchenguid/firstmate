@@ -1245,7 +1245,7 @@ cmd_generation() {
 # and durably capture any result that had already arrived before replacement.
 cmd_restart() {
   local id=${1-} expected_generation='' condition adapter sep generation
-  local claim_state pid token child='' late_child i=0 current_token
+  local claim_state pid token child='' late_child i=0 current_token replacement_claim_state
   shift 1 2>/dev/null || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   if [ "${1-}" = --if-generation ]; then
@@ -1326,6 +1326,12 @@ cmd_restart() {
         fi
         current_token=$FM_PROCEVENT_CLAIM_TOKEN
         if [ "$current_token" != "$token" ]; then
+          fm_procevent_claim_state_locked "$id"
+          replacement_claim_state=$?
+          if [ "$replacement_claim_state" -ne 0 ]; then
+            fm_procevent_source_lock_release "$id"
+            die "replacement source runner is not live: $id"
+          fi
           if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
             fm_procevent_source_lock_release "$id"
             die "replacement source runner belongs to another home: $id"
