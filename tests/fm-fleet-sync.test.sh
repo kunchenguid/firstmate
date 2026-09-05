@@ -580,15 +580,18 @@ test_hidden_shallow_clone_unshallows_and_reports() {
 }
 
 test_hidden_non_repo_directory_stays_silent() {
-  local home out
-  home=$(new_home)
+  local home before out after
+  home=$(build_enclosing_home hidden-nonrepo)
   mkdir -p "$home/projects/.cache"
+  before=$(head_sha "$home")
 
   out=$(run_sync "$home")
+  after=$(head_sha "$home")
 
   assert_not_contains "$out" ".cache:" \
     "hidden non-repository directory produced a fleet-sync outcome"
   [ -d "$home/projects/.cache" ] || fail "hidden non-repository directory was removed"
+  [ "$before" = "$after" ] || fail "hidden non-repository directory advanced the enclosing home"
   pass "an immediate hidden non-repository directory is ignored silently"
 }
 
@@ -742,8 +745,8 @@ test_non_clone_dir_never_syncs_the_enclosing_repo() {
   out=$(run_sync "$home")
   after=$(head_sha "$home")
 
-  assert_contains "$out" "not-a-clone: skipped: not a clone root" \
-    "a non-repo directory under projects/ must be skipped by name"
+  assert_not_contains "$out" "not-a-clone:" \
+    "a whole-fleet refresh reported a visible non-project directory"
   assert_not_contains "$out" "not-a-clone: synced" \
     "a non-repo directory must never be reported as a synced project"
   [ "$before" = "$after" ] || \

@@ -38,7 +38,13 @@ fm_project_depth_count() {  # <project-dir>
 }
 
 fm_project_unshallow_if_needed() {  # <project-dir>
-  local project=$1 shallow before after fetch_output inspect_output
+  local project=$1 shallow before after fetch_output inspect_output project_top project_abs
+  project_top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || project_top=
+  project_abs=$(cd "$project" 2>/dev/null && pwd -P) || project_abs=
+  if [ -z "$project_top" ] || [ "$project_top" != "$project_abs" ]; then
+    printf 'project path is not its own Git worktree root\n'
+    return 1
+  fi
   if ! inspect_output=$(git -C "$project" rev-parse --is-shallow-repository 2>&1); then
     printf 'could not inspect repository depth: %s\n' "$(fm_project_depth_first_line "$inspect_output")"
     return 1

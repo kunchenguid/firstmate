@@ -261,12 +261,14 @@ secondmate_note_respawned() {  # <id>
 }
 
 fleet_sync_origin_backed_project_count() {
-  local count proj
+  local count proj proj_top proj_abs
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
   for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
     [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    proj_top=$(git -C "$proj" rev-parse --show-toplevel 2>/dev/null) || continue
+    proj_abs=$(cd "$proj" && pwd -P) || continue
+    [ "$proj_top" = "$proj_abs" ] || continue
     git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
   done

@@ -460,6 +460,9 @@ fi
 for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
+  proj_top=$(git -C "$proj" rev-parse --show-toplevel 2>/dev/null) || continue
+  proj_abs=$(cd "$proj" && pwd -P) || continue
+  [ "$proj_top" = "$proj_abs" ] || continue
   # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost
   # the time instead of only its total. Recording is a no-op unless the deferred
   # network stage asked for it.

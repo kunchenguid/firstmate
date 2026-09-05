@@ -238,6 +238,28 @@ test_shallow_project_without_network_refuses_lane_loudly() {
   pass "spawn refuses a shallow project with unreachable origin before lane creation"
 }
 
+test_nested_project_path_does_not_repair_enclosing_clone() {
+  local rec id enclosing out status
+  id='pool-shallow-nested-r14'
+  rec=$(make_shallow_case shallow-nested "$id")
+  read_case_record "$rec"
+  enclosing=$PROJECT_DIR
+  PROJECT_DIR="$enclosing/nested"
+  mkdir -p "$PROJECT_DIR"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn accepted a nested directory as a project clone"
+  assert_contains "$out" "project path is not its own Git worktree root" \
+    "spawn did not report the invalid nested project path"
+  [ "$(git -C "$enclosing" rev-parse --is-shallow-repository)" = true ] \
+    || fail "spawn repaired the enclosing clone through a nested project path"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "spawn published task metadata for a nested project path"
+  pass "spawn rejects a nested path without repairing its enclosing clone"
+}
+
 test_non_main_default_branch_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-trunk-r2'
@@ -570,6 +592,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_shallow_project_repairs_before_lane_creation
 test_shallow_project_without_network_refuses_lane_loudly
+test_nested_project_path_does_not_repair_enclosing_clone
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
