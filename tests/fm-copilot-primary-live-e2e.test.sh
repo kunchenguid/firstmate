@@ -76,7 +76,7 @@ jq -cn '{additionalContext:"Include LIVE_SESSION_START_OK in every response."}'
 SH
 
 cp "$ROOT/bin/fm-copilot-hook.sh" "$ROOT/bin/fm-hook-host-lib.sh" \
-   "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
+   "$ROOT/bin/fm-harness-process-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
    "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-arm-command-policy.mjs" \
    "$REPO/bin/"

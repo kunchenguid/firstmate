@@ -57,6 +57,7 @@ make_fake_root() {
 fm_backend_tmux_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-harness-process-lib.sh" "$fake/bin/fm-harness-process-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
@@ -158,6 +159,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
 fm_backend_tmux_kill() { return 0; }
 SH
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  ln -s "$ROOT/bin/fm-harness-process-lib.sh" "$fake/bin/fm-harness-process-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"

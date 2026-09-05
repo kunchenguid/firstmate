@@ -31,8 +31,8 @@
 # breaks the primary's supervision, which is the worse failure.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$SCRIPT_DIR/fm-harness-process-lib.sh"
 
 fm_hook_actual_host() {
   local pid=$$ comm args host

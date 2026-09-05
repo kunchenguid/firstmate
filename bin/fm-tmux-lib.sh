@@ -43,8 +43,8 @@
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
