@@ -22,6 +22,19 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
+PIPELINE_BIN="$TMP_ROOT/pipeline-bin"
+mkdir -p "$PIPELINE_BIN"
+cat > "$PIPELINE_BIN/no-mistakes" <<'STUB'
+#!/bin/sh
+if [ "$*" = 'axi run --help' ]; then
+  printf '%s\n' '      --require-ponytail   require Ponytail full for pipeline agents'
+  exit 0
+fi
+exit 2
+STUB
+chmod +x "$PIPELINE_BIN/no-mistakes"
+PATH="$PIPELINE_BIN:$PATH"
+export PATH
 
 # A home with one registered project, one project directory, and a fake tmux that
 # refuses, so a spawn that clears the delivery checks still creates nothing.
@@ -146,6 +159,8 @@ EOF
   write_brief "$home" delivery-agree-b2 direct-PR
   out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
+  assert_grep "Development contract: ponytail=full" "$home/data/delivery-agree-b2/launch-brief.md" \
+    "legacy direct-PR brief was launched without the Ponytail contract"
 
   # A brief scaffolded before the contract line existed warns once and continues.
   write_brief "$home" delivery-legacy-b3
@@ -153,6 +168,88 @@ EOF
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
+}
+
+test_spawn_publishes_or_reports_the_ponytail_contract() {
+  local rec home proj fakebin out status id first_contract
+  rec=$(make_home ponytail-contract-refusal)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id=delivery-ponytail-custom-b4
+  write_brief "$home" "$id" direct-PR
+  cat >> "$home/data/$id/brief.md" <<'EOF'
+
+# Development discipline
+Keep the project's existing local conventions.
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "Ponytail full guarantee cannot be established" \
+    "a custom legacy development section made the canonical overlay reject itself"
+  first_contract=$(awk '$0 == "# Development discipline" { emit=1; next } emit && /^# / { exit } emit' \
+    "$home/data/$id/launch-brief.md")
+  assert_contains "$first_contract" "Development contract: ponytail=full" \
+    "the canonical Ponytail overlay was not the authoritative first development section"
+
+  id=delivery-ponytail-refusal-b5
+  write_brief "$home" "$id" direct-PR
+  mkdir -p "$home/data/$id/launch-brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when the Ponytail launch contract cannot be published"
+  assert_contains "$out" "Ponytail full guarantee cannot be established for $id" \
+    "spawn did not clearly diagnose the missing Ponytail guarantee"
+  assert_contains "$out" "launch brief path is a directory" \
+    "spawn did not identify why the Ponytail contract could not be published"
+  assert_absent "$home/state/$id.meta" \
+    "Ponytail contract refusal still published task metadata"
+  pass "fm-spawn: the canonical Ponytail contract is published or launch fails clearly"
+}
+
+test_unsupported_no_mistakes_delivery_is_refused() {
+  local rec home proj fakebin out status id meta
+  rec=$(make_home unsupported-pipeline)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id=delivery-pluginless-refusal-b5
+  write_brief "$home" "$id" no-mistakes
+  cat > "$fakebin/no-mistakes" <<'STUB'
+#!/bin/sh
+if [ "$*" = 'axi run --help' ]; then
+  printf '%s\n' '      --intent string   what the user set out to accomplish'
+  exit 0
+fi
+exit 2
+STUB
+  chmod +x "$fakebin/no-mistakes"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unsupported no-mistakes spawn should be refused"
+  assert_contains "$out" "does not expose axi run --require-ponytail" \
+    "unsupported CLI refusal did not identify the missing handoff"
+  assert_contains "$out" "refusing to launch $id" \
+    "unsupported CLI refusal did not stop before worker launch"
+  assert_absent "$home/state/$id.meta" \
+    "unsupported CLI refusal still published task metadata"
+
+  id=promote-pluginless-refusal-b6
+  write_brief "$home" "$id"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" PATH="$fakebin:$PATH" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unsupported no-mistakes promotion should be refused"
+  assert_contains "$out" "does not expose axi run --require-ponytail" \
+    "unsupported CLI refusal did not identify the missing promotion handoff"
+  assert_contains "$out" "refusing to promote $id" \
+    "unsupported CLI refusal did not stop before changing the task"
+  assert_grep 'kind=scout' "$meta" \
+    "unsupported CLI refusal changed the task kind"
+  assert_absent "$home/data/$id/ship-instructions.md" \
+    "unsupported CLI refusal published ship instructions"
+  pass "fm-spawn/fm-promote: unsupported no-mistakes delivery is refused"
 }
 
 # The registry is the captain's standing posture, so dropping below its rigor is
@@ -339,6 +436,8 @@ STUB
 
     grep -qx "Delivery contract: mode=$mode" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
+    grep -qx "Development contract: ponytail=full" "$payload" \
+      || fail "$mode: promoted worker did not receive the Ponytail development contract"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
     assert_grep "pwd -P" "$payload" \
@@ -362,13 +461,19 @@ STUB
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    awk '/^# Definition of done$/ { emit=1 } emit && /^# Current no-mistakes intent contract$/ { exit } emit' "$home/data/$id/brief.md" | sed '/^$/d' > "$brief_dod"
+    awk '/^# Definition of done$/ { emit=1 } emit && /^# Current no-mistakes intent contract$/ { exit } emit' "$payload" | sed '/^$/d' > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
+  assert_no_grep "## Required pipeline discipline" "$payload" \
+    "promoted no-mistakes worker put execution directives into sanitized intent"
+  assert_grep "only the authorized captain intent" "$payload" \
+    "promoted no-mistakes worker lost the intent provenance boundary"
+  assert_grep 'no-mistakes axi run --require-ponytail --intent "$captain_intent"' "$payload" \
+    "promoted no-mistakes worker lost the operational Ponytail handoff"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
@@ -504,6 +609,19 @@ EOF
     "legacy no-mistakes spawn rejected explicitly marked captain words"
   assert_present "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not render a current launch contract"
+  assert_grep "Development contract: ponytail=full" "$home/data/$id/launch-brief.md" \
+    "legacy no-mistakes launch omitted the implementation-time Ponytail contract"
+  assert_no_grep "## Required pipeline discipline" "$home/data/$id/launch-brief.md" \
+    "legacy no-mistakes launch put execution directives into sanitized intent"
+  assert_grep "Prefer the host's installed Ponytail plugin, skill, and lifecycle hooks" \
+    "$home/data/$id/launch-brief.md" \
+    "development contract did not prefer the installed host integration"
+  assert_grep "Pass the serialized captain intent below plus any later words the captain actually supplied as \`--intent\`" \
+    "$home/data/$id/launch-brief.md" \
+    "launch contract did not preserve the intent provenance boundary"
+  assert_grep 'no-mistakes axi run --require-ponytail --intent "$captain_intent"' \
+    "$home/data/$id/launch-brief.md" \
+    "legacy no-mistakes launch omitted the operational Ponytail handoff"
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
@@ -750,6 +868,8 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_spawn_publishes_or_reports_the_ponytail_contract
+test_unsupported_no_mistakes_delivery_is_refused
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

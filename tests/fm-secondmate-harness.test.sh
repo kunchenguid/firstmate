@@ -660,7 +660,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" pi
+  fm_fake_exit0 "$fakebin" pi no-mistakes
   printf '%s\n' "$fakebin"
 }
 
