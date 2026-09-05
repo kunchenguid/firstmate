@@ -116,6 +116,16 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    busy-expired)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+sleep 1
+holder=$(cat "$FM_HOME/state/.watch.lock/pid")
+printf 'watcher: busy holder pid=%s still running after 1s; left alone\n' "$holder"
+exit 0
+SH
+      ;;
     reset-boundary)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -537,6 +547,37 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "benign live cycle must not leave a failure-notice marker"
   [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "benign live cycle must not leave an attended-alarm marker"
   pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
+}
+
+test_busy_holder_expiry_is_consumed_without_a_second_wait() {
+  local dir out status pid identity refresher started elapsed held alive=0
+  dir=$(make_primary_dir "$TMP_ROOT/busy-expired")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" busy-expired
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify stalled watcher holder"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch -t 200001010000 "$dir/state/.last-watcher-beat"
+  ( sleep 2; touch "$dir/state/.last-watcher-beat" ) &
+  refresher=$!
+  started=$(date +%s)
+  export FM_GUARD_GRACE=4
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_GUARD_GRACE
+  elapsed=$(( $(date +%s) - started ))
+  wait "$refresher" 2>/dev/null || true
+  kill -0 "$pid" 2>/dev/null && alive=1
+  held=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a stalled holder expiry must close quietly"
+  [ -z "$out" ] || fail "a stalled holder expiry produced operator output: $out"
+  [ "$elapsed" -lt 3 ] || fail "auto-arm added a second bounded wait after the arm had already waited (${elapsed}s)"
+  [ "$alive" -eq 1 ] && [ "$held" = "$pid" ] || fail "auto-arm stopped or replaced the stalled holder"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] || fail "a stalled holder expiry invoked more than one arm"
+  [ "$(epoch_outcome "$dir")" = busy-holder ] || fail "a post-expiry beat hid the detached busy-holder outcome: $(epoch_outcome "$dir")"
+  pass "auto-arm: a busy-holder expiry closes after one wait without losing its detached outcome"
 }
 
 test_positive_recovery_budget_contention_preserves_episode() {
@@ -1165,6 +1206,7 @@ test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
+test_busy_holder_expiry_is_consumed_without_a_second_wait
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight

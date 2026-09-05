@@ -206,7 +206,6 @@ OUT=
 ACTIONABLE=0
 HEALTHY=0
 BUSY_HOLDER=0
-busy_deadline=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -238,40 +237,20 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
 
+  # The arm entrypoint already performed the only bounded busy-holder wait.
+  # Consume that outcome before checking current health so a beat arriving after
+  # expiry cannot turn a detached arm close into a healthy attachment.
+  if [ -n "$OUT" ] \
+    && grep -Eq '^watcher: busy holder pid=[0-9]+ still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
+    BUSY_HOLDER=1
+    break
+  fi
+
   # A non-actionable close is benign when another verified watcher already owns
   # this home and is still beating within the shared grace window.
   if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     HEALTHY=1
     break
-  fi
-  # A live, identity-matched holder whose beacon has aged is a SUSPECTED STALL,
-  # never proof that the process is stuck: wait for it rather than re-running the
-  # identical predicate immediately. On 2026-09-04 both refusals landed one second
-  # apart (epochs 1788501895 and 1788501896), so the retry asked the same question
-  # before the holder could possibly have finished its phase, and the cycle ended
-  # in "auto-arm FAILED" for a watcher that was working the whole time.
-  #
-  # Polling here only WAITS. It never signals, kills or replaces the holder, and
-  # never starts a second watcher beside it: the captain ruled on 2026-09-05 that
-  # a running monitor process is not terminated on age, a missing heartbeat, or an
-  # expired wait. If the wait expires the holder keeps running and the next turn
-  # end arms again.
-  if fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-    busy_deadline=$(( $(date +%s) + (GRACE / 2) + 1 ))
-    while [ "$(date +%s)" -lt "$busy_deadline" ]; do
-      sleep 1
-      if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-        HEALTHY=1
-        break
-      fi
-      fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" || break
-    done
-    [ "$HEALTHY" -eq 1 ] && break
-    # Still held by a live watcher: this is not a failure to report.
-    if fm_watcher_busy_holder "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-      BUSY_HOLDER=1
-      break
-    fi
   fi
   [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
