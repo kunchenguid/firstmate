@@ -1475,6 +1475,36 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   pass "fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses"
 }
 
+# A fresh ship or scout spawn is refreshed to the current default-branch tip
+# before it branches (bin/fm-spawn.sh). A relaunch replaces the AGENT, never the
+# work, so that refresh must not reach it: rewinding or fast-forwarding a task's
+# own branch would move unlanded work off the base it was written against.
+test_spawn_relaunch_keeps_the_recorded_base_when_the_primary_advanced() {
+  local dir out rc before after branch
+  dir=$(new_case relaunchbase rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'zsh' > "$dir/fake/command"
+
+  printf 'work in flight\n' > "$dir/wt/in-flight.txt"
+  git -C "$dir/wt" add in-flight.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'task work'
+  before=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'landed after the task started\n' > "$dir/proj/landed.txt"
+  git -C "$dir/proj" add landed.txt
+  git -C "$dir/proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'land later work'
+
+  out=$(run_spawn "$dir" rl40 --relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch should succeed"$'\n'"$out"
+  after=$(git -C "$dir/wt" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "a relaunch moved the task's base from $before to $after"
+  branch=$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = task-rl40 ] || fail "a relaunch left the task off its own branch, on '$branch'"
+  assert_grep 'work in flight' "$dir/wt/in-flight.txt" "a relaunch discarded the task's own work"
+  pass "fm-spawn --relaunch: the task keeps its branch, base, and work while the primary's default branch moves on"
+}
+
 test_spawn_relaunch_refuses_an_unrecorded_task() {
   local dir out rc
   dir=$(new_case norecord rl17)
@@ -1581,6 +1611,7 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
+test_spawn_relaunch_keeps_the_recorded_base_when_the_primary_advanced
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

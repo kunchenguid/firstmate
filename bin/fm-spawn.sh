@@ -144,8 +144,14 @@
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
 #   Only after this isolation check, a fresh ship or scout's clean task worktree
-#   fetches origin, resolves the current remote default branch, and resets to its tip.
-#   Relaunch reuses the recorded worktree without fetching or resetting its base.
+#   fetches origin, resolves the current remote default branch, and resets to the
+#   newer of origin's tip and that same branch in the primary checkout - whichever
+#   CONTAINS the other, so the slot is never moved backwards. A local-only project
+#   lands work on the primary checkout's branch and never pushes, so following
+#   origin alone would start every task hundreds of commits stale; diverged
+#   candidates are refused. The refresh reports the exact commit count a slot was
+#   behind when it moved. Relaunch reuses the recorded worktree without fetching
+#   or resetting its base.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses a fresh spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
@@ -2076,8 +2082,51 @@ EOF
   printf '%s' "$lines" >&2
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+# Choose the commit a fresh pooled worktree must start from, between the two
+# candidates a pool slot can already see. Sets SPAWN_BASE_REV and SPAWN_BASE_LABEL,
+# or sets SPAWN_BASE_ERROR and returns 1.
+#   origin/<default>  the forge tip, authoritative for a PR-delivered project.
+#   <default> in the primary checkout  where a local-only project's landed work
+#     actually lives: bin/fm-merge-local.sh advances that branch and nothing is
+#     ever pushed, so origin stays frozen at the last push while the local branch
+#     keeps moving. Following origin by policy is what planted new work on a base
+#     hundreds of commits stale, growing with every local landing.
+# The base is whichever candidate CONTAINS the other, so this never moves a slot
+# BACKWARDS onto a ref that is merely newer by name. A pool slot is a linked
+# worktree of the primary checkout and shares its object store, so that commit is
+# already present and this resolution costs no network; a standalone clone that
+# lacks it keeps the origin tip instead. Genuinely diverged candidates are refused
+# rather than guessed at, because either choice would silently discard the other
+# history's work from the base.
+SPAWN_BASE_REV=""
+SPAWN_BASE_LABEL=""
+SPAWN_BASE_ERROR=""
+resolve_spawn_worktree_base() {  # <worktree> <primary-checkout> <default> <origin-rev>
+  local worktree=$1 primary=$2 default=$3 origin_rev=$4 primary_rev primary_default
+  SPAWN_BASE_REV="$origin_rev"
+  SPAWN_BASE_LABEL="origin/$default"
+  SPAWN_BASE_ERROR=""
+  primary_rev=$(primary_head_commit "$primary" 2>/dev/null || true)
+  [ -n "$primary_rev" ] || return 0
+  [ "$primary_rev" != "$origin_rev" ] || return 0
+  git -C "$worktree" rev-parse --verify --quiet "$primary_rev^{commit}" >/dev/null 2>&1 || return 0
+  if git -C "$worktree" merge-base --is-ancestor "$primary_rev" "$origin_rev" 2>/dev/null; then
+    return 0
+  fi
+  # Name the branch the commit actually came from: primary_head_commit resolves the
+  # PRIMARY's own default branch, which need not be the one resolved in the slot.
+  primary_default=$(default_branch "$primary" 2>/dev/null || printf '%s' "$default")
+  if git -C "$worktree" merge-base --is-ancestor "$origin_rev" "$primary_rev" 2>/dev/null; then
+    SPAWN_BASE_REV="$primary_rev"
+    SPAWN_BASE_LABEL="$primary_default in the primary checkout"
+    return 0
+  fi
+  SPAWN_BASE_ERROR="$primary_default in the primary checkout ($(git -C "$worktree" rev-parse --short "$primary_rev" 2>/dev/null || echo "$primary_rev")) and origin/$default ($(git -C "$worktree" rev-parse --short "$origin_rev" 2>/dev/null || echo "$origin_rev")) have diverged"
+  return 1
+}
+
+freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
+  local worktree=$1 primary=$2 default target expected actual status behind unit
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2099,6 +2148,12 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
+  if ! resolve_spawn_worktree_base "$worktree" "$primary" "$default" "$expected"; then
+    echo "error: cannot resolve a base for pooled worktree '$worktree': $SPAWN_BASE_ERROR; refusing to launch rather than guess which history to build on" >&2
+    return 1
+  fi
+  expected=$SPAWN_BASE_REV
+  target=$SPAWN_BASE_LABEL
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2111,14 +2166,21 @@ freshen_spawn_worktree_base() {  # <worktree>
     fi
     return 1
   fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  # Count the drift BEFORE the reset, so the report below carries the exact number
+  # of commits this slot would otherwise have started behind rather than an adjective.
+  behind=$(git -C "$worktree" rev-list --count "HEAD..$expected" 2>/dev/null || true)
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to $target ('$expected'); refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current $target ('$expected'); refusing to launch" >&2
     return 1
+  fi
+  if [ -n "$behind" ] && [ "$behind" -gt 0 ] 2>/dev/null; then
+    if [ "$behind" -eq 1 ]; then unit=commit; else unit=commits; fi
+    echo "note: pooled worktree '$worktree' was $behind $unit behind $target; refreshed to $(git -C "$worktree" rev-parse --short HEAD)" >&2
   fi
 }
 
@@ -2654,7 +2716,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the

@@ -489,6 +489,118 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# A local-only project lands work with bin/fm-merge-local.sh: the primary
+# checkout's default branch advances and nothing is ever pushed, so origin stays
+# frozen at the last push while that branch keeps moving. A pool slot allocated at
+# the frozen tip is the shape that shipped work from hundreds of commits of stale
+# history, because the refresh itself planted it there by following origin.
+make_local_only_case() {
+  local name=$1 id=$2 landings=${3:-3} case_dir home project origin pool fakebin frozen n
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  frozen=$(git -C "$project" rev-parse HEAD)
+  # The slot is allocated at the frozen origin tip, the way a recycled slot arrives.
+  git -C "$project" worktree add --quiet --detach "$pool" "$frozen"
+
+  n=1
+  while [ "$n" -le "$landings" ]; do
+    printf 'landed locally %s\n' "$n" > "$project/landed-$n.txt"
+    git -C "$project" add "landed-$n.txt"
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm "land $n"
+    n=$((n + 1))
+  done
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$frozen|main"
+}
+
+test_local_only_landings_beat_a_frozen_origin() {
+  local rec id out status head landed
+  id='pool-local-only-r12'
+  rec=$(make_local_only_case local-only "$id" 3)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a slot stranded on a frozen origin"$'\n'"$out"
+  landed=$(git -C "$PROJECT_DIR" rev-parse main)
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$landed" != "$INITIAL_SHA" ] || fail "fixture did not advance the primary past the frozen origin tip"
+  [ "$head" = "$landed" ] \
+    || fail "spawn left the slot at $head, not the primary's landed tip $landed"
+  assert_grep 'landed locally 3' "$POOL_DIR/landed-3.txt" \
+    "the refreshed slot is missing work the primary had already landed"
+  assert_contains "$out" "was 3 commits behind main in the primary checkout" \
+    "the refresh did not report the exact number of commits the slot was behind"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed refresh: %s\n' "$(printf '%s\n' "$out" | grep 'commits behind')"
+  fi
+  pass "a slot stranded on a frozen origin is refreshed to the primary's landed tip, reporting the exact drift"
+}
+
+test_dirty_slot_survives_even_when_the_primary_is_ahead() {
+  local rec id out status before
+  id='pool-local-only-dirty-r13'
+  rec=$(make_local_only_case local-only-dirty "$id" 2)
+  read_case_record "$rec"
+  printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a dirty slot while the primary was ahead"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a dirty slot was not refused as uncommitted work"
+  assert_grep 'work the captain has not committed' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while catching the slot up"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved a dirty slot's base instead of leaving it untouched"
+  pass "a dirty slot keeps its work and its base even when the primary has landed work ahead of it"
+}
+
+test_diverged_candidates_refuse_rather_than_guess() {
+  local rec id out status before publisher
+  id='pool-diverged-r14'
+  rec=$(make_local_only_case diverged "$id" 2)
+  read_case_record "$rec"
+  # Push a commit the primary's branch does not contain, so neither candidate
+  # contains the other and no base can be chosen without discarding one history.
+  publisher="$CASE_DIR/publisher"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
+  printf 'pushed straight to the forge\n' > "$publisher/forge-only.txt"
+  git -C "$publisher" add forge-only.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm forge-only
+  git -C "$publisher" push --quiet origin main
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn picked a base while the two histories had diverged"
+  assert_contains "$out" "have diverged" "the refusal should name the divergence"
+  assert_contains "$out" "refusing to launch rather than guess which history to build on" \
+    "the refusal should say why no base was chosen"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "a refused spawn still moved the slot's base"
+  pass "diverged primary and origin histories refuse the spawn instead of silently picking one"
+}
+
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
@@ -501,5 +613,8 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_local_only_landings_beat_a_frozen_origin
+test_dirty_slot_survives_even_when_the_primary_is_ahead
+test_diverged_candidates_refuse_rather_than_guess
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
