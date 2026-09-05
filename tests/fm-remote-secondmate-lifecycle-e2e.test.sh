@@ -975,6 +975,7 @@ wait "$config_second" || fail "bootstrap inheritance transaction failed after wa
 pass "config push and bootstrap serialize remote inheritance convergence"
 
 printf 'codex\n' > "$PARENT/config/crew-harness"
+printf '%s\n' 'Use ASD-STE100 with British spelling for human-facing prose.' > "$PARENT/config/worker-writing-style.md"
 # A failed reread nudge now means the durable remote inbox RECORD could not be
 # written (a swallowed doorbell alone no longer fails a recorded steer), so
 # the failure is induced by making the remote steering inbox unwritable.
@@ -996,6 +997,12 @@ assert_absent "$NUDGE_MARKER" "successful remote config reread left its retry ma
 assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-retry.out" "remote config reread retry was not reported"
 CONFIG_CORR=$(newest_remote_inbox_corr)
 [ -n "$CONFIG_CORR" ] || fail "remote config reread did not carry a correlation token"
+cmp "$PARENT/config/worker-writing-style.md" "$REMOTE_HOME/config/worker-writing-style.md" \
+  || fail "remote writing-style bytes did not converge"
+# The durable steering record is the emitted instruction delivered to the agent.
+CONFIG_MESSAGE=$(grep -l "corr=$CONFIG_CORR" "$REMOTE_HOME"/state/parent-route/ios.inbox/*.msg)
+assert_grep 'config/worker-writing-style.md' "$CONFIG_MESSAGE" "remote reread omitted the writing-style path"
+assert_grep 'not subject to worker discretion' "$CONFIG_MESSAGE" "remote reread omitted mandatory writing-style framing"
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "remote reply source did not capture the config reread acknowledgement"

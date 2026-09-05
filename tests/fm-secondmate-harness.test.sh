@@ -14,8 +14,9 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/worker-writing-style.md, config/backlog-backend, config/backend,
+#      config/herdr-presentation-spaces, config/startup-memory-budget, and
+#      config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -289,6 +290,7 @@ test_propagate_lib() {
   # 1. present source is copied
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
+  printf 'Use the configured writing style.\n' > "$src/worker-writing-style.md"
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
@@ -300,6 +302,8 @@ test_propagate_lib() {
   [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
+  [ "$(cat "$dest/worker-writing-style.md")" = 'Use the configured writing style.' ] \
+    || fail "worker-writing-style.md not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
@@ -322,11 +326,14 @@ test_propagate_lib() {
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
   printf 'claude\n' > "$src/crew-harness"
+  printf 'Use the changed writing style.\n' > "$src/worker-writing-style.md"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   printf 'zellij\n' > "$src/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
+  [ "$(cat "$dest/worker-writing-style.md")" = 'Use the changed writing style.' ] \
+    || fail "changed worker writing style did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
   [ "$(cat "$dest/backend")" = zellij ] || fail "changed backend did not converge"
 
@@ -342,11 +349,12 @@ test_propagate_lib() {
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/worker-writing-style.md" "$src/backlog-backend" \
     "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
+  [ -e "$dest/worker-writing-style.md" ] && fail "worker-writing-style absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
@@ -1005,7 +1013,7 @@ new_world() {
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
-    printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+    printf 'config/crew-harness\nconfig/worker-writing-style.md\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
@@ -1704,7 +1712,8 @@ EOF
 # two live homes start with different stale config subsets; after push each is
 # updated and each live agent receives only its own changed-content instruction.
 test_config_reread_per_home_changed_sets_and_exact_bytes() {
-  local w head log out err status instr_a instr_b multiline_json pointer
+  local w head log out err status instr_a instr_b instruction multiline_json writing_style pointer
+  local ordinary_framing mandatory_framing
   w=$(new_world config-reread-per-home)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" alpha "$head"
@@ -1719,6 +1728,8 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   multiline_json=$(printf '{\n  "default": {\n    "harness": "grok",\n    "model": "grok-4.5"\n  },\n  "rules": [\n    {"when": "news", "use": {"harness": "grok"}}\n  ]\n}\n')
   printf '%s' "$multiline_json" > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  writing_style=$(printf '%s\n' 'Use the primary writing style.' 'Preserve this exact second line.')
+  printf '%s\n' "$writing_style" > "$w/home/config/worker-writing-style.md"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
   {
@@ -1739,6 +1750,10 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   cmp -s "$w/home/config/crew-dispatch.json" "$w/beta/config/crew-dispatch.json" \
     || fail "beta did not receive multiline dispatch"
   [ "$(cat "$w/alpha/config/crew-harness")" = codex ] || fail "alpha harness not updated"
+  cmp -s "$w/home/config/worker-writing-style.md" "$w/alpha/config/worker-writing-style.md" \
+    || fail "alpha did not receive worker writing style"
+  cmp -s "$w/home/config/worker-writing-style.md" "$w/beta/config/worker-writing-style.md" \
+    || fail "beta did not receive worker writing style"
   [ "$(cat "$w/alpha/config/backlog-backend")" = manual ] || fail "alpha backlog-backend not updated"
   [ "$(cat "$w/alpha/config/backend")" = tmux ] || fail "alpha backend not updated"
 
@@ -1751,20 +1766,31 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
 
   # Deterministic allowlist path order and exact destination bytes for alpha
   # (allowlisted config items were missing/stale and therefore pushed).
-  assert_grep "These inherited config files changed" "$instr_a" "alpha framing missing"
-  assert_grep "defaults/rules" "$instr_a" "alpha must preserve agent judgment framing"
+  instruction=$(cat "$instr_a")
+  ordinary_framing='These inherited config files changed. Re-read and apply their exact contents at every future intake. They are defaults/rules and do not remove your judgment to choose differently when warranted.'
+  mandatory_framing='This inherited config file changed. Re-read and apply its exact contents at every future intake. Its rules must be applied as written and are not subject to worker discretion.'
+  assert_contains "$instruction" "$(printf '%s\n\n%s' "$ordinary_framing" 'config/crew-dispatch.json')" \
+    "ordinary config item did not receive defaults-and-judgment framing"
+  assert_not_contains "$instruction" "$(printf '%s\n\n%s' "$mandatory_framing" 'config/crew-dispatch.json')" \
+    "ordinary config item received mandatory framing"
+  assert_contains "$instruction" "$(printf '%s\n\n%s' "$mandatory_framing" 'config/worker-writing-style.md')" \
+    "worker writing style did not receive mandatory framing"
+  assert_not_contains "$instruction" "$(printf '%s\n\n%s' "$ordinary_framing" 'config/worker-writing-style.md')" \
+    "worker writing style received defaults-and-judgment framing"
   assert_contains "$(cat "$instr_a")" "config/crew-dispatch.json" "alpha missing dispatch path"
   assert_contains "$(cat "$instr_a")" "config/crew-harness" "alpha missing harness path"
+  assert_contains "$(cat "$instr_a")" "config/worker-writing-style.md" "alpha missing writing-style path"
   assert_contains "$(cat "$instr_a")" "config/backlog-backend" "alpha missing backlog path"
   assert_contains "$(cat "$instr_a")" "config/backend" "alpha missing backend path"
   # Path order follows FM_INHERITABLE_CONFIG.
   awk '
     /config\/crew-dispatch\.json/ { d=NR }
     /config\/crew-harness/ { h=NR }
+    /config\/worker-writing-style\.md/ { w=NR }
     /config\/backlog-backend/ { b=NR }
     /config\/backend/ && !/backlog-backend/ { k=NR }
     END {
-      if (!(d && h && b && k && d < h && h < b && b < k)) exit 1
+      if (!(d && h && w && b && k && d < h && h < w && w < b && b < k)) exit 1
     }
   ' "$instr_a" || fail "alpha instruction path order is not deterministic allowlist order"
 
@@ -1773,6 +1799,10 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
     "alpha instruction must include exact multiline dispatch bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/crew-harness-----\ncodex\n-----END config/crew-harness-----' \
     "alpha instruction must include exact harness scalar bytes"
+  assert_contains "$(cat "$instr_a")" "$(printf '%s\n%s\n%s' \
+    '-----BEGIN config/worker-writing-style.md-----' "$writing_style" \
+    '-----END config/worker-writing-style.md-----')" \
+    "alpha instruction must include exact worker-writing-style bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/backlog-backend-----\nmanual\n-----END config/backlog-backend-----' \
     "alpha instruction must include exact backlog-backend scalar bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \

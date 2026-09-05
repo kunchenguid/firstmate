@@ -479,6 +479,18 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-secondmate.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-ship.md",
+      "audience": "maintainer-verification"
     }
   ]
 }

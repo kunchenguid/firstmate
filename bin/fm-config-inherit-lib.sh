@@ -4,8 +4,10 @@
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
-# spawn on codex too, primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too, primary config/backend pins that home's local
+# spawn on codex too, primary config/worker-writing-style.md supplies the same
+# human-facing prose rules to each newly generated worker brief, primary
+# config/backlog-backend=manual makes that home hand-edit backlog files too,
+# primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
 # bounds that home's startup-memory curation, and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
@@ -33,7 +35,8 @@
 # primary; an item the primary does not set is mirrored as absence downstream.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
-# bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
+# bytes. Launch supersedes pending nudges; writing-style brief coverage is
+# defined in docs/configuration.md "Worker writing style".
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -63,7 +66,11 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness worker-writing-style.md backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+
+# Items whose inherited rules are mandatory rather than defaults that retain
+# worker discretion.
+FM_MANDATORY_INHERITABLE_CONFIG="worker-writing-style.md"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -76,6 +83,14 @@ FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
 fm_config_inherit_item_session_scoped() {  # <item>
   local item=$1 candidate
   for candidate in $FM_SESSION_SCOPED_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
+fm_config_inherit_item_mandatory() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_MANDATORY_INHERITABLE_CONFIG; do
     [ "$candidate" = "$item" ] && return 0
   done
   return 1
@@ -547,9 +562,10 @@ FM_CONFIG_REREAD_MAX_PENDING=16
 FM_CONFIG_REREAD_MAX_QUARANTINE=16
 FM_CONFIG_INHERIT_LOCK_REL="state/.fm-inherited-config.lock"
 
-# Framing lines for the config-reread instruction. Defaults/rules only - never
-# an enforcement claim, and never a parsed summary of file contents.
+# Framing follows the mandatory-item set above; other items retain discretion.
+# Never substitute a parsed summary for file contents.
 FM_CONFIG_REREAD_FRAMING='These inherited config files changed. Re-read and apply their exact contents at every future intake. They are defaults/rules and do not remove your judgment to choose differently when warranted.'
+FM_CONFIG_REREAD_MANDATORY_FRAMING='This inherited config file changed. Re-read and apply its exact contents at every future intake. Its rules must be applied as written and are not subject to worker discretion.'
 
 # fm_config_reread_is_allowlisted_item <item>
 # True only for the declared inheritable config allowlist (bare item name as
@@ -687,7 +703,7 @@ fm_config_reread_save_retry_report() {
 # changed (or on write failure). Never inlines data/captain-shared.md, SHA
 # values, selected profiles, or any generated interpretation.
 fm_config_write_reread_instruction() {
-  local dest_home=$1 report=$2 instruction_path=$3 item rel dest parent tmp first=1
+  local dest_home=$1 report=$2 instruction_path=$3 item rel dest parent tmp first=1 framing current_framing=""
   FM_CONFIG_REREAD_FAILED_TEMP=""
   [ -n "$dest_home" ] || return 1
   [ -n "$report" ] && [ -f "$report" ] || return 1
@@ -702,8 +718,15 @@ fm_config_write_reread_instruction() {
     fm_config_reread_is_allowlisted_item "$item" || continue
     rel="config/$item"
     dest="$dest_home/config/$item"
-    if [ "$first" = 1 ]; then
-      printf '%s\n' "$FM_CONFIG_REREAD_FRAMING" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    if fm_config_inherit_item_mandatory "$item"; then
+      framing=$FM_CONFIG_REREAD_MANDATORY_FRAMING
+    else
+      framing=$FM_CONFIG_REREAD_FRAMING
+    fi
+    if [ "$framing" != "$current_framing" ]; then
+      [ "$first" = 1 ] || printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+      printf '%s\n' "$framing" >> "$tmp" || { rm -f "$tmp"; return 1; }
+      current_framing=$framing
       first=0
     fi
     {

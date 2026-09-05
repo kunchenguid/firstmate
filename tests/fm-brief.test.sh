@@ -221,6 +221,107 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# These fixtures are the complete generated briefs from the parent of the
+# worker-writing-style change. Normalise only the test checkout and temporary
+# roots, then compare every remaining byte so optional rendering cannot change
+# any scaffold when the local file is absent.
+test_absent_worker_writing_style_preserves_pre_change_bytes() {
+  local home kind id brief actual expected
+  home="$TMP_ROOT/home"
+  mkdir -p "$home/data" "$home/config"
+
+  for kind in ship scout secondmate; do
+    id="absent-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+          "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+          "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='writing-style charter' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    actual="$TMP_ROOT/absent-$kind.normalised.md"
+    expected="$ROOT/tests/fixtures/fm-brief/absent-$kind.md"
+    TMP_NORM="$TMP_ROOT" ROOT_NORM="$ROOT" perl -pe \
+      's/\Q$ENV{TMP_NORM}\E/__TMP_ROOT__/g; s/\Q$ENV{ROOT_NORM}\E/__ROOT__/g' \
+      "$brief" > "$actual"
+    cmp -s "$expected" "$actual" \
+      || fail "$kind scaffold changed from its pre-writing-style bytes while the local file was absent"
+  done
+  pass "fm-brief.sh: absent writing style preserves pre-change bytes for every scaffold"
+}
+
+test_worker_writing_style_is_optional_and_reaches_new_scaffolds() {
+  local home style baseline styled kind id brief reread_instruction override override_style override_brief
+  home="$TMP_ROOT/writing-style-home"
+  mkdir -p "$home/data" "$home/config"
+  style='Use the configured prose convention.
+Keep this exact second line.'
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" style-absent some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "brief without worker writing style should scaffold"
+  baseline="$home/data/style-absent/brief.md"
+  assert_no_grep "# Worker writing style" "$baseline" \
+    "absent worker-writing-style file emitted a heading"
+  assert_no_grep "Use the configured prose convention." "$baseline" \
+    "absent worker-writing-style file changed brief content"
+
+  override="$TMP_ROOT/writing-style-override"
+  override_style='Use only the override writing style.'
+  mkdir -p "$override"
+  printf '%s\n' "$override_style" > "$override/worker-writing-style.md"
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$override" \
+    "$ROOT/bin/fm-brief.sh" style-override some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "brief with overridden worker writing style should scaffold"
+  override_brief="$home/data/style-override/brief.md"
+  assert_contains "$(cat "$override_brief")" "$override_style" \
+    "FM_CONFIG_OVERRIDE worker writing style did not reach the brief"
+  assert_not_contains "$(cat "$override_brief")" "Use the configured prose convention." \
+    "brief ignored FM_CONFIG_OVERRIDE in favour of the home config directory"
+
+  printf '%s\n' "$style" > "$home/config/worker-writing-style.md"
+  # shellcheck disable=SC2016 # Preserve literal $FM_HOME in the expected output.
+  reread_instruction='At every intake, read `$FM_HOME/config/worker-writing-style.md` and apply its current contents. If the file is absent, use the embedded rules above as the fallback.'
+  for kind in ship scout secondmate; do
+    id="style-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='writing-style charter' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    styled=$(awk '/^# Worker writing style$/ { capture=1; next } capture && /^$/ { exit } capture { print }' "$brief")
+    [ "$styled" = "$style" ] \
+      || fail "$kind scaffold did not inject worker-writing-style content verbatim"
+    [ "$(grep -c '^# Worker writing style$' "$brief")" = 1 ] \
+      || fail "$kind scaffold did not emit exactly one worker-writing-style heading"
+    if [ "$kind" = secondmate ]; then
+      assert_contains "$(cat "$brief")" "$reread_instruction" \
+        "secondmate charter did not require the current writing style at every intake"
+      assert_not_contains "$(cat "$brief")" "$home/config/worker-writing-style.md" \
+        "secondmate charter froze the scaffold home's writing-style path"
+    else
+      assert_not_contains "$(cat "$brief")" "At every intake, read" \
+        "$kind scaffold received the secondmate-only reread instruction"
+    fi
+  done
+  pass "fm-brief.sh: writing style reaches newly generated scaffolds and secondmates reread it at intake"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -850,6 +951,8 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_absent_worker_writing_style_preserves_pre_change_bytes
+test_worker_writing_style_is_optional_and_reaches_new_scaffolds
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
