@@ -752,6 +752,24 @@ test_view_renders_snapshot() {
   pass "fleet view renders the snapshot without secondmate peek guidance"
 }
 
+# The kind-labeled cleanup report exists so a cleanup target list is chosen from
+# recorded kinds, never inferred from a worktree path - a path suffix cannot tell
+# a crewmate worktree of the firstmate project from a persistent secondmate home.
+test_view_renders_kind_labeled_cleanup_candidates() {
+  local home fakebin view
+  home=$(make_home cleanup-candidates)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --cleanup-candidates)
+  assert_contains "$view" "| ship-task | ship | disposable | bin/fm-teardown.sh ship-task |" \
+    "cleanup candidates should label an ordinary ship task disposable with its plain teardown command"
+  assert_contains "$view" "| secondmate-task | secondmate | persistent | bin/fm-teardown.sh secondmate-task --retire-secondmate secondmate-task |" \
+    "cleanup candidates should label a secondmate persistent and name the authority its retirement takes"
+  assert_contains "$view" "an idle queue is healthy, not finished" \
+    "cleanup candidates should say why an idle secondmate is not a cleanup target"
+  pass "fleet view lists cleanup candidates labeled by kind"
+}
+
 test_view_renders_dead_secondmate_agent_status() {
   local home fakebin view
   home=$(make_home dead-secondmate)
@@ -1062,4 +1080,5 @@ test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
+test_view_renders_kind_labeled_cleanup_candidates
 test_view_renders_dead_secondmate_agent_status

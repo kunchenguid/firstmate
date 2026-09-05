@@ -307,6 +307,7 @@ The same emitter handles a merge firstmate performed and one its poll detected, 
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure.
+It also owns the per-target authority a `kind=secondmate` retirement takes and the one-target-per-invocation rule, so a cleanup list can never retire a persistent home as a side effect; `bin/fm-fleet-view.sh --cleanup-candidates` is the kind-labeled report those targets are chosen from.
 
 ## Optional Relay
 
