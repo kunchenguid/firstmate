@@ -16,8 +16,8 @@
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backend, config/startup-memory-budget -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, and
-#      startup-memory budget inherit the primary's settings. The generic
+#      dispatch profiles, runtime-backend default, and startup-memory budget
+#      inherit the primary's settings. The generic
 #      absence mirror converges an absent item
 #      without deciding its release-dependent floor.
 #      It is primary-authoritative
