@@ -7,9 +7,10 @@ import { spawn } from "node:child_process";
 // supervision outcome made visible as a subsecond freeze every time one
 // arrived (docs/pi-supervision-branch.md "Off-thread delivery").
 //
-// This is the one owner of that replacement: the same capture shape spawnSync
-// returns, produced by an awaited spawn so the event loop keeps running while
-// the child does. Callers keep their own ordering guarantees - awaiting here
+// This is the one owner of that replacement: the status, UTF-8 stdout, and
+// UTF-8 stderr fields these callers consumed from spawnSync, produced by an
+// awaited spawn so the event loop keeps running while the child does. Callers
+// keep their own ordering guarantees - awaiting here
 // yields the thread, so anything that must not interleave belongs behind a
 // serializing queue in the caller.
 //

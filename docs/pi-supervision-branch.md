@@ -63,7 +63,7 @@ The supervision branch itself is Pi-only by construction:
 
 The supervision branch lives inside the captain's own Pi process, and Pi runs extensions, their tools, and their event handlers on the single JavaScript thread that also draws the TUI and reads the keyboard.
 A synchronous subprocess in the delivery path therefore stops repaint and key echo for the child's whole lifetime, which the captain saw as a subsecond freeze every time a routine or captain-facing outcome arrived.
-Every subprocess on that path is now awaited instead: `.pi/extensions/lib/fm-async-exec.ts` is the single owner of that awaited-spawn replacement, and it returns the same capture shape and the same failure verdicts the synchronous form returned.
+Subprocess work reached through Pi's asynchronous APIs is now awaited instead: `.pi/extensions/lib/fm-async-exec.ts` owns that awaited-spawn replacement and preserves the status, captured-output, and failure semantics its callers used from the synchronous form.
 
 Awaiting yields the thread, so what the single thread used to guarantee for free is now an explicit queue in `.pi/extensions/fm-branch-supervision.ts`.
 Every delivery, every acknowledgement, and every turn boundary's reconciliation runs as one unit of that queue, which is what preserves the durable append before anything visible, one delivery at a time in sequence order, the read cursor advanced before the next reader sees a row, and one ownership activation per generation.
