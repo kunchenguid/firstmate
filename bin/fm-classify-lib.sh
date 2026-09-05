@@ -1720,18 +1720,40 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
+crew_absorb_class_detail() {  # <id>
   local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+  [ -n "$id" ] || { printf 'none none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  case "$line" in state:*) ;; *) printf 'none none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = paused ]; then
+    src=${line#*source: }; src=${src%% *}
+    printf 'paused %s' "${src:-unknown}"
+    return
+  fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in run-step|pane) printf 'working %s' "$src"; return ;; esac
   fi
-  printf 'none'
+  printf 'none %s' "${src:-unknown}"
+}
+
+crew_absorb_class() {  # <id>
+  local detail
+  detail=$(crew_absorb_class_detail "$1")
+  printf '%s' "${detail%% *}"
+}
+
+# 0 iff the authoritative state is an actively-running no-mistakes run-step.
+# This narrow liveness exemption is used only at the busy-progress fuse: a run
+# step can legitimately wait on its upstream review/CI monitor with frozen pane
+# counters and no writes in the crew worktree, so those two weaker signals must
+# not report it as no-progress. A busy pane, status-log line, or any other source
+# does not qualify.
+crew_run_step_working() {  # <id>
+  local detail
+  detail=$(crew_absorb_class_detail "$1")
+  [ "$detail" = 'working run-step' ]
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

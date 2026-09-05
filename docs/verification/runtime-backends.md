@@ -312,6 +312,48 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+## Progress counters
+
+The busy-but-no-progress report (`busy_progress_check` in `bin/fm-watch.sh`) measures a worker's advance from numbers the harness itself renders, so `bin/fm-progress-lib.sh` owns which of those numbers count as progress and which are animation.
+The distinction is the whole guarantee: a frozen worker keeps repainting its elapsed-time clock and spinner, so anything time-shaped that leaked into the reading would mask every wedge, and a counter that failed to match would report a worker that is fine.
+
+Verified on 2026-08-27 against the rendered footers this repo already holds recorded observations of - `Sock-hopping... (11s - 234 tokens)` from the [Herdr](#herdr) busy-state sampling below, and `Pollinating... (16s - 1.1k tokens - thought for 1s)` from the Claude composer fixtures in `tests/fm-tmux-submit-busy.test.sh`:
+
+```sh
+tests/fm-progress-lib.test.sh
+```
+
+```text
+ok - a live token meter in a real harness footer is read as progress
+ok - up/down tokens, spend, and context percentage are all read as progress
+ok - a used/total context meter is read as progress, both numbers kept
+ok - elapsed clocks, spinners, and non-context percentages are never read as progress
+ok - a ticking clock alone leaves the progress reading byte-identical (the pane hash would not)
+ok - real token growth does change the progress reading
+ok - a harness that renders no counters returns no reading and says so
+ok - empty input returns no reading
+ok - token-shaped text outside the footer region is not read as progress
+```
+
+Codex's recorded footer, `- Working (6s - esc to interrupt)`, renders no counter at all and correctly yields no reading; that is an admitted blind spot, recorded in the watcher's absorbed-wake log, and such a harness keeps `FM_BUSY_TURN_MAX_SECS` as its only backstop rather than being measured on a guess.
+
+Pattern matching alone is deliberately not sufficient to arm the report.
+A counter shape proves only that the text looks like a meter, and displayed content inside the footer region matches exactly as a real meter does - a transcript line reading `2481 tokens` scrolling through the scan window even changes between polls, so mere change is not evidence either, since text that differs is as likely to fall as to rise.
+`busy_progress_check` therefore requires one of a pane's numbers to be observed RISING at least once - what a real meter does within the first seconds of generation and on poll after poll thereafter, and what scrolled text does only by chance - before the short fuse applies to it, so a counter-free harness showing counter-shaped transcript text is ordinarily treated exactly like one showing no numbers at all.
+That is a raised bar rather than a closed gap: a reading keeps the largest value per kind, so a transcript number that scrolls into the footer window higher than the one read before still reads as a rise, and the report stays report-only, exemption-gated, and logged for exactly that reason.
+`tests/fm-watch-triage.test.sh` pins both halves against a real watcher process.
+
+Not yet verified: whether each installed harness RELEASE still renders these counters during a real turn.
+That is a vendor-rendered fact no fixture can establish, and the guard below is its refresh command; it was not run on 2026-08-27 because the verification machine was saturated and the task's load constraint ruled out launching harnesses.
+Until it is run, only `claude` carries recorded counter evidence in this repo, and the guard's expectation list holds that one harness alone.
+
+```sh
+FM_BUSY_PROGRESS_DRIFT=1 tests/fm-busy-progress-drift-live-e2e.test.sh
+```
+
+Run it after any harness upgrade; it launches each installed harness, drives one short real turn, samples the pane repeatedly across it until one counter is seen rising, fails naming any harness whose recorded counters have disappeared or no longer advance, reports absent harnesses explicitly, and refuses a pass that checked nothing.
+An installed harness observed to advance a counter is promoted into the guard's expectation list in the same commit that records the evidence here.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
