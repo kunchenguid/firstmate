@@ -242,14 +242,19 @@ EOF
 
 wake_for() {
   # Reuse the fleet's durable wake append so a poll surfaces as a `check` wake.
-  local id=$1 summary=$2 lib="$FM_HOME/bin/fm-wake-lib.sh"
+  # The key is generation-aware when the mailbox reports a UIDVALIDITY, so a
+  # restored mailbox's reused uid can never collide with a stale wake key.
+  local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh"
+  local wake_key="mail:$id"
+  if [ -n "$generation" ]; then
+    wake_key="mail:$generation/$id"
+  fi
   if [ -f "$lib" ]; then
     # shellcheck source=/dev/null
     . "$lib"
-    fm_wake_append check "mail:$id" "check: mail $id - $summary"
+    fm_wake_append check "$wake_key" "check: mail $id - $summary"
   else
     echo "fm-mail: $lib missing; cannot wake" >&2
-    return 1
   fi
 }
 
@@ -281,10 +286,11 @@ case "${1:-}" in
   poll)
     # List unseen mail (uid,date,from,subj) plus the mailbox generation guard,
     # then diff against already-surfaced uids to find NEW messages and surface
-    # one wake each. Never marks anything read. The entire list-diff-wake loop
-    # runs under one flock and each surfaced uid is committed to the cursor
-    # before its wake is emitted, so an overlapping poll or an interrupted run
-    # can never read a stale cursor and double-surface mail.
+    # one wake each. Never marks anything read. The wake append is the durable
+    # commit point and each poll first heals any wake left queued by an
+    # interrupted run, then emits new wakes and records their uids - all under
+    # one flock, so an overlapping poll or an interrupted run can never lose a
+    # mail or double-surface it.
     exec 9>"$STATE_DIR/.mail-seen.lock"
     flock 9
     LIST="$(run_py poll_list)"
@@ -309,46 +315,61 @@ case "${1:-}" in
       printf 'uidvalidity=%s\n' "$STORED_GEN" > "$CURSOR"
     fi
 
+    # Heal a poll interrupted between its wake append and its cursor record:
+    # that wake is already durably queued, so record its uid now instead of
+    # either re-waking the same mail or silently dropping it. Generation-aware
+    # wake keys keep a reused numeric uid of a restored mailbox from being
+    # suppressed by a stale queued wake from the previous generation.
+    if [ -f "$FM_HOME/bin/fm-wake-lib.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$FM_HOME/bin/fm-wake-lib.sh"
+      while IFS= read -r k; do
+        keyrest="${k#mail:}"
+        [ "$keyrest" = "$k" ] && continue
+        keygen=""
+        keyuid=""
+        case "$keyrest" in
+          */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
+          *) keyuid="$keyrest" ;;
+        esac
+        [ -z "$keyuid" ] && continue
+        if [ -n "$keygen" ] && [ -n "$GENERATION" ] && [ "$keygen" != "$GENERATION" ]; then
+          continue
+        fi
+        if [ -n "$keygen" ] && [ -z "$GENERATION" ]; then
+          continue
+        fi
+        if [ -z "${SEEN[$keyuid]:-}" ]; then
+          printf '%s\n' "$keyuid" >> "$CURSOR"
+          SEEN["$keyuid"]=1
+        fi
+      done < <(fm_wake_queued_keys check 2>/dev/null || true)
+    fi
+
     woke=0
-    wake_err=0
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       uid="$(printf '%s' "$line" | cut -f1)"
       fr="$(printf '%s' "$line" | cut -f3)"
       subj="$(printf '%s' "$line" | cut -f4)"
       if [ -z "${SEEN[$uid]:-}" ]; then
-        # Record before waking: the cursor is the durable commit point for a
-        # surface decision, so a wake is never emitted for a uid that is not
-        # already recorded. An interrupted poll can therefore never leave a
-        # wake whose uid the next poll treats as new again. If the wake itself
-        # then fails, roll the record back so a later poll retries the surface
-        # instead of silently dropping it.
-        printf '%s\n' "$uid" >> "$CURSOR"
-        SEEN["$uid"]=1
-        if wake_for "$uid" "mail from $fr - ${subj:-no subject}"; then
+        # Wake first, then record: the durable wake append is the commit point.
+        # A kill before the append leaves nothing and the next poll retries; a
+        # kill after the append but before the cursor write is healed by the
+        # reconciliation above, which records the uid without re-waking.
+        if wake_for "$GENERATION" "$uid" "mail from $fr - ${subj:-no subject}"; then
+          printf '%s\n' "$uid" >> "$CURSOR"
+          SEEN["$uid"]=1
           echo "fm-mail: woke for $uid"
           woke=$((woke + 1))
         else
-          SEEN["$uid"]=
           echo "fm-mail: wake failed for $uid; retried on next poll" >&2
-          wake_err=1
-          : > "$CURSOR.clean"
-          while IFS= read -r u; do
-            case "$u" in
-              "$uid") ;;
-              *) printf '%s\n' "$u" >> "$CURSOR.clean" ;;
-            esac
-          done < "$CURSOR"
-          mv "$CURSOR.clean" "$CURSOR"
+          exit 1
         fi
       fi
     done <<< "$LIST"
     flock -u 9
     exec 9>&-
-    if [ "$wake_err" -eq 1 ]; then
-      echo "fm-mail: poll incomplete; wake queue unavailable" >&2
-      exit 1
-    fi
     if [ "$woke" -eq 0 ]; then
       echo "fm-mail: no new mail"
     fi

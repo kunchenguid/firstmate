@@ -203,6 +203,44 @@ SH
   pass "fm-mail: generation change prevents a reused uid from being suppressed"
 }
 
+test_poll_heals_wake_without_cursor_record() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t60006\n'
+printf '99\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  # First poll wakes 99 and records it, proving the normal path.
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first poll must succeed"
+  assert_contains "$out" "woke for 99" "first poll wakes uid 99"
+
+  # Simulate a poll interrupted after its wake append but before its cursor
+  # write: remove the uid from the cursor while its wake stays queued.
+  printf 'uidvalidity=60006\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "healing poll must succeed"
+  assert_not_contains "$out" "woke for 99" "healing poll must not re-wake the queued mail"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "99" "healing poll restores the cursor record"
+  local wakeq
+  wakeq=$(grep -c "check: mail 99" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "queued wake is still appended exactly once"
+  pass "fm-mail: poll heals a wake whose cursor record was interrupted"
+}
+
 test_poll_serializes_overlapping_invocations() {
 local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -247,4 +285,5 @@ test_send_passes_body
 test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
+test_poll_heals_wake_without_cursor_record
 test_poll_serializes_overlapping_invocations
