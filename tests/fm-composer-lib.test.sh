@@ -21,6 +21,9 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
+# shellcheck source=tests/composer-claude-titled-rule-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/composer-claude-titled-rule-fixture.sh"
+
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
@@ -327,6 +330,41 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_claude_titled_separated_rule() {
+  # Incident 2026-09-05 07:02-07:07 PDT (task afk-composer-read-claude-herdr):
+  # current claude draws its OWN idle composer the same way pi's separated
+  # shape is drawn - a bare `❯` between two `─` rules - but embeds the
+  # session/task title IN the top rule ("──...── First ─", verified live).
+  # The old `_fm_composer_pi_separator_row` only recognized a rule of PURE
+  # dashes, so the titled top rule went unrecognized while its still-plain
+  # partner did not, and the plain bottom rule then read as an ORPHANED
+  # trailing separator that invalidated the bare-row candidate below every
+  # other shape - the away daemon's supervisor composer read "unknown" against
+  # a genuinely idle pane, injection deferred, and the 301s wedge alarm fired.
+  # Unlike pi, a bare AGENT glyph is positive proof on its own (THE SAFETY RULE,
+  # header above), so this needs only the lazy identity round-trip that proves
+  # the live agent is claude, not pi - never a pi idle/done state.
+  local screen claude_done claude_working
+  screen=$(fm_test_fixture_claude_titled_rule_screen)
+  claude_done=$(printf 'claude\tdone'); claude_working=$(printf 'claude\tworking')
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")" = need-identity ] \
+    || fail "a titled separated rule pair with an identity-capable profile should request the lazy identity probe"
+  assert_screen "claude titled-rule idle on herdr, done" empty "$CAPS_STYLED" "$screen" '' "$claude_done"
+  # A working claude is still a genuine empty composer here (unlike pi): the
+  # bare glyph itself is the proof, not the agent's turn state.
+  assert_screen "claude titled-rule idle on herdr, working" empty "$CAPS_STYLED" "$screen" '' "$claude_working"
+  assert_screen "claude titled-rule idle without identity capability" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude titled-rule idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # The live incident capture also carried a highlighted "N new messages"
+  # notification bar above the composer and a shell-count footer below it;
+  # neither is composer content and both must not change the verdict.
+  local with_footer
+  with_footer=$(fm_test_fixture_claude_titled_rule_screen_with_footer)
+  assert_screen "claude titled-rule idle with notification bar and footer" empty \
+    "$CAPS_STYLED" "$with_footer" '' "$claude_done"
+  pass "matrix: claude's titled separated composer reads empty; a titled rule pairs with its partner instead of stranding the bare glyph"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -618,6 +656,7 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
+test_matrix_claude_titled_separated_rule
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

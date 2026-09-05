@@ -10,6 +10,9 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
+# shellcheck source=tests/composer-claude-titled-rule-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/composer-claude-titled-rule-fixture.sh"
+
 # housekeeping()'s stale-escalation threshold now resolves through
 # fm_stale_escalate_secs (bin/fm-classify-lib.sh), which falls back to
 # $FM_HOME/config when a caller passes no FM_CONFIG_OVERRIDE. Sourcing
@@ -2553,6 +2556,30 @@ test_primary_busy_guard_is_harness_scoped() {
   pass "primary busy guard isolates rendered signatures by detected harness"
 }
 
+test_pane_is_busy_claude_titled_rule_composer_reads_idle() {
+  # Class sweep for task afk-composer-read-claude-herdr's composer fix: the
+  # SAME idle screen (incident 2026-09-05, claude's titled separated-rule
+  # composer, with its notification bar and shell-count footer) must also be
+  # read as NOT busy, so both consumers of a rendered idle claude pane -
+  # bin/fm-composer-lib.sh's composer verdict and this busy-footer guard -
+  # agree on the one real capture rather than drifting apart.
+  local dir footer_screen tail
+  dir=$(make_supercase primary-herdr-titled-rule-idle)
+  footer_screen=$(fm_test_fixture_claude_titled_rule_screen_with_footer)
+  (
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_capture() { printf '%s' "$footer_screen"; }
+    if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "an idle claude titled-rule composer's footer must not read busy"
+    fi
+  ) || fail "claude titled-rule idle pane_is_busy subshell failed"
+  tail=$(printf '%s' "$footer_screen" | grep -v '^[[:space:]]*$' | tail -12)
+  if printf '%s' "$tail" | fm_busy_lines_match claude; then
+    fail "fm_busy_lines_match read the idle claude titled-rule footer as busy"
+  fi
+  pass "pane_is_busy/fm_busy_lines_match: claude's idle titled-rule composer footer reads NOT busy"
+}
+
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
   dir=$(make_supercase busy-default-backend)
@@ -2808,6 +2835,7 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
+test_pane_is_busy_claude_titled_rule_composer_reads_idle
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

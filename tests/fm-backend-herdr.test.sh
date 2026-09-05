@@ -14,6 +14,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+# shellcheck source=tests/composer-claude-titled-rule-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/composer-claude-titled-rule-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -3207,6 +3209,35 @@ test_composer_state_pi_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
 }
 
+# Incident 2026-09-05 07:02-07:07 PDT (task afk-composer-read-claude-herdr):
+# current claude draws its OWN idle composer the same way pi's separated shape
+# is drawn - a bare `❯` between two `─` rules - but embeds the session/task
+# title IN the top rule ("──...── First ─", verified live via `herdr pane
+# read w2H:p1 --ansi`). The old `_fm_composer_pi_separator_row` only recognized
+# a rule of PURE dashes, so the titled top rule went unrecognized while its
+# still-plain partner did not, and the plain bottom rule then read as an
+# ORPHANED trailing separator that invalidated the bare-row candidate below
+# every other shape: the away daemon's supervisor composer read `unknown`
+# against a genuinely idle pane for the whole 07:02-07:07 window, injection
+# deferred throughout, and the 301s wedge alarm fired. Fixture: the shared,
+# sanitized capture in tests/composer-claude-titled-rule-fixture.sh (also used
+# by tests/fm-composer-lib.test.sh and the busy-guard assertion in
+# tests/fm-daemon.test.sh, so every consumer of this exact idle screen is
+# proven against the one real capture).
+test_composer_state_claude_titled_rule_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-claude-titled-rule-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fm_test_fixture_claude_titled_rule_screen_with_footer > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native claude titled separated-rule composer should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "the titled separated-rule shape must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: a native idle claude titled separated-rule composer reads empty (task afk-composer-read-claude-herdr)"
+}
+
 # A pi worker parked on an interactive prompt (permission dialog, question
 # menu, trust dialog) reports agent_status=blocked: it is waiting on a human
 # keystroke. The menu is drawn ABOVE the separator pair, so the composer region
@@ -4669,6 +4700,7 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
+test_composer_state_claude_titled_rule_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
