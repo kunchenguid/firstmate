@@ -85,9 +85,10 @@
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
-#     Structured-home input must declare the current hold-classifier schema; an
-#     older live ledger or cached copy is invalid even when it contains no captain
-#     holds, and leaves the home explicitly unreadable until its producer refreshes it.
+#     Structured-home input must declare the current home-summary and hold-classifier
+#     schemas; an older live ledger or cached copy is stale even when it contains no
+#     captain holds, and leaves the home explicitly unavailable until its producer
+#     refreshes it.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes are partial, not unreadable, when an unavailable child state
@@ -1034,7 +1035,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
-        schema:"fm-secondmate-home-summary.v1",
+        schema:"fm-secondmate-home-summary.v2",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
         generated:$generated,
         generated_epoch:$generated_epoch,
@@ -1246,6 +1247,28 @@ summary_file_read() {  # <file> <expected-home> <output-file>
   return 0
 }
 
+summary_file_has_schema() {  # <file> <expected-home> <schema>
+  local file=$1 home=$2 schema=$3 captured bytes
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  captured=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.schema-summary.XXXXXX") || return 1
+  if ! LC_ALL=C head -c "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$file" > "$captured"; then
+    rm -f -- "$captured"
+    return 1
+  fi
+  bytes=$(LC_ALL=C wc -c < "$captured" | tr -d ' ')
+  case "$bytes" in
+    ''|*[!0-9]*) rm -f -- "$captured"; return 1 ;;
+  esac
+  if [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ] \
+    || ! jq -e -s --arg home "$home" --arg schema "$schema" '
+      length == 1 and .[0].schema == $schema and .[0].home == $home
+    ' "$captured" >/dev/null 2>&1; then
+    rm -f -- "$captured"
+    return 1
+  fi
+  rm -f -- "$captured"
+}
+
 summary_file_oversized() {  # <file>
   local bytes
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -1304,7 +1327,7 @@ prepare_remote_summary_collection() {  # <sampled-row-json-lines>
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
 length == 1 and (.[0] |
-  .schema == "fm-secondmate-home-summary.v1"
+  .schema == "fm-secondmate-home-summary.v2"
   and .hold_classifier_schema == "fm-captain-hold-buckets.v1"
   and .home == $home
   and (.generated | type) == "string"
@@ -1649,6 +1672,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
+  local summary_schema_stale
   local seen_homes=''
   registry_file="$JSON_TRANSPORT_DIR/secondmate-registry.json"
   union_file="$JSON_TRANSPORT_DIR/secondmate-union.json"
@@ -1714,6 +1738,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     printf '{}\n' > "$summary_file" || return 1
     summary_sampled=false
     summary_valid=false
+    summary_schema_stale=false
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
       case "$home" in
@@ -1753,6 +1778,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
           summary_source='remote-ledger-cache'
           summary_freshness=cached
+        elif summary_file_has_schema "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" "fm-secondmate-home-summary.v1" \
+          || { [ -n "$cache_path" ] && summary_file_has_schema "$cache_path" "$home" "fm-secondmate-home-summary.v1"; }; then
+          summary_schema_stale=true
+          reason="structured home ledger schema is stale; rerun the fleet update"
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
           reason="structured home ledger exceeded byte limit and no valid cached copy is available"
         elif [ "$SNAPSHOT_COLLECTION_TIMED_OUT" -eq 1 ] && [ -z "$collection_status" ]; then
@@ -1762,6 +1791,9 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         fi
       elif summary_file_read "$home/state/home-summary.json" "$home" "$summary_file"; then
         summary_source='local-ledger'
+      elif summary_file_has_schema "$home/state/home-summary.json" "$home" "fm-secondmate-home-summary.v1"; then
+        summary_schema_stale=true
+        reason="structured home ledger schema is stale; rerun the fleet update"
       elif summary_file_oversized "$home/state/home-summary.json"; then
         reason="structured home ledger exceeded byte limit"
       else
@@ -1820,7 +1852,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
     else
-      if [ -n "$event_raw" ]; then
+      if [ "$summary_schema_stale" = true ]; then
+        provenance=unknown
+        freshness=stale
+      elif [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
         freshness=historical-event
       else

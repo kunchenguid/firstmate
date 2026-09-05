@@ -605,7 +605,7 @@ test_local_only_fork_remote_allows() {
   [ "$(cat "$case_dir/state/.branch-outcome-index-ready")" = 1 ] \
     || fail "fork-allow: post-teardown branch report did not publish its ready sequence"
   jq -e --arg id task-x1 '
-    .schema == "fm-secondmate-home-summary.v1"
+    .schema == "fm-secondmate-home-summary.v2"
     and all(.endpoints[]; .id != $id)
   ' "$case_dir/state/home-summary.json" >/dev/null \
     || fail "successful task teardown did not publish the task's removal from the home summary ledger"

@@ -5,9 +5,9 @@
 #
 # The published state/home-summary.json is the exact
 # `fm-fleet-snapshot.sh --secondmate-home-summary` document for this FM_HOME.
-# Its schema remains `fm-secondmate-home-summary.v1`, declares the current hold
-# classifier contract, and includes both the existing generated timestamp and
-# generated_epoch for freshness arithmetic.
+# Its schema is `fm-secondmate-home-summary.v2`, which declares landed rows using
+# the current selector as well as the hold classifier contract, and includes both
+# the existing generated timestamp and generated_epoch for freshness arithmetic.
 #
 # Publication is atomic: the producer writes and validates a unique mode-0600
 # temporary file on the state directory's filesystem, then renames it over the
@@ -150,7 +150,7 @@ home_summary_refresh_once() {
   rm -f -- "$HOME_SUMMARY_ERR_TMP"
   HOME_SUMMARY_ERR_TMP=
   if ! jq -e --arg home "$FM_HOME" '
-    .schema == "fm-secondmate-home-summary.v1"
+    .schema == "fm-secondmate-home-summary.v2"
     and .hold_classifier_schema == "fm-captain-hold-buckets.v1"
     and .home == $home
     and (.generated | type) == "string"
