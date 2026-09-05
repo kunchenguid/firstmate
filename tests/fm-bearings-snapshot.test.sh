@@ -1403,6 +1403,7 @@ test_captain_approved_delivery_stays_in_landed() {
   local home mate fakebin json snap backlog repo wt pr show forced_pr forced_show reused_pr
   local spoof_pr spoof_marker spoof_show spoof_body spoof_records none_marker prior_pr
   local interrupted_pr interrupted_marker interrupted_show interrupted_rc
+  local mixed_pr mixed_marker mixed_legacy mixed_body mixed_show mixed_records
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
@@ -1489,6 +1490,43 @@ SH
     || fail "could not read the resumed retained-cleanup completion"
   assert_contains "$interrupted_show" "<!-- firstmate-completion.v1 {\\\"value\\\":\\\"PR $interrupted_pr\\\"} -->" \
     "the resumed close lost the retained cleanup's shipped artifact"
+  mixed_pr="https://github.com/kunchenguid/firstmate/pull/1364"
+  mixed_marker="<!-- firstmate-completion.v1 {\"value\":\"PR $mixed_pr\"} -->"
+  mixed_legacy="Deliverable of the finished work: none"
+  mixed_body=$(printf '%s\n\n%s' "$mixed_marker" "$mixed_legacy")
+  "$TASKS_AXI_BIN" add mixed-provenance-delivery "Complete reused delivery provenance" \
+    --kind ship --repo firstmate --start --file "$backlog" >/dev/null \
+    || fail "could not create the mixed-provenance delivery fixture"
+  "$TASKS_AXI_BIN" update mixed-provenance-delivery --body "$mixed_body" \
+    --file "$backlog" >/dev/null \
+    || fail "could not create the mixed-provenance body"
+  fm_write_meta "$home/state/mixed-provenance-delivery.meta" \
+    "window=firstmate:fm-mixed-provenance-delivery" \
+    "endpoint_task_id=mixed-provenance-delivery" "worktree=$wt" "project=$repo" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$mixed_pr" \
+    "spawn_gen=mixed-provenance-fixture"
+  record_claude_state "$home/state" mixed-provenance-delivery idle
+  printf 'done: reused delivery shipped\n' > "$home/state/mixed-provenance-delivery.status"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" NET_LOG="$home/net.log" \
+    "$TEARDOWN" mixed-provenance-delivery >/dev/null \
+    || fail "could not complete the mixed-provenance delivery"
+  mixed_show=$("$TASKS_AXI_BIN" show mixed-provenance-delivery --full --file "$backlog") \
+    || fail "could not read the mixed-provenance completion"
+  mixed_body=$(printf '%s\n' "$mixed_show" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+      print $value unless $value eq "-";
+    ') || fail "could not decode the mixed-provenance completion body"
+  mixed_records=$(printf '%s\n' "$mixed_body" | sed -n \
+    -e '/^<!-- firstmate-completion\.v1 /p' \
+    -e '/^Deliverable of the finished work: /p')
+  [ "$mixed_records" = "$(printf '%s\n%s\n%s' "$mixed_marker" "$mixed_legacy" "$mixed_marker")" ] \
+    || fail "the writer did not append its verdict after the trailing legacy record: $mixed_body"
   "$TASKS_AXI_BIN" add approved-local "Land it locally" --kind ship --repo firstmate \
     --start --file "$backlog" >/dev/null \
     || fail "could not create the local delivery fixture"
@@ -1687,6 +1725,7 @@ SH
     | ([.backlog.records[] | select(.id == "rejected-merge")][0]) as $rejected
     | ([.backlog.records[] | select(.id == "spoofed-question")][0]) as $spoofed
     | ([.backlog.records[] | select(.id == "interrupted-retain")][0]) as $interrupted
+    | ([.backlog.records[] | select(.id == "mixed-provenance-delivery")][0]) as $mixed
     | ([.backlog.records[] | select(.id == "legacy-approved")][0]) as $legacy
     | ([.backlog.records[] | select(.id == "prior-provenance-approved")][0]) as $prior
     | $approved.delivery_provenance == true and ($approved.pr_url | test("/pull/1365"))
@@ -1700,6 +1739,7 @@ SH
       and $spoofed.delivery_provenance == true and $spoofed.pr_url == null
       and $spoofed.report_path == null and $spoofed.local_note == null
       and $interrupted.delivery_provenance == true and ($interrupted.pr_url | test("/pull/1363"))
+      and $mixed.delivery_provenance == true and ($mixed.pr_url | test("/pull/1364"))
       and $legacy.delivery_provenance == false and ($legacy.pr_url | test("/pull/1368"))
       and $prior.delivery_provenance == true and ($prior.pr_url | test("/pull/1364"))
   ' >/dev/null || fail "completion provenance did not distinguish delivered, rejected, and legacy rows: $snap"
@@ -1711,6 +1751,7 @@ SH
       and (.landed | any(.[]; .id == "prior-provenance-approved" and (.artifact | test("/pull/1364"))))
       and (.landed | any(.[]; .id == "mate-approved-merge" and (.artifact | test("/pull/1361"))))
       and (.landed | any(.[]; .id == "interrupted-retain" and (.artifact | test("/pull/1363"))))
+      and (.landed | any(.[]; .id == "mixed-provenance-delivery" and (.artifact | test("/pull/1364"))))
       and (.landed | any(.[]; .id == "forced-rejected") | not)
       and (.landed | any(.[]; .id == "reused-discard") | not)
       and (.landed | any(.[]; .id == "rejected-merge") | not)
