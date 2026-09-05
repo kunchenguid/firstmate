@@ -170,7 +170,7 @@ worker_acquire_lock() {
       worker_recover_quarantine "$account_home" || return 3
       continue
     fi
-    if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
+    if fm_remote_job_lock_owner_matches_process "$account_home" "$WORKER_LOCK"; then return 2; fi
     if fm_remote_job_probe "$account_home" || worker_lock_recent; then
       attempt=$((attempt + 1))
       sleep 0.1
@@ -1063,13 +1063,35 @@ worker_supervisor_shutdown() {
   exit 0
 }
 
+worker_supervisor_cleanup() {
+  local owner
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 0
+  owner=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
+  [ "$owner" = "${BASHPID:-$$}" ] || return 0
+  # This lease owns the supervisor, not the serving child's readiness files.
+  rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command"
+  rmdir "$WORKER_LOCK"
+}
+
 worker_supervise_linux() {
-  local account_home child_status started failures=0 restarts=0 backoff
+  local account_home child_status started failures=0 restarts=0 backoff lock_status
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
+  # The serving child releases worker.lock on exit. A separate ownership lease
+  # survives its restart window, preventing concurrent ensure calls from
+  # accumulating independent restart loops while serving ownership is stale.
+  WORKER_LOCK="$FM_REMOTE_JOB_STATE/supervisor.lock"
+  trap worker_supervisor_cleanup EXIT
   trap worker_supervisor_shutdown HUP INT TERM
+  worker_acquire_lock "$account_home"
+  lock_status=$?
+  case "$lock_status" in
+    0) ;;
+    2) return 0 ;;
+    *) worker_error "cannot acquire supervisor ownership"; return 1 ;;
+  esac
   while :; do
     if worker_code_root_abandoned; then
       worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker supervisor"

@@ -980,6 +980,22 @@ It also retains the helper's refusal, default-session tripwire, failed-deletion,
 The runner regression separately proves that the process check rejects surviving test servers and unreadable inventories while accepting the default server, readers, and zombies.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
+The Linux worker-stop regression uses an actual child subreaper and independent restart supervisors from the same queue, plus a separate queue that must survive.
+Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
+The supervisor now retains its own ownership lease across child restarts, and stop discovers verified sibling groups by executable and queue identity rather than adoption parent.
+The regression asserts both termination and absence of respawns after stop; it failed against the previous implementation and passed with the fix.
+
+```sh
+bin/fm-test-run.sh --jobs 1 tests/fm-remote-job-orphan-reap.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh
+bin/fm-lint.sh
+```
+
+```text
+ok - stop finds adopted sibling supervisors, prevents respawn, and preserves another queue
+ok - stale serving metadata cannot accumulate restart supervisors
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=25934
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

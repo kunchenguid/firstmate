@@ -205,3 +205,8 @@ pass "the reaper stops an abandoned worker's whole tree"
 out=$("$REAPER" 2>&1) || fail "a repeat reaper run failed: $out"
 assert_not_contains "$out" "$STALE" "the reaper reported an already-stopped worker"
 pass "the reaper is idempotent"
+
+if [ "$(uname -s)" = Linux ]; then
+  python3 "$ROOT/tests/fixtures/remote-job/subreaper-stop.py" "$ROOT" ||
+    fail "subreaper stop and supervisor ownership regression failed"
+fi

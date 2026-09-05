@@ -71,11 +71,14 @@
 # an Aqua requirement. The launch-agent renderer and repair helpers here are
 # shared by the entrypoint and remote doctor so their ownership cannot drift.
 #
+# A Linux supervisor holds supervisor.lock across serving-child restarts.
 # The Linux start path puts the worker tree in its own process group, so
 # stopping a worker signals its restart supervisor, its serving child, and any
 # job descendant together instead of leaving a supervisor to restart what was
 # just killed. fm_remote_job_stop_worker_tree owns that stop and refuses to
-# signal a group whose leader is not itself a worker, so a worker inherited
+# signal a group whose leader is not itself a worker, and includes sibling
+# supervisors bound to the same executable and queue through /proc on Linux.
+# A worker inherited
 # from an older build or from launchd's own session is still stopped safely as
 # a single process. fm_remote_job_root_is_live is the shared predicate for
 # whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
@@ -956,15 +959,99 @@ fm_remote_job_worker_process_group() { # <pid>
   printf '%s\n' "$pgid"
 }
 
+# Linux's adoption parent is not ownership evidence. Bind sibling supervisors
+# to the same executable and queue using their kernel environment.
+# Never print the environment: it can contain unrelated private values.
+fm_remote_job_process_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
+  local pid=$1 entry root='' state='' account='' executable script
+  [ -O "/proc/$pid" ] && [ -r "/proc/$pid/environ" ] || return 1
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      FM_ROOT_OVERRIDE=*) root=${entry#*=} ;;
+      FM_REMOTE_JOB_STATE_ROOT=*) state=${entry#*=} ;;
+      HOME=*) account=${entry#*=} ;;
+    esac
+  done < "/proc/$pid/environ" 2>/dev/null
+  [ -n "$state" ] || state="$account/.firstmate/remote-job"
+  case "$root:$state" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "$root" in /*) ;; *) return 1 ;; esac
+  case "$state" in /*) ;; *) return 1 ;; esac
+  {
+    IFS= read -r -d '' executable && IFS= read -r -d '' script
+  } < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  case "${executable##*/}" in bash) ;; *) return 1 ;; esac
+  [ "$script" = "$root/bin/fm-remote-job-worker.sh" ] || return 1
+  FM_REMOTE_JOB_PROCESS_ROOT=$root
+  FM_REMOTE_JOB_PROCESS_STATE=$state
+}
+
+fm_remote_job_group_running() { # <pgid>; zombies cannot execute or respawn
+  local pgid=$1 snapshot
+  snapshot=$(/bin/ps -e -o pgid= -o stat= 2>/dev/null) || return 2
+  printf '%s\n' "$snapshot" |
+    awk -v group="$pgid" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'
+}
+
 # Stop a worker and every descendant it leaked, TERM first and KILL only for a
 # survivor. Signals the isolated worker group when one is provable and the lone
 # process otherwise. Returns non-zero when any verified worker-group member is
 # still alive afterwards.
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 pgid i=0
+  local pid=$1 pgid i=0 candidate root='' state='' group start index alive signal
+  local groups=() starts=()
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
+  if [ -n "$pgid" ]; then
+    groups+=("$pgid")
+    starts+=("$(fm_remote_job_process_start "$pgid")")
+  fi
+  if fm_remote_job_process_scope "$pid"; then
+    root=$FM_REMOTE_JOB_PROCESS_ROOT state=$FM_REMOTE_JOB_PROCESS_STATE
+    # A stale serving-owner record can have admitted more than one supervisor.
+    # Each has its own group even after adoption by a systemd user subreaper.
+    for candidate in /proc/[0-9]*; do
+      candidate=${candidate##*/}
+      fm_remote_job_process_scope "$candidate" 2>/dev/null || continue
+      [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
+        [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || continue
+      group=$(fm_remote_job_worker_process_group "$candidate" 2>/dev/null || true)
+      [ -n "$group" ] || continue
+      case " ${groups[*]:-} " in *" $group "*) continue ;; esac
+      start=$(fm_remote_job_process_start "$group") || return 1
+      groups+=("$group") starts+=("$start")
+    done
+  fi
+  if [ "${#groups[@]}" -gt 0 ]; then
+    # Check the captured leader identity immediately before each signal. A
+    # recycled PID must never turn fixture cleanup into an unrelated group kill.
+    for signal in TERM KILL; do
+      index=0
+      for group in "${groups[@]}"; do
+        start=$(fm_remote_job_process_start "$group" 2>/dev/null || true)
+        if [ -n "$start" ]; then
+          [ "$start" = "${starts[$index]}" ] || return 1
+        fi
+        if fm_remote_job_group_running "$group"; then
+          kill -"$signal" -- "-$group" 2>/dev/null || true
+        else
+          [ "$?" -eq 1 ] || return 1
+        fi
+        index=$((index + 1))
+      done
+      i=0
+      while [ "$i" -lt 50 ]; do
+        alive=0
+        for group in "${groups[@]}"; do
+          if fm_remote_job_group_running "$group"; then alive=1; else [ "$?" -eq 1 ] || return 1; fi
+        done
+        [ "$alive" -eq 1 ] || return 0
+        i=$((i + 1))
+        sleep 0.1
+      done
+    done
+    return 1
+  fi
   if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
   while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
     && [ "$i" -lt 50 ]; do
@@ -1005,7 +1092,7 @@ fm_remote_job_read_single_line() {
 fm_remote_job_lock_owner_matches_process() {
   local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
   fm_remote_job_prepare_state "$account_home" || return 1
-  lock=$(fm_remote_job_worker_lock_path)
+  lock=${2:-$(fm_remote_job_worker_lock_path)}
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
