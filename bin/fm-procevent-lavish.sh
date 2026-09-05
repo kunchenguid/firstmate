@@ -187,14 +187,10 @@ cmd_retire() {
     fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
     if [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
       if [ -e "$pending" ] || [ -L "$pending" ]; then
-        pending_reply_is_private "$pending" \
-          || die "retired source left an unsafe pending reply path: $id"
-        rm -f -- "$pending" || die "cannot remove retired source reply: $id"
+        fallback_reply_record_locked "$pending" "source retired before delivery"
       fi
       if [ -e "$inflight" ] || [ -L "$inflight" ]; then
-        pending_reply_is_private "$inflight" \
-          || die "retired source left an unsafe in-flight reply path: $id"
-        rm -f -- "$inflight" || die "cannot remove retired in-flight reply: $id"
+        fallback_reply_record_locked "$inflight" "source retired before delivery"
       fi
     fi
     fm_procevent_source_lock_release "$id"

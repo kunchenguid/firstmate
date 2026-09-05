@@ -1634,6 +1634,36 @@ assert_absent "$pending_reply" "committed reply returned to pending after the gr
 kill -TERM "$reply_poll_pid"
 wait "$reply_poll_pid" 2>/dev/null || true
 
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Acknowledgement already claimed." >/dev/null
+mv "$pending_reply" "$inflight_reply"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" RESTART_LOG="$RESTART_LOG" \
+  FM_LAVISH_HOST_STATUS_FILE="$reply_status" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
+  "Acknowledgement still pending." >/dev/null
+RETIRE_READY="$TMP_ROOT/accepted-reply-retire-ready"
+RETIRE_RELEASE="$TMP_ROOT/accepted-reply-retire-release"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  RESTART_LOG="$RESTART_LOG" RETIRE_READY="$RETIRE_READY" RETIRE_RELEASE="$RETIRE_RELEASE" \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" retire "$REPLY_ART" >/dev/null &
+accepted_reply_retire_pid=$!
+wait_for "$RETIRE_READY" || fail "accepted-reply retire fixture did not remove its registration"
+: > "$RETIRE_RELEASE"
+wait "$accepted_reply_retire_pid" || fail "explicit retirement rejected accepted acknowledgements"
+assert_contains "$(cat "$reply_status")" \
+  "acknowledgement: Acknowledgement still pending.; reason: source retired before delivery" \
+  "explicit retirement did not preserve a pending acknowledgement in host status"
+assert_contains "$(cat "$reply_status")" \
+  "acknowledgement: Acknowledgement already claimed.; reason: source retired before delivery" \
+  "explicit retirement did not preserve an in-flight acknowledgement in host status"
+assert_absent "$pending_reply" "explicit retirement left its recorded pending acknowledgement"
+assert_absent "$inflight_reply" "explicit retirement left its recorded in-flight acknowledgement"
+FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
+  "$ROOT/bin/fm-procevent.sh" register lavish "$reply_id" -- \
+  "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" >/dev/null
+
 RETIRE_READY="$TMP_ROOT/reply-retire-ready"
 RETIRE_RELEASE="$TMP_ROOT/reply-retire-release"
 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
