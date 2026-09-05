@@ -1234,6 +1234,41 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+# A firstmate-repo task's project IS this test's FM_ROOT_OVERRIDE: content_in_default
+# (bin/fm-teardown.sh) must then check the LOCAL default branch, never fetch and
+# compare against origin, because a home with no push rights to upstream would
+# otherwise see origin/main never gain the content and wrongly refuse forever
+# (AGENTS.md task fm-spawn-base-local-main). Origin/main is deliberately left
+# WITHOUT the content here - the pre-fix code would fetch it, find no match, and
+# REFUSE; the fix must ALLOW by reading refs/heads/main from the shared local
+# object store instead, exactly as fm-merge-local.sh's own local-only landing
+# would leave it.
+test_firstmate_home_content_in_default_prefers_local_main() {
+  local case_dir rc
+  case_dir=$(make_case firstmate-home-content-landed)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Simulate fm-merge-local.sh: fast-forward THIS home's own local main (the
+  # project's checked-out branch) onto the task branch. Never pushed to origin.
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+
+  set +e
+  FM_ROOT_OVERRIDE="$case_dir/project" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "firstmate-home-content-landed: teardown should succeed once local main carries the content"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "firstmate-home-content-landed: teardown printed a REFUSED line"
+  [ "$(git -C "$case_dir/project" rev-parse origin/main)" != "$(git -C "$case_dir/project" rev-parse main)" ] \
+    || fail "fixture did not prove origin/main lacks the content local main carries"
+  pass "a firstmate-home task's landed-work check reads local main, not origin, so a home with no push rights is not permanently refused"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -3525,6 +3560,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_firstmate_home_content_in_default_prefers_local_main
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
