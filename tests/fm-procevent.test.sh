@@ -1434,18 +1434,34 @@ case "${1-}" in
   generation)
     source="$FM_HOME/state/procevent/$2.source"
     [ -f "$source" ] && [ ! -L "$source" ] || exit 1
-    printf 'generation: %s\n' "$(file_identity "$source")"
+    token=$(sed -n 's/^registration_token=//p' "$source")
+    [ -n "$token" ] || exit 1
+    printf 'generation: %s\n' "$token"
     ;;
   restart)
     printf '%s\n' "$*" >> "$RESTART_LOG"
     source="$FM_HOME/state/procevent/$2.source"
     if [ "${RESTART_REARM:-0}" = 1 ]; then
-      replacement=$(mktemp "$FM_HOME/state/procevent/.source.XXXXXX") || exit 1
-      cp -- "$source" "$replacement" && chmod 0600 "$replacement" \
-        && mv -f -- "$replacement" "$source" || exit 1
+      saved="$FM_HOME/state/procevent/.reused-source"
+      old_identity=$(file_identity "$source") || exit 1
+      ln -- "$source" "$saved" && rm -f -- "$source" || exit 1
+      new_token=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      REPLACEMENT_TOKEN="$new_token" perl -0777 -e '
+        my ($path) = @ARGV;
+        open my $file, "+<", $path or exit 1;
+        local $/;
+        my $text = <$file>;
+        $text =~ s/^registration_token=.*$/registration_token=$ENV{REPLACEMENT_TOKEN}/m or exit 1;
+        seek $file, 0, 0 or exit 1;
+        truncate $file, 0 or exit 1;
+        print {$file} $text or exit 1;
+      ' "$saved" || exit 1
+      ln -- "$saved" "$source" && rm -f -- "$saved" || exit 1
+      new_identity=$(file_identity "$source") || exit 1
+      printf '%s %s\n' "$old_identity" "$new_identity" > "$REUSED_INODE_LOG"
     fi
     if [ "${3-}" = --if-generation ] \
-      && [ "$(file_identity "$source")" != "${4-}" ]; then
+      && [ "$(sed -n 's/^registration_token=//p' "$source")" != "${4-}" ]; then
       exit 1
     fi
     ;;
@@ -1639,8 +1655,10 @@ assert_contains "$(cat "$pending_reply")" "Reply staged after re-arm." \
 
 rm -f -- "$pending_reply"
 ended_status="$REPLY_HOME/state/reply-host.status"
+REUSED_INODE_LOG="$TMP_ROOT/reused-registration-inode"
 ended_reply_out=$(RESTART_REARM=1 FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
   FM_LAVISH_HOST_STATUS_FILE="$ended_status" RESTART_LOG="$RESTART_LOG" \
+  REUSED_INODE_LOG="$REUSED_INODE_LOG" \
   "$REPLY_RUNTIME/bin/fm-procevent-lavish.sh" reply "$REPLY_ART" \
   "Applied the final requested change." 2>&1) \
   || fail "reply rejected a final acknowledgement racing session retirement"
@@ -1654,6 +1672,9 @@ assert_contains "$(cat "$ended_status")" \
   "retirement-racing reply did not record why board delivery was refused"
 assert_absent "$pending_reply" "retirement-racing reply left an undeliverable pending acknowledgement"
 assert_absent "$inflight_reply" "retirement-racing reply left an undeliverable in-flight acknowledgement"
+read -r retired_inode rearmed_inode < "$REUSED_INODE_LOG"
+[ "$retired_inode" = "$rearmed_inode" ] \
+  || fail "retire-then-re-arm fixture did not deliberately reuse the registration inode"
 
 : > "$REPLY_LOG"
 PATH="$REPLY_BIN:$PATH" FM_HOME="$REPLY_HOME" FM_ROOT_OVERRIDE="$REPLY_RUNTIME" \
@@ -1688,11 +1709,16 @@ trap 'printf "queued prompt survived restart\n"; exit 0' TERM
 while :; do sleep 1; done
 SH
 chmod +x "$RESTART_BLOCKER"
-pe_register "$RESTART_HOME" lavish restart-src -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+restart_register_out=$(pe_register "$RESTART_HOME" lavish restart-src -- \
+  "$RESTART_BLOCKER" "$RESTART_STARTED")
+assert_contains "$restart_register_out" "registration-token: sha256:" \
+  "register did not print the built-in registration token"
 restart_generation_out=$(pe "$RESTART_HOME" generation restart-src --if-matches lavish -- \
   "$RESTART_BLOCKER" "$RESTART_STARTED") \
   || fail "generation did not identify the exact registered source"
 restart_generation=${restart_generation_out#generation: }
+assert_contains "$restart_register_out" "registration-token: $restart_generation" \
+  "generation did not return the token printed when the source was registered"
 pe "$RESTART_HOME" reconcile >/dev/null
 wait_for_lines "$RESTART_STARTED" 1 || fail "restart fixture did not start its first generation"
 pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
@@ -1709,6 +1735,12 @@ pe "$RESTART_HOME" restart restart-src --if-matches lavish -- /bin/false >/dev/n
   || restart_bad_status=$?
 [ "$restart_bad_status" -ne 0 ] || fail "restart accepted argv that did not match the registration"
 pe_register "$RESTART_HOME" lavish restart-src -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null
+replacement_generation_out=$(pe "$RESTART_HOME" generation restart-src --if-matches lavish -- \
+  "$RESTART_BLOCKER" "$RESTART_STARTED") \
+  || fail "generation did not identify the replacement registration"
+replacement_generation=${replacement_generation_out#generation: }
+[ "$replacement_generation" != "$restart_generation" ] \
+  || fail "replacement registration reused its predecessor's random token"
 restart_generation_status=0
 pe "$RESTART_HOME" restart restart-src --if-generation "$restart_generation" \
   --if-matches lavish -- "$RESTART_BLOCKER" "$RESTART_STARTED" >/dev/null 2>&1 \

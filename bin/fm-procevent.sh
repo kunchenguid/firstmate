@@ -8,7 +8,7 @@
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh generation <source-id> --if-matches <adapter> -- <argv>...
-#   fm-procevent.sh restart <source-id> [--if-generation <device:inode>] --if-matches <adapter> -- <argv>...
+#   fm-procevent.sh restart <source-id> [--if-generation <registration-token>] --if-matches <adapter> -- <argv>...
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -20,11 +20,12 @@
 #   fm-procevent.sh extension-process-event <process-event-arguments...>
 #   fm-procevent.sh list
 #
-# register   Record a built-in source: its adapter, its canonical id, and the
-#            exact argv to execute. argv is stored one argument per line and
-#            executed directly, so there is no shell surface and no argument
-#            splitting. Built-in adapters register sources; nothing here parses
-#            user text.
+# register   Record a built-in source: its adapter, its canonical id, a fresh
+#            random registration token, and the exact argv to execute. argv is
+#            stored one argument per line and executed directly, so there is no
+#            shell surface and no argument splitting. Built-in adapters register
+#            sources; nothing here parses user text. The printed
+#            registration-token identifies that exact publication.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -412,7 +413,7 @@ extension_registration_replacement_safe_locked() {  # <source-id>
 }
 
 cmd_register() {
-  local adapter=${1-} id=${2-} sep=${3-}
+  local adapter=${1-} id=${2-} sep=${3-} registration_token
   shift 3 2>/dev/null || usage
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
@@ -433,15 +434,14 @@ cmd_register() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish the registration"
   fi
+  registration_token=$FM_PROCEVENT_REGISTRATION_TOKEN
   fm_procevent_source_lock_release "$id"
   printf 'registered: %s (%s)\n' "$id" "$adapter"
+  printf 'registration-token: %s\n' "$registration_token"
 }
 
 new_extension_registration_token() {
-  local hex
-  hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  [ "${#hex}" -eq 64 ] || return 1
-  printf 'sha256:%s\n' "$hex"
+  fm_procevent_registration_token_new
 }
 
 extension_source_request_id() {  # <adapter> <source-id> <next-sequence> <registration-token> <package-digest>
@@ -966,7 +966,7 @@ retire_owned_terminal_source() {  # <source-id>
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$CLAIM_TOKEN" ] \
     && [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$CLAIM_REG_IDENTITY" ] \
-    && current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) \
+    && current_identity=$(fm_procevent_registration_identity "$registration" 2>/dev/null) \
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
     if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then

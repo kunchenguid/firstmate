@@ -88,7 +88,18 @@ fm_procevent_extension_config_ref_valid() {
 }
 
 fm_procevent_extension_registration_token_valid() {
+  fm_procevent_registration_token_valid "${1-}"
+}
+
+fm_procevent_registration_token_valid() {
   fm_procevent_digest_valid "${1-}"
+}
+
+fm_procevent_registration_token_new() {
+  local hex
+  hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  [ "${#hex}" -eq 64 ] || return 1
+  printf 'sha256:%s\n' "$hex"
 }
 
 # fm_procevent_any_registered <state>
@@ -130,7 +141,7 @@ fm_procevent_source_lock_release() {
 }
 
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg registration_token
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -141,14 +152,19 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   reg=$(fm_procevent_registry_dir "$state")
   (umask 077; mkdir -p "$reg") || return 1
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  registration_token=$(fm_procevent_registration_token_new) || return 1
   dest="$reg/$id.source"
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
+    printf 'owner=builtin\n'
+    printf 'registration_schema=fm-procevent-builtin-owner.v1\n'
+    printf 'registration_token=%s\n' "$registration_token"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
   } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+    FM_PROCEVENT_REGISTRATION_TOKEN=$registration_token
     return 0
   fi
   rm -f -- "$tmp"
@@ -251,9 +267,9 @@ fm_procevent_extension_registration_load_locked() {  # <state> <source-id>
   fm_procevent_extension_registration_token_valid "$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN" || return 2
 }
 
-# Exact legacy registration comparison used by conditional built-in retirement.
+# Exact built-in registration comparison, including legacy records.
 fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1 token_line registration_token
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -266,7 +282,26 @@ fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <a
   dest="$reg/$id.source"
   [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
   tmp=$(umask 077; mktemp "$reg/.source-match.XXXXXX") || return 1
-  if {
+  token_line=$(sed -n '4p' "$dest") || token_line=
+  if [ "$(sed -n '2p' "$dest")" = owner=builtin ] \
+    && [ "$(sed -n '3p' "$dest")" = registration_schema=fm-procevent-builtin-owner.v1 ]; then
+    case "$token_line" in registration_token=*) registration_token=${token_line#registration_token=} ;; esac
+    fm_procevent_registration_token_valid "${registration_token-}" || {
+      rm -f -- "$tmp"
+      return 1
+    }
+  fi
+  if [ -n "${registration_token-}" ] && {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'owner=builtin\n'
+    printf 'registration_schema=fm-procevent-builtin-owner.v1\n'
+    printf 'registration_token=%s\n' "$registration_token"
+    printf 'argc=%s\n' "$#"
+    printf 'argv:\n'
+    printf '%s\n' "$@"
+  } > "$tmp" && cmp -s -- "$tmp" "$dest"; then
+    status=0
+  elif [ -z "${registration_token-}" ] && {
     printf 'adapter=%s\n' "$adapter"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
@@ -278,21 +313,50 @@ fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <a
   return "$status"
 }
 
-fm_procevent_registration_generation_valid() {  # <device:inode>
-  local device inode
-  case "$1" in
-    *:*) device=${1%%:*}; inode=${1#*:} ;;
-    *) return 1 ;;
+fm_procevent_registration_generation_valid() {  # <registration-token>
+  fm_procevent_registration_token_valid "${1-}"
+}
+
+fm_procevent_registration_identity() {  # <registration-path>
+  local registration=$1 owner_line token_line identity
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  [ "$(fm_pr_file_mode "$registration" 2>/dev/null)" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$registration" 2>/dev/null)" = 1 ] || return 1
+  owner_line=$(sed -n '2p' "$registration") || return 1
+  case "$owner_line" in
+    owner=builtin)
+      [ "$(sed -n '3p' "$registration")" = registration_schema=fm-procevent-builtin-owner.v1 ] \
+        || return 1
+      token_line=$(sed -n '4p' "$registration") || return 1
+      ;;
+    owner=extension)
+      [ "$(sed -n '3p' "$registration")" = extension_schema=fm-procevent-extension-owner.v1 ] \
+        || return 1
+      token_line=$(sed -n '10p' "$registration") || return 1
+      ;;
+    *)
+      identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+      printf '%s\n' "$identity"
+      return 0
+      ;;
   esac
-  case "$device" in ''|*[!0-9]*) return 1 ;; esac
-  case "$inode" in ''|*[!0-9]*|*:* ) return 1 ;; esac
+  case "$token_line" in registration_token=*) identity=${token_line#registration_token=} ;; *) return 1 ;; esac
+  fm_procevent_registration_token_valid "$identity" || return 1
+  printf '%s\n' "$identity"
 }
 
 fm_procevent_registration_generation_locked() {  # <state> <source-id>
-  local registration generation
+  local registration owner_line schema_line token_line generation
   registration="$(fm_procevent_registry_dir "$1")/$2.source"
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
-  generation=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+  [ "$(fm_pr_file_mode "$registration" 2>/dev/null)" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$registration" 2>/dev/null)" = 1 ] || return 1
+  owner_line=$(sed -n '2p' "$registration") || return 1
+  schema_line=$(sed -n '3p' "$registration") || return 1
+  token_line=$(sed -n '4p' "$registration") || return 1
+  [ "$owner_line" = owner=builtin ] \
+    && [ "$schema_line" = registration_schema=fm-procevent-builtin-owner.v1 ] || return 1
+  case "$token_line" in registration_token=*) generation=${token_line#registration_token=} ;; *) return 1 ;; esac
   fm_procevent_registration_generation_valid "$generation" || return 1
   printf '%s\n' "$generation"
 }
@@ -443,7 +507,7 @@ fm_procevent_claim_state_locked() {
   fm_procevent_claim_load_locked "$1" || return 2
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then
     registration="$FM_PROCEVENT_CLAIM_REG_DIR/$1.source"
-    current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
+    current_identity=$(fm_procevent_registration_identity "$registration" 2>/dev/null || true)
     [ "$current_identity" = "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] && return 4
   fi
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
@@ -457,7 +521,7 @@ fm_procevent_claim_acquire_locked() {
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
   case "$reg_dir" in /*) ;; *) return 1 ;; esac
-  reg_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || return 1
+  reg_identity=$(fm_procevent_registration_identity "$registration" 2>/dev/null) || return 1
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   root=$(fm_procevent_claim_root)
   claim=$(fm_procevent_claim_path "$id")
