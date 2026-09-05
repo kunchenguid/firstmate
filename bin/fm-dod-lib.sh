@@ -267,6 +267,9 @@ fm_dod_block() {  # <mode> <task-id> <task-record>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+Two evidence rules apply to every PR you open:
+1. No binary screenshots or other media enter the repository tree: prose evidence (for example \`fidelity-check.md\`) cites each one by filename, and the actual images go into the PR body, uploaded through GitHub.
+2. The document step is report-only: an accepted documentation finding is fixed only by your own commit plus one re-validation, and the PR body's Document section must state what actually changed.
 Before you push, pass this delivery preflight:
 EOF
       fm_dod_delivery_preflight_block "$id" "$task_record"
@@ -323,6 +326,10 @@ Two firstmate-specific rules layer on top of that guidance:
 
 Rule F: your \`done: PR {url} checks green\` report requires check conclusions verified at the exact current head sha of the PR branch, never a conclusion recorded against an earlier or stale head.
 If the branch moved after checks last ran, confirm CI reran and passed at the new head before reporting done; per rule 9, a red result at a stale head is never re-run as a shortcut past that.
+
+Two evidence rules apply to every PR you open:
+1. No binary screenshots or other media enter the repository tree: prose evidence (for example \`fidelity-check.md\`) cites each one by filename, and the actual images go into the PR body, uploaded through GitHub.
+2. The document step is report-only: an accepted documentation finding is fixed only by your own commit plus one re-validation, and the PR body's Document section must state what actually changed.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 \`done:\` means checks green at the exact head; it is never used for the pre-validation \`working: prepared\` handoff above.

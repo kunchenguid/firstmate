@@ -444,6 +444,54 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# Pin the two evidence rules the captain's 2026-09-05 ruling added to the DOD:
+# no committed binary screenshots (prose cites them by filename, images go into
+# the PR body), and a documentation finding is fixed only by the worker's own
+# commit plus one re-validation since the pipeline's document step is
+# report-only. Both no-mistakes and direct-PR briefs must state both rules;
+# local-only never opens a PR, so neither rule applies there.
+test_no_binary_evidence_and_document_step_dod_rules() {
+  local home id brief
+  home="$TMP_ROOT/evidence-rules-home"
+  mkdir -p "$home/data"
+
+  id="brief-evidence-nm-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "No binary screenshots or other media enter the repository tree" "$brief" \
+    "no-mistakes DOD must ban committed binary screenshots and media"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backtick must stay literal
+  assert_grep 'prose evidence (for example `fidelity-check.md`) cites each one by filename' "$brief" \
+    "no-mistakes DOD must require prose evidence to cite screenshots by filename"
+  assert_grep "the actual images go into the PR body, uploaded through GitHub" "$brief" \
+    "no-mistakes DOD must route screenshot images to the PR body instead of the repo"
+  assert_grep "The document step is report-only: an accepted documentation finding is fixed only by your own commit plus one re-validation" "$brief" \
+    "no-mistakes DOD must state the document step is report-only and require a real commit plus re-validation"
+  assert_grep "the PR body's Document section must state what actually changed" "$brief" \
+    "no-mistakes DOD must require the PR body's Document section to state the actual change"
+
+  id="brief-evidence-direct-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "No binary screenshots or other media enter the repository tree" "$brief" \
+    "direct-PR DOD must ban committed binary screenshots and media"
+  assert_grep "The document step is report-only: an accepted documentation finding is fixed only by your own commit plus one re-validation" "$brief" \
+    "direct-PR DOD must state the document step is report-only and require a real commit plus re-validation"
+
+  id="brief-evidence-local-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "No binary screenshots or other media enter the repository tree" "$brief" \
+    "local-only DOD must not carry the PR-body evidence rule; local-only never opens a PR"
+  assert_no_grep "The document step is report-only" "$brief" \
+    "local-only DOD must not carry the PR-body document-step rule; local-only never opens a PR"
+
+  pass "fm-brief.sh: no-mistakes and direct-PR DODs ban committed screenshots and require a real documentation commit"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -1010,6 +1058,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_binary_evidence_and_document_step_dod_rules
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
