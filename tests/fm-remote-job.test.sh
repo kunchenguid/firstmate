@@ -235,6 +235,7 @@ done
 fm_remote_job_probe "$ACCOUNT_HOME" || fail "the active worker did not refresh its readiness heartbeat"
 [ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the heartbeat probe succeeded after the active job stopped running"
+assert_absent "$ACTIVE_SIDE_EFFECT" "the active job escaped its release gate before the readiness check"
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$(cat "$STATE_ROOT/worker.pid")" = "$ACTIVE_WORKER_PID" ] \
   || fail "ensure replaced a healthy worker during an active job"
