@@ -145,8 +145,11 @@ init_changed_fixture_repo() {
   mkdir -p \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
-    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
+    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src" \
+    "$repo/skills/example"
   : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/skills/example/SKILL.md"
+  : >"$repo/skills/example/template.html"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   : >"$repo/.claude/settings.json"
@@ -244,6 +247,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/skills/example/SKILL.md"
+  printf '\n' >>"$repo/skills/example/template.html"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "public skill source selects pure contract coverage"
+  git -C "$repo" add skills
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm public-skill-change
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
