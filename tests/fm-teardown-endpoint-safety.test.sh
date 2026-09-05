@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for cleanup endpoint identity validation.
+# Regression tests for cleanup endpoint and worktree-slot identity validation.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -365,6 +365,150 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+test_reused_pool_slot_refuses_before_touching_the_other_task() {
+  local dir id=stale-task other=live-task worker rc
+
+  dir=$(make_case slot-reuse)
+  # The reuse collision: the pool slot recorded for a finished task has already
+  # been handed to another task, whose worker is live in it right now.
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a second task record still holds"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reused pool slot"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a second task record still holds"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the live task's record"
+  assert_present "$dir/home/state/$id.meta" "teardown removed the stale task's record before refusing"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "refusal should name the other task holding the slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The same collision recorded on a secondmate home field rather than a task
+  # worktree is the same slot, and refuses the same way.
+  dir=$(make_case slot-reuse-home)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "home=$dir/worktree" \
+    "project=$dir/project" "kind=secondmate"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a secondmate home record still holds"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a secondmate home record still holds"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the secondmate record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
+}
+
+test_sole_slot_record_still_tears_down() {
+  local dir id=sole-task worker
+
+  dir=$(make_case slot-sole)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # A neighbouring task on its OWN slot must not look like a collision.
+  mkdir -p "$dir/other-worktree"
+  fm_write_meta "$dir/home/state/neighbour.meta" \
+    "window=firstmate:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$dir/other-worktree" "project=$dir/project" "kind=scout"
+  ( cd "$dir/other-worktree" && exec sleep 30 ) &
+  worker=$!
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of a task that solely holds its slot failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "uncontested teardown left the task record"
+  assert_present "$dir/home/state/neighbour.meta" "uncontested teardown removed the neighbour's record"
+  kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a task that solely holds its slot still returns it"
+}
+
+test_endpoint_outside_recorded_slot_refuses_before_mutation() {
+  local dir id=drifted-task rc
+
+  dir=$(make_case slot-endpoint-drift)
+  mkdir -p "$dir/other-worktree"
+  # The recorded pane answers from a DIFFERENT copy: the record no longer proves
+  # this task owns the slot it names.
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  printf '%s\n' '$dir/other-worktree'
+  exit 0
+fi
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a slot its own endpoint contradicts"
+  assert_present "$dir/worktree/sentinel" "contradicted teardown reset the recorded slot"
+  assert_present "$dir/home/state/$id.meta" "contradicted teardown removed the task record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "contradicted teardown reached a mutating runtime call: $(cat "$dir/runtime.log")"
+
+  # A pane sitting in a subdirectory of its own slot is ordinary drift, not a
+  # contradiction, and must still tear down.
+  dir=$(make_case slot-endpoint-subdir)
+  mkdir -p "$dir/worktree/sub"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  printf '%s\n' '$dir/worktree/sub'
+  exit 0
+fi
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown refused an endpoint inside its own slot: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "in-slot endpoint teardown left the task record"
+
+  pass "fm-teardown: an endpoint outside the recorded slot refuses, while in-slot drift still tears down"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
@@ -372,3 +516,6 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_reused_pool_slot_refuses_before_touching_the_other_task
+test_sole_slot_record_still_tears_down
+test_endpoint_outside_recorded_slot_refuses_before_mutation

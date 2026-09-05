@@ -59,6 +59,31 @@
 # task state when that proof fails; otherwise it removes the task's check,
 # trust record, PR sidecar, and publication record with the rest of the
 # volatile state.
+# Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
+# reused across tasks, so a stale, duplicated, or drifted worktree= record can
+# name a slot a DIFFERENT live task now holds. Cleanup kills every process under
+# that path and hard-resets it before returning it, so releasing a slot that is
+# not genuinely this task's destroys another worker's live work. Before the first
+# cleanup step, teardown proves the slot is this task's on two independent
+# records, and refuses with both tasks and the slot untouched when either
+# contradicts:
+#   1. Record exclusivity - no OTHER task record in this home may name the same
+#      live path in its worktree= or home=. One live path with two task records
+#      is the reuse collision itself, whichever record is stale.
+#   2. Endpoint agreement - when the recorded endpoint answers with a live
+#      working directory, it must resolve inside the recorded slot. A pane that
+#      has been rebound to another slot contradicts the record even when this
+#      home holds only one task record for the path.
+# Neither refusal is relaxed by --force: --force authorizes discarding THIS
+# task's unlanded work, never another task's live work. Reconcile whichever
+# record is wrong and re-run; both refusals name the inspection command.
+# Only backends whose current-path read tracks the live process are consulted for
+# check 2 (tmux's pane_current_path, herdr's foreground_cwd). zellij and cmux
+# freeze a pane's cwd at creation, so their read cannot distinguish a rebound
+# pane from a normal one and is not evidence; Orca is not a pool slot and proves
+# its path through require_orca_worktree_path_match instead. An endpoint that
+# answers nothing readable is inconclusive, not a contradiction, so the ordinary
+# dead-endpoint teardown still proceeds on check 1 alone.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -1972,6 +1997,71 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+# The task's own live slot, canonicalized, or empty when this record has no slot
+# to release (a secondmate home, a record with no worktree=, or a path that is
+# already gone). Every slot-ownership check below is scoped to that value, so a
+# record with nothing live to return skips them rather than refusing.
+teardown_live_slot_path() {
+  [ "$KIND" != secondmate ] || return 1
+  [ -n "$WT" ] || return 1
+  canonical_existing_dir "$WT"
+}
+
+# See "Worktree-slot ownership" in the header. Check 1: this home's task records
+# must not name the same live slot twice.
+require_exclusive_task_worktree_slot() {
+  local slot other other_id field other_path other_slot
+  slot=$(teardown_live_slot_path) || return 0
+  for other in "$STATE"/*.meta; do
+    [ -f "$other" ] && [ ! -L "$other" ] || continue
+    other_id=$(basename "$other" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    for field in worktree home; do
+      other_path=$(fm_meta_get "$other" "$field")
+      [ -n "$other_path" ] || continue
+      other_slot=$(canonical_existing_dir "$other_path") || continue
+      [ "$other_slot" = "$slot" ] || continue
+      echo "REFUSED: task $ID's recorded worktree $slot is also task $other_id's recorded $field." >&2
+      echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+      echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $ID; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+      return 1
+    done
+  done
+}
+
+# The live working directory the recorded endpoint reports, for the backends
+# whose read tracks the running process. Empty output (including from every
+# other backend) means "no evidence", never "contradicts".
+teardown_endpoint_live_path() {
+  case "$BACKEND" in
+    tmux)
+      fm_backend_source tmux >/dev/null 2>&1 || return 0
+      fm_backend_tmux_current_path "$T" 2>/dev/null || true
+      ;;
+    herdr)
+      fm_backend_source herdr >/dev/null 2>&1 || return 0
+      fm_backend_herdr_current_path "$T" 2>/dev/null || true
+      ;;
+  esac
+}
+
+# See "Worktree-slot ownership" in the header. Check 2: a readable endpoint
+# working directory must resolve inside the recorded slot.
+require_task_endpoint_slot_agreement() {
+  local slot seen seen_path
+  slot=$(teardown_live_slot_path) || return 0
+  seen=$(teardown_endpoint_live_path)
+  [ -n "$seen" ] || return 0
+  seen_path=$(canonical_existing_dir "$seen") || return 0
+  case "$seen_path" in
+    "$slot"|"$slot"/*) return 0 ;;
+  esac
+  echo "REFUSED: task $ID's endpoint $T is working in $seen_path, outside its recorded worktree $slot." >&2
+  echo "The recorded copy may already belong to another task, so nothing was changed - not even with --force." >&2
+  echo "Reconcile the endpoint against the record (bin/fm-crew-state.sh $ID), then re-run teardown: either the record names the wrong copy, or that endpoint is no longer this task's." >&2
+  return 1
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -2713,6 +2803,9 @@ remove_secondmate_registry_entry() {
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
+
+require_exclusive_task_worktree_slot || exit 1
+require_task_endpoint_slot_agreement || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
