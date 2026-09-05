@@ -989,7 +989,8 @@ It also dissolves a previously scoped process group, recreates the same numeric 
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
-The legacy identity regression starts ownership under the first working `C.UTF-8` or `C.utf8` spelling and EST5, then checks it from a C locale and JST-9 without compiling locale data or reading host locale sources.
+The legacy identity regression probes installed locales for two that render the same process start differently under EST5, then exercises locale-only reconstruction with that pair or prints an explicit skip naming every locale probed.
+This host exposed only `C`, `C.utf8`, and `POSIX`, whose `ps lstart` renderings were identical, so only the locale-only case skipped here.
 The worker-stop regression runs a tracked job that changes its working directory to the account home, then proves its active claim PID and kernel start identity stop it without reaching another queue or an unrelated process.
 The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
 
@@ -1006,7 +1007,7 @@ ok - zombie serving ownership recovers its scoped supervisor without respawn
 
 The signal-injection fixture also passes when its runner is a background Bash job with inherited ignored SIGINT.
 It restores the signal disposition before executing each suite, retaining the nonzero-exit and teardown assertions.
-The tmux liveness fixture probes whether a native executable supports a renamed invocation, because Nix multicall coreutils selects its applet from that name and otherwise exits before classification.
+The tmux liveness fixture uses Bash `exec -a` processes and runs with failing `cc` and `gcc` shims, so Nix multicall coreutils does not dispatch from a harness-shaped applet name and no compiler is required.
 The Pi follow-up fixture waits for the rendered monitoring result before counting the answer; native Pi 0.84.4 can persist a completed session record while its screen still shows the empty composer.
 The count remains exactly one, including Calm-enabled, Calm-disabled, absent-extension, adjacent-notification, and restarted-session cases.
 
@@ -1022,7 +1023,8 @@ The native Pi cases ran; checks requiring the separately importable Pi SDK repor
 Repeated ensure calls also reproduced a live-owner rejection when the worker started under EST5 and a caller used JST-9.
 Linux ownership now records the boot identifier and kernel start ticks instead of timezone-sensitive `ps lstart` text, and existing timestamp records retain a compatibility check while workers drain.
 Ownership checks are independent of readiness, and the start path also honors a live supervisor lease while its serving child is restarting or publishing readiness.
-The subreaper regression records legacy ownership in the live worker's available `C.UTF-8` or `C.utf8` locale and EST5 timezone, checks timezone reconstruction from a C locale and JST-9 caller, then checks locale reconstruction from a C locale while holding EST5 constant.
+The subreaper regression records legacy ownership in the live worker's selected installed locale and EST5 timezone, then checks timezone reconstruction from a C locale and JST-9 caller.
+When two installed locales produce observably different `ps lstart` text, it separately checks locale reconstruction while holding EST5 constant and asserts that rendering precondition first.
 It pauses the serving child with an aged heartbeat, verifies unchanged process identities, and counts actual launcher invocations to prove that no replacement starts.
 The previous implementation fails that check; the corrected implementation reports:
 

@@ -164,6 +164,26 @@ def utf8_locale():
     raise AssertionError("a built-in C UTF-8 locale is required")
 
 
+def locale_render_pair(pid, timezone):
+    installed = subprocess.check_output(["locale", "-a"], text=True).splitlines()
+    preferred = ("C", "C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8",
+                 "pt_BR.UTF-8", "pt_BR.utf8", "de_DE.UTF-8", "de_DE.utf8")
+    locales = [name for name in preferred if name in installed]
+    locales.extend(name for name in installed if name not in locales)
+    renderings = {}
+    for name in locales:
+        result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                                env=dict(os.environ, TZ=timezone, LC_ALL=name),
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if result.returncode == 0 and result.stdout:
+            renderings[name] = result.stdout
+    for recorded in renderings:
+        for caller in renderings:
+            if renderings[recorded] != renderings[caller]:
+                return recorded, caller, renderings[recorded], renderings[caller], locales
+    return None, None, None, None, locales
+
+
 try:
     # Recreate older independent restart supervisors using actual processes,
     # while production start and stop own every lifecycle operation under test.
@@ -277,7 +297,9 @@ wait "$!"
     subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c",
                     "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                     "commit", "-qm", "fixture"], env=git_env, check=True)
-    locale_name = utf8_locale()
+    locale_recorded, locale_caller, locale_rendered, caller_rendered, probed_locales = \
+        locale_render_pair(os.getpid(), "EST5")
+    locale_name = locale_recorded or utf8_locale()
     call(start, queue, "EST5", locale_name)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     quarantine = queue / "worker.lock/quarantine"
@@ -315,15 +337,26 @@ wait "$!"
         call(ensure, queue, "JST-9")
         assert launch_log.read_text() == launches, "legacy identity launched another worker"
         (lock / "start").write_text(kernel_identity)
-    for lock in (queue / "worker.lock", queue / "supervisor.lock"):
-        pid = (lock / "pid").read_text().strip()
-        kernel_identity = (lock / "start").read_text()
-        locale_legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
-                                                env=dict(os.environ, TZ="EST5", LC_ALL=locale_name), text=True)
-        (lock / "start").write_text(locale_legacy)
-        call(ensure, queue, "EST5", "C")
-        assert launch_log.read_text() == launches, "locale-only legacy identity launched another worker"
-        (lock / "start").write_text(kernel_identity)
+    if locale_recorded:
+        assert locale_rendered != caller_rendered
+        for lock in (queue / "worker.lock", queue / "supervisor.lock"):
+            pid = (lock / "pid").read_text().strip()
+            kernel_identity = (lock / "start").read_text()
+            locale_legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
+                                                    env=dict(os.environ, TZ="EST5", LC_ALL=locale_recorded),
+                                                    text=True)
+            caller_legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
+                                                    env=dict(os.environ, TZ="EST5", LC_ALL=locale_caller),
+                                                    text=True)
+            assert locale_legacy != caller_legacy
+            (lock / "start").write_text(locale_legacy)
+            call(ensure, queue, "EST5", locale_caller)
+            assert launch_log.read_text() == launches, "locale-only legacy identity launched another worker"
+            (lock / "start").write_text(kernel_identity)
+        print(f"ok - locale-only legacy identity reconstruction uses {locale_recorded} from {locale_caller}")
+    else:
+        print("skip - locale-only legacy identity reconstruction: no differing ps lstart rendering among "
+              + ", ".join(probed_locales))
     print("ok - repeated ensure across timezones and delayed readiness preserves owners without new workers")
     job_queue = fixture / "job-queue"
     call(start, job_queue)
