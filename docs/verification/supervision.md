@@ -248,10 +248,13 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-watch-triage.test.sh
+tests/fm-daemon.test.sh
+tests/fm-task-inbox.test.sh
 FM_CLAUDE_APPROVAL_DRIFT=1 tests/fm-claude-approval-notify-live-e2e.test.sh
 ```
 
-The last one is the opt-in guard that refreshes the vendor-payload claim above; run it after a Claude upgrade.
+The watcher, daemon, and inbox suites pin the parked pane surfacing promptly and receiving no doorbell; the last one is the opt-in guard that refreshes the vendor-payload claim above, so run it after a Claude upgrade.
 
 ## Turn-end guard
 
