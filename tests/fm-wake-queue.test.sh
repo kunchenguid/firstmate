@@ -1223,28 +1223,37 @@ test_self_announced_append_guards() {
 # reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
 # live hold exactly as before.
 test_self_held_lock_reclaims_instead_of_deadlocking() {
-  local dir state rc
+  local dir state rc pid_mode
   dir=$(make_case self-held-lock)
   state="$dir/state"
+  # Exercise Bash 3.2's missing-BASHPID path even on newer Bash versions.
+  for pid_mode in native fallback; do
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
+    [ "$3" = native ] || unset BASHPID
     . "$1"
     lock="$2/.fixture.lock"
     fm_lock_acquire_wait "$lock" || exit 10
     fm_lock_try_acquire "$lock" || exit 11
     fm_lock_release "$lock"
     [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$pid_mode" || rc=$?
   [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
+    [ "$3" = native ] || unset BASHPID
     . "$1"
     lock="$2/.fixture2.lock"
     fm_lock_acquire_wait "$lock" || exit 10
+    owner=$(readlink "$lock") || exit 11
     ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
+    [ "$(readlink "$lock")" = "$owner" ] || exit 14
+    [ "$(cat "$lock/pid")" = "$$" ] || exit 15
     fm_lock_release "$lock"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 16
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$pid_mode" || rc=$?
   [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
+  done
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
