@@ -162,9 +162,9 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "$state/t1.inbox/*.msg" "doorbell should name all unhandled records"
+  assert_contains "$doorbell" "'$state/t1.inbox'/*.msg" "doorbell should quote and name all unhandled records"
   assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
-  assert_contains "$doorbell" "$state/t1.inbox/handled/" "doorbell should name the handled dir"
+  assert_contains "$doorbell" "'$state/t1.inbox'/handled/" "doorbell should quote and name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
@@ -176,8 +176,9 @@ test_write_is_durable_and_exact() {
 # command line. Execute the real line in real shells and assert it is inert:
 # exit 0, no output, and nothing in the inbox touched.
 test_doorbell_is_a_shell_noop() {
-  local state rec doorbell sh out before after
-  state="$TMP_ROOT/noop/state"
+  local state rec doorbell sh out before after marker
+  state="$TMP_ROOT/noop/x; touch marker; #'s space/state"
+  marker="$state/marker"
   mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
@@ -185,24 +186,28 @@ test_doorbell_is_a_shell_noop() {
     ': '*) ;;
     *) fail "the doorbell must start with the shell no-op prefix, got: $doorbell" ;;
   esac
+  assert_contains "$doorbell" "'\\''s space/state/t1.inbox'" \
+    "the doorbell should escape an embedded single quote in its quoted path"
   before=$(ls -R "$state/t1.inbox")
   for sh in sh bash zsh; do
     command -v "$sh" >/dev/null 2>&1 || continue
     out=$(cd "$state" && "$sh" -c "$doorbell" 2>&1) \
-      || fail "$sh executed the doorbell with a non-zero status: $out"
-    [ -z "$out" ] || fail "$sh produced output while executing the doorbell: $out"
+      || fail "$sh executed the hostile-path doorbell with a non-zero status: $out"
+    [ -z "$out" ] || fail "$sh produced output while executing the hostile-path doorbell: $out"
+    [ ! -e "$marker" ] || fail "$sh executed shell syntax embedded in the inbox path"
   done
   # An interactive-style zsh with the line fed on stdin, the closest portable
   # stand-in for a dead pane's login shell reading typed keystrokes.
   if command -v zsh >/dev/null 2>&1; then
     out=$(cd "$state" && printf '%s\n' "$doorbell" | zsh -s 2>&1) \
-      || fail "zsh reading the doorbell from stdin failed: $out"
-    [ -z "$out" ] || fail "zsh printed while reading the doorbell: $out"
+      || fail "zsh reading the hostile-path doorbell from stdin failed: $out"
+    [ -z "$out" ] || fail "zsh printed while reading the hostile-path doorbell: $out"
+    [ ! -e "$marker" ] || fail "zsh executed shell syntax from the stdin doorbell"
   fi
   after=$(ls -R "$state/t1.inbox")
   [ "$before" = "$after" ] || fail "executing the doorbell changed the inbox:"$'\n'"$after"
   [ -f "$rec" ] || fail "executing the doorbell removed the unhandled record"
-  pass "inbox: the doorbell line executes as a no-op in a bare shell"
+  pass "inbox: a hostile-path doorbell executes as a no-op in bare shells"
 }
 
 # fm_task_inbox_ring against a backend whose agent classifies dead: nothing is
@@ -468,7 +473,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list $state/t1.inbox/*.msg" "$log" \
+  grep -qF "Firstmate instruction waiting: list '$state/t1.inbox'/*.msg" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"

@@ -249,13 +249,12 @@ fm_task_inbox_body() {  # <record-path>
 # still receives the complete instruction in the line itself. The leading `: `
 # is the POSIX shell no-op, so the same line typed into a pane whose agent has
 # exited (a bare shell) runs nothing; see the dead-pane note in the header.
-# Keep the line free of shell metacharacters that `:` would still evaluate
-# (no `;`, `&`, `|`, `$`, backticks, or redirections).
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs quoted
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf ': Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  quoted=$(printf '%s' "$abs" | sed "s/'/'\\\\''/g")
+  printf ": Firstmate instruction waiting: list '%s'/*.msg and, in numeric order, read and act on each, then mv each handled file to '%s'/handled/." \
+    "$quoted" "$quoted"
 }
 
 # Ring the doorbell, best-effort: one dead-agent pre-check, one advisory
