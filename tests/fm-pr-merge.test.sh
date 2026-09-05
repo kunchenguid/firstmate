@@ -1822,13 +1822,13 @@ test_secondmate_merge_reports_upward_once() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-reports: merge failed"
 
-  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$replies" \
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "secondmate-merge-reports: the landed PR was not reported upward"
   [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
     || fail "secondmate-merge-reports: one merge produced more than one upward merge line"
   # The merge path registers the PR first, and that registration publishes the
   # child's ready line on the same channel from fm-pr-check itself.
-  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" "$replies" \
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "secondmate-merge-reports: the registration's ready line was not reported upward"
 
   # The same merge again: the forge accepts it in this fixture, so only the
@@ -1854,7 +1854,7 @@ test_secondmate_merge_reports_on_the_local_route() {
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-local: merge failed"
 
-  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$parent_status" \
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" <(sed -E 's/ \[at=[0-9]+\]//' "$parent_status") \
     "secondmate-merge-local: the landed PR did not reach the parent home's channel"
   [ ! -e "$case_dir/state/parent-replies.status" ] \
     || fail "secondmate-merge-local: a local-route report also wrote the remote reply channel"
@@ -1914,7 +1914,7 @@ test_gitlab_merge_reports_upward() {
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "gitlab-merge-reports: merge failed"
 
   assert_grep "done [key=merged-task-x1]: merged task-x1 $url" \
-    "$case_dir/state/parent-replies.status" \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$case_dir/state/parent-replies.status") \
     "gitlab-merge-reports: a landed merge request was not reported upward"
   pass "a landed GitLab merge request is reported upward on the same channel"
 }
