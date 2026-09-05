@@ -471,6 +471,10 @@ $ASK_USER_BLOCK
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Ponytail code style is a standing captain rule: keep the diff minimal and
+   dependency-free. Prefer the standard library and the existing project idioms;
+   no wrappers, no speculative generality, no new third-party dependency unless
+   the task explicitly requires it - then name the justification in your final report.
 
 $INBOX_SECTION
 

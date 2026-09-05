@@ -817,6 +817,23 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Captain standing rule (data/captain.md, Ponytail philosophy): every ship
+# brief must carry the minimal, dependency-free code rule so every coding
+# crewmate receives it without firstmate hand-adding it per brief.
+test_ship_brief_carries_ponytail_rule() {
+  local home brief
+  home="$TMP_ROOT/ponytail-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ponytail-e1 some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "fm-brief.sh ponytail fixture scaffold exited non-zero"
+  brief="$home/data/brief-ponytail-e1/brief.md"
+  assert_grep "Ponytail code style is a standing captain rule" "$brief" \
+    "ship brief missing the standing Ponytail rule"
+  assert_grep "no new third-party dependency unless" "$brief" \
+    "ship brief missing the Ponytail dependency bar"
+  pass "fm-brief.sh: ship briefs carry the standing Ponytail rule"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -867,4 +884,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_brief_carries_ponytail_rule
 test_scout_and_secondmate_scaffold
