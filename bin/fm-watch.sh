@@ -333,7 +333,9 @@ window_key() {  # <window>
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
+# durable and the worker will reach a turn boundary - and so does a turn parked
+# at an operator-only approval gate, since a doorbell typed into that dialog
+# would answer it; an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
@@ -357,7 +359,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  if window_is_busy "$w" "$tail40" || fm_busy_approval_wait "$STATE" "$task" "$(window_harness "$w")"; then
     return 0
   fi
   case "$verb" in

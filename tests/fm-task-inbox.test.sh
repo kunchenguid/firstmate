@@ -425,6 +425,34 @@ test_watcher_waits_on_busy_pane() {
   pass "watcher: a busy pane just waits - the record is durable and no doorbell is typed"
 }
 
+# A Claude turn parked at its tool-permission dialog is not absorbable as work
+# (the stale path surfaces it), but a doorbell typed into that dialog would
+# answer the operator-only gate on the operator's behalf: digits in the inbox
+# path select numbered options and the trailing Enter confirms one. So the
+# steer check waits on a parked record exactly as it waits on a busy pane, and
+# the worker reads the durable record at its next turn boundary.
+test_watcher_waits_on_parked_pane() {
+  local dir state out log pid rec gen
+  dir=$(setup_watch_case parkedwait)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" t1 busy --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  printf 'Allow Bash(git switch)?\n1. Yes\n2. No\n' > "$dir/parked.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/parked.capture" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 4
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a pane parked at the approval gate must wait, not ring:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "the parked wait lost the durable inbox record"
+  pass "watcher: a turn parked at a permission prompt gets no doorbell - the record stays durable for the next turn boundary"
+}
+
 test_watcher_quiet_on_healthy_inbox() {
   local dir state out log pid
   dir=$(setup_watch_case healthy)
@@ -533,6 +561,7 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
+test_watcher_waits_on_parked_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
