@@ -88,11 +88,10 @@ case "$*" in
 esac
 SH
 chmod +x "$REMOTE_ROOT/bin/herdr"
-git -C "$REMOTE_ROOT" init -q -b main
-git -C "$REMOTE_ROOT" config user.email test@example.com
-git -C "$REMOTE_ROOT" config user.name Test
-git -C "$REMOTE_ROOT" add AGENTS.md bin
-git -C "$REMOTE_ROOT" commit -qm 'tracked remote fixture'
+fm_git -C "$REMOTE_ROOT" init -q -b main
+fm_git -C "$REMOTE_ROOT" add AGENTS.md bin
+fm_git -C "$REMOTE_ROOT" -c user.email=test@example.com -c user.name=Test \
+  commit -qm 'tracked remote fixture'
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash

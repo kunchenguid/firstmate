@@ -315,6 +315,12 @@ SH
 
 # --- deterministic git identity and fixtures --------------------------------
 
+# fm_git <args...>: run fixture Git operations without host configuration.
+fm_git() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c commit.gpgsign=false -c tag.gpgsign=false "$@"
+}
+
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
 # fixture commits never depend on the host git config.
 fm_git_identity() {
@@ -328,19 +334,19 @@ fm_git_identity() {
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  fm_git -C "$dir" init -q
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
-  git -C "$dir" add README.md
-  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  fm_git -C "$dir" add README.md
+  fm_git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
 # fm_git_add_origin <repo> <bare>: clone <repo> bare into <bare> and register it
 # as <repo>'s origin via a file:// URL (so later clones resolve an absolute path).
 fm_git_add_origin() {
   local repo=$1 remote=$2 remote_abs
-  git clone --quiet --bare "$repo" "$remote"
+  fm_git clone --quiet --bare "$repo" "$remote"
   remote_abs=$(cd "$remote" && pwd)
-  git -C "$repo" remote add origin "file://$remote_abs"
+  fm_git -C "$repo" remote add origin "file://$remote_abs"
 }
 
 # fm_git_worktree <repo> <worktree> <branch>: initialize <repo> with one commit
@@ -349,7 +355,7 @@ fm_git_worktree() {
   local repo=$1 worktree=$2 branch=$3
   fm_git_init_commit "$repo"
   fm_git_add_origin "$repo" "$repo.origin.git"
-  git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
+  fm_git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
 # --- state/<id>.meta writers ------------------------------------------------

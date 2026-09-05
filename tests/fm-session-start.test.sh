@@ -61,8 +61,9 @@ new_world() {
   home="$w/home"
   fakebin="$w/fakebin"
   mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
-  git init -q -b main "$root"
-  git -C "$root" commit -q --allow-empty -m init
+  fm_git init -q -b main "$root"
+  fm_git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m init
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
@@ -765,7 +766,7 @@ EOF
   mkdir -p "$home/other-secondmate/state"
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
-  git -C "$root" checkout -q -B fm/read-only-tangle
+  fm_git -C "$root" checkout -q -B fm/read-only-tangle
 
   sleep 300 &
   holder_pid=$!
@@ -2322,7 +2323,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  git -C "$root" checkout -q -B fm/reemit-tangle
+  fm_git -C "$root" checkout -q -B fm/reemit-tangle
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \

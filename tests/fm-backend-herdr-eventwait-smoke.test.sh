@@ -54,7 +54,7 @@ HERDR_VERSION=$(herdr --version 2>/dev/null | head -1)
 
 if ! fm_backend_herdr_events_capable "$SESSION"; then
   echo "skip: this herdr build is below the events.subscribe capability (protocol < 16 or events surface absent)"
-  cleanup_all
+  cleanup_all || exit 1
   trap - EXIT
   exit 0
 fi
