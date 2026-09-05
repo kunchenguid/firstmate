@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Refresh project clones: fast-forward the checked-out local default branch to
-# origin/<default> when safe, and prune local branches whose upstream tracking
-# branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
-# worktree still needs.
+# Refresh project clones: complete any shallow clone from origin, fast-forward
+# the checked-out local default branch to origin/<default> when safe, and prune
+# local branches whose upstream tracking branch is gone (the remote branch was
+# deleted, i.e. its PR merged) and that no worktree still needs.
+# A shallow repair reports the before/after history count. Healthy complete
+# clones stay silent for that check, while a failed repair is a loud skip.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
@@ -43,6 +45,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-project-depth-lib.sh
+. "$SCRIPT_DIR/fm-project-depth-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -298,6 +302,7 @@ report_stuck() {
 }
 
 sync_project() {
+  local depth_out
   PROJ=$1
   label=$(project_label)
 
@@ -323,6 +328,13 @@ sync_project() {
   if [ "$proj_top" != "$proj_abs" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
+  fi
+  if ! depth_out=$(fm_project_unshallow_if_needed "$PROJ"); then
+    echo "$label: skipped: $depth_out"
+    return 0
+  fi
+  if [ -n "$depth_out" ]; then
+    echo "$label: recovered: $depth_out"
   fi
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}

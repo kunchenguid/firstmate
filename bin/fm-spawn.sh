@@ -143,6 +143,9 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   Before creating a fresh ship/scout lane, spawn completes a shallow primary
+#   project clone from origin. It reports the before/after history count when it
+#   repairs one and refuses the lane loudly when the repair cannot complete.
 #   Only after this isolation check, a fresh ship or scout's clean task worktree
 #   fetches origin, resolves the current remote default branch, and resets to its tip.
 #   Relaunch reuses the recorded worktree without fetching or resetting its base.
@@ -325,6 +328,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-project-depth-lib.sh
+. "$SCRIPT_DIR/fm-project-depth-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1868,6 +1873,16 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if ! fm_brief_task_content_valid "$BRIEF"; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
+  fi
+  if [ "$RELAUNCH" -eq 0 ]; then
+    PROJECT_DEPTH_OUT=
+    if ! PROJECT_DEPTH_OUT=$(fm_project_unshallow_if_needed "$PROJ_ABS"); then
+      echo "error: project $(basename "$PROJ_ABS") is shallow and could not be repaired: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
+      exit 1
+    fi
+    if [ -n "$PROJECT_DEPTH_OUT" ]; then
+      echo "project $(basename "$PROJ_ABS"): recovered: $PROJECT_DEPTH_OUT"
+    fi
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then

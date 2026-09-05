@@ -27,6 +27,10 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# Shallow clones are completed before the ordinary refresh. The successful path
+# reports the before/after history count and preserves the checked-out branch and
+# worktree, while an unreachable origin leaves the clone shallow and fails loud.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -75,6 +79,27 @@ build_pair() {
   git -C "$work" push -q -u origin main
 
   git clone --quiet "file://$remote_abs" "$clone"
+  printf '%s\n' "$clone"
+}
+
+# build_shallow_pair <home> <name>: create a six-commit origin and a depth-two
+# clone under projects/, so the real --unshallow path has four missing commits.
+build_shallow_pair() {
+  local home=$1 name=$2 work remote clone remote_abs n
+  work="$home/work-$name"
+  remote="$home/remotes/$name.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  for n in 1 2 3 4 5 6; do
+    commit_file "$work" file.txt "v$n" "C$n"
+  done
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git clone --quiet --depth 2 "file://$remote_abs" "$clone"
   printf '%s\n' "$clone"
 }
 
@@ -376,6 +401,8 @@ test_already_current_unchanged() {
   assert_contains "$out" "eta: already current" "already-current clone reports unchanged"
   assert_not_contains "$out" "STUCK" "already-current is not flagged STUCK"
   assert_not_contains "$out" "recovered" "already-current is not labelled recovered"
+  assert_not_contains "$out" "unshallowed repository history" \
+    "a complete clone should stay silent for the shallow check"
   [ "$(head_sha "$clone")" = "$before" ] || fail "already-current clone was moved"
   pass "already-current clone is reported unchanged"
 }
@@ -490,8 +517,49 @@ test_whole_fleet_form() {
   pass "whole-fleet form processes every clone under projects/"
 }
 
+test_shallow_clone_unshallows_and_reports() {
+  local home clone out before_head before_branch
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" shallow-repair)
+  before_head=$(git -C "$clone" rev-parse HEAD)
+  before_branch=$(git -C "$clone" symbolic-ref --short HEAD)
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "shallow-repair fixture is not shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 2 ] \
+    || fail "shallow-repair fixture does not start with two visible commits"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "shallow-repair: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "successful shallow repair did not report its before/after history count"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = false ] \
+    || fail "fleet sync left the repaired clone shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 6 ] \
+    || fail "fleet sync did not restore the complete origin/main history"
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$before_head" ] \
+    || fail "shallow repair moved HEAD"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "$before_branch" ] \
+    || fail "shallow repair changed the checked-out branch"
+  pass "a shallow clone is completed additively and reports its history growth"
+}
+
+test_shallow_clone_without_network_fails_loud() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" shallow-offline)
+  git -C "$clone" remote set-url origin "file://$home/remotes/missing.git"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "shallow-offline: skipped: could not unshallow repository history at 2 commits:" \
+    "failed shallow repair was not reported as an explicit skip"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "failed shallow repair changed the repository depth marker"
+  pass "a shallow clone with an unreachable origin stays shallow and fails loud"
+}
+
 test_bootstrap_relays_recovered_and_stuck() {
-  local home stuck rec out
+  local home stuck rec shallow shallow_offline out
   home=$(new_home)
   # A clone we will leave STUCK (dirty), and one that self-heals (detached-clean-ancestor).
   stuck=$(build_pair "$home" stuck-clone)
@@ -500,6 +568,9 @@ test_bootstrap_relays_recovered_and_stuck() {
   rec=$(build_pair "$home" rec-clone)
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
+  shallow=$(build_shallow_pair "$home" shallow-clone)
+  shallow_offline=$(build_shallow_pair "$home" shallow-offline-clone)
+  git -C "$shallow_offline" remote set-url origin "file://$home/remotes/missing.git"
 
   # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
@@ -507,6 +578,11 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"
+  assert_contains "$out" "FLEET_SYNC: shallow-clone: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "bootstrap relays the shallow-repair history growth"
+  assert_contains "$out" "FLEET_SYNC: shallow-offline-clone: skipped: could not unshallow repository history at 2 commits:" \
+    "bootstrap relays an unreachable shallow-repair failure"
+  : "$shallow $shallow_offline"
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
@@ -710,6 +786,8 @@ test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
+test_shallow_clone_unshallows_and_reports
+test_shallow_clone_without_network_fails_loud
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
