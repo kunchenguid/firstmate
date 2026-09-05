@@ -246,19 +246,26 @@ fm_task_inbox_body() {  # <record-path>
 
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
-# still receives the complete instruction in the line itself.
+# still receives the complete instruction in the line itself. The leading `: `
+# is the POSIX shell no-op, so the same line typed into a pane whose agent has
+# exited (a bare shell) runs nothing; see the dead-pane note in the header.
+# Keep the line free of shell metacharacters that `:` would still evaluate
+# (no `;`, `&`, `|`, `$`, backticks, or redirections).
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
+  printf ': Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
     "$abs" "$abs"
 }
 
-# Ring the doorbell, best-effort: one advisory composer pre-check, then the
-# backend's submit machinery with a minimal retry budget, verdict discarded.
+# Ring the doorbell, best-effort: one dead-agent pre-check, one advisory
+# composer pre-check, then the backend's submit machinery with a minimal retry
+# budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
-# delivery proof; the acknowledgement move is the only delivery signal.
+# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
+# the endpoint's agent is positively dead (nothing typed; recovery owns the
+# record). No return value is delivery proof; the acknowledgement move is the
+# only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -267,6 +274,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
+    dead) return 3 ;;
+  esac
   line=$(fm_task_inbox_doorbell_line "$rec")
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
@@ -338,8 +348,11 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   IFS=$(printf '\t') read -r rec_base count last <<EOF
 $ladder
 EOF
-  if [ "$rec_base" != "$base" ]; then
-    # A different (or first) oldest message: the previous ladder is stale.
+  if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
+    # A different oldest message: the previous ladder is stale. An absent
+    # ladder is left alone so a dead-pane escalation, which never rings and so
+    # never writes one, keeps its marker (the marker check below still ignores
+    # a marker naming some other message).
     count=0
     last=0
     rm -f "$dir/.escalated" 2>/dev/null || true
@@ -364,8 +377,9 @@ EOF
 }
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
-# protected skip still consumes budget so neither a dead pane nor permanently
-# blocked composer can retry silently forever. A concurrently removed inbox is
+# protected skip still consumes budget so neither an unreadable pane nor a
+# permanently blocked composer can retry silently forever (a positively dead
+# pane never enters the ladder: the watcher escalates it directly). A concurrently removed inbox is
 # a successful no-op; otherwise failure means the caller must surface the
 # unwritable ladder while the record remains unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>

@@ -71,7 +71,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           ;;
         *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
-        'Firstmate instruction waiting: list '*)
+        ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
             "$D/on-doorbell" "$payload"
@@ -284,7 +284,7 @@ test_persist_precedes_restart() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
   # The pane transcript orders the two phases: the instruction doorbell first,
   # the harness exit command only after it.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the mate"
   [ -n "$exit_line" ] || fail "the mate was never stopped, so it was not restarted"
@@ -553,7 +553,7 @@ test_persist_waits_are_polled_together() {
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
-  nudge_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
+  nudge_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
   [ -n "$exit_line" ] && [ -n "$nudge_line" ] && [ "$exit_line" -lt "$nudge_line" ] \
     || fail "the first mate's timeout held the confirmed second mate behind it: $out"
   pass "T10 pending persist answers are polled as one fleet"
@@ -712,7 +712,7 @@ test_already_current_mate_restarts_end_to_end() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
     "the pass must report the reload it performed"
   # Persist strictly before replace, read off the pane transcript.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the already-current mate"
   [ -n "$exit_line" ] || fail "the already-current mate was never stopped, so it was not restarted"

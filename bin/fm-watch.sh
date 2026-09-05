@@ -330,7 +330,9 @@ window_key() {  # <window>
 # policy owner) reports a due action, a busy pane just waits - the record is
 # durable and the worker will reach a turn boundary - an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
+# wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
+# skips the ladder altogether: it is never typed into and surfaces as that same
+# stale wake exactly once. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
 # still makes the race quiet. The attempt is data-plane typing or a
@@ -359,6 +361,24 @@ inbox_steer_check() {  # <window> <task>
     ring)
       ring_rc=0
       fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      if [ "$ring_rc" -eq 3 ]; then
+        # Positively dead agent: nothing was typed, and re-ringing a bare shell
+        # can never be acknowledged, so the ladder is capped here - one stale
+        # wake for recovery, then quiet until the record is handled or the
+        # inbox changes. The record itself stays for stuck-crewmate-recovery.
+        reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited, so the doorbell was not typed; recover the worker)"
+        if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
+          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+          return 0
+        fi
+        fm_wake_append stale "$w" "$reason" || exit 1
+        if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
+          echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
+          exit 1
+        fi
+        wake "$reason"
+        return 0
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
