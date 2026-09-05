@@ -225,7 +225,7 @@ write_remote_home_summary() {  # <remote-home> <generated-epoch>
   local home=$1 epoch=$2
   mkdir -p "$home/state"
   jq -n --arg home "$home" --argjson epoch "$epoch" '{
-    schema:"fm-secondmate-home-summary.v2",
+    schema:"fm-secondmate-home-summary.v3",
     hold_classifier_schema:"fm-captain-hold-buckets.v1",
     generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
     valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"captain_decision",
@@ -2911,10 +2911,10 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
 - [x] remote-approved - Captain-approved delivery $approved_pr (repo: firstmate) (kind: ship) (hold-kind: captain) (merged 2026-09-03)
 EOF
   tmp="$cache_file.tmp"
-  jq '.schema = "fm-secondmate-home-summary.v1" | .landed = [] | .counts.landed = 0' \
+  jq '.schema = "fm-secondmate-home-summary.v2" | .landed = [] | .counts.landed = 0' \
     "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
   tmp="$remote_home/state/home-summary.json.tmp"
-  jq '.schema = "fm-secondmate-home-summary.v1" | .landed = [] | .counts.landed = 0' \
+  jq '.schema = "fm-secondmate-home-summary.v2" | .landed = [] | .counts.landed = 0' \
     "$remote_home/state/home-summary.json" > "$tmp" && mv "$tmp" "$remote_home/state/home-summary.json"
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
   printf '%s' "$json" | jq -e --arg pr "$approved_pr" '
