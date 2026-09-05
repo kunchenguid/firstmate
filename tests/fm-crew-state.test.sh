@@ -1530,6 +1530,10 @@ test_latest_status_preserves_legacy_completions() {
     line=$(last_status_line "$d/state/task.status")
     [ "$line" = 'working: following up on merged work' ] || fail "later working event did not supersede legacy completion"
     status_is_captain_relevant "$line" && fail "legacy prose made a working event captain-relevant"
+    printf 'paused: waiting on upstream PR #123 to land\nOnce it is %s I will rebase and continue.\n\n' "$event" > "$d/state/task.status"
+    line=$(last_status_line "$d/state/task.status")
+    [ "$line" = 'paused: waiting on upstream PR #123 to land' ] || fail "continuation prose mentioning '$event' hid a multi-line pause: $line"
+    status_is_paused "$line" || fail "a multi-line pause lost pause handling behind prose mentioning '$event'"
   done
   (
     shopt -u nocasematch

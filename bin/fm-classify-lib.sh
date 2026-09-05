@@ -108,11 +108,14 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Return the last recognized status event, ignoring continuation prose and blanks.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
-# A log with no recognized events retains its last nonblank legacy free-text line.
+# A bare legacy free-text line counts as an event only when a captain token leads
+# it, so continuation prose that merely mentions one cannot hide a declaration.
+# A log with no recognized events retains its last nonblank line.
 # This is an event read; status_current_line below reconciles open decisions.
 last_status_line() {
-  local f=$1 line last='' fallback='' verb
+  local f=$1 line last='' fallback='' verb legacy_re
   [ -f "$f" ] && [ -r "$f" ] || return 0
+  legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
@@ -121,10 +124,20 @@ last_status_line() {
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") last=$line ;;
-      *) status_is_captain_relevant "$line" && last=$line ;;
+      *) _fm_classify_matches "$line" "$legacy_re" && last=$line ;;
     esac
   done < "$f"
   printf '%s\n' "${last:-$fallback}"
+}
+
+# 0 when <line> matches the extended regex <pattern> case-insensitively, leaving
+# the caller's nocasematch setting untouched.
+_fm_classify_matches() {  # <line> <pattern>
+  local matched=1 restore_case=0
+  shopt -q nocasematch || { shopt -s nocasematch; restore_case=1; }
+  [[ "$1" =~ $2 ]] && matched=0
+  [ "$restore_case" -eq 0 ] || shopt -u nocasematch
+  return "$matched"
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
@@ -146,7 +159,7 @@ status_is_terminal_verb() {
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
-  local line=$1 verb matched=1 restore_case=0 pattern
+  local line=$1 verb
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
@@ -159,11 +172,7 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  pattern=${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}
-  shopt -q nocasematch || { shopt -s nocasematch; restore_case=1; }
-  [[ "$line" =~ $pattern ]] && matched=0
-  [ "$restore_case" -eq 0 ] || shopt -u nocasematch
-  return "$matched"
+  _fm_classify_matches "$line" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
