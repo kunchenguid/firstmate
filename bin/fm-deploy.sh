@@ -13,8 +13,12 @@
 # one and prove the user the app runs as can read it, set the current version
 # aside, stop the app, check out the exact commit, swap the proved front end
 # into place, reinstall that one unit, verify the bundle, restart, and prove it
-# answers. It never touches the sign-in or TLS units, never reads or writes a
-# secrets file, and never forces, stashes, or discards anything.
+# answers. Proving it answers polls each address for a bounded window rather
+# than asking once, because a restart returns as soon as systemd accepts it,
+# not once the app is actually listening, and a probe landing in that gap gets
+# "connection refused" rather than the app's own answer. It never touches the
+# sign-in or TLS units, never reads or writes a secrets file, and never forces,
+# stashes, or discards anything.
 #
 # Everything about the NEW version that this home can answer from the machine is
 # answered while the OLD one is still serving, and every one of those answers is
@@ -544,16 +548,26 @@ fi
 fm_deploy_ssh "sudo systemctl restart '$UNIT'" || step_failed "$PROJECT would not start on the new version"
 
 # --- prove it answers ---------------------------------------------------------
-health=$(fm_deploy_ssh "curl -s -o /dev/null -w '%{http_code}' --max-time 20 '$FM_DEPLOY_TGT_health_url'" 2>/dev/null || true)
-[ "$health" = 200 ] || step_failed "$PROJECT restarted but did not report itself healthy (it answered $health)"
+fm_deploy_wait_for_code 200 "$FM_DEPLOY_HEALTH_WINDOW_SECONDS" "$FM_DEPLOY_HEALTH_INTERVAL_SECONDS" \
+  fm_deploy_ssh "curl -s -o /dev/null -w '%{http_code}' --max-time 20 '$FM_DEPLOY_TGT_health_url'" \
+  || step_failed "$PROJECT restarted but did not report itself healthy after waiting ${FM_DEPLOY_PROBE_ELAPSED}s (it answered $FM_DEPLOY_PROBE_CODE)"
+HEALTH_PROBE_DETAIL="health answered $FM_DEPLOY_PROBE_CODE after ${FM_DEPLOY_PROBE_ELAPSED}s"
 
-public=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "$FM_DEPLOY_TGT_public_url" 2>/dev/null || true)
-[ "$public" = "$FM_DEPLOY_TGT_public_expect" ] || step_failed "the sign-in protected address answered $public instead of $FM_DEPLOY_TGT_public_expect"
+fm_deploy_wait_for_code "$FM_DEPLOY_TGT_public_expect" "$FM_DEPLOY_HEALTH_WINDOW_SECONDS" "$FM_DEPLOY_HEALTH_INTERVAL_SECONDS" \
+  curl -s -o /dev/null -w '%{http_code}' --max-time 25 "$FM_DEPLOY_TGT_public_url" \
+  || step_failed "the sign-in protected address answered $FM_DEPLOY_PROBE_CODE instead of $FM_DEPLOY_TGT_public_expect after waiting ${FM_DEPLOY_PROBE_ELAPSED}s"
+PROBE_DETAIL="$HEALTH_PROBE_DETAIL; public answered $FM_DEPLOY_PROBE_CODE after ${FM_DEPLOY_PROBE_ELAPSED}s"
 
 if [ "$ROLLBACK" -eq 1 ]; then
-  ledger_append rolled-back "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" 'restored the version the last attempt came from'
+  ledger_append rolled-back "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" "restored the version the last attempt came from ($PROBE_DETAIL)"
 else
-  ledger_append deployed "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" "${PERMISSION:-}"
+  detail=${PERMISSION:-}
+  if [ -n "$detail" ]; then
+    detail="$detail ($PROBE_DETAIL)"
+  else
+    detail="$PROBE_DETAIL"
+  fi
+  ledger_append deployed "$DEPLOYED_SHA" "$TARGET_SHA" "$AUTHORITY" "$detail"
 fi
 printf '%s is live at %s. Health check and the sign-in protected address both answered as expected.\n' "$PROJECT" "$TARGET_SHA"
 printf 'To put the previous version back: bin/fm-deploy.sh %s --rollback\n' "$PROJECT"

@@ -141,7 +141,25 @@ esac
 case "\$cmd" in
   *'rev-parse HEAD'*) printf '%s\n' "\${FMTEST_HOST_SHA:-$DEPLOYED}" ;;
   *'/proc/locks'*)    printf '%s\n' "\${FMTEST_RUN_STATE:-idle}" ;;
-  *'http_code'*)      printf '%s\n' "\${FMTEST_HEALTH:-200}" ;;
+  # The restart above can win the race with the app's own bind, in which case a
+  # probe taken right after gets connection-refused rather than an answer.
+  # FMTEST_HEALTH_MISS_PROBES is how a test says that gap lasted a given number
+  # of probes: this fake machine answers "000" - curl's own code for "never
+  # connected" - that many times, then settles on FMTEST_HEALTH. Left unset, it
+  # answers FMTEST_HEALTH from the first probe, as before.
+  *'http_code'*)
+    if [ -n "\${FMTEST_HEALTH_MISS_PROBES:-}" ]; then
+      n=\$(( \$(cat '$CASE_DIR/health-probes' 2>/dev/null || printf 0) + 1 ))
+      printf '%s' "\$n" > '$CASE_DIR/health-probes'
+      if [ "\$n" -le "\${FMTEST_HEALTH_MISS_PROBES}" ]; then
+        printf '000\n'
+      else
+        printf '%s\n' "\${FMTEST_HEALTH:-200}"
+      fi
+    else
+      printf '%s\n' "\${FMTEST_HEALTH:-200}"
+    fi
+    ;;
   # A start-time requirement the machine does not meet yet: FMTEST_PRECHECK_FAILS
   # names the validator this fake machine refuses.
   *'sudo -u '*'validate_allowed_emails.py'*)
@@ -317,6 +335,47 @@ test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one() {
   pass "a restart that never comes up healthy is reported as a failed deploy with its rollback command"
 }
 
+test_a_health_probe_that_wins_the_bind_race_on_retry_still_deploys() {
+  local out rc=0 probes ledger
+  make_case health-probe-bind-race
+  # The restart above can win the race with the app's own bind: the first
+  # probes taken land in that gap and get "000" - curl's own code for "never
+  # connected" - even though the app answers moments later. This is the
+  # incident itself: a probe taken once during that gap reported a version
+  # live-but-unhealthy that the host journal showed had already answered 200.
+  out=$(FMTEST_HEALTH_MISS_PROBES=2 FM_DEPLOY_HEALTH_INTERVAL_SECONDS=1 run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -eq 0 ] || fail "health-probe-bind-race: a health check that only needed to catch up with the app's own bind was reported as failed: $out"
+  assert_contains "$out" "is live at $PLAIN" "health-probe-bind-race"
+  probes=$(grep -c "http_code" "$SSH_LOG")
+  [ "$probes" -eq 3 ] || fail "health-probe-bind-race: expected 3 health probes (2 misses then an answer), saw $probes: $(tr '\n' '|' < "$SSH_LOG")"
+  ledger="$HOME_DIR/state/deploy-ledger/demo.jsonl"
+  assert_grep '"result":"deployed"' "$ledger" "health-probe-bind-race: the deploy was not recorded"
+  grep -E '"detail":"[^"]*health answered 200 after [0-9]+s' "$ledger" >/dev/null \
+    || fail "health-probe-bind-race: the ledger detail did not record the final probe outcome and the elapsed wait: $(cat "$ledger")"
+  pass "a health probe that only needs to catch up with the app's own bind window retries instead of failing, and the ledger records the wait"
+}
+
+test_a_health_probe_that_never_answers_fails_within_its_window() {
+  local out rc=0 probes ledger
+  make_case health-probe-never-answers
+  # A window this small still exercises the same bounded-wait mechanism: the
+  # probe never gets past "000", so this proves the OTHER half of the same
+  # incident - a version that truly never comes up must still be declared
+  # failed, not left waiting forever or reported live on a hopeful first try.
+  out=$(FMTEST_HEALTH_MISS_PROBES=999 FM_DEPLOY_HEALTH_WINDOW_SECONDS=1 FM_DEPLOY_HEALTH_INTERVAL_SECONDS=1 \
+    run_deploy demo "$PLAIN") || rc=$?
+  [ "$rc" -ne 0 ] || fail "health-probe-never-answers: a health check that never came up was reported as live"
+  assert_not_contains "$out" "is live at" "health-probe-never-answers"
+  assert_contains "$out" "--rollback" "health-probe-never-answers"
+  probes=$(grep -c "http_code" "$SSH_LOG")
+  [ "$probes" -ge 2 ] || fail "health-probe-never-answers: only one probe was taken, so the window was not honored: $(tr '\n' '|' < "$SSH_LOG")"
+  ledger="$HOME_DIR/state/deploy-ledger/demo.jsonl"
+  assert_grep '"result":"failed"' "$ledger" "health-probe-never-answers: the failure was not recorded"
+  grep -E '"detail":"[^"]*after waiting [0-9]+s \(it answered 000\)' "$ledger" >/dev/null \
+    || fail "health-probe-never-answers: the ledger detail did not record the final probe outcome and the elapsed wait: $(cat "$ledger")"
+  pass "a health check that never comes up is declared failed once its window is exhausted, and the ledger records the wait"
+}
+
 test_the_precheck_runs_before_the_stop_and_only_on_host_owned_files() {
   local out rc=0 precheck stop
   make_case precheck-order
@@ -471,3 +530,5 @@ test_rollback_works_after_a_failed_deploy
 test_record_live_catches_the_record_up_without_touching_the_machine
 test_rollback_targets_the_version_the_last_deploy_came_from
 test_an_unhealthy_restart_is_a_failed_deploy_not_a_live_one
+test_a_health_probe_that_wins_the_bind_race_on_retry_still_deploys
+test_a_health_probe_that_never_answers_fails_within_its_window

@@ -196,6 +196,67 @@ fm_deploy_ledger_rollback_candidates() {
   return 0
 }
 
+# --- post-restart health probing ----------------------------------------------
+#
+# The window every post-restart probe polls within before it may declare
+# failure. A restart returns as soon as systemd accepts the request, not once
+# the app is actually listening, and a probe that lands in that gap gets
+# "connection refused" - not an answer - exactly like the incident that
+# recorded a live version as a failed deploy because the one probe taken landed
+# before the app's own bind, moments before the host journal shows it answering
+# 200. Named here, not a literal in each call site, and overridable by the
+# environment the way FM_DEPLOY_SSH_CONNECT_TIMEOUT already is, so a test can
+# shrink it without touching the probe logic.
+FM_DEPLOY_HEALTH_WINDOW_SECONDS=${FM_DEPLOY_HEALTH_WINDOW_SECONDS:-30}
+FM_DEPLOY_HEALTH_INTERVAL_SECONDS=${FM_DEPLOY_HEALTH_INTERVAL_SECONDS:-1}
+
+# fm_deploy_probe_code <cmd...>
+# Runs <cmd...>, which must print an HTTP status code such as curl's
+# %{http_code}, and prints exactly that code. Prints "000" instead for anything
+# else <cmd...> produced (including nothing, on a nonzero exit), the same code
+# curl itself prints for "never connected", so a probe that could not run reads
+# as "no answer yet" rather than a script error.
+fm_deploy_probe_code() {
+  local code
+  code=$("$@" 2>/dev/null) || true
+  case "$code" in
+    [0-9][0-9][0-9]) printf '%s' "$code" ;;
+    *) printf '000' ;;
+  esac
+}
+
+# fm_deploy_wait_for_code <expected> <window-seconds> <interval-seconds> <probe-cmd...>
+#
+# Polls <probe-cmd...> (see fm_deploy_probe_code) until it reports <expected>
+# or <window-seconds> have passed since the first probe. "000" - no
+# connection - is the one answer that is retried: it is indistinguishable from
+# a restart still winning its own race with the app's bind. Any other code is
+# the app's own answer and is decisive on the probe that saw it, matching
+# <expected> or not, so a real failure is never masked behind a full window of
+# waiting for one that was never coming.
+#
+# Sets, on every return: FM_DEPLOY_PROBE_CODE (the last code observed) and
+# FM_DEPLOY_PROBE_ELAPSED (whole seconds actually waited), for the caller to
+# fold into what it reports and into the ledger detail of a failure.
+# Returns 0 when the final code matched <expected>, 1 otherwise.
+fm_deploy_wait_for_code() {
+  local expected=$1 window=$2 interval=$3 start deadline code
+  shift 3
+  start=$(date +%s)
+  deadline=$((start + window))
+  while :; do
+    code=$(fm_deploy_probe_code "$@")
+    # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+    FM_DEPLOY_PROBE_CODE=$code
+    # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+    FM_DEPLOY_PROBE_ELAPSED=$(( $(date +%s) - start ))
+    [ "$code" = "$expected" ] && return 0
+    [ "$code" = '000' ] || return 1
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep "$interval"
+  done
+}
+
 # --- host preconditions the units enforce at start ----------------------------
 
 # Where a project keeps its unit files. bin/fm-deploy.sh already installs
