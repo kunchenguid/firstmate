@@ -183,12 +183,13 @@ destination_allows_inherited_item() {
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
+# churns mtimes). A source item proven absent is mirrored as a missing
 # destination item, so clearing the primary's value clears it downstream too
-# (primary-authoritative). The destination dir is created lazily, only when there
-# is actually something to write, so a primary with no inherited config item set is a
-# complete no-op (it leaves the secondmate home exactly as it was - the
-# backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
+# (primary-authoritative). Inspection errors or existing nonregular sources
+# leave that destination item unchanged and report an error; inaccessible paths
+# and dangling source links must never silently remove an inherited grant.
+# The destination dir is created lazily, only when there is something to copy;
+# absence on both sides is a no-op. When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and

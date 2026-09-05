@@ -171,7 +171,8 @@
 #   /usr/bin/env -i followed by /bin/sh -c of the existing launch command.
 #   Each line is one POSIX environment name, never a value or shell expression;
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
-#   before launch. An empty file retains only the operational floor below.
+#   before launch, as do path inspection errors such as inaccessible config
+#   directories. An empty file retains only the operational floor below.
 #   Names are read once per spawn; values are expanded in the destination pane,
 #   not copied from the invoking process or written into the launch text.
 #   Unset names stay unset and empty values stay empty.
