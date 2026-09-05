@@ -174,6 +174,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# Shared supervision predicate and idle-capacity read, so the away scan reports
+# an idle pool with a full queue through exactly the same escalation path as
+# every other event.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$FM_DAEMON_DIR/fm-supervision-lib.sh"
+
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
@@ -1172,6 +1178,16 @@ housekeeping() {  # <state>
         escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)"
       fi
     done
+
+    # Idle capacity is a property of the home, not of any status file, so it is
+    # scanned outside that loop: an idle fleet has no status files at all, which
+    # is exactly the state this catches. One escalation per scan cadence.
+    local idle_line
+    while IFS= read -r idle_line; do
+      [ -n "$idle_line" ] || continue
+      escalate_add "$state" "$idle_line"
+    done < <(fm_idle_capacity_report "$state" \
+      "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$FM_ROOT")
   fi
 }
 

@@ -30,7 +30,7 @@ set -u
 command -v tasks-axi >/dev/null 2>&1 || fail "these tests need the real tasks-axi to seed a backlog"
 TMP_ROOT=$(fm_test_tmproot fm-merge-outcome-lib-tests)
 
-FM_READY_FRONTIER_SENTENCE_FOR_TEST='No arbitrary cap. Dispatch every ready node that is independent and collision-free. Any ready node left undispatched needs a recorded reason, an owner, and a recheck trigger.'
+FM_READY_FRONTIER_SENTENCE_FOR_TEST='Live tasks are bounded by seams and by the concurrency cap, and every undispatched ready item carries a recorded rule, owner, and recheck event.'
 
 # make_main_home_case <name>: a plain main home (no .fm-secondmate-home marker)
 # with a real data/backlog.md carrying one already-ready, unblocked item.

@@ -333,6 +333,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -513,6 +515,8 @@ print_backlog_compact() {
         print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
       fi
       print_backlog_pointer
+      printf '\n'
+      fm_idle_capacity_report "$STATE" "$DATA" "$FM_ROOT"
     else
       printf '(present, empty)\n'
     fi

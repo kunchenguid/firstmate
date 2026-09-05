@@ -94,6 +94,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -104,6 +105,8 @@ mkdir -p "$STATE"
 # runtime can exceed the bounded CI lint worker while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
@@ -1980,6 +1983,19 @@ EOF
       wake "heartbeat"
     else
       if ! mark_all_captain_relevant_surfaced; then
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        wake "heartbeat"
+      fi
+      # Ready work with a free worktree slot is captain-relevant even though no
+      # status file changed - on a fully idle fleet there are no status files at
+      # all, which is exactly the state that used to be absorbed forever. It
+      # rides the ordinary heartbeat wake, whose own transition increments the
+      # heartbeat streak (bin/fm-push-transition-lib.sh), so a standing idle
+      # fleet is reported on the long backed-off interval up to HEARTBEAT_MAX
+      # rather than every base period.
+      fm_idle_capacity_compute "$STATE" "$DATA" "$FM_ROOT"
+      if [ "$FM_IDLE_CAPACITY" = true ]; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
         touch "$STATE/.last-heartbeat"
         wake "heartbeat"

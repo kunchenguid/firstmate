@@ -3,7 +3,9 @@
 #
 # Two layers:
 #   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
-#                used by fm-guard.sh and by the hook's banner details.
+#                used by fm-guard.sh and by the hook's banner details. Its idle
+#                branch and the idle-capacity report have their own suite in
+#                tests/fm-idle-capacity.test.sh.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
 #                scopes in-flight work to the PRIMARY checkout only and requires
 #                a live, identity-matched watcher lock plus a fresh beacon.

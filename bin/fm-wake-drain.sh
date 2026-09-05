@@ -22,6 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
+
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -556,6 +560,12 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  # A heartbeat sends firstmate to the whole fleet, which is exactly when an
+  # idle pool with a full queue must be visible. Other wake kinds already name
+  # their own work, so they are left alone.
+  if printf '%s\n' "$rows" | awk -F '\t' 'NF >= 5 && $3 == "heartbeat" { found = 1 } END { exit !found }'; then
+    fm_idle_capacity_report "$STATE" "$DATA" "$FM_ROOT" || true
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }

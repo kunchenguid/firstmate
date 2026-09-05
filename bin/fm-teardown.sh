@@ -167,6 +167,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -1182,7 +1184,7 @@ backlog_done_args() {
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
 backlog_refresh_reminder() {
-  local backlog_display frontier
+  local backlog_display
   [ "$KIND" = secondmate ] && return 0
   [ "$CLEANUP_RECOVERY" = orca ] && return 0
   if backlog_display=$(fm_backlog_file "$DATA"); then
@@ -1191,9 +1193,17 @@ backlog_refresh_reminder() {
     backlog_display="${DATA%/}/backlog.md"
   fi
   if [ "$BACKLOG_CLOSED" = 1 ]; then
-    if frontier=$(fm_ready_frontier_text "$backlog_display"); then
+    # A closing lane is the exact moment a home can go quiet with a full queue,
+    # so the frontier is SHOWN here rather than named. The idle-capacity report
+    # is the single owner of that rendering (bin/fm-supervision-lib.sh); it also
+    # carries free slots, live count, stale holds, and any dispatch freeze, which
+    # the raw listing this replaced could not. A backlog that could not be read
+    # keeps the legacy wording rather than asserting a frontier nothing proved.
+    fm_idle_capacity_compute "$STATE" "$DATA" "$FM_ROOT"
+    if [ "$FM_IDLE_READY_READ" = true ]; then
       printf '%s\n' "Backlog: $ID is closed in $backlog_display."
-      printf '%s\n' "$frontier"
+      fm_idle_capacity_render
+      printf '%s\n' "$FM_READY_FRONTIER_SENTENCE"
       printf '%s\n' "Check date gates: dispatch only work whose blockers are gone and date is due."
     else
       printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."

@@ -611,7 +611,7 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
-FM_READY_FRONTIER_SENTENCE_FOR_TEST='No arbitrary cap. Dispatch every ready node that is independent and collision-free. Any ready node left undispatched needs a recorded reason, an owner, and a recheck trigger.'
+FM_READY_FRONTIER_SENTENCE_FOR_TEST='Live tasks are bounded by seams and by the concurrency cap, and every undispatched ready item carries a recorded rule, owner, and recheck event.'
 
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
