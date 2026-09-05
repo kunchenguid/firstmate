@@ -81,8 +81,10 @@
 # before preserving the route for retry. Teardown then discards child work, kills
 # child runtime endpoints, and removes the retired home. Removing a leased home
 # releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# never left leased forever. If the treehouse return fails and the pool cannot
+# prove that home's slot is already back in it (see the already-returned
+# convergence below), teardown leaves the leased home and state in place instead
+# of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -117,6 +119,49 @@
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
+#
+# Already-returned convergence (teardown-already-returned): killing the pool shell
+# that treehouse itself opened in the task copy (see Fix 2 below) makes treehouse
+# auto-return that copy on the shell's exit, BEFORE teardown issues its own
+# `treehouse return --force <path>`. That explicit return then fails with
+# treehouse's own `worktree <path> is not managed by treehouse`, and cleanup used
+# to abort and retain every durable task record for work that had already landed
+# and whose copy was already back in the pool.
+# teardown_treehouse_return_attempt therefore treats a return as satisfied when the
+# copy is POSITIVELY PROVEN to be back in the pool already. Both gates must hold:
+#   1. the failure carries treehouse's own already-returned line naming EXACTLY the
+#      path teardown asked it to return. Every other non-lock failure still aborts
+#      loudly, and the message alone never authorizes anything by itself.
+#   2. teardown_treehouse_already_returned proves it structurally from
+#      `treehouse status --json`, read in the same recorded project context the
+#      return ran from: exactly ONE pool entry whose CANONICAL path is the canonical
+#      recorded path (so a pool root reached through a symlink still matches, while
+#      a same-basename sibling slot, another pool slot, or another home never does),
+#      reported `available` with no lease id, no lease holder, no lease timestamp and
+#      no live process, on a copy whose git common dir is still the recorded
+#      project's own repository.
+# Anything weaker keeps the abort: a generic `not managed` with no matching listing
+# entry, a substring or basename resemblance, several matching entries, an `in-use`
+# or leased slot, a copy owned by another firstmate home's clone, a missing jq, or a
+# failed, empty, or malformed listing. An entry that omits any of those five fields,
+# or reports one with a type treehouse does not use, is malformed for this purpose
+# and proves nothing rather than reading as empty. Each retains all task records.
+# The proof is read-only and, when it holds, authorizes exactly one thing: skipping a
+# return that already happened. It performs no further worktree mutation, never
+# retries the return, never resets, removes, prunes, or claims any copy, and never
+# relaxes a landed-work, dirty-tree, process, lock, endpoint, or ownership refusal -
+# it runs only after all of those have already passed. It is not a `--force` path.
+# The convergence lives in the backend-independent worktree-return step, so it is
+# shared by every treehouse-backed backend (tmux, herdr, zellij, cmux), by the
+# secondmate-home lease release, and by the forced-secondmate child-worktree return;
+# `backend=orca` never reaches it, because Orca owns its own worktrees and is removed
+# through `orca worktree rm` instead. The child-worktree site is the one place where
+# the convergence decides more than abort-versus-continue: a failed return there falls
+# through to safe_rm_rf_child_worktree, which `rm -rf`s the copy, so a child slot
+# treehouse had already auto-returned used to be erased out from under the pool. A
+# child copy proven back in the pool is now left alone instead. A child worktree that
+# is NOT a pool slot never appears in the listing, so it still refuses and still falls
+# through to that same fallback.
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
@@ -1373,19 +1418,183 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# True when treehouse reported that EXACTLY the path we asked it to return is not
+# one of its own pool slots ("worktree <path> is not managed by treehouse").
+# This message is never proof of anything on its own - it is only the narrow
+# precondition for reading the pool listing below, so every other return failure
+# stays on the loud abort path.
+treehouse_return_is_unmanaged_error() {  # <output> <path>
+  local text=$1 path=$2
+  printf '%s\n' "$text" | grep -Fxq "worktree $path is not managed by treehouse"
+}
+
+# Canonical absolute git common dir of <canonical-dir>, i.e. the repository that
+# owns it. Empty/failure when the path is not inside a readable git repository.
+teardown_git_common_dir() {  # <canonical-dir>
+  local dir=$1 common
+  common=$( cd "$dir" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null ) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  canonical_existing_dir "$common"
+}
+
+# Positive structural proof that <dir> is ALREADY back in the pool, read from
+# treehouse's own supported `status --json` listing in the same pool context the
+# return itself used. The script header's teardown-already-returned section owns
+# the contract this enforces and every case that must keep the abort instead.
+# Read-only throughout: it mutates nothing, and its success authorizes exactly one
+# thing - skipping a return that has already happened. Each refusal below names
+# the specific missing proof, since that message is what an operator acts on.
+teardown_treehouse_already_returned() {  # <dir> <cd_dir> <label>
+  local dir=$1 cd_dir=$2 label=$3
+  local want listing entries rc=0 matches=0
+  local entry_line entry_index path
+  local hit_index="" hit_fields=""
+  local hit_state="" hit_lease_id="" hit_lease_holder="" hit_leased_at="" hit_procs=""
+  local entry_canon copy_repo project_canon project_repo leased_at_desc
+
+  want=$(canonical_existing_dir "$dir") || {
+    echo "teardown: $label return reported $dir is not managed by this pool, but $dir is not an inspectable directory, so it cannot be proven already returned; aborting" >&2
+    return 1
+  }
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "teardown: $label return reported $dir is not managed by this pool, but jq is unavailable to read the pool listing, so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+  listing=$( ( cd "$cd_dir" && treehouse status --json ) 2>/dev/null ) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing could not be read from $cd_dir, so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+  if ! printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir is not a readable slot array, so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+  # Slot index plus raw path per entry. Only the FIRST tab separates them, so a
+  # path is never re-split or whitespace-trimmed on its way to canonicalization.
+  entries=$(printf '%s' "$listing" | jq -r '
+    to_entries[]
+    | select(.value | type == "object")
+    | "\(.key)\t\(.value.path // "")"') || {
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir could not be parsed, so it cannot be proven already returned; aborting" >&2
+    return 1
+  }
+
+  while IFS= read -r entry_line; do
+    [ -n "$entry_line" ] || continue
+    entry_index=${entry_line%%$'\t'*}
+    path=${entry_line#*$'\t'}
+    [ -n "$path" ] && [ "$path" != "$entry_line" ] || continue
+    entry_canon=$(canonical_existing_dir "$path") || continue
+    [ "$entry_canon" = "$want" ] || continue
+    matches=$(( matches + 1 ))
+    hit_index=$entry_index
+  done <<EOF
+$entries
+EOF
+
+  if [ "$matches" -ne 1 ]; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir names that exact copy $matches times (exactly one is required), so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+
+  # Every field must be PRESENT and carry treehouse's own type, so an entry that
+  # never reports a lease or a process list proves nothing rather than reading as
+  # proven-empty. One field per line: an empty lease id or holder must stay empty
+  # rather than collapse into its neighbour, which a tab-separated record would do.
+  hit_fields=$(printf '%s' "$listing" | jq -r --argjson slot "$hit_index" '
+    .[$slot]
+    | select(has("status") and has("lease_id") and has("lease_holder")
+             and has("leased_at") and has("processes"))
+    | select((.status | type) == "string"
+             and (.lease_id | type) == "string"
+             and (.lease_holder | type) == "string"
+             and (.leased_at == null or (.leased_at | type) == "string")
+             and (.processes | type) == "array")
+    | [ .status,
+        .lease_id,
+        .lease_holder,
+        (if .leased_at == null then "" else "leased-at" end),
+        (.processes | length | tostring) ]
+    | .[]') || hit_fields=
+  if [ -z "$hit_fields" ]; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir does not report that copy's status, lease and process fields in treehouse's own shape, so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+  {
+    IFS= read -r hit_state
+    IFS= read -r hit_lease_id
+    IFS= read -r hit_lease_holder
+    IFS= read -r hit_leased_at
+    IFS= read -r hit_procs
+  } <<EOF
+$hit_fields
+EOF
+
+  if [ "$hit_state" != available ] \
+     || [ -n "$hit_lease_id" ] || [ -n "$hit_lease_holder" ] || [ -n "$hit_leased_at" ] \
+     || [ "$hit_procs" != 0 ]; then
+    if [ -n "$hit_leased_at" ]; then leased_at_desc="a lease timestamp"; else leased_at_desc="no lease timestamp"; fi
+    echo "teardown: $label return reported $dir is not managed by this pool, but the pool still reports that copy as '${hit_state:-unknown}' (lease '${hit_lease_id:-}', holder '${hit_lease_holder:-}', $leased_at_desc, ${hit_procs:-?} live processes), so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+
+  project_canon=$(canonical_existing_dir "$cd_dir") || {
+    echo "teardown: $label return reported $dir is not managed by this pool, and the recorded project context $cd_dir is not an inspectable directory, so ownership of that copy cannot be proven; aborting" >&2
+    return 1
+  }
+  copy_repo=$(teardown_git_common_dir "$want") || copy_repo=
+  project_repo=$(teardown_git_common_dir "$project_canon") || project_repo=
+  if [ -z "$copy_repo" ] || [ -z "$project_repo" ] || [ "$copy_repo" != "$project_repo" ]; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and that copy's repository ('${copy_repo:-unreadable}') is not the recorded project's repository ('${project_repo:-unreadable}'); refusing to treat another home's copy as this task's returned copy; aborting" >&2
+    return 1
+  fi
+
+  echo "teardown: $label was already returned before this cleanup ran - the pool lists exactly that copy as available, unleased, with no live process - so cleanup continues without a second return" >&2
+  return 0
+}
+
+TEARDOWN_TREEHOUSE_RETURN_OUT=
+TEARDOWN_TREEHOUSE_RETURN_ALREADY=0
+
+# One `treehouse return --force <dir>` attempt from <cd_dir>, with the
+# already-returned convergence folded in so every attempt is idempotent.
+# Publishes the attempt's combined output in TEARDOWN_TREEHOUSE_RETURN_OUT (echoed
+# to stdout on success, stderr on failure) so the caller can still match the
+# transient git-lock signature, and sets TEARDOWN_TREEHOUSE_RETURN_ALREADY=1 when
+# the copy was proven already returned rather than returned by this attempt.
+# Exit 0 means the copy is in the pool; exit 1 means it is not.
+teardown_treehouse_return_attempt() {  # <dir> <cd_dir> <label>
+  local dir=$1 cd_dir=$2 label=$3 out
+  TEARDOWN_TREEHOUSE_RETURN_ALREADY=0
+  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
+  # be matched by signature even when the lock file is already gone mid-check.
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    TEARDOWN_TREEHOUSE_RETURN_OUT=$out
+    if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+    return 0
+  fi
+  TEARDOWN_TREEHOUSE_RETURN_OUT=$out
+  if [ -n "$out" ]; then printf '%s\n' "$out" >&2; fi
+  treehouse_return_is_unmanaged_error "$out" "$dir" || return 1
+  teardown_treehouse_already_returned "$dir" "$cd_dir" "$label" || return 1
+  TEARDOWN_TREEHOUSE_RETURN_ALREADY=1
+  return 0
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
 
-  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
-  # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-    [ -n "$out" ] && printf '%s\n' "$out"
+  if teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label"; then
     return 0
   fi
-  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
@@ -1406,12 +1615,13 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-      [ -n "$out" ] && printf '%s\n' "$out"
-      echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+    if teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label"; then
+      if [ "$TEARDOWN_TREEHOUSE_RETURN_ALREADY" != 1 ]; then
+        echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      fi
       return 0
     fi
-    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
@@ -1433,12 +1643,12 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-        [ -n "$out" ] && printf '%s\n' "$out"
-        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+      if teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label"; then
+        if [ "$TEARDOWN_TREEHOUSE_RETURN_ALREADY" != 1 ]; then
+          echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        fi
         return 0
       fi
-      [ -n "$out" ] && printf '%s\n' "$out" >&2
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi
