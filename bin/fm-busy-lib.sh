@@ -53,8 +53,12 @@
 # ordinary work absorbs its quiet pane until the wedge threshold. The gate is
 # therefore recorded as a distinguished EVENT on the ordinary busy record rather
 # than as a fourth state: state and source keep their exact meanings, and one
-# extra predicate exposes the flavour to bin/fm-crew-state.sh, which is the one
-# place a supervisor-facing state is chosen. bin/fm-claude-approval-hook.sh is
+# extra predicate exposes the flavour to the readers that decide what busy
+# buys: bin/fm-crew-state.sh, where the supervisor-facing state is chosen
+# (parked, not working), and the absorb gates in bin/fm-watch.sh and
+# bin/fm-supervise-daemon.sh, which stop counting a gated turn as busy so its
+# quiet pane takes the stale path and surfaces promptly instead of waiting out
+# the wedge threshold. bin/fm-claude-approval-hook.sh is
 # Claude's adapter for both halves; the gate opens on the harness's own
 # structured permission notification and closes on the next tool that actually
 # ran, or on any ordinary lifecycle event, since every one of them proves the

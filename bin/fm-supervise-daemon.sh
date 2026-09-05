@@ -670,7 +670,10 @@ task_window_harness() {  # <window> <state>
 # semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
 # when the endpoint could not be read at all. Only an exact busy verdict is
 # working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# silent idle, so a stale pane whose state cannot be proven surfaces. A busy
+# turn parked at an operator-only approval gate (fm_busy_approval_wait) makes
+# no progress either, so it reads 1 and its stale marker escalates rather than
+# being dropped as resumed work.
 stale_window_is_busy() {  # <window> <state>
   local win=$1 state=$2 backend harness label task tail40 verdict
   backend=$(task_window_backend "$win" "$state")
@@ -679,7 +682,8 @@ stale_window_is_busy() {  # <window> <state>
   label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
-  [ "${verdict%% *}" = busy ]
+  [ "${verdict%% *}" = busy ] || return 1
+  ! fm_busy_approval_wait "$state" "$task" "$harness"
 }
 
 escalate_add() {  # <state> <distilled-item>

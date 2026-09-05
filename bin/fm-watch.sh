@@ -254,20 +254,25 @@ hash_pane() {
 # the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
-# treated as not-provably-working and surfaces rather than being absorbed.
+# treated as not-provably-working and surfaces rather than being absorbed. A
+# busy turn parked at an operator-only approval gate (fm_busy_approval_wait) is
+# an open turn making no progress, so it too returns 1 and takes the stale path,
+# where fm-crew-state's parked line surfaces it instead of absorbing it.
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
+  local w=$1 tail40=$2 task meta harness verdict
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
+  harness=$(window_harness "$w")
   if [ -n "$task" ] && [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
   else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$harness" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  [ "${verdict%% *}" = busy ] || return 1
+  ! fm_busy_approval_wait "$STATE" "${task:-unknown}" "$harness"
 }
 
 window_kind() {

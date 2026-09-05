@@ -1237,6 +1237,34 @@ test_housekeeping_resumed_stale_cleared() {
   pass "resumed (busy) stale clears its marker without escalating"
 }
 
+# The away-mode mirror of the watcher's approval-gate path: a Claude turn parked
+# at its permission dialog still classifies busy, and before the gate reached
+# stale_window_is_busy the recheck dropped its stale marker as resumed work and
+# never escalated. A gated turn is not resumed work, so the marker escalates.
+test_housekeeping_parked_stale_escalates() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-parked)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-gate-w6"
+  pane="$dir/pane.txt"
+  printf 'working\n' > "$state/gate-w6.status"
+  printf 'Allow Bash(git switch)? (y/n)\n' > "$pane"
+  fm_write_meta "$state/gate-w6.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=claude"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" gate-w6)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" gate-w6 busy --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  key=$(printf '%s' "gate-w6" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "a stale pane parked at the approval gate was dropped as resumed work"
+  grep -F "stale persisted" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the parked stale did not escalate as persisted: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "parked stale marker not cleared after escalation"
+  pass "a persistent stale whose busy record is parked at the approval gate escalates instead of clearing"
+}
+
 test_housekeeping_herdr_persistent_stale_resolves_meta() {
   local dir state key
   dir=$(make_supercase stale-herdr-persistent)
@@ -2637,6 +2665,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_housekeeping_parked_stale_escalates
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
