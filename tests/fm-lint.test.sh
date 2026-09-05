@@ -19,8 +19,10 @@ set -u
 
 LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
+LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
+REQUIRED_ACTIONLINT=$("$LINT_WF" --required-version)
 
 # Official GitHub release asset sha256 values for shellcheck v0.11.0 .tar.xz
 # archives (https://github.com/koalaman/shellcheck/releases/tag/v0.11.0). Tests
@@ -149,6 +151,15 @@ SH
 pinned_ready() {
   command -v shellcheck >/dev/null 2>&1 || return 1
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
+}
+
+# True only when the default (no-args) lint path's workflow-YAML step, which
+# shells out to pinned actionlint, can actually run: fm-lint.sh's default path
+# invokes fm-lint-workflows.sh, so any no-args fm-lint.sh test depends on the
+# same tool this mirrors pinned_ready for.
+actionlint_pinned_ready() {
+  command -v actionlint >/dev/null 2>&1 || return 1
+  [ "$(actionlint -version | awk 'NR==1 {print; exit}')" = "$REQUIRED_ACTIONLINT" ]
 }
 
 test_help_reports_the_complete_interface() {
@@ -361,6 +372,10 @@ SH
 }
 
 test_changed_mode_lints_only_the_changed_file() {
+  if ! actionlint_pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED_ACTIONLINT not resolved): changed-mode lint run"
+    return
+  fi
   local tmp fakebin log diff_file out target
   tmp=$(fm_test_tmproot fm-lint-changed)
   fakebin=$(fm_fakebin "$tmp")
@@ -431,6 +446,10 @@ test_explicit_path_bypasses_changed_logic() {
 }
 
 test_zero_changed_files_exits_clean() {
+  if ! actionlint_pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED_ACTIONLINT not resolved): zero-changed-files exit check"
+    return
+  fi
   local tmp fakebin diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")

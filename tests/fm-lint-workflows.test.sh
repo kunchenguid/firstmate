@@ -15,6 +15,14 @@ LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
+# True only when the resolved actionlint is exactly the pinned version, so
+# tests that run real actionlint match what CI enforces instead of a runner
+# default (or no actionlint at all). Mirrors fm-lint.test.sh's pinned_ready.
+pinned_ready() {
+  command -v actionlint >/dev/null 2>&1 || return 1
+  [ "$(actionlint -version | awk 'NR==1 {print; exit}')" = "$REQUIRED" ]
+}
+
 # Official sha256 values from actionlint_1.7.12_checksums.txt on the v1.7.12
 # release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12). Tests
 # compare installer behavior against these published digests, not script source.
@@ -167,6 +175,10 @@ YAML
 }
 
 test_current_workflows_pass() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): current workflows parse check"
+    return
+  fi
   local out rc
   rc=0
   out=$("$LINT_WF" 2>&1) || rc=$?
@@ -177,6 +189,10 @@ test_current_workflows_pass() {
 }
 
 test_col0_heredoc_fails_with_clear_error() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): column-0 heredoc regression check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-col0)
   mkdir -p "$tmp/.github/workflows"
@@ -192,6 +208,10 @@ test_col0_heredoc_fails_with_clear_error() {
 }
 
 test_valid_fixture_passes() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): valid fixture check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-ok)
   mkdir -p "$tmp/.github/workflows"
@@ -217,6 +237,10 @@ test_empty_workflows_dir_fails() {
 }
 
 test_explicit_broken_path_fails() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): explicit broken path check"
+    return
+  fi
   local tmp broken out rc
   tmp=$(fm_test_tmproot fm-lint-wf-path)
   broken="$tmp/broken.yml"
@@ -230,6 +254,10 @@ test_explicit_broken_path_fails() {
 }
 
 test_non_mapping_root_fails() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): non-mapping root check"
+    return
+  fi
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-scalar)
   mkdir -p "$tmp/.github/workflows"
@@ -463,6 +491,10 @@ test_installer_rejects_unsupported_platform() {
 # self-broken ci.yml. Copy the lint scripts into a fake repo so the default
 # workflow root is the fixture, not this worktree.
 test_fm_lint_default_path_catches_broken_ci_yml() {
+  if ! pinned_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): fm-lint.sh default-path broken-ci.yml check"
+    return
+  fi
   local tmp fakebin log diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-wf-default)
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"
