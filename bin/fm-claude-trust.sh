@@ -69,6 +69,10 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
+SCRIPT_DIR=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+
 [ "$#" -eq 2 ] || { echo "usage: fm-claude-trust.sh <worktree> <project>" >&2; exit 2; }
 WT_ARG=$1
 PROJ_ARG=$2
@@ -137,9 +141,34 @@ WT_COMMON=$(common_dir_of "$WT_REAL") || true
 [ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
 [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
 
+# A secondmate home's task worktrees come from a shared pool that links against
+# the SAME project's clone in the PARENT home, not this home's own
+# projects/<name> clone, so their common dir matches the parent clone rather than
+# PROJ_REAL. Accept exactly that one additional owner: resolve the parent home
+# from this home's durable secondmate binding, take <parent-home>/projects/<name>
+# for the same project name, and require its resolved common dir to equal the
+# worktree's. This is not a name, origin-URL, or path-prefix match: the git
+# common dirs must be identical after resolution, exactly as the same-home test
+# is. A main home has no binding, so this never fires there and today's single
+# same-home test stands unchanged.
+worktree_belongs_to_parent_clone() {
+  local home=${FM_HOME:-} name parent_clone parent_common
+  [ -n "$home" ] || return 1
+  fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 1
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+  [ -n "$FM_SECONDMATE_PARENT_HOME" ] || return 1
+  name=$(basename -- "$PROJ_REAL")
+  parent_clone="$FM_SECONDMATE_PARENT_HOME/projects/$name"
+  parent_common=$(common_dir_of "$parent_clone") || return 1
+  [ -n "$parent_common" ] || return 1
+  [ "$WT_COMMON" = "$parent_common" ]
+}
+
 PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-[ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+  worktree_belongs_to_parent_clone || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+fi
 
 # The store write needs node, and a missing interpreter refuses like every other
 # failure here. Degrading instead would launch a worker straight into the dialog

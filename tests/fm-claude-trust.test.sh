@@ -440,6 +440,69 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
 }
 
+# A secondmate home's task worktrees are pooled worktrees of the SAME project's
+# clone in the PARENT home, not of this home's own projects/<name> clone, so
+# their git common dir matches the parent clone. Trust pre-registration must
+# accept that owner - resolved exactly through the durable parent binding and a
+# common-dir comparison - or no claude worker can launch in a secondmate home.
+test_parent_pool_worktree_is_trusted() {
+  local case_dir parent_home sub_home config project parent_clone sub_clone pool_wt out
+  case_dir="$TMP_ROOT/parent-pool"
+  parent_home="$case_dir/parent-home"
+  sub_home="$case_dir/sub-home"
+  config="$case_dir/claude-config"
+  project=analytics
+  parent_clone="$parent_home/projects/$project"
+  sub_clone="$sub_home/projects/$project"
+  pool_wt="$case_dir/treehouse/$project-abc123/1"
+  mkdir -p "$config" "$parent_home/projects" "$sub_home/projects" "$case_dir/treehouse/$project-abc123"
+  # The parent home's clone, and a pooled worktree linked against it.
+  fm_git_init_commit "$parent_clone"
+  git -C "$parent_clone" worktree add --quiet -b pool-1 "$pool_wt"
+  # The secondmate home's own clone of the same project: a SEPARATE repository,
+  # so its common dir differs from the pooled worktree's and the same-home test
+  # alone would refuse the worktree.
+  fm_git_init_commit "$sub_clone"
+  # The durable local parent binding this home resolves the parent from.
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent_home" \
+    > "$sub_home/.fm-secondmate-parent"
+  out=$(FM_HOME="$sub_home" CLAUDE_CONFIG_DIR="$config" HOME="$config" \
+    "$TRUST" "$pool_wt" "$sub_clone" 2>&1)
+  expect_code 0 $? "a pooled worktree of the parent's clone must be trusted in a secondmate home: $out"
+  assert_contains "$out" "trusted:" "registration did not report what it trusted"
+  assert_trusted "$config/.claude.json" "$pool_wt" "the parent-pool worktree was not recorded as trusted"
+  pass "fm-claude-trust.sh: trusts a secondmate pool worktree of the parent's clone"
+}
+
+# The parent path widens the accepted owner to exactly one clone; a pooled
+# worktree of an UNRELATED repository shares neither this home's clone nor the
+# parent's, so it stays refused even with a valid parent binding present.
+test_unrelated_pool_worktree_is_refused_in_secondmate_home() {
+  local case_dir parent_home sub_home config project sub_clone unrelated unrelated_wt out
+  case_dir="$TMP_ROOT/parent-pool-foreign"
+  parent_home="$case_dir/parent-home"
+  sub_home="$case_dir/sub-home"
+  config="$case_dir/claude-config"
+  project=analytics
+  sub_clone="$sub_home/projects/$project"
+  unrelated="$case_dir/unrelated-repo"
+  unrelated_wt="$case_dir/unrelated-wt"
+  mkdir -p "$config" "$parent_home/projects" "$sub_home/projects"
+  fm_git_init_commit "$parent_home/projects/$project"
+  fm_git_init_commit "$sub_clone"
+  # A worktree of a wholly unrelated repository, not the parent's clone.
+  fm_git_init_commit "$unrelated"
+  git -C "$unrelated" worktree add --quiet -b unrelated-1 "$unrelated_wt"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent_home" \
+    > "$sub_home/.fm-secondmate-parent"
+  out=$(FM_HOME="$sub_home" CLAUDE_CONFIG_DIR="$config" HOME="$config" \
+    "$TRUST" "$unrelated_wt" "$sub_clone" 2>&1)
+  expect_code 1 $? "an unrelated repository's worktree must still be refused in a secondmate home: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_not_trusted "$config/.claude.json" "$unrelated_wt" "an unrelated repository's worktree was trusted"
+  pass "fm-claude-trust.sh: refuses an unrelated pool worktree even with a parent binding"
+}
+
 test_fresh_worktree_is_trusted
 test_registration_is_idempotent
 test_primary_checkout_is_refused
@@ -460,3 +523,5 @@ test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_refused_spawn_leaves_no_task_state
+test_parent_pool_worktree_is_trusted
+test_unrelated_pool_worktree_is_refused_in_secondmate_home
