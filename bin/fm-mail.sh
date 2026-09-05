@@ -251,19 +251,29 @@ wake_for() {
   # Reuse the fleet's durable wake append so a poll surfaces as a `check` wake.
   # The key is generation-aware when the mailbox reports a UIDVALIDITY, so a
   # restored mailbox's reused uid can never collide with a stale wake key.
-  local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh"
+  # The append and the journal write commit under a single held FM_WAKE_QUEUE_LOCK:
+  # the drain acknowledges and deletes consumed rows only under the same lock,
+  # so it can never remove our wake between the append and the journal write.
+  # The journal entry is therefore proof the wake was appended once it exists.
+  local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
   fi
-  if [ -f "$lib" ]; then
-    # shellcheck source=/dev/null
-    . "$lib"
-    fm_wake_append check "$wake_key" "check: mail $id - $summary"
-  else
+  if [ ! -f "$lib" ]; then
     echo "fm-mail: $lib missing; cannot wake" >&2
     return 1
   fi
+  # shellcheck source=/dev/null
+  . "$lib"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
+    printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" || status=$?
+  else
+    status=1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
 }
 
 case "${1:-}" in
@@ -383,13 +393,12 @@ case "${1:-}" in
       fr="$(printf '%s' "$line" | cut -f3)"
       subj="$(printf '%s' "$line" | cut -f4)"
       if [ -z "${SEEN[$uid]:-}" ]; then
-        # Wake first, then journal, then record. The wake append is the durable
-        # surface; the journal write immediately after it proves this home
-        # emitted it (and survives any drain ack); the cursor write closes the
-        # commit. A kill before the append leaves nothing and the next poll
-        # retries; a kill after the append is healed above without re-waking.
+        # Wake first, then record: the wake append and the durable journal write
+        # commit together under the wake-queue lock inside wake_for (so no drain
+        # ack can split them), and the cursor write closes the commit. A kill
+        # before the append leaves nothing and the next poll retries; a kill
+        # after the append is healed above without re-waking.
         if wake_for "$GENERATION" "$uid" "mail from $fr - ${subj:-no subject}"; then
-          printf '%s\t%s\n' "$GENERATION" "$uid" >> "$WOKEN"
           printf '%s\n' "$uid" >> "$CURSOR"
           SEEN["$uid"]=1
           echo "fm-mail: woke for $uid"
