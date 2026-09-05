@@ -1127,11 +1127,34 @@ fm_remote_job_signal_scope_snapshot() { # <snapshot> <root> <state> <signal>
   done <<< "$snapshot"
 }
 
+fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
+  local pid=$1 account_home=${HOME:-} lock pid_file recorded_pid recorded_start actual_start supervisor state
+  [ -n "$account_home" ] || return 1
+  fm_remote_job_prepare_state "$account_home" || return 1
+  state=$FM_REMOTE_JOB_STATE
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  pid_file=$(fm_remote_job_worker_pid_path)
+  recorded_pid=$(fm_remote_job_read_single_line "$pid_file" 64) || return 1
+  [ "$recorded_pid" = "$pid" ] || return 1
+  recorded_pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
+  [ "$recorded_pid" = "$pid" ] || return 1
+  recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || true)
+  [ -n "$actual_start" ] || return 1
+  fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
+  fm_remote_job_process_non_zombie "$pid" && return 1
+  fm_remote_job_lock_owner_matches_process "$account_home" "$state/supervisor.lock" || return 1
+  supervisor=$FM_REMOTE_JOB_OWNER_PID
+  fm_remote_job_process_scope "$supervisor" || return 1
+  [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+}
+
 fm_remote_job_stop_worker_tree() { # <pid>
   local pid=$1 root state signal current known='' i actual_start recorded_start
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
-  if fm_remote_job_process_scope "$pid"; then
+  if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
     root=$FM_REMOTE_JOB_PROCESS_ROOT
     state=$FM_REMOTE_JOB_PROCESS_STATE
     for signal in TERM KILL; do

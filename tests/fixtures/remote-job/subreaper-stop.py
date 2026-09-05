@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 if len(sys.argv) > 1 and sys.argv[1] == "--reuse-group":
@@ -89,21 +90,18 @@ def wait_for(predicate, seconds=10):
     raise AssertionError("condition did not become true before deadline")
 
 
-def worker_environment(queue, timezone="UTC0", locale_name="C", locale_path=None):
+def worker_environment(queue, timezone="UTC0", locale_name="C"):
     env = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
                FM_REMOTE_JOB_STATE_ROOT=str(queue), FM_REMOTE_JOB_PLATFORM_OVERRIDE="Linux", TZ=timezone,
                LC_ALL=locale_name,
                PATH=f"{launch_bin}:{os.environ['PATH']}", FM_FIXTURE_NOHUP=real_nohup,
                FM_FIXTURE_LAUNCH_LOG=str(launch_log))
-    if locale_path:
-        env["LOCPATH"] = str(locale_path)
-    else:
-        env.pop("LOCPATH", None)
+    env.pop("LOCPATH", None)
     return env
 
 
-def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
-    env = worker_environment(queue, timezone, locale_name, locale_path)
+def call(script, queue, timezone="UTC0", locale_name="C"):
+    env = worker_environment(queue, timezone, locale_name)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -114,6 +112,24 @@ def call(script, queue, timezone="UTC0", locale_name="C", locale_path=None):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def queue_processes(queue):
+    result = set()
+    expected = os.fsencode(queue)
+    for pid in processes():
+        try:
+            entries = (Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if b"FM_REMOTE_JOB_STATE_ROOT=" + expected in entries:
+            result.add(pid)
+    return result
+
+
+def process_state(pid):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    return fields[0]
 
 
 try:
@@ -213,13 +229,8 @@ done
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):
         shutil.copy2(repo / "bin" / name, root / "bin" / name)
-    locale_root = fixture / "locales"
-    locale_root.mkdir()
-    locale_name = "fr_FR.UTF-8"
-    subprocess.run(["localedef", "--no-archive", "-i", "fr_FR", "-f", "UTF-8",
-                    str(locale_root / locale_name)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    call(start, queue, "EST5", locale_name, locale_root)
+    locale_name = "POSIX"
+    call(start, queue, "EST5", locale_name)
     wait_for(lambda: (queue / "worker.ready").is_file() and len(processes()) == 2)
     quarantine = queue / "worker.lock/quarantine"
     quarantine.write_text("active execution could not be confirmed stopped\n")
@@ -248,11 +259,10 @@ done
         pid = (lock / "pid").read_text().strip()
         kernel_identity = (lock / "start").read_text()
         legacy = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
-                                         env=dict(os.environ, TZ="EST5", LC_ALL=locale_name,
-                                                  LOCPATH=str(locale_root)), text=True)
+                                         env=dict(os.environ, TZ="EST5", LC_ALL=locale_name), text=True)
         canonical = subprocess.check_output(["/bin/ps", "-p", pid, "-o", "lstart="],
-                                            env=dict(os.environ, TZ="EST5", LC_ALL="C"), text=True)
-        assert legacy != canonical, "fixture locale did not change the legacy timestamp"
+                                            env=dict(os.environ, TZ="UTC0", LC_ALL="C"), text=True)
+        assert legacy != canonical, "fixture timezone did not change the legacy timestamp"
         (lock / "start").write_text(legacy)
         call(ensure, queue, "JST-9")
         assert launch_log.read_text() == launches, "legacy identity launched another worker"
@@ -262,12 +272,35 @@ done
     for _ in range(3):
         call(start, queue)
         wait_for(lambda: set(processes()) == original)
-    call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', queue)
-    wait_for(lambda: not processes())
+    real_other = fixture / "real-other-queue"
+    call(start, real_other)
+    wait_for(lambda: len(queue_processes(real_other)) == 2)
+    unrelated = set(queue_processes(real_other))
+    serving = int((queue / "worker.pid").read_text())
+    supervisor = int((queue / "supervisor.lock/pid").read_text())
+    os.kill(supervisor, signal.SIGSTOP)
+    os.kill(serving, signal.SIGKILL)
+    wait_for(lambda: process_state(serving) == "Z")
+
+    def resume_supervisor():
+        time.sleep(0.2)
+        try:
+            os.kill(supervisor, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+
+    resume = threading.Thread(target=resume_supervisor)
+    resume.start()
+    call(f"fm_remote_job_stop_worker_tree {serving}", queue)
+    resume.join(timeout=2)
+    wait_for(lambda: not queue_processes(queue))
     for _ in range(30):
-        assert not processes(), "real supervisor respawned after stop"
+        assert not queue_processes(queue), "real supervisor respawned after zombie-child stop"
+        assert queue_processes(real_other) == unrelated, "zombie-child stop reached another queue"
         time.sleep(0.1)
-    print("ok - stale serving metadata cannot accumulate restart supervisors")
+    call('fm_remote_job_stop_worker_tree "$(cat "$FM_REMOTE_JOB_STATE_ROOT/worker.pid")"', real_other)
+    wait_for(lambda: not processes())
+    print("ok - zombie serving ownership recovers its scoped supervisor without respawn")
 finally:
     # Bounded fixture-only fallback, even when a pre-fix assertion fails.
     for pid in processes():

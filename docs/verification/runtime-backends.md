@@ -978,8 +978,8 @@ fm-test-run: no new fm-remote or fm-lab-* Herdr server survived the suite
 `tests/fm-herdr-lab.test.sh` interrupts fifteen actual Herdr suite entry points at their provisioning boundary with a fixture helper and checks teardown after failure, INT, and TERM.
 It also retains the helper's refusal, default-session tripwire, failed-deletion, and cancelled-provisioning assertions.
 The runner records each matching server's PID and Linux `/proc` start time before the suite, then fails for new or restarted identities found afterward.
-On hosts without `/proc`, it uses the process start time rendered under the C locale and UTC, with a revalidated working directory lookup, so identity does not depend on host locale or timezone.
-It warns with PID, start time, working directory, and session when a pre-existing identity remains, so shared-host contamination stays visible without being attributed to the current suite.
+On hosts without `/proc`, it records the process start time under the C locale and UTC with a revalidated working directory, but fails closed for every survivor because second-resolution identity cannot prove that a PID was not reused.
+It warns with PID, start time, working directory, and session only when a kernel identity proves that a pre-existing process remains, so shared-host contamination stays visible without misclassifying a replacement.
 The runner regression separately proves both identity paths reject new and reused identities and unreadable baseline or final inventories while accepting exited candidates, the default server, readers, and zombies.
 Its long Nix-path case proves that the process inventory requests unlimited argument width before classifying Herdr servers.
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
@@ -988,6 +988,8 @@ The Linux worker-stop regression uses an actual child subreaper, a leaderless wo
 It also dissolves a previously scoped process group, recreates the same numeric group with an unrelated process identity before stop, and verifies that cleanup leaves it untouched.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
+The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.
+The legacy identity regression uses the guaranteed POSIX locale and an explicit timezone shift, so it exercises environment reconstruction without locale compiler or host locale-source dependencies.
 The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
 
 ```sh
