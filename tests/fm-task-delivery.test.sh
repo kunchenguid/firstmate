@@ -2,6 +2,17 @@
 # Behavior tests for the explicit per-task delivery contract (AGENTS.md section 7)
 # across bin/fm-spawn.sh, bin/fm-promote.sh, and bin/fm-project-mode.sh.
 #
+# Promotion is also where a scout's base first acquires a delivery, so a mode that
+# opens a pull request is refused while the commit the worktree was CREATED FROM -
+# base= in the task record - is unreachable from origin/<default>. That base is the
+# only commit a pull request can inherit, because the promoted worker is ordered to
+# drop everything above it before branching. So a scout resting on origin's tip
+# still promotes while the primary runs ahead with local-only landings, a scout that
+# made scratch commits still promotes, a scout parked on a historical commit origin
+# still contains still promotes, a base a rewritten-and-force-pushed default branch
+# replaced is still caught, and a task record with no base= at all is reported
+# rather than silently passed or blanket-refused.
+#
 # A ship task's delivery mode and yolo posture are firstmate's decision at intake,
 # so the tools refuse to guess: the spawn and a scout promotion require both flags,
 # validate them against a closed set, and the spawn additionally refuses to launch
@@ -39,6 +50,63 @@ make_home() {  # <name> [<registry-line>...]
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi
   printf '%s\n' "$home|$projects/proj|$fakebin"
+}
+
+# Commit the staged index with a fixed identity.
+promote_commit() {  # <dir> <message>
+  git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "$2"
+}
+
+# A project with an origin remote, <pushed> commits origin has received, and
+# <landed> further commits that never reach it - exactly what bin/fm-merge-local.sh
+# leaves behind on a local-only project. Echoes the case root; the project lives in
+# <root>/project and the bare forge in <root>/origin.git.
+make_promote_project() {  # <name> <pushed-commits> <landed-commits>
+  local name=$1 pushed=$2 landed=$3 root n=0
+  root="$TMP_ROOT/$name"
+  mkdir -p "$root"
+  git init --quiet -b main "$root/project"
+  printf 'base\n' > "$root/project/README.md"
+  git -C "$root/project" add README.md
+  promote_commit "$root/project" initial
+  while [ "$n" -lt "$pushed" ]; do
+    n=$((n + 1))
+    printf 'pushed\n' > "$root/project/pushed-$n.txt"
+    git -C "$root/project" add "pushed-$n.txt"
+    promote_commit "$root/project" "push $n"
+  done
+  git clone --quiet --bare "$root/project" "$root/origin.git"
+  git -C "$root/project" remote add origin "file://$root/origin.git"
+  git -C "$root/project" fetch --quiet origin
+  n=0
+  while [ "$n" -lt "$landed" ]; do
+    n=$((n + 1))
+    printf 'landed\n' > "$root/project/landed-$n.txt"
+    git -C "$root/project" add "landed-$n.txt"
+    promote_commit "$root/project" "land $n"
+  done
+  printf '%s\n' "$root"
+}
+
+# Park a scout's worktree on one specific commit and register it as this task's,
+# recording that commit as base= the way bin/fm-spawn.sh does. Pass a sixth
+# argument of "no" for a task record that predates the recorded base.
+add_scout_at() {  # <home> <id> <project-dir> <worktree> <commit-ish> [record-base]
+  local home=$1 id=$2 proj=$3 wt=$4 at=$5 record=${6:-yes}
+  mkdir -p "$home/state"
+  write_brief "$home" "$id"
+  git -C "$proj" worktree add --quiet --detach "$wt" "$at"
+  {
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$wt"
+    [ "$record" = no ] || printf 'base=%s\n' "$(git -C "$wt" rev-parse HEAD)"
+  } > "$home/state/$id.meta"
+}
+
+run_promote() {  # <home> <promote-args...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" "$@" 2>&1
 }
 
 write_brief() {  # <home> <id> [<recorded-mode>]
@@ -273,6 +341,192 @@ test_promote_requires_and_records_the_delivery_contract() {
 
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
+# A scout records no delivery posture, so bin/fm-spawn.sh was free to base its
+# worktree on the primary checkout's default branch. Promotion decides the
+# delivery, so it re-reads that base: a pull-request mode must not branch from
+# commits origin has never seen, or the PR publishes every one of them.
+test_promote_refuses_a_pr_delivery_on_unpushed_local_history() {
+  local root home meta wt before out status
+  root=$(make_promote_project promote-unpushed 0 2)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-u1.meta"
+  add_scout_at "$home" promote-u1 "$root/project" "$wt" main
+  before=$(git -C "$wt" rev-parse HEAD)
+
+  out=$(run_promote "$home" promote-u1 --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion into a PR delivery accepted a base origin has never seen"
+  assert_contains "$out" "carries 2 commits origin/main does not" \
+    "the refusal did not carry the exact count of unpushed commits"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the refusal did not name the delivery that makes the base unusable"
+  assert_grep 'kind=scout' "$meta" "a refused promotion still flipped the task record"
+  assert_no_grep '^mode=' "$meta" "a refused promotion recorded a delivery mode"
+  [ ! -e "$home/data/promote-u1/ship-instructions.md" ] \
+    || fail "a refused promotion still published ship instructions"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$before" ] \
+    || fail "promotion moved the scout's worktree while refusing"
+
+  # The same base is fine for a delivery that never pushes, so the refusal is
+  # scoped to the delivery rather than to the repository state.
+  out=$(run_promote "$home" promote-u1 --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a local-only promotion should accept the primary's landed base"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "the local-only promotion did not flip the task record"
+  assert_grep 'mode=local-only' "$meta" "the local-only promotion did not record its delivery"
+  pass "fm-promote: a pull-request delivery is refused while the base carries unpushed local history"
+}
+
+# What a promotion can publish is decided by the base this task was spawned from,
+# never by the primary checkout's branch. A scout based on origin's tip carries
+# nothing origin lacks, so an unrelated local-only landing moving that branch
+# forward must not block it: there would be no correct remedy if it did, because
+# pushing would publish work the captain deliberately keeps off origin and
+# --mode local-only changes the delivery contract instead of fixing the base.
+test_promote_allows_a_pr_delivery_from_a_base_origin_already_has() {
+  local root home meta wt forge out status
+  root=$(make_promote_project promote-at-origin 0 2)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-o1.meta"
+  forge=$(git -C "$root/project" rev-parse origin/main)
+  add_scout_at "$home" promote-o1 "$root/project" "$wt" "$forge"
+  [ "$(git -C "$root/project" rev-parse main)" != "$forge" ] \
+    || fail "fixture did not leave the primary's branch ahead of the frozen origin tip"
+
+  out=$(run_promote "$home" promote-o1 --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a scout resting on origin's tip was refused over the primary's branch"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "the promotion did not flip the task record"
+  assert_grep 'mode=no-mistakes' "$meta" "the promotion did not record its delivery"
+  [ -f "$home/data/promote-o1/ship-instructions.md" ] \
+    || fail "the promotion published no ship instructions"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$forge" ] \
+    || fail "promotion moved the scout's worktree"
+  pass "fm-promote: a base origin already has promotes into a PR delivery however far the primary has run ahead"
+}
+
+# A scout parked on a specific historical commit is auditing that base on purpose.
+# Origin still contains it, so its branch could publish nothing origin lacks and the
+# promotion must go through.
+test_promote_allows_a_pr_delivery_from_a_historical_base_origin_contains() {
+  local root home meta wt historical out status
+  root=$(make_promote_project promote-historical 2 0)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-h1.meta"
+  historical=$(git -C "$root/project" rev-parse 'origin/main~2')
+  add_scout_at "$home" promote-h1 "$root/project" "$wt" "$historical"
+
+  out=$(run_promote "$home" promote-h1 --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a scout auditing a historical base origin contains was refused"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "the promotion did not flip the task record"
+  assert_grep 'mode=direct-PR' "$meta" "the promotion did not record its delivery"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$historical" ] \
+    || fail "promotion moved the scout off the historical base it was auditing"
+  pass "fm-promote: a historical base origin still contains promotes into a PR delivery"
+}
+
+# The mirror case a count taken on a live ref cannot see: rewriting the default
+# branch and force-pushing it leaves origin and local identical, so that count reads
+# zero while this task's recorded base is still the commit the rewrite replaced.
+# Passing it through would publish exactly those commits inside the PR, silently.
+test_promote_refuses_a_pr_delivery_on_a_base_the_rewrite_replaced() {
+  local root home meta wt initial before out status
+  root=$(make_promote_project promote-rewritten 2 0)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-r1.meta"
+  initial=$(git -C "$root/project" rev-parse 'origin/main~2')
+  add_scout_at "$home" promote-r1 "$root/project" "$wt" origin/main
+  before=$(git -C "$wt" rev-parse HEAD)
+
+  git -C "$root/project" reset --quiet --hard "$initial"
+  printf 'rewritten\n' > "$root/project/rewritten.txt"
+  git -C "$root/project" add rewritten.txt
+  promote_commit "$root/project" "rewrite the published history"
+  git -C "$root/project" push --quiet --force origin main
+  [ "$(git -C "$root/project" rev-parse main)" = "$(git -C "$root/project" rev-parse origin/main)" ] \
+    || fail "fixture did not leave the local and remote default branches identical"
+  [ "$(git -C "$root/project" rev-list --count origin/main..main)" = 0 ] \
+    || fail "fixture left the primary's branch ahead, so the old count would have caught this case anyway"
+
+  out=$(run_promote "$home" promote-r1 --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a base the rewrite left behind, which the PR would publish"
+  assert_contains "$out" "carries 2 commits origin/main does not" \
+    "the refusal did not count the commits the recorded base holds outside origin"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the refusal did not name the delivery that makes the base unusable"
+  assert_grep 'kind=scout' "$meta" "a refused promotion still flipped the task record"
+  assert_no_grep '^mode=' "$meta" "a refused promotion recorded a delivery mode"
+  [ ! -e "$home/data/promote-r1/ship-instructions.md" ] \
+    || fail "a refused promotion still published ship instructions"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$before" ] \
+    || fail "promotion moved the scout's worktree while refusing"
+  pass "fm-promote: a base a rewritten-and-pushed default branch replaced is refused for a PR delivery"
+}
+
+# A scout is told its worktree is a laboratory and that scratch commits are free,
+# and the ship instructions promotion itself writes order the promoted worker to
+# return to a clean default-branch base and leave those commits behind. Nothing
+# above the base can reach the pull request, so the scout that committed while
+# reproducing a bug - the one scout actually worth promoting - must go through.
+test_promote_allows_a_pr_delivery_after_the_scout_made_scratch_commits() {
+  local root home meta wt base out status
+  root=$(make_promote_project promote-scratch 1 0)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-s1.meta"
+  base=$(git -C "$root/project" rev-parse origin/main)
+  add_scout_at "$home" promote-s1 "$root/project" "$wt" "$base"
+  [ "$(git -C "$root/project" rev-parse main)" = "$base" ] \
+    || fail "fixture left the primary ahead of origin, so this case would not isolate the scratch commits"
+  printf 'reproduction\n' > "$wt/repro.txt"
+  git -C "$wt" add repro.txt
+  promote_commit "$wt" "reproduce the bug"
+  printf 'more scratch\n' > "$wt/scratch.txt"
+  git -C "$wt" add scratch.txt
+  promote_commit "$wt" "scratch experiment"
+  [ "$(git -C "$wt" rev-list --count "origin/main..HEAD")" = 2 ] \
+    || fail "fixture did not leave two scratch commits above the recorded base"
+
+  out=$(run_promote "$home" promote-s1 --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a scout was refused over the scratch commits its own brief authorizes"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "the promotion did not flip the task record"
+  assert_grep 'mode=no-mistakes' "$meta" "the promotion did not record its delivery"
+  [ -f "$home/data/promote-s1/ship-instructions.md" ] \
+    || fail "the promotion published no ship instructions"
+  pass "fm-promote: scratch commits above a clean base do not block a PR delivery"
+}
+
+# A task spawned before the base was recorded cannot be checked either way. Silently
+# passing it would reopen the hazard and blanket-refusing it would strand every such
+# task, so promotion proceeds and says so.
+test_promote_reports_a_task_with_no_recorded_spawn_base() {
+  local root home meta wt out status
+  root=$(make_promote_project promote-norecord 0 2)
+  home="$root/home"
+  wt="$root/wt"
+  meta="$home/state/promote-n1.meta"
+  add_scout_at "$home" promote-n1 "$root/project" "$wt" main no
+  ! grep -q '^base=' "$meta" || fail "the fixture recorded a spawn base it was meant to omit"
+
+  out=$(run_promote "$home" promote-n1 --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a task with no recorded spawn base was blanket-refused"$'\n'"$out"
+  assert_contains "$out" "records no spawn base" \
+    "promotion did not report that the base could not be checked"
+  assert_contains "$out" "opens a pull request against origin" \
+    "the report did not name the delivery whose base went unchecked"
+  assert_grep 'kind=ship' "$meta" "the reported promotion did not flip the task record"
+  assert_grep 'mode=direct-PR' "$meta" "the reported promotion did not record its delivery"
+  pass "fm-promote: a task with no recorded spawn base is reported, not silently passed or refused"
+}
+
 test_promote_refuses_a_symlinked_task_record() {
   local home meta target original out status leftover
   home="$TMP_ROOT/promote-symlink/home"
@@ -753,6 +1007,12 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_a_pr_delivery_on_unpushed_local_history
+test_promote_allows_a_pr_delivery_from_a_base_origin_already_has
+test_promote_allows_a_pr_delivery_from_a_historical_base_origin_contains
+test_promote_refuses_a_pr_delivery_on_a_base_the_rewrite_replaced
+test_promote_allows_a_pr_delivery_after_the_scout_made_scratch_commits
+test_promote_reports_a_task_with_no_recorded_spawn_base
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy

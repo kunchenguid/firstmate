@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's mode-specific "Definition of done" block, and of
+# the one fact derived from it that tooling acts on: which delivery modes open a
+# pull request against origin.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
@@ -22,6 +24,23 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+# Return 0 when this delivery mode opens a pull request against origin.
+# The modes named here are exactly the ones whose Definition of done below tells
+# the worker (or the pipeline acting for it) to push a branch and raise a PR;
+# local-only is told the opposite, in as many words.
+# Three tools read this rather than restating the list, because they must agree on
+# one commit: bin/fm-spawn.sh chooses a fresh task worktree's base with it,
+# bin/fm-promote.sh re-checks that base when a scout finally acquires a delivery,
+# and bin/fm-review-diff.sh anchors the captain's review on it. A second copy
+# drifting is how a branch gets built on one base and reviewed against another,
+# which is the silent disagreement this single owner exists to prevent.
+fm_delivery_opens_pull_request() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.

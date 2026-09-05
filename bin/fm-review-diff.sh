@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
-# Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# The default branch is fetched first whenever the project has an origin remote.
+# A task whose meta records a pull-request delivery is then compared against origin/<default>, because that is the branch its pull request targets and every commit missing from origin lands inside it.
+# Which modes those are is bin/fm-dod-lib.sh's to say, and bin/fm-spawn.sh reads the same owner when it picks the worktree's base, so the branch is reviewed against the commit it was actually built on.
+# Any other task is compared against whichever of origin/<default> and the local <default> contains the other, which is the base bin/fm-spawn.sh gave its worktree, because a local-only project's landed work lives only on the local default branch while its origin stays frozen at the last push.
+# When neither of those two contains the other - the branches have diverged - the local <default> is the base, because a task that lands locally branches from there and the three-dot merge base still resolves to the real branch point.
+# The two missing-ref fallbacks are asymmetric on purpose: an unresolvable origin/<default> leaves the local <default> as the base, and a missing local <default> leaves origin/<default>.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -18,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -122,6 +127,7 @@ resolve_pr_head() {
   return 1
 }
 
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
@@ -133,11 +139,28 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+resolve_review_base() {
+  local origin_rev local_rev
+  origin_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$origin_rev" ] || { printf '%s' "$DEFAULT"; return 0; }
+  if fm_delivery_opens_pull_request "$MODE"; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  local_rev=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  [ -n "$local_rev" ] || { printf '%s' "origin/$DEFAULT"; return 0; }
+  if git -C "$WT" merge-base --is-ancestor "$local_rev" "$origin_rev" 2>/dev/null; then
+    printf '%s' "origin/$DEFAULT"
+    return 0
+  fi
+  printf '%s' "$DEFAULT"
+}
+
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  BASE=$(resolve_review_base)
 else
   BASE="$DEFAULT"
 fi
