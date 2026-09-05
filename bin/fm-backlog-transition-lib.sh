@@ -13,9 +13,9 @@
 # load-bearing for the pairing.
 #   bin/fm-spawn.sh      meta published => `tasks-axi start`
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
-#                        when the row is still an open captain call
-#                        (bin/fm-captain-hold.sh `open`), so cleanup never
-#                        retires the captain's own question
+#                        with the deliverable recorded when the row is still an
+#                        open captain call (bin/fm-captain-hold.sh `open`), so
+#                        cleanup never retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
 # cross-home nudge stay defense in depth, not the primary mechanism.
@@ -52,9 +52,9 @@
 # it publishes the meta first, so a crash
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
-# reopens the row instead of closing it, and never closes a row that reads as an
-# open captain call. An answer that closed the row first simply retires the
-# record.
+# records the deliverable and reopens the row instead of closing it, and never
+# closes a row that reads as an open captain call. An answer that closed the row
+# first simply retires the record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -333,15 +333,75 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 }
 
 # Keep a captain-held row open across the removal of the work record that
-# discovered it by returning the row to Queued, the conventional post-cleanup
-# shape for an open captain call.
+# discovered it: record the finished work's deliverable as one line at the end
+# of the task body (a line already present is left alone) and return the row to
+# Queued, the conventional post-cleanup shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
+# written into the body rather than through `tasks-axi update --report`,
+# because that flag rewrites the title of a row that is not Done.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
+  local data authorized_data=$1 id=$2 out command_status previous_arg=''
+  local arg deliverable='' line body new_body tmp
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
-  fm_backlog_mutate "$data" reopen "$id"
+  shift 2
+  FM_BACKLOG_TRANSITION_ERROR=
+  for arg in "$@"; do
+    case "$previous_arg" in
+      --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
+      --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
+      --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
+    esac
+    previous_arg=$arg
+  done
+  if [ -n "$deliverable" ]; then
+    out=$(fm_backlog_row_show "$data" "$id" --full)
+    command_status=$?
+    if [ "$command_status" -ne 0 ]; then
+      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
+        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
+      return "$command_status"
+    fi
+    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
+      | LC_ALL=C perl -MJSON::PP -e '
+        local $/;
+        my $shown = <STDIN>;
+        $shown =~ s/\s+\z//;
+        exit 0 if $shown eq "" || $shown eq "-";
+        my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+        print $value unless $value eq "-";
+      ') || {
+      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+      return 1
+    }
+    line="Deliverable of the finished work: $deliverable"
+    case $'\n'"$body"$'\n' in
+      *$'\n'"$line"$'\n'*) ;;
+      *)
+        new_body=$line
+        [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+        tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
+          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
+          return 1
+        }
+        if ! printf '%s\n' "$new_body" > "$tmp"; then
+          rm -f -- "$tmp"
+          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
+          return 1
+        fi
+        if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+          rm -f -- "$tmp"
+          return 1
+        fi
+        rm -f -- "$tmp"
+        ;;
+    esac
+  fi
+  fm_backlog_mutate "$authorized_data" reopen "$id"
 }
 
 fm_backlog_canonical_existing() {
@@ -529,8 +589,8 @@ fm_backlog_close_transition() {
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
-# The captain-held twin of the close transition: same record and ordering, with
-# `reopen` instead of `done`.
+# The captain-held twin of the close transition: same record, same ordering,
+# `reopen` with the deliverable recorded instead of `done`.
 fm_backlog_retain_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
@@ -730,8 +790,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
 }
 
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
-# instead of a close; the remaining flags preserve the ordinary close arguments
-# if replay later establishes that the row should close.
+# instead of a close; the remaining flags are the same completion links either
+# transition records.
 fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
   local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
   local mode=close serialized_args=()

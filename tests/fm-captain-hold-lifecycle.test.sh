@@ -1858,8 +1858,9 @@ EOF
 
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
-# work must never be the act that closes the captain's own row: the call keeps
-# reading as open on the board, and only a recorded answer closes it. An ordinary finished task in the
+# work must never be the act that closes the captain's own row: the deliverable
+# is recorded on the still-held row, the call keeps reading as open on the
+# board, and only a recorded answer closes it. An ordinary finished task in the
 # same home must still close exactly as before, and discard authority covers
 # unlanded work, never the captain's question.
 test_teardown_never_closes_a_captain_held_task() {
@@ -1887,6 +1888,8 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_contains "$show" "state: queued" "the finished work's row still reads as worked on"
   assert_contains "$show" "held: yes" "cleanup lifted the captain hold"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the deliverable was not recorded on the still-open row"
   assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
   assert_absent "$home/state/$id.backlog-close" \
     "successful cleanup left its pending transition record behind"
@@ -1935,14 +1938,16 @@ test_teardown_never_closes_a_captain_held_task() {
   assert_contains "$show" "state: queued" "forced cleanup left the captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "forced cleanup dropped the captain hold"
 
-  # Only a recorded answer closes the captain call.
+  # Only a recorded answer closes the captain call, and the deliverable survives it.
   printf 'Ship attachments by reference.\n' > "$home/answer.txt"
   run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
     || fail "the surviving captain call could not be answered"
   show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
   assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
   assert_contains "$show" "Ship attachments by reference." "the captain's words were not recorded"
-  pass "cleanup leaves a captain-held work item open, and its answer closes successfully"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the answer lost the recorded deliverable"
+  pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
 }
 
 # Retention happens after destructive cleanup, through the same pending record
@@ -1986,6 +1991,8 @@ SH
   show=$(tasks_in "$home" show "$id" --full) || fail "a failed cleanup erased the captain call"
   assert_contains "$show" "state: in_flight" "a failed cleanup changed the row before cleanup succeeded"
   assert_contains "$show" "hold_kind: captain" "a failed cleanup dropped the captain hold"
+  assert_not_contains "$show" "Deliverable of the finished work" \
+    "the deliverable was recorded before destructive cleanup succeeded"
 
   fm_fake_exit0 "$home/fakebin" treehouse
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -2001,6 +2008,8 @@ SH
   assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
   assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
   assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "session start did not record the finished work's deliverable"
   pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
 }
 
@@ -2048,6 +2057,8 @@ EOF
   assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
   assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
   assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report records/$id/report.md" \
+    "cleanup did not record the deliverable in the relocated backlog"
   assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
   assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
