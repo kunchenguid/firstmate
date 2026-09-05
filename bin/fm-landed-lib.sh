@@ -26,7 +26,26 @@
 # ambiguity going forward.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-FM_LANDED_JQ_DEFS='
+FM_COMPLETION_JQ_DEFS='
+  def completion_record:
+    . as $line
+    | if startswith("<!-- firstmate-completion.v1 ") and endswith(" -->") then
+        (sub("^<!-- firstmate-completion\\.v1 "; "")
+         | sub(" -->$"; "")
+         | fromjson?) as $record
+        | select($record | type == "object" and keys == ["value"]
+          and (.value | type == "string") and (.value | length > 0))
+        | {line:$line,value:$record.value,format:"v1"}
+      elif startswith("Deliverable of the finished work: ") then
+        {line:$line,value:(sub("^Deliverable of the finished work: "; "")),format:"legacy"}
+      else empty end;
+  def delivery_values($lines):
+    ([ $lines[] | completion_record ]
+     | if length > 0 then [.[-1].value] else [] end);
+'
+
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_LANDED_JQ_DEFS=$FM_COMPLETION_JQ_DEFS'
   def landed_delivery:
     ((.pr_url // null) != null)
     or ((.report_path // null) != null)

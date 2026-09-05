@@ -56,6 +56,10 @@
 # closes a row that reads as an open captain call. An answer that closes the row
 # first preserves the pending completion before replay retires the record.
 
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-landed-lib.sh"
+
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_TRANSITION_SKIP=
@@ -363,8 +367,14 @@ fm_backlog_record_completion() {  # <data-dir> <id> [flag...]
     FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
     return 1
   }
-  latest_line=$(printf '%s\n' "$body" \
-    | sed -n '/^<!-- firstmate-completion\.v1 /p' | tail -1)
+  latest_line=$(printf '%s\n' "$body" | jq -Rrs "$FM_COMPLETION_JQ_DEFS"'
+    split("\n")
+    | [ .[] | completion_record ]
+    | if length > 0 then .[-1].line else "" end
+  ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not read completion provenance for $id"
+    return 1
+  }
   [ -n "$deliverable" ] || deliverable=none
   encoded=$(printf '%s' "$deliverable" | LC_ALL=C perl -MJSON::PP -e '
     local $/;

@@ -364,7 +364,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" "$FM_COMPLETION_JQ_DEFS"'
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -422,19 +422,6 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def local_note($rest):
       cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
-    def delivery_value:
-      if startswith("<!-- firstmate-completion.v1 ") and endswith(" -->") then
-        (sub("^<!-- firstmate-completion\\.v1 "; "")
-         | sub(" -->$"; "")
-         | fromjson?
-         | select(type == "object" and keys == ["value"] and (.value | type == "string") and (.value | length > 0))
-         | .value)
-      elif startswith("Deliverable of the finished work: ") then
-        sub("^Deliverable of the finished work: "; "")
-      else empty end;
-    def delivery_values($lines):
-      ([ $lines[] | delivery_value ]
-       | if length > 0 then [.[-1]] else [] end);
     def delivery_links($values):
       [$values[] | scan("https?://[^[:space:]);\"<>]+")];
     def delivery_report($values):
