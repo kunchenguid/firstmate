@@ -146,7 +146,12 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  printf '%s' "$line" | awk '{
+    colon = index($0, ":")
+    head = substr($0, 1, colon)
+    gsub(/ \[at=[0-9]+\]/, "", head)
+    print head substr($0, colon + 1)
+  }' | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure

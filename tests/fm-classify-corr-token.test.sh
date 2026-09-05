@@ -596,6 +596,46 @@ test_optional_event_time() {
   pass "optional event time preserves parsing and legacy unknown time"
 }
 
+test_captain_override_ignores_event_time() {
+  local dir verb line event
+  local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
+  dir=$(make_case captain-override-time)
+  for verb in done needs-decision blocked failed; do
+    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete"; do
+      status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
+      printf '%s\n' "$line" > "$dir/state/task.status"
+      event=$(status_span_first_actionable "$dir/state/task.status" 0) \
+        || fail "override hid actionable status span: $line"
+      [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
+      [ "$(cat "$dir/state/task.status")" = "$line" ] || fail "classification rewrote stored event"
+    done
+  done
+  FM_CAPTAIN_RE='done:'
+  for line in 'blocked: waiting' 'blocked [at=1700000000]: waiting'; do
+    status_is_captain_relevant "$line" && fail "override admitted excluded event: $line"
+    printf '%s\n' "$line" > "$dir/state/task.status"
+    status_span_has_actionable "$dir/state/task.status" 0 \
+      && fail "override surfaced excluded event: $line"
+  done
+  for verb in working paused resolved captain-held; do
+    for line in "$verb: done: mentioned" "$verb [at=1700000000]: done: mentioned"; do
+      status_is_captain_relevant "$line" && fail "override bypassed nonterminal suppression: $line"
+    done
+  done
+  FM_CAPTAIN_RE='^custom-verb: audit complete$'
+  for line in 'custom-verb: audit complete' 'custom-verb [at=1700000000]: audit complete'; do
+    status_is_captain_relevant "$line" || fail "timestamp broke custom verb override: $line"
+  done
+  FM_CAPTAIN_RE="^done \\[corr=$CORR\\]: literal \\[at=1700000000\\]$"
+  for line in "done [corr=$CORR]: literal [at=1700000000]" \
+    "done [at=1700000000] [corr=$CORR]: literal [at=1700000000]" \
+    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]"; do
+    status_is_captain_relevant "$line" || fail "normalization changed correlation metadata or note: $line"
+  done
+  pass "captain regex overrides preserve timed and legacy relevance and event bytes"
+}
+
+test_captain_override_ignores_event_time
 test_optional_event_time
 test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in
