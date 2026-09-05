@@ -438,7 +438,7 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Grok's native completion path revalidated on 2026-08-12, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
@@ -446,7 +446,7 @@ Claude Code 2.1.219
 codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
-grok 0.2.103 (89c3d36fb6f1) [stable]
+grok 1.0.3 (1a29d5bc12) [stable]
 ```
 
 | Harness | Exact opt-in command | Observed guarantee |
@@ -455,7 +455,13 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
-| Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
+| Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion delivered the actionable close into the same interactive session, the cycle ledger recorded `reason=actionable-signal`, and Grok started a distinct live successor arm without another human prompt. |
+
+The Grok refresh produced:
+
+```text
+ok - grok 1.0.3 (1a29d5bc12) [stable] live E2E consumed actionable native completion and re-armed a live successor in the same session
+```
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

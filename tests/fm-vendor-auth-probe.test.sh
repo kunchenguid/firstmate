@@ -55,7 +55,7 @@ if IFS= read -r -t 2 leaked; then
   printf '%s\n' "$leaked" >> "$FM_FAKE_GROK_STDIN"
 fi
 if [ "${1:-}" = --version ]; then
-  printf 'grok %s (fakebuild) [stable]\n' "${FM_FAKE_GROK_VERSION:-0.2.117}"
+  printf 'grok %s (fakebuild) [stable]\n' "${FM_FAKE_GROK_VERSION:-1.0.3}"
   exit 0
 fi
 case "${FM_FAKE_GROK_MODE:-authenticated}" in
@@ -75,7 +75,7 @@ case "${FM_FAKE_GROK_MODE:-authenticated}" in
   empty) : ;;
   hang) sleep 30 ;;
 esac
-# grok 0.2.117 exits 0 whether or not the session authenticates; the fake keeps
+# grok 1.0.3 exits 0 whether or not the session authenticates; the fake keeps
 # that property so a regression to exit-status reading fails here.
 exit 0
 SH

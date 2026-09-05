@@ -175,23 +175,25 @@ That zero is a prepaid balance, not the subscription window, and is never headro
 
 ## Standalone Grok discovery probe
 
-Verified 2026-07-30 on `grok 0.2.117 (f1c06093089f) [stable]`.
+Verified 2026-08-12 on `grok 1.0.3 (1a29d5bc12) [stable]`, after the credentialed watcher-continuity contract passed on the same binary.
 
 ```sh
 grok --version
-grok models   # stdin closed, single attempt, hard-bounded
+bin/fm-vendor-auth-probe.sh grok
+GROK_HOME=<empty-isolated-home> grok models </dev/null
 ```
 
 Observed:
 
+- The maintained probe reports `probe=grok status=authenticated version=1.0.3 versionVerified=yes`.
 - `grok models` exits `0` and its first stdout line is `You are logged in with grok.com.` for an authenticated session.
 - With a home directory holding no Grok credential, the first stdout line is `You are not authenticated.`, also with exit status `0`.
 - Because the status is `0` in both cases, the exit status is not a verdict; only the literal first stdout line is examined, and a blank first line does not authenticate.
-- `<home>/.grok/auth.json` was byte-identical across the authenticated run (`mtime`, `size`, and mode `0600` unchanged), so the probe is a read in that path.
+- The live credential file was byte-identical by SHA-256 before and after both checks, so neither probe mutated it.
 
 These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
-Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
+Re-run the three commands above and update this section and the pinned version together when the vendor CLI changes.
 
 ## Regression coverage
 

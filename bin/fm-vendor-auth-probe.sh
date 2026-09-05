@@ -29,7 +29,7 @@
 #
 # Registered probes:
 #   grok   `grok models` - the standalone Grok Build CLI. Verified on grok
-#          0.2.117: the command exits 0 in BOTH the authenticated and the
+#          1.0.3: the command exits 0 in BOTH the authenticated and the
 #          unauthenticated case, so only the literal first stdout line
 #          discriminates and the exit status is never a verdict.
 #
@@ -63,7 +63,7 @@
 #                                  `alarm 0` both mean "no deadline".
 set -u
 
-VERIFIED_GROK_VERSION=0.2.117
+VERIFIED_GROK_VERSION=1.0.3
 
 usage() {
   cat <<'EOF'
@@ -161,7 +161,7 @@ probe_grok() {
     printf 'timeout\n'
     return 0
   fi
-  # The exit status is deliberately ignored: grok 0.2.117 exits 0 in both the
+  # The exit status is deliberately ignored: grok 1.0.3 exits 0 in both the
   # authenticated and unauthenticated cases, so only the first stdout line
   # discriminates. Raw output is classified here and never printed.
   first=$(printf '%s\n' "$output" | head -n 1)

@@ -50,8 +50,21 @@ lab_pid_is_safe() {
   esac
 }
 
+arm_pid_is_tracked() {
+  local pid=$1 command
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in
+    *bin/fm-watch-arm.sh*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cleanup() {
-  local watcher_pid arm_pid
+  local watcher_pid arm_pid turn_barrier_pid
+  if [ -d "$HOME_DIR/state" ]; then
+    : > "$HOME_DIR/state/grok-initial-turn-release"
+  fi
+  turn_barrier_pid=$(cat "$HOME_DIR/state/grok-initial-turn-hook.pid" 2>/dev/null || true)
   watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
   arm_pid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
   "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
@@ -62,6 +75,9 @@ cleanup() {
   if [ -n "$arm_pid" ] && lab_pid_is_safe "$arm_pid"; then
     kill -TERM "$arm_pid" 2>/dev/null || true
   fi
+  if [ -n "$turn_barrier_pid" ] && lab_pid_is_safe "$turn_barrier_pid"; then
+    kill -TERM "$turn_barrier_pid" 2>/dev/null || true
+  fi
   rm -rf "$LAB"
 }
 trap cleanup EXIT
@@ -69,6 +85,21 @@ trap cleanup EXIT
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
+cat > "$PROJECT/bin/fm-grok-continuity-turn-barrier.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE="${FM_HOME:?}/state"
+[ ! -e "$STATE/grok-initial-turn-complete" ] || exit 0
+printf '%s\n' "${BASHPID:-$$}" > "$STATE/grok-initial-turn-hook.pid"
+while [ ! -e "$STATE/grok-initial-turn-release" ]; do
+  sleep 0.05
+done
+: > "$STATE/grok-initial-turn-complete"
+SH
+chmod +x "$PROJECT/bin/fm-grok-continuity-turn-barrier.sh"
+cat > "$PROJECT/.grok/hooks/zz-fm-continuity-turn-barrier.json" <<'JSON'
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash -lc 'exec \"${GROK_WORKSPACE_ROOT:?}/bin/fm-grok-continuity-turn-barrier.sh\"'","timeout":180}]}]}}
+JSON
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/grok-e2e.meta"
 
@@ -78,20 +109,51 @@ printf 'project=fixture\n' > "$HOME_DIR/state/grok-e2e.meta"
 wait_for_text "Grok Build" 180 || fail "Grok did not reach its ready composer"
 sleep 1
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
-PROMPT='Use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh`. Never use a shell ampersand. Once it reports started, respond briefly.'
+PROMPT='Use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh`. Never use a shell ampersand. Once it reports started, respond exactly INITIAL_WATCHER_READY. Only after that tracked background task later completes, run exactly `bin/fm-wake-drain.sh`, handle the durable wake, run the exact WAKE_ACK_REQUIRED command it prints, then use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh` again. Never use a shell ampersand. Once the successor reports started, respond exactly WAKE_HANDLED_AND_REARMED.'
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l "$PROMPT"
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
 
 i=0
-initial_watcher=
+turn_barrier_pid=
 while [ "$i" -lt 240 ]; do
-  initial_watcher=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
-  [ -n "$initial_watcher" ] && kill -0 "$initial_watcher" 2>/dev/null && break
+  turn_barrier_pid=$(cat "$HOME_DIR/state/grok-initial-turn-hook.pid" 2>/dev/null || true)
+  [ -n "$turn_barrier_pid" ] && kill -0 "$turn_barrier_pid" 2>/dev/null && break
   sleep 0.5
   i=$((i + 1))
 done
-if [ -z "$initial_watcher" ] || ! kill -0 "$initial_watcher" 2>/dev/null; then
-  fail "Grok did not start the tracked background watcher"
+if [ -z "$turn_barrier_pid" ] \
+  || ! kill -0 "$turn_barrier_pid" 2>/dev/null \
+  || ! lab_pid_is_safe "$turn_barrier_pid"; then
+  capture >&2
+  fail "Grok initial turn did not reach its controlled Stop boundary"
+fi
+initial_watcher=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+initial_arm_pid=$(ps -p "$initial_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
+if [ -z "$initial_watcher" ] \
+  || ! kill -0 "$initial_watcher" 2>/dev/null \
+  || ! lab_pid_is_safe "$initial_watcher" \
+  || [ -z "$initial_arm_pid" ] \
+  || ! kill -0 "$initial_arm_pid" 2>/dev/null \
+  || ! arm_pid_is_tracked "$initial_arm_pid"; then
+  capture >&2
+  fail "Grok initial turn reached Stop without a tracked live watcher"
+fi
+: > "$HOME_DIR/state/grok-initial-turn-release"
+i=0
+while [ "$i" -lt 240 ] && kill -0 "$turn_barrier_pid" 2>/dev/null; do
+  sleep 0.05
+  i=$((i + 1))
+done
+if kill -0 "$turn_barrier_pid" 2>/dev/null \
+  || [ ! -e "$HOME_DIR/state/grok-initial-turn-complete" ]; then
+  fail "Grok initial turn did not complete its controlled Stop boundary"
+fi
+current_watcher=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+if [ "$current_watcher" != "$initial_watcher" ] \
+  || ! kill -0 "$initial_watcher" 2>/dev/null \
+  || ! kill -0 "$initial_arm_pid" 2>/dev/null; then
+  capture >&2
+  fail "Grok initial turn completed without its original watcher live"
 fi
 
 printf 'done: grok live e2e watcher fire\n' > "$HOME_DIR/state/grok-e2e.status"
@@ -103,10 +165,52 @@ while [ "$i" -lt 240 ]; do
 done
 grep -Eq 'reason=actionable-signal' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "Grok action cycle was not classified in the lifecycle ledger"
-wait_for_text "Task completed in" 120 || fail "Grok did not surface its native background-task completion notification"
+
+i=0
+successor_watcher=
+recovery_state=
+while [ "$i" -lt 240 ]; do
+  successor_watcher=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+  recovery_state=$(cat "$HOME_DIR/state/.watcher-down" 2>/dev/null || true)
+  if [ -n "$successor_watcher" ] \
+    && [ "$successor_watcher" != "$initial_watcher" ] \
+    && kill -0 "$successor_watcher" 2>/dev/null \
+    && [ -f "$HOME_DIR/state/.wake-queue" ] \
+    && [ ! -s "$HOME_DIR/state/.wake-queue" ]; then
+    case "$recovery_state" in
+      acked:handling:*|acked:downtime:*) break ;;
+    esac
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+if [ -z "$successor_watcher" ] \
+  || [ "$successor_watcher" = "$initial_watcher" ] \
+  || ! kill -0 "$successor_watcher" 2>/dev/null \
+  || ! lab_pid_is_safe "$successor_watcher"; then
+  capture >&2
+  fail "Grok did not start a live successor from native background completion"
+fi
+successor_arm_pid=$(ps -p "$successor_watcher" -o ppid= 2>/dev/null | tr -d ' ' || true)
+if [ -z "$successor_arm_pid" ] \
+  || ! kill -0 "$successor_arm_pid" 2>/dev/null \
+  || ! arm_pid_is_tracked "$successor_arm_pid"; then
+  fail "Grok successor was not owned by a tracked background task"
+fi
+if [ ! -f "$HOME_DIR/state/.wake-queue" ] \
+  || [ -s "$HOME_DIR/state/.wake-queue" ]; then
+  fail "Grok successor started before the durable wake was acknowledged"
+fi
+case "$(cat "$HOME_DIR/state/.watcher-down" 2>/dev/null || true)" in
+  acked:handling:*|acked:downtime:*) ;;
+  *) fail "Grok successor started before the recovery generation was acknowledged" ;;
+esac
 pane=$(capture)
+if printf '%s\n' "$pane" | grep -Fq 'GROK_EXIT='; then
+  fail "Grok exited instead of continuing in the same interactive session"
+fi
 if printf '%s\n' "$pane" | grep -Fq 'bin/fm-watch-arm.sh &'; then
   fail "Grok used a shell ampersand instead of its tracked background task"
 fi
 
-printf 'ok - %s live E2E preserved tracked background completion and shared ledger classification\n' "$GROK_VERSION"
+printf 'ok - %s live E2E consumed actionable native completion and re-armed a live successor in the same session\n' "$GROK_VERSION"
