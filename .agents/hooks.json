@@ -1,0 +1,41 @@
+{
+  "firstmate-sessionstart": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "../bin/fm-antigravity-hook.sh sessionstart",
+        "timeout": 180
+      }
+    ]
+  },
+  "firstmate-shell-seatbelts": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../bin/fm-arm-pretool-check.sh --antigravity"
+          },
+          {
+            "type": "command",
+            "command": "../bin/fm-cd-pretool-check.sh --antigravity"
+          }
+        ]
+      }
+    ]
+  },
+  "firstmate-delegation-seatbelt": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../bin/fm-subagent-pretool-check.sh --antigravity"
+          }
+        ]
+      }
+    ]
+  }
+}
