@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-launcher-workspace-e2e.test.sh - mandatory ISOLATED
-# end-to-end real-Herdr test for worker PLACEMENT with presentation spaces
-# disabled.
+# end-to-end real-Herdr test for worker PLACEMENT.
 #
 # The guarantee under test: a crewmate or scout is created in the exact Herdr
 # workspace of the firstmate or secondmate process that launched it, identified

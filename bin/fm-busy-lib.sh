@@ -984,13 +984,13 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
 # override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
 # be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
+fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir>
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
   fi
-  if ! fm_backend_target_exists "$backend" "$target" "$label" 2>/dev/null; then
+  if ! fm_backend_target_exists "$backend" "$target" 2>/dev/null; then
     printf 'dead endpoint-gone'
     return 0
   fi

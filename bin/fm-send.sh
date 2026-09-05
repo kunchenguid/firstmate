@@ -8,7 +8,7 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
+# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c.
 #
 # Two data planes:
 #

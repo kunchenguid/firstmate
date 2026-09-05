@@ -43,9 +43,8 @@
 # it orphaned, because tasks-axi treats only two-or-more-space lines as body.
 # The move needs compatible `tasks-axi` on PATH, including atomic multi-ID `mv`
 # support. Bootstrap requires a compatible build fleet-wide, so this works
-# everywhere;
-# own hand-editing of its own backlog, not this validated helper. Idempotent:
-# re-running converges. Atomic: on any move failure nothing moves.
+# everywhere. Idempotent: re-running converges. Atomic: on any move failure
+# nothing moves.
 # See AGENTS.md project management and task lifecycle.
 # Remote routes use an outbox handoff: one atomic local tasks-axi mv removes the
 # selected set from the dispatchable backlog into data/handoff/<id>.outbox.md,

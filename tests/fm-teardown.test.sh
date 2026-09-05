@@ -1816,11 +1816,7 @@ case "\${1:-} \${2:-}" in
     printf '%s\n' '{"server":{"running":true}}'
     ;;
   "session list")
-    if [ "\${FM_FAKE_HERDR_SESSION_LIST_GARBAGE:-0}" = 1 ]; then
-      printf '%s\n' 'not-json'
-    else
-      printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
-    fi
+    printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
     ;;
   "pane close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
@@ -1985,11 +1981,7 @@ set -u
 printf '%s\n' "\$*" >> "\${FM_FAKE_HERDR_LOG:?}"
 case "\${1:-} \${2:-}" in
   "session list")
-    if [ "\${FM_FAKE_HERDR_SESSION_LIST_GARBAGE:-0}" = 1 ]; then
-      printf '%s\n' 'not-json'
-    else
-      printf '%s\n' '{"sessions":[{"name":"childsession","running":true,"socket_path":"$case_dir/child.sock"}]}'
-    fi
+    printf '%s\n' '{"sessions":[{"name":"childsession","running":true,"socket_path":"$case_dir/child.sock"}]}'
     ;;
   "workspace list") exit 1 ;;
   "pane get")
