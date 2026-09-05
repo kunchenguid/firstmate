@@ -264,7 +264,7 @@ fleet_sync_origin_backed_project_count() {
   local count proj
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
+  for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
     [ -d "$proj" ] || continue
     git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
     git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue

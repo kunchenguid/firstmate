@@ -319,7 +319,6 @@ sync_project() {
   # $PROJ to be the root of its own work tree before any other git command runs.
   proj_top=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) || proj_top=""
   if [ -z "$proj_top" ]; then
-    echo "$label: skipped: not a git repo"
     return 0
   fi
   # Both sides are physical paths (git resolves --show-toplevel through symlinks),
@@ -458,7 +457,7 @@ if [ $# -eq 1 ]; then
 fi
 
 [ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
+for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
   [ -e "$proj" ] || continue
   [ -d "$proj" ] || continue
   # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost

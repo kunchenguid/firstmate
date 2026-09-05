@@ -561,6 +561,37 @@ test_shallow_clone_without_network_fails_loud() {
   pass "a shallow clone with an unreachable origin stays shallow and fails loud"
 }
 
+test_hidden_shallow_clone_unshallows_and_reports() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" .hidden-shallow)
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "hidden shallow fixture is not shallow"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" ".hidden-shallow: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "whole-fleet sync did not repair an immediate hidden shallow clone"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = false ] \
+    || fail "whole-fleet sync left the hidden clone shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 6 ] \
+    || fail "whole-fleet sync did not restore the hidden clone history"
+  pass "an immediate hidden shallow clone is repaired like a visible clone"
+}
+
+test_hidden_non_repo_directory_stays_silent() {
+  local home out
+  home=$(new_home)
+  mkdir -p "$home/projects/.cache"
+
+  out=$(run_sync "$home")
+
+  assert_not_contains "$out" ".cache:" \
+    "hidden non-repository directory produced a fleet-sync outcome"
+  [ -d "$home/projects/.cache" ] || fail "hidden non-repository directory was removed"
+  pass "an immediate hidden non-repository directory is ignored silently"
+}
+
 test_bootstrap_relays_recovered_and_stuck() {
   local home stuck rec shallow shallow_offline out
   home=$(new_home)
@@ -571,7 +602,7 @@ test_bootstrap_relays_recovered_and_stuck() {
   rec=$(build_pair "$home" rec-clone)
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
-  shallow=$(build_shallow_pair "$home" shallow-clone)
+  shallow=$(build_shallow_pair "$home" .shallow-clone)
   shallow_offline=$(build_shallow_pair "$home" shallow-offline-clone)
   git -C "$shallow_offline" remote set-url origin "file://$home/remotes/missing.git"
 
@@ -581,7 +612,7 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"
-  assert_contains "$out" "FLEET_SYNC: shallow-clone: recovered: unshallowed repository history (2 -> 6 commits)" \
+  assert_contains "$out" "FLEET_SYNC: .shallow-clone: recovered: unshallowed repository history (2 -> 6 commits)" \
     "bootstrap relays the shallow-repair history growth"
   assert_contains "$out" "FLEET_SYNC: shallow-offline-clone: skipped: could not unshallow repository history at 2 commits:" \
     "bootstrap relays an unreachable shallow-repair failure"
@@ -791,6 +822,8 @@ test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_shallow_clone_unshallows_and_reports
 test_shallow_clone_without_network_fails_loud
+test_hidden_shallow_clone_unshallows_and_reports
+test_hidden_non_repo_directory_stays_silent
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
