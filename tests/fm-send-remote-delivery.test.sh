@@ -399,7 +399,7 @@ test_remote_send_revalidates_after_retirement_lock() {
   dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
   rhome=$(setup_remote_secondmate_home remote-retire-race)
   meta="$rhome/state/parent-route/rsm.meta"
-  lock="$rhome/state/parent-route/.meta-rsm.lock"
+  lock="$rhome/state/parent-route/.locks/rsm/meta.lock"
   ready="$dir/lock-ready"
   release="$dir/release-lock"
   FM_STATE_OVERRIDE="$rhome/state/parent-route" bash -c '
@@ -435,7 +435,7 @@ test_remote_send_revalidates_parent_route_after_retirement_lock() {
   rhome=$(setup_remote_secondmate_home remote-parent-retire-race)
   home=$(setup_remote_parent_home remote-parent-retire-race "$rhome")
   meta="$home/state/rsm.meta"
-  lock="$home/state/.meta-rsm.lock"
+  lock="$home/state/.locks/rsm/meta.lock"
   ready="$dir/lock-ready"
   release="$dir/release-lock"
   FM_STATE_OVERRIDE="$home/state" bash -c '

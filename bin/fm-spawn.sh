@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--cursor-exemption <attended|envelope:<name>>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--cursor-exemption <attended|envelope:<name>>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate [--cursor-exemption <attended|envelope:<name>>]
+#   --cursor-exemption is the per-invocation grant that lets a cursor spawn past the
+#   unattended bar, either `attended` when a person is in the pane or
+#   `envelope:<name>` when the named outer isolation envelope governs the worker.
+#   It is never inherited from the environment, and the grant is recorded in the
+#   task's meta and on the success line so an audit can tell the two apart.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -20,7 +25,10 @@
 #   unmarked legacy Tasks stop for migration rather than becoming intent. That
 #   library owns the parsing and intent rules. When the explicit mode carries
 #   less rigor than the project's standing posture, a loud one-line deviation
-#   notice is printed and the spawn continues.
+#   notice is printed and the spawn continues. A codex ship spawn additionally
+#   prints one notice naming what codex's sandbox still denies (the no-mistakes
+#   data directory), because that worker can commit but cannot drive its own
+#   validation; see codex_writable_roots() below.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -158,7 +166,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo/--cursor-exemption
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -179,6 +187,9 @@
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
+#     __CODEXADDDIRS__ codex-only: one shell-quoted `--add-dir <root>` per writable
+#                  root the crewmate contract needs outside its sandboxed worktree,
+#                  computed by codex_writable_roots() below (empty for every other harness)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -217,7 +228,9 @@
 # items), on a config/backlog-backend=manual home, and in a home that keeps no
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
 # tasks-axi refuses before creating any lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [cursor_exemption=<grant>] window=<backend-target> worktree=<path>
+# cursor_exemption= appears only when --cursor-exemption granted this launch, and
+# carries the same value recorded in state/<id>.meta so the grant is auditable.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -236,6 +249,18 @@
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
+
+# Bash 5.2 defaults patsub_replacement ON, which gives `&` in the replacement
+# operand of ${parameter//pattern/replacement} the matched pattern's text. This
+# script assembles launch commands by substituting shell-quoted paths into
+# templates, and a granted root or brief path containing `&` (a project checked
+# out under `a&b`) would be rewritten into a corrupted path - the worker would
+# be granted or pointed at the wrong location while the launch reports success.
+# Stock macOS bash 3.2, which this script must keep running under, has no such
+# expansion: replacements are literal. Turning the option off everywhere pins
+# the literal semantics on every bash version, so the substitution below cannot
+# mean different things on different machines.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -307,6 +332,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -330,6 +357,11 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+# The cursor unattended exemption is per invocation and never ambient: it is a
+# flag on THIS spawn, recorded in THIS task's meta, so one deliberate attended
+# launch cannot silently exempt a later unattended spawn in the same shell.
+CURSOR_EXEMPTION=
+CURSOR_EXEMPTION_SET=0
 KIND_SET=0
 HARNESS_ARG=
 MODEL=
@@ -361,6 +393,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      cursor-exemption) CURSOR_EXEMPTION=$a; CURSOR_EXEMPTION_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -384,6 +417,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --cursor-exemption) want_value=cursor-exemption ;;
+    --cursor-exemption=*) CURSOR_EXEMPTION=${a#--cursor-exemption=}; CURSOR_EXEMPTION_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -395,6 +430,11 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$CURSOR_EXEMPTION_SET" -eq 0 ] || [ -n "$CURSOR_EXEMPTION" ] || { echo "error: --cursor-exemption requires a non-empty value" >&2; exit 1; }
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_valid "$CURSOR_EXEMPTION"; then
+  echo "error: --cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' where <name> starts with a letter or digit and continues with letters, digits, '.', '_', or '-' (the named outer isolation envelope that governs this worker); '$CURSOR_EXEMPTION' names neither, and a grant that is unnamed, free-form, or carrying a line break could neither be audited later nor written into the task record without displacing another recorded field" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -459,10 +499,30 @@ else
   fi
 fi
 
+# The grant recorded on an EXISTING task's own durable record, or nothing when
+# the task has no record yet. This is not ambient inheritance: it reads THIS
+# task's own meta and nothing else, which is the same durable-record source
+# --relaunch reads. Every path that restarts an existing task asks it, then
+# passes the answer through fm_control_cursor_exemption_inherited so one rule -
+# envelope survives, attended never does, and only onto cursor - governs the
+# relaunch verb and firstmate's own secondmate liveness recovery alike.
+spawn_recorded_cursor_exemption() {  # <state-dir> <id>
+  local meta="$1/$2.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  fm_meta_get "$meta" cursor_exemption
+}
+
+spawn_recorded_harness() {  # <state-dir> <id>
+  local meta="$1/$2.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  fm_meta_get "$meta" harness
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent remote_recorded_exemption sm_primary_head sync_out sync_rc
+  local remote_exemption_note remote_launch_refusal remote_launch_qualifier
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -501,15 +561,61 @@ spawn_remote_secondmate() {
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
-    *)
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
-      return 1
-      ;;
-  esac
+  if ! fm_control_harness_supported "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+    return 1
+  fi
+  # firstmate's own secondmate liveness recovery re-runs `fm-spawn.sh <id>
+  # --secondmate` with no flag, so without this an enveloped cursor secondmate
+  # could never be brought back after its endpoint died - the durable envelope
+  # that justified the grant still governs the replacement, which is the whole
+  # reason an envelope grant is inheritable and an attended one is not.
+  if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+    CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+      "$(spawn_recorded_cursor_exemption "$STATE" "$id")" \
+      "$(spawn_recorded_harness "$STATE" "$id")" "$harness")
+  fi
+  # This path launches and returns long before the shared guards below, so it
+  # asks the same owners rather than carrying its own copy of either rule: a
+  # remote cursor secondmate is the least observable parked pane there is, and it
+  # must not be the one spawn that walks around the bar. The grant is refused on
+  # a non-cursor harness HERE, before the round trip, for the same reason the
+  # local path refuses it: forwarding it would both record a stale cursor grant
+  # in this parent's task meta and hand the remote host a flag its own fm-spawn.sh
+  # refuses anyway. This route asks the shared composite rather than its
+  # constituent predicates, so a policy rule added to the owner reaches the remote
+  # route too - the local-versus-remote asymmetry has produced two real defects on
+  # this branch already, and a route standing outside the owner is how a third
+  # would arrive.
+  # The shared refusal offers both grant forms because both are valid on an
+  # ordinary launch, but only an envelope grant can describe a worker on another
+  # host, so this route qualifies the shared text rather than forking a second
+  # copy of it. The qualifier is attached ONLY to the cursor refusal it explains:
+  # the composite also refuses this route for reasons that have nothing to do
+  # with a grant, and stapling cursor guidance onto those would answer a question
+  # the operator did not ask - or, on a non-cursor harness carrying a grant, tell
+  # them to drop the flag and to pass one in the same breath.
+  remote_launch_qualifier=
+  if fm_control_cursor_exemption_applies "$harness"; then
+    remote_launch_qualifier=" On this REMOTE secondmate route only --cursor-exemption envelope:<name> is accepted, because 'attended' asserts a person at this pane and cannot describe a worker on another host."
+  fi
+  if ! remote_launch_refusal=$(fm_control_launch_refusal "$harness" secondmate "$CURSOR_EXEMPTION"); then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: ${remote_launch_refusal}${remote_launch_qualifier}" >&2
+    return 1
+  fi
+  # `attended` asserts that a person is at THIS pane, which says nothing about a
+  # worker started on another host, so it is refused here rather than forwarded.
+  # Only a named isolation envelope describes a property that still holds there.
+  if [ "$CURSOR_EXEMPTION" = attended ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: an 'attended' cursor exemption asserts a person at this pane and cannot authorize a worker on a remote host; pass --cursor-exemption envelope:<name> naming the proven isolation envelope that governs the remote worker" >&2
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -633,8 +739,15 @@ spawn_remote_secondmate() {
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
+  # Self-describing trailing arguments; bin/fm-remote-secondmate-control.sh's
+  # cmd_launch owns the wire contract and its compatibility degradation. Only an
+  # envelope grant is forwardable: `attended` asserts a person at THIS pane and
+  # cannot describe a worker on another host, so it never crosses the wire.
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  [ -z "$remote_traceparent" ] || launch_args+=("traceparent:$remote_traceparent")
+  case "$CURSOR_EXEMPTION" in
+    envelope:?*) launch_args+=("exemption:$CURSOR_EXEMPTION") ;;
+  esac
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -684,6 +797,17 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  # The grant is recorded the same way: from what the remote endpoint actually
+  # carries, not from what this side asked to deliver. A launch that reused an
+  # already-alive endpoint did not run under a newly requested grant, so
+  # recording the request would leave the parent's audit line and its pre-stop
+  # relaunch check claiming cursor authority the live worker never had. The
+  # endpoint reports its grant on the same route block; an endpoint carrying none
+  # reports none, and a value that fails the shared shape check is treated as
+  # none rather than recorded.
+  remote_recorded_exemption=$(printf '%s\n' "$out" | sed -n 's/^cursor_exemption=//p' | tail -1)
+  fm_control_cursor_exemption_valid "$remote_recorded_exemption" || remote_recorded_exemption=
+  fm_control_cursor_exemption_applies "$remote_harness" || remote_recorded_exemption=
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -694,6 +818,7 @@ spawn_remote_secondmate() {
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
+    [ -z "$remote_recorded_exemption" ] || echo "cursor_exemption=$remote_recorded_exemption"
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
@@ -729,7 +854,9 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  remote_exemption_note=
+  [ -z "$remote_recorded_exemption" ] || remote_exemption_note=" cursor_exemption=$remote_recorded_exemption"
+  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off$remote_exemption_note window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
 
@@ -984,6 +1111,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$CURSOR_EXEMPTION_SET" -eq 0 ] || shared_args+=(--cursor-exemption "$CURSOR_EXEMPTION")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1252,6 +1380,372 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
+# codex is the only adapter firstmate launches inside a filesystem sandbox
+# (-s workspace-write), which confines every shell command the worker runs to its
+# own worktree plus /tmp and $TMPDIR. The paths the contract needs OUTSIDE that
+# worktree differ by kind, so an ungranted codex worker is structurally unable to
+# finish its brief (observed 2026-08-26: a codex scout produced a complete report
+# it could not deliver, and fm-captain-hold.sh's lock retry recursed on the denial
+# until the filename was too long). The grant is scoped as narrowly as the sandbox
+# mechanism allows PER KIND so a mistaken worker command cannot reach another
+# task's authoritative supervision records:
+#   ship crewmate: it never runs the completion gate and writes no report, so the
+#     only paths it needs outside its worktree are its OWN two per-task state
+#     FILES - state/<id>.status (the supervision line it appends with >>) and
+#     state/<id>.turn-ended (the wake marker its codex `notify` hook touches on
+#     every turn) - plus the git common dir below. Granting those two files, not
+#     state/, keeps EVERY other task's status, meta, and completion-lock records
+#     out of reach. Both are pre-created here so the single-file roots resolve and
+#     neither the append nor the touch needs the directory-create permission a
+#     file grant withholds; touching an existing turn-ended marker only bumps its
+#     mtime, which is exactly what the watcher ages (bin/fm-watch.sh
+#     busy_turn_over_age). Pre-creating a state/ file DOES make it a new signal
+#     file for bin/fm-watch.sh scan_signals, which reports any status file or
+#     turn-end marker whose signature differs from its persisted state/.seen-*
+#     one, so every file this grant pre-creates goes through
+#     codex_precreate_root_file below and is marked as already reported: codex has
+#     no semantic busy source that could absorb such a wake, and a wake for
+#     activity nobody produced is a false report.
+#   ship crewmate and secondmate also get the task's OWN steering inbox DIRECTORY,
+#     state/<id>.inbox (path owned by fm_task_inbox_dir in
+#     bin/fm-task-inbox-lib.sh). Every brief kind carries the inbox section
+#     (bin/fm-brief.sh), and its acknowledgement IS a `mv` of the handled record
+#     into state/<id>.inbox/handled/; without write on that directory a sandboxed
+#     worker could read its steering messages and never acknowledge one, so the
+#     re-ring ladder would escalate it as stuck for complying. It has to be the
+#     directory rather than a file because the record names are allocated by
+#     firstmate after launch and cannot be named ahead of time; it is still the
+#     task's own path, strictly narrower than state/. The inbox and its handled/
+#     are created here so the root resolves at launch.
+#   scout: the SAME per-task state set a ship crewmate gets - status file,
+#     turn-ended marker (its codex notify hook is armed exactly like a ship's),
+#     steering inbox - plus two DIRECTORY roots a ship never needs:
+#     state/.locks/<id>/ for the completion gate, and its own data/<id>/ for the
+#     report at data/<id>/report.md. The captain-hold gate the scout runs takes
+#     the task's metadata lock, and that whole lock protocol (the lock symlink,
+#     fm_lock_owner_dir's mktemp-named owner directories, the .steal lock) lives
+#     inside state/.locks/<id>/ (fm_meta_lock_path in bin/fm-wake-lib.sh); the
+#     mktemp suffixes and the lock symlink cannot be named ahead of time, so the
+#     DIRECTORY is what gets granted and pre-created here, never files inside
+#     it. The completion attestation itself is written to
+#     data/<origin>/captain-review (bin/fm-captain-hold.sh), so neither the
+#     gate's lock nor its attestation needs any write on the shared state/
+#     directory. The former whole-state/ scout grant is gone on purpose: it made
+#     the gate work, but it let one scout overwrite every OTHER task's status,
+#     inbox, lock, and watcher records. data/<id>/ - not the shared data/ root
+#     (report.md does not exist at launch while the data/<id>/ dir holding
+#     brief.md already does) - keeps every other task's report and the shared
+#     backlog out of a mistaken command's reach.
+#   secondmate: only the parent's state/<id>.status file (see below).
+#   the task worktree's git COMMON dir (ship + scout), which for a pooled worktree
+#     lives inside the primary checkout: without it `git add` is denied, so a codex
+#     task cannot stage or commit anything at all.
+# The grant is never $FM_HOME itself, which keeps .env, config/, projects/, and
+# every other home denied. --add-dir is used rather than
+# -c sandbox_workspace_write.writable_roots=[...] because it is additive: the -c
+# form REPLACES an operator's own configured roots. The brief's own rule against
+# writing outside the worktree stays stricter than this sandbox, so the grant is a
+# backstop, not a permission. Every root is emitted CANONICALIZED, because the
+# launch's own __TURNEND__ is built from a `pwd -P` state dir and codex resolves a
+# granted root the same way: a home reached through a symlink (a /tmp home on
+# macOS, where /tmp -> /private/tmp) would otherwise name a path neither the
+# notify hook nor the sandbox ever sees. The harness-adapters skill owns what this
+# leaves a codex worker able to finish (network is granted separately by the
+# launch's own network_access flag, not by any root), and
+# docs/verification/codex-sandbox.md owns the measurements.
+
+# The ONE owner of every path this grant resolves, creates, or emits. Pre-creation
+# and directory creation below obtain their paths from here rather than carrying
+# their own guards, so a fourth call site added later inherits both invariants by
+# construction instead of having to remember them.
+#
+# Two DIFFERENT things can be a symlink here, and they are not the same threat.
+# Do not collapse them.
+#   A link planted INSIDE a task's own state or data path, pointing outward, is
+#   HOSTILE and is refused. A codex worker holds write on its own granted state
+#   and data paths, so one mistaken command there can leave a granted path - or
+#   a sibling of it, inside a granted DIRECTORY root such as the task's inbox or
+#   its .locks/<id>/ - as a link; without invariant 1 the NEXT ship or
+#   secondmate spawn of that id would resolve the link and hand its worker the
+#   TARGET as a writable root, and would create through it. Observed: with
+#   state/<id>.inbox linked to the home, the composed launch granted $FM_HOME
+#   itself.
+#   The CONTAINER itself being reached through a link is ordinary operator layout,
+#   NOT an attack, so it is canonicalized and allowed exactly as the worktree and
+#   git common dir already are. That asymmetry is not reachable for $STATE
+#   today - fm_backlog_directory_present already refuses a symlinked state
+#   directory for EVERY spawn, kind and harness alike, long before this function
+#   runs - so this exemption is about keeping the stance coherent rather than
+#   fixing a live break. No grant makes $FM_HOME writable, so no worker can
+#   replace a container; only the entries under it are reachable, and those are
+#   what invariant 1 guards.
+# Invariant 1: the final component is never a symlink and is never resolved
+# through, EXCEPT when the path is the container itself.
+# Invariant 2: the resolved root stays inside <container>, so no symlinked
+# component anywhere in the path can walk the grant out of the state or data tree
+# the root belongs to. It is defence in depth behind invariant 1 and does catch
+# the directory-link shapes on its own if invariant 1 is removed, so it bounds the
+# class for any future caller or path shape reached another way.
+# PARENT components are still resolved, because that canonicalization is what
+# makes a granted root the same physical path the sandbox and the notify hook use
+# (a /tmp home on macOS, where /tmp is /private/tmp).
+# A violation REFUSES loudly and fails the spawn rather than dropping the root: a
+# silently missing root would strand the worker in exactly the way this grant
+# exists to prevent, so the captain is told which path to repair.
+# Invariant 3: a granted FILE root has exactly one link to its inode. A symlink
+# reaches outward through a name the fleet already refuses; a HARD link reaches
+# outward through an inode while the lexical path stays inside the task's own
+# state tree, so invariants 1 and 2 cannot see it. Whoever could create such a
+# link inside state/ could already write there, but the granted codex worker is
+# the party that then writes THROUGH the link into whatever file shares the
+# inode, so the spawn declines to extend that reach: a second name for one inode
+# is never a shape firstmate itself creates, and a multiply linked status or
+# turn-ended record is corruption the captain should see at dispatch. Directory
+# roots are exempt because a directory cannot carry a second link on macOS or
+# Linux, and the container itself stays canonicalized exactly as before.
+# The count is read through fm_inherit_file_link_count (bin/fm-config-inherit-lib.sh),
+# the fleet's existing portable reader for this exact BSD/GNU stat split, rather
+# than a fifth private copy of it.
+codex_root_real() {  # <container> <path>; prints the canonical root, or fails
+  local container=$1 path=$2 parent base real container_real links
+  if [ "$path" != "$container" ] && [ -L "$path" ]; then
+    echo "error: $path is a symlink; firstmate never resolves, creates, or grants a codex writable root through a link - repair or remove that record before spawning" >&2
+    return 1
+  fi
+  if [ "$path" != "$container" ] && [ -f "$path" ]; then
+    links=$(fm_inherit_file_link_count "$path")
+    case "$links" in
+      ''|*[!0-9]*)
+        echo "error: $path is a candidate codex writable root, but its link count could not be read; refusing to grant a root whose inode sharing cannot be verified" >&2
+        return 1
+        ;;
+    esac
+    if [ "$links" -gt 1 ]; then
+      echo "error: $path has $links hard links; firstmate never grants a codex writable root whose inode is shared with another path - repair or remove that record before spawning" >&2
+      return 1
+    fi
+  fi
+  if [ -d "$path" ]; then
+    real=$(cd "$path" 2>/dev/null && pwd -P) || real=$path
+  else
+    parent=$(dirname "$path")
+    base=$(basename "$path")
+    if parent=$(cd "$parent" 2>/dev/null && pwd -P); then
+      real="${parent%/}/$base"
+    else
+      real=$path
+    fi
+  fi
+  container_real=$(cd "$container" 2>/dev/null && pwd -P) || container_real=$container
+  case "$real" in
+    "$container_real"|"$container_real"/*) ;;
+    *)
+      echo "error: the codex writable root for $path resolves to $real, outside $container_real - refusing to grant a root beyond the task's own state and data paths" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$real"
+}
+
+# Pre-create one file so its single-file writable root resolves, and mark it as
+# already reported to the watcher. EVERY file this grant pre-creates MUST go
+# through here, including any root added later. bin/fm-watch.sh scan_signals
+# surfaces any state/ signal file whose signature differs from its persisted
+# state/.seen-* one, so a file conjured by the spawn rather than written by a
+# worker would otherwise wake the captain for activity nobody produced, and codex
+# has no verified semantic busy source that could absorb such a wake. Real later
+# activity changes the signature and surfaces normally. A file that already
+# exists is left untouched, marker included: its unreported signature may be real
+# activity nobody has surfaced yet.
+# The symlink and containment invariants come from codex_root_real above, which
+# is consulted BEFORE anything is created: `[ -e ]` alone is false for a DANGLING
+# link, so an unguarded append would follow it and create its target anywhere on
+# disk. Declining matches how the rest of the fleet treats a symlinked state
+# record: bin/fm-classify-lib.sh models kind=symlink with its target,
+# bin/fm-watch.sh scan_signals deliberately keeps a symlinked .status VISIBLE
+# rather than skipping it, and bin/fm-inactive-reconcile.sh refuses to act on one.
+codex_precreate_root_file() {  # <container> <file>
+  local container=$1 file=$2
+  codex_root_real "$container" "$file" >/dev/null || return 1
+  if [ -e "$file" ]; then
+    # The right TYPE is part of the contract: the worker appends to this path, so
+    # a directory (or any non-regular entry) sitting where the file belongs would
+    # pass the containment check, be granted as a root, and then fail every
+    # append and touch the worker owes. Refusing names the path to repair rather
+    # than reporting a successful spawn whose worker is stranded.
+    if [ ! -f "$file" ]; then
+      echo "error: $file exists but is not a regular file; the codex writable-root grant needs the per-task record file itself - repair or remove that entry before spawning" >&2
+      return 1
+    fi
+    if ! perl -MFcntl=:DEFAULT -e '
+      sysopen(my $fh, $ARGV[0], O_WRONLY | O_APPEND | O_NOFOLLOW) or exit 1;
+      close $fh or exit 1;
+    ' "$file" 2>/dev/null; then
+      echo "error: $file cannot be opened for writing; refusing to grant a codex writable root the worker cannot actually write - inspect the record's permissions" >&2
+      return 1
+    fi
+    return 0
+  elif ! perl -MFcntl=:DEFAULT -e '
+    sysopen(my $fh, $ARGV[0], O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW, 0666) or exit 1;
+    close $fh or exit 1;
+  ' "$file" 2>/dev/null; then
+    echo "error: $file could not be created; refusing to grant a codex writable root the worker cannot actually write - inspect the state directory's permissions" >&2
+    return 1
+  fi
+  if ! fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null; then
+    if ! rm -f -- "$file" || [ -e "$file" ] || [ -L "$file" ]; then
+      echo "error: $file was created but its signal marker could not be published, and the untracked record could not be removed safely; refusing to grant a codex writable root" >&2
+      return 1
+    fi
+    echo "error: the signal marker for $file could not be published safely; refusing to grant a codex writable root with an untracked record" >&2
+    return 1
+  fi
+}
+
+# Create a directory the grant depends on, under a root the owner above has
+# already cleared. <dir> is the root that will be granted; <create> is the path
+# beneath it to make, so the layout stays owned by bin/fm-task-inbox-lib.sh rather
+# than being rebuilt here. A failure is loud for the same reason as the file
+# helper's: a granted inbox whose handled/ subdirectory could not be created is a
+# root the worker's acknowledgement move cannot complete in.
+codex_precreate_root_dir() {  # <container> <dir> <create>
+  local container=$1 dir=$2 create=$3 tmp
+  codex_root_real "$container" "$dir" >/dev/null || return 1
+  if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+    echo "error: $dir exists but is not a directory; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  if [ ! -e "$dir" ] && ! mkdir "$dir" 2>/dev/null; then
+    echo "error: $dir could not be created under $container; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  codex_root_real "$container" "$dir" >/dev/null || return 1
+  if [ -L "$create" ] || { [ -e "$create" ] && [ ! -d "$create" ]; }; then
+    echo "error: $create exists but is not a safe directory; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  if [ ! -e "$create" ] && ! mkdir "$create" 2>/dev/null; then
+    echo "error: $create could not be created under the steering inbox $dir; refusing to grant a codex writable root the worker cannot acknowledge in - repair or remove that entry before spawning" >&2
+    return 1
+  fi
+  codex_root_real "$dir" "$create" >/dev/null || return 1
+  tmp=$(umask 077; mktemp "$dir/.fm-codex-root.XXXXXX") || {
+    echo "error: $dir cannot be written; refusing to grant a codex writable root the worker cannot acknowledge in - inspect the inbox permissions" >&2
+    return 1
+  }
+  rm -f -- "$tmp" || return 1
+  tmp=$(umask 077; mktemp "$create/.fm-codex-root.XXXXXX") || {
+    echo "error: $create cannot be written; refusing to grant a codex writable root the worker cannot acknowledge in - inspect the handled directory's permissions" >&2
+    return 1
+  }
+  rm -f -- "$tmp" || return 1
+}
+
+codex_writable_roots() {  # <kind> <worktree> <project> <id>; prints one absolute root per line
+  local kind=$1 worktree=$2 project=$3 id=$4 wt_real gitdir project_gitdir status_file turnend_file
+  local inbox_dir meta_lock_dir
+  status_file="$STATE/$id.status"
+  inbox_dir=$(fm_task_inbox_dir "$STATE" "$id")
+  # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
+  # crewmate spawns are already inside the sandbox, and it runs its OWN completion
+  # gate in its own home. The paths it needs outside are the status file the
+  # PARENT scaffolded in the parent's state dir, which is how every routed answer
+  # returns (bin/fm-brief.sh's charter), and the parent-side steering inbox its
+  # charter tells it to acknowledge in. It gets ONLY those two - not the parent's
+  # state dir, data/, or git objects. Both are pre-created so the roots resolve
+  # and the append never needs directory-create permission.
+  if [ "$kind" = secondmate ]; then
+    codex_precreate_root_file "$STATE" "$status_file" || return 1
+    codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
+    codex_root_real "$STATE" "$status_file" || return 1
+    codex_root_real "$STATE" "$inbox_dir" || return 1
+    return 0
+  fi
+  turnend_file="$STATE/$id.turn-ended"
+  codex_precreate_root_file "$STATE" "$status_file" || return 1
+  codex_precreate_root_file "$STATE" "$turnend_file" || return 1
+  codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
+  codex_root_real "$STATE" "$status_file" || return 1
+  codex_root_real "$STATE" "$turnend_file" || return 1
+  codex_root_real "$STATE" "$inbox_dir" || return 1
+  if [ "$kind" = scout ]; then
+    # The completion gate's whole lock protocol lives inside the task's OWN lock
+    # directory (fm_meta_lock_path in bin/fm-wake-lib.sh). The directory is
+    # pre-created and granted here because a sandboxed scout cannot create it:
+    # that needs write on the shared state directory, which is exactly the
+    # reach this per-task layout removed. fm_lock_owner_dir's [ -d ] guard then
+    # never even attempts a denied mkdir when the gate takes the lock.
+    meta_lock_dir=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
+    meta_lock_dir=${meta_lock_dir%/*}
+    codex_precreate_root_dir "$STATE" "$meta_lock_dir" "$meta_lock_dir" || return 1
+    codex_root_real "$STATE" "$meta_lock_dir" || return 1
+    # The report and the completion attestation (data/<id>/report.md and
+    # data/<id>/captain-review, bin/fm-captain-hold.sh) both land under the
+    # task's own data directory, never the shared data/ root.
+    codex_root_real "$DATA" "$DATA/$id" || return 1
+  fi
+  wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
+  gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
+  [ -n "$gitdir" ] || return 0
+  case "$gitdir" in
+    /*) ;;
+    *) gitdir="$wt_real/$gitdir" ;;
+  esac
+  gitdir=$(cd "$gitdir" 2>/dev/null && pwd -P) || return 0
+  # A git directory already inside the worktree needs no grant; only a linked
+  # worktree's out-of-tree common dir does.
+  case "$gitdir/" in
+    "$wt_real"/*) return 0 ;;
+  esac
+  # The out-of-tree grant is pinned to the RECORDED PROJECT's own common
+  # directory rather than to whatever the worktree's `.git` file currently
+  # reports. The `.git` file of a linked worktree is a plain text file INSIDE
+  # the worktree, so a previous worker - which holds write access to exactly
+  # that worktree - can repoint it at another repository's worktree metadata,
+  # and `rev-parse` then happily resolves against the redirected metadata. An
+  # unpinned grant would hand the next worker write access to that other
+  # repository's refs, config, and hooks, which escapes the per-project sandbox
+  # boundary this whole grant exists to hold. A worktree whose reported common
+  # dir is not the project's own is tampered or drifted, so the spawn refuses
+  # and names both paths rather than granting either.
+  project_gitdir=$(git -C "$project" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: the codex git-metadata grant needs $project to be the git repository this worktree belongs to, but its own common dir could not be resolved - refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  [ -n "$project_gitdir" ] || {
+    echo "error: $project resolved an empty git common dir; refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  case "$project_gitdir" in
+    /*) ;;
+    *) project_gitdir=$(cd "$project" 2>/dev/null && pwd -P)/"$project_gitdir" ;;
+  esac
+  project_gitdir=$(cd "$project_gitdir" 2>/dev/null && pwd -P) || {
+    echo "error: the recorded project's git common dir $project_gitdir does not resolve; refusing to grant an unpinned out-of-tree git directory" >&2
+    return 1
+  }
+  if [ "$gitdir" != "$project_gitdir" ]; then
+    echo "error: the worktree $worktree reports git metadata at $gitdir, which is not the recorded project $project's own $project_gitdir - a redirected .git file would silently widen the grant to another repository, so repair the worktree's .git before spawning" >&2
+    return 1
+  fi
+  printf '%s\n' "$gitdir"
+}
+
+codex_add_dir_flags() {  # <kind> <worktree> <project> <id>; prints the shell-quoted --add-dir flags
+  local kind=$1 worktree=$2 project=$3 id=$4 root out='' roots
+  # Command substitution, not a process substitution: a refused root must be able
+  # to fail this function rather than composing a launch with the grant silently
+  # short of what the brief needs.
+  roots=$(codex_writable_roots "$kind" "$worktree" "$project" "$id") || return 1
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    out="$out--add-dir $(shell_quote "$root") "
+  done <<EOF
+$roots
+EOF
+  printf '%s' "$out"
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -1267,22 +1761,49 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # Two independent controls disable claude's `/bug`/`/feedback` model-drafted
-    # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
-    # agent never queues or submits a bug-report draft on the captain's behalf even
-    # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
-    # directly and is not subject to managed-settings precedence, while --settings
-    # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
-    # changelog 2.1.247) that a managed policy CAN override back on. Either control
-    # alone disables the feature; keep both so a managed override of one still
-    # leaves the other in force. Both are per-launch, scoped to this invocation only,
-    # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # --permission-mode auto runs the worker under claude's OWN classifier
+    # ("approve/deny permission prompts") instead of --dangerously-skip-permissions,
+    # which bypassed every check. Auto mode is NOT unconditional: claude 2.1.251
+    # falls back to the prompting `default` mode when auto is unavailable for the
+    # plan, for the session model, while fast mode is on, or when the classifier
+    # transcript grows too long, and an unattended pane has nobody to answer the
+    # prompt it falls back to. CLAUDE_CODE_DISABLE_FAST_MODE=1 removes the one
+    # fallback trigger a launch can control (verified: the session then reports
+    # fast_mode_disabled_reason=disabled_by_env), so a captain's own /fast on
+    # cannot silently drop a crewmate back to interactive prompting. The
+    # remaining triggers are plan/model/server-side; the harness-adapters skill
+    # documents the resulting dialog so a degraded worker is recognizable.
+    #
+    # The feedback controls are independent of that permission posture and stay
+    # layered on: CLAUDE_CODE_SEND_FEEDBACK=0 and the settings-level
+    # feedbackDrafts=off keep a fleet worker from queueing or submitting a
+    # /bug or /feedback report on the captain's behalf, so changing the
+    # permission mode did not retire either one.
+    # documents the resulting dialog so a degraded worker is recognizable.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # -s workspace-write -a never replaces --dangerously-bypass-approvals-and-sandbox:
+    # the worker runs under codex's OWN filesystem sandbox and never prompts,
+    # instead of running with both switched off. workspace-write confines writes
+    # to the task worktree plus /tmp and $TMPDIR, which is the intended blast
+    # radius for a crewmate. It also DENIES the supervision paths the crewmate
+    # contract needs outside that worktree; __CODEXADDDIRS__ grants exactly those
+    # back per kind (codex_writable_roots above).
+    #
+    # sandbox_workspace_write.network_access=true is NOT part of that write grant,
+    # it is a distinct axis: workspace-write confines NETWORK egress
+    # as well as writes, and codex defaults that key to false. Verified on codex
+    # 0.150.1 against a config-free CODEX_HOME - the worker's shell cannot resolve
+    # a host at all under the default, which would break `git push`, `gh`, and
+    # every dependency install the delivery contract needs. Setting it here rather
+    # than relying on the operator's own ~/.codex/config.toml makes the grant
+    # explicit and machine-independent; the write confinement above is unaffected
+    # (verified: a write outside the worktree is still denied with it on).
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write __CODEXADDDIRS__-a never -c sandbox_workspace_write.network_access=true "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write __CODEXADDDIRS__-a never -c sandbox_workspace_write.network_access=true -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1297,15 +1818,30 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
+    # crewmate needs. grok's launch was deliberately left unchanged by the
+    # hardening that moved claude, codex, and cursor onto their own approval and
+    # sandbox controls. That is a scope decision, not a claim about grok: grok is
+    # not installed on the machine this change was verified on, so its available
+    # approval and sandbox controls were NOT re-examined here and no conclusion
+    # about them is asserted. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
-    # --yolo does NOT cover and which would otherwise block every spawn, since
-    # each task gets a fresh worktree path cursor has never seen. --yolo is the
-    # --force alias whose TUI label is "Run Everything". --workspace pins the
+    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which the
+    # autonomy flags do NOT cover and which would otherwise block every spawn,
+    # since each task gets a fresh worktree path cursor has never seen.
+    # --auto-review --sandbox enabled replaces the former --yolo (the --force
+    # alias whose TUI label is "Run Everything"): the worker runs under cursor's
+    # own review and sandbox controls rather than with both switched off. These
+    # were measured on cursor-agent 2026.08.25, not assumed. --sandbox enabled
+    # DOES confine writes under --auto-review (a write outside the worktree is
+    # denied), but --force defeats that confinement at any flag order, so --force
+    # and --yolo are deliberately NOT passed: either would claim a confinement
+    # the launch does not actually have. The accepted cost is that --auto-review
+    # runs a server classifier that "prompts for the rest", so a cursor pane CAN
+    # park on a dialog nobody is watching; the ship refusal below is what keeps
+    # that cost off the unattended implementation path.
+    # --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
     # isolation contract. The binary is resolved rather than named because
@@ -1314,7 +1850,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # gemini (Google Gemini CLI): a positional query starts the supervised
     # interactive session and auto-submits it, so the brief rides the launch
     # command exactly as it does for claude and grok (verified: a multi-line
@@ -1381,14 +1917,98 @@ launch_template() {
   esac
 }
 
+# Resolve a raw launch command's leading executable under the conservative
+# grammar above. Prints the resolved WORDS one per line, executable first, so a
+# caller can also inspect the flags that ride the launch; the syntax precheck
+# refuses raw input containing newlines, so the line split is lossless.
+raw_launch_executable() {
+  case "$1" in
+    *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'*'*|*'?'*|*'['*|*']'*|*'{'*|*'}'*|*'~'*|*$'\n'*|*$'\r'*) return 2 ;;
+  esac
+  perl -MText::ParseWords=shellwords -e '
+    my @words = eval { shellwords($ARGV[0]) };
+    exit 2 if $@ || !@words;
+    my $index = 0;
+    while ($index < @words && $words[$index] =~ /\A([A-Za-z_][A-Za-z0-9_]*)=/) {
+      exit 2 if $1 =~ /\A(?:PATH|CDPATH|PWD|OLDPWD)\z/;
+      $index++;
+    }
+    exit 2 if $index >= @words;
+    if ($words[$index] eq q{env}) {
+      $index++;
+      while ($index < @words) {
+        my $word = $words[$index];
+        if ($word =~ /\A([A-Za-z_][A-Za-z0-9_]*)=/) {
+          exit 2 if $1 =~ /\A(?:PATH|CDPATH|PWD|OLDPWD)\z/;
+          $index++;
+          next;
+        }
+        if ($word eq q{--}) { $index++; last; }
+        exit 2 if $word =~ /\A-/;
+        last;
+      }
+    }
+    exit 2 if $index >= @words || $words[$index] eq q{env};
+    exit 2 if $words[$index] =~ m{/(?:bash|csh|dash|deno|env|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z};
+    exit 2 if $words[$index] =~ /\A(?:bash|command|csh|dash|deno|exec|fish|ksh|nice|node|nohup|perl|python(?:\d+(?:\.\d+)?)?|ruby|sh|sudo|tcsh|time|zsh)\z/;
+    print join(qq{\n}, @words[$index .. $#words]), qq{\n};
+  ' -- "$1"
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    raw_executable_status=0
+    raw_launch_words=$(raw_launch_executable "$LAUNCH") || raw_executable_status=$?
+    if [ "$raw_executable_status" -eq 2 ]; then
+      echo "error: raw launch command is not a direct executable or supported bare env wrapper, so its executable cannot be verified for the cursor unattended-launch bar; shell expansion syntax, absolute wrappers, and env --split-string/-S are refused" >&2
+      exit 1
+    fi
+    raw_executable=${raw_launch_words%%$'\n'*}
+    [ -z "$raw_executable" ] || HARNESS=$(basename "$raw_executable")
+    # Cursor installs a legacy alias named `agent` alongside cursor-agent, and that
+    # basename is far too generic to add to any adapter table by name. But a raw
+    # `agent ...` launch that resolves to a VERIFIED cursor executable is a real
+    # cursor launch, and without this canonicalization it records harness=agent,
+    # which the cursor unattended bar cannot see - exactly the parked-pane hazard
+    # that bar exists for. Resolving through the verified owner (structure or a
+    # bounded --help probe) holds such a launch to the cursor rule; an `agent`
+    # that does not verify stays an unverified adapter exactly as before.
+    if [ "$HARNESS" = agent ]; then
+      agent_word=$raw_executable
+      agent_candidate=$(command -v "$agent_word" 2>/dev/null || true)
+      if [ -n "$agent_candidate" ] && [ -x "$agent_candidate" ] \
+        && fm_cursor_verify_executable "$agent_candidate"; then
+        HARNESS=cursor-agent
+      fi
+    fi
+    # A recognized cursor launch is refused outright when its own flags defeat
+    # the confinement the cursor posture promises. The verified template keeps
+    # --force and --yolo out of the command because either one overrides
+    # --auto-review --sandbox enabled at any flag order (measured, cursor-agent
+    # 2026.08.25), so a raw `cursor-agent --force ...` would launch with the
+    # sandbox off while the record, the grant, and the control plane all treat
+    # the task as cursor-confined. Refusing here names the flags rather than
+    # stripping them: a launch whose meaning the caller edited behind the
+    # posture is not a launch firstmate can vouch for.
+    raw_cursor_family=0
+    if [ -n "$HARNESS" ] && [ "$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)" = cursor ]; then
+      raw_cursor_family=1
+    fi
+    if [ "$raw_cursor_family" -eq 1 ]; then
+      while IFS= read -r raw_word; do
+        case "$raw_word" in
+          --force|--yolo)
+            echo "error: raw cursor launch passes --force/--yolo, which overrides the --auto-review --sandbox enabled confinement at any flag order; a cursor launch must keep the sandbox controls the verified template enforces, so drop the flag or launch the template cursor harness instead" >&2
+            exit 1
+            ;;
+        esac
+      done <<EOF
+$raw_launch_words
+EOF
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1418,18 +2038,62 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+# Which kinds a verified adapter may run is owned by
+# fm_control_harness_supports_kind in fm-control-lib.sh, and this asks it for
+# EVERY verified harness rather than repeating any rule here, so a future entry
+# in that table is enforced by the launch owner and the control plane alike. The
+# control plane asks the same question BEFORE it stops a running agent, which is
+# what keeps a refused relaunch from stranding a task with no agent at all.
+#
+# Two rules live in that table today. muse has no primary supervision protocol,
+# so it cannot run a secondmate. cursor launches under --auto-review --sandbox
+# enabled, which keeps a REAL filesystem sandbox but accepts that cursor's
+# server classifier prompts for any call it does not deem safe; an unattended
+# pane has no approver and the cursor-transcript busy fold keeps a parked pane
+# reading as working, so cursor is refused for ship, scout, and secondmate
+# alike, the last being the worst case because a whole firstmate instance stalls
+# invisibly. The non-prompting alternative (--force, and its documented --yolo
+# alias) defeats --sandbox enabled, so it is refused as false hardening rather
+# than shipped.
+#
+# An unverified harness is skipped, not refused: a raw launch command is the
+# documented escape hatch for an adapter with no template. The canonicalization
+# inside the table still holds a raw `cursor-agent` command to the cursor rule.
+# The harness this spawn resolved to is finally known here, so a RESTART can now
+# ask the inheritance owner what the grant on this task's own record is still
+# worth. A grant that does not survive onto this harness is dropped rather than
+# carried into the record below.
+#
+# Restricted to the two paths that restart an EXISTING task from its own record:
+# `--relaunch`, and a `--secondmate` spawn, which is the shape firstmate's own
+# liveness recovery uses. An ordinary fresh ship or scout spawn is deliberately
+# excluded even when its id already has a stale record, because inheriting there
+# would hand a launch nobody granted an exemption for a grant from a previous
+# one - the ambient, implicit authority the per-invocation flag exists to
+# prevent. A fresh spawn keeps requiring the flag.
+if [ "$CURSOR_EXEMPTION_SET" -eq 0 ] &&
+  { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; }; then
+  CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+    "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" \
+    "$(spawn_recorded_harness "$STATE" "$ID")" "$HARNESS")
+fi
+
+# Every POLICY admissibility rule is composed by fm_control_launch_refusal in
+# bin/fm-control-lib.sh, asked here with the EFFECTIVE grant rather than with how
+# the grant arrived, so flag, inheritance, and any later source go through one
+# check. bin/fm-control.sh's relaunch asks the SAME function before it stops
+# anything, which is what keeps a policy refusal on the pre-stop side of that
+# transaction instead of stranding a task whose replacement is then refused.
+#
+# The environmental refusals BELOW this point are deliberately outside it: each
+# one's answer depends on the state of this MACHINE - resolving an adapter's
+# executable on PATH, probing a live model catalog, checking for a
+# worker-reachable credential are examples rather than the whole set - which the
+# control plane cannot ask without running the harness binary. A new rule that is
+# answerable from harness, kind, and grant alone belongs in the composite; one
+# that needs this machine belongs here and can strand a relaunch.
+if ! SPAWN_LAUNCH_REFUSAL=$(fm_control_launch_refusal "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"); then
+  echo "error: $SPAWN_LAUNCH_REFUSAL" >&2
   exit 1
 fi
 
@@ -1583,9 +2247,12 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort. On
+      # codex-cli 0.150.1 the bundled catalog advertises low|medium|high|xhigh on
+      # every model, and max (plus ultra on two) on SOME models only, so max is
+      # omitted here because it is per-model rather than universal, not because
+      # the vendor lacks it (docs/verification/codex-sandbox.md records the
+      # measurement). Passing it would be a known-bad value on gpt-5.4/5.5.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
@@ -1924,6 +2591,24 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+  # codex's sandbox denies the no-mistakes data directory, and no writable root
+  # changes that, so a codex worker cannot drive the validation pipeline itself
+  # (docs/verification/codex-sandbox.md). No network limit is claimed here, and
+  # none applies: the codex launch above passes
+  # -c sandbox_workspace_write.network_access=true unconditionally, which overrides
+  # the operator's own config, so egress is on for every firstmate codex crewmate
+  # regardless of the machine. The pipeline denial is the reliable blocker, so say
+  # it at dispatch rather than leaving it to be rediscovered at the gate; this is a
+  # notice, not a refusal, because a firstmate-driven landing is legitimate.
+  # It fires for no-mistakes ALONE, because that is the only mode whose contract
+  # needs the denied directory. A direct-PR brief (bin/fm-dod-lib.sh) says "Do NOT
+  # run /no-mistakes" and completes by pushing and opening the PR itself, which
+  # the git common dir grant and the unconditional network_access grant already
+  # cover; local-only never leaves the machine. On either of those modes every
+  # clause here would describe a limit the worker does not have.
+  if [ "$HARNESS" = codex ] && [ "$MODE" = no-mistakes ]; then
+    echo "notice: $ID ships mode=$MODE on codex, whose sandbox denies the no-mistakes data directory - the worker can commit and reach the network but cannot run validation itself; expect to land it another way or choose another harness" >&2
   fi
 fi
 
@@ -3038,7 +3723,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort cursor_exemption busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3053,6 +3738,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$CURSOR_EXEMPTION" ] || echo "cursor_exemption=$CURSOR_EXEMPTION"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -3161,6 +3847,13 @@ case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
+  codex)
+    CODEX_ADD_DIRS=$(codex_add_dir_flags "$KIND" "$WT" "$PROJ_ABS" "$ID") || {
+      echo "error: refusing to launch $ID on codex: its writable-root grant could not be composed safely (see the refusal above); repair the named path, because launching without it would strand the worker outside the paths its brief requires" >&2
+      exit 1
+    }
+    LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$CODEX_ADD_DIRS"}
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
@@ -3343,4 +4036,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_EXEMPTION_NOTE=
+[ -z "$CURSOR_EXEMPTION" ] || SPAWN_EXEMPTION_NOTE=" cursor_exemption=$CURSOR_EXEMPTION"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_EXEMPTION_NOTE window=$META_WINDOW worktree=$WT"

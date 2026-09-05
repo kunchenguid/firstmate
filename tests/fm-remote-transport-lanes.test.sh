@@ -47,9 +47,14 @@ cleanup_lane_fixture() {
 }
 trap cleanup_lane_fixture EXIT
 
+# The copy list must carry every library fm-remote-secondmate-control.sh sources
+# plus the worker stack it stages through: a control-state call launched here
+# runs the REAL script against this partial root, so one missing source file is
+# a wire failure the lane then reports as a control-state refusal.
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-delta-read.sh" \
   "$ROOT/bin/fm-remote-secondmate-control.sh" "$ROOT/bin/fm-backend.sh" \
+  "$ROOT/bin/fm-trace-context-lib.sh" "$ROOT/bin/fm-control-lib.sh" \
   "$ROOT/bin/fm-pending-reply-lib.sh" "$ROOT/bin/fm-task-inbox-lib.sh" \
   "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-marker-lib.sh" \
   "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-tmux-lib.sh" \

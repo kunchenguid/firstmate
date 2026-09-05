@@ -197,8 +197,8 @@ EOF
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
     || fail "captain-held bookkeeping closes re-woke their own home"
-  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
-  assert_grep "decision_keys=sample-route-call" "$home/state/$id.meta" "inventory was not recorded as task ids"
+  assert_grep "decisions_reviewed=1" "$home/data/$id/captain-review" "completion attestation missing"
+  assert_grep "decision_keys=sample-route-call" "$home/data/$id/captain-review" "inventory was not recorded as task ids"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close the live status decisions: $open"
@@ -1086,8 +1086,9 @@ test_legacy_identities_keep_working() {
   show=$(tasks_in "$home" show "$hold" --full)
   assert_contains "$show" "hold_kind: captain" "the shim-created row is not a plain captain-held task"
 
-  # A pre-collapse metadata attestation records SHORT keys; verify must resolve
-  # them through the legacy composed identity.
+  # A pre-relocation attestation lives in the task meta with SHORT keys; verify
+  # must resolve it through the legacy meta fallback (the record now lands in
+  # data/<id>/captain-review instead) and the legacy composed identity.
   printf 'decisions_reviewed=1\ndecision_keys=keep-two,pick-one\n' >> "$home/state/$id.meta"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "legacy short-key metadata did not verify against composed identities"

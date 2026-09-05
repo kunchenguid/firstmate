@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent:<value>] [exemption:<grant>]
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -61,6 +61,10 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -128,16 +132,24 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent exemption
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  exemption=$(fm_meta_get "$REMOTE_ENDPOINT_META" cursor_exemption)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  # The endpoint's own grant is reported for the same reason its carrier is:
+  # the parent must record the grant the RUNNING agent was launched under, and a
+  # launch request that reused an already-alive endpoint did not necessarily run
+  # under the grant this call carried. Without this line the parent cannot tell
+  # a fresh launch from a reuse, and its record would claim authority the live
+  # worker never had.
+  [ -z "$exemption" ] || printf 'cursor_exemption=%s\n' "$exemption"
 }
 
 cmd_route() {
@@ -151,9 +163,74 @@ cmd_route() {
   print_route "$id"
 }
 
+# Trailing arguments after the fixed five are SELF-DESCRIBING rather than
+# positional, so a new field cannot be mistaken for an older one. The parent
+# sends `traceparent:<value>` and `exemption:<grant>`; anything else is rejected.
+#
+# Both directions of the mixed-version contract are stated here, because a fleet
+# upgrades one host at a time and either side can be the older one.
+#
+# NEW parent, OLD remote: the older host takes its carrier POSITIONALLY as $6
+# and caps the verb at six arguments, so what breaks first is `traceparent:`,
+# not `exemption:`. Once the parent's home enables config/trace-context the
+# parent appends `traceparent:<value>` as $6 on EVERY remote secondmate launch,
+# the older host binds that whole token - prefix included - into its traceparent
+# slot and forwards it as `--traceparent traceparent:00-...`, and its own
+# fm-spawn refuses the non-W3C value. The blast radius is therefore every
+# carrier-bearing launch to a not-yet-upgraded host, including ordinary codex and
+# claude launches that have nothing to do with cursor, not just an exempted one.
+# Adding a grant on top sends a seventh argument, which trips the older
+# dispatcher's six-argument cap and exits on usage before it binds anything.
+# Only the trace-off-plus-grant case mis-binds `exemption:` itself. Every one of
+# those is loud and fails closed: none launches unexempted.
+#
+# OLD parent, NEW remote: the older parent sends its carrier as a BARE positional
+# sixth argument, which matches neither prefix. Rejecting it would break every
+# carrier-bearing remote spawn from a not-yet-upgraded parent, including ordinary
+# codex and claude launches that have nothing to do with cursor, so a bare
+# argument that is a well-formed W3C carrier is accepted as the traceparent it
+# has always been. It can never be read as a grant: only the explicit
+# `exemption:` prefix sets one, so an old parent still launches unexempted and
+# the unattended bar still applies. A bare argument that is NOT a carrier is
+# refused, so a typo or a future token cannot ride in through this branch.
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5
+  local current meta out herdr_session traceparent='' exemption='' extra
+  shift 5
+  for extra in "$@"; do
+    case "$extra" in
+      traceparent:*) traceparent=${extra#traceparent:} ;;
+      exemption:*) exemption=${extra#exemption:} ;;
+      "") ;;
+      *)
+        if [ -z "$traceparent" ] && fm_trace_context_valid "$extra"; then
+          traceparent=$extra
+        else
+          die "unrecognized remote launch argument '$extra'; expected traceparent:<value> or exemption:<grant>"
+        fi
+        ;;
+    esac
+  done
+  # Only an envelope grant crosses the wire, and this is the boundary that
+  # CONSUMES the grant, so it validates what it accepts rather than trusting the
+  # sender to have validated what it sent. The parent already refuses to compose
+  # `exemption:attended`, so nothing shipped reaches this - which is exactly why
+  # it belongs here: an `attended` grant asserts a person at the PARENT's pane
+  # and would be honored on this host as an attestation for a worker nobody is
+  # watching.
+  #
+  # The SHAPE of a grant is asked of fm_control_cursor_exemption_valid rather
+  # than matched here, so this boundary enforces exactly the rule its declared
+  # owner enforces - including the bounded envelope name - instead of a looser
+  # local copy that would let a value the owner rejects cross the wire.
+  case "$exemption" in
+    '') ;;
+    attended) die "a remote secondmate launch cannot carry an 'attended' cursor exemption: it asserts a person at the sending pane and says nothing about a worker on this host; send exemption:envelope:<name> instead" ;;
+    *)
+      fm_control_cursor_exemption_valid "$exemption" \
+        || die "unrecognized remote cursor exemption '$exemption'; a remote secondmate launch forwards only exemption:envelope:<name>, where <name> starts with a letter or digit and continues with letters, digits, '.', '_', or '-'"
+      ;;
+  esac
 
   validate_id "$id"
   validate_home "$id"
@@ -192,6 +269,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
+  [ -z "$exemption" ] || ARGS+=(--cursor-exemption "$exemption")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
@@ -413,7 +491,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] || usage; cmd_launch "$@" ;;
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;

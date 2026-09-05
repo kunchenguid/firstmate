@@ -12,22 +12,27 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
+| Autonomy | `--permission-mode auto`, so the worker runs under Claude's own classifier rather than `--dangerously-skip-permissions`, which bypassed every check. The spawn also sets `CLAUDE_CODE_DISABLE_FAST_MODE=1`; see "Auto mode" below. It layers `CLAUDE_CODE_SEND_FEEDBACK=0` and a settings file of `{"feedbackDrafts":"off"}` on top, so a fleet worker cannot queue or submit a `/bug` or `/feedback` report on the captain's behalf. |
 
-## Workspace trust
+Fresh-worktree or first-machine launch may show the workspace-trust confirmation.
+Never answer it with a sent key: the dialog's selection cursor sits on `No, exit`, so a sent Enter submits the exit choice and terminates the worker (the verified capture in `../../../docs/verification/runtime-backends.md` shows exactly that default).
+The spawn pre-registers the worktree in the launching user's own Claude trust store through `../../../bin/fm-claude-trust.sh`, so a crewmate should never meet the dialog.
+When one still appears - a Claude secondmate home Claude has never trusted is the known case, because the spawn's pre-registration deliberately skips that kind - treat the worker as blocked and let a human answer the dialog in the pane; no key firstmate sends can accept trust.
+The bypass-permissions confirmation can no longer appear, because Firstmate no longer passes `--dangerously-skip-permissions`.
+Claude's auto-mode entry warning and its auto-mode-unavailable notice are transcript NOTIFICATIONS, not choices, and they need no acknowledgement.
+Never send Enter for either one: the pane is already running, so that keystroke lands in the worker's composer.
 
-Claude gates a folder it has never seen behind an interactive workspace-trust dialog, so every fresh task worktree would hit it.
-`--dangerously-skip-permissions` does not cover that gate: `claude --help` records that the dialog is skipped only in non-interactive mode, through `-p` or a non-TTY stdout, and a crewmate pane is interactive.
-A ship or scout spawn therefore pre-registers the worktree before launch, and the dialog does not appear.
-`../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
+## Auto mode
 
-Never try to answer the trust dialog with a key.
-Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
-A visible trust dialog means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys.
-
-The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
-Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
-Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
-Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
+Auto mode is not unconditional, and the residual risk below is knowingly accepted rather than mitigated in code.
+On 2.1.251 the session falls back to the prompting `default` mode when auto mode is unavailable for the account's plan, unavailable for the session model, disabled by settings, blocked because fast mode is on, or when the classifier transcript grows too long.
+The fallback target is hardcoded to the prompting mode, so no setting redirects it to a non-prompting one, and a forced-unavailable run printed no warning at all.
+An unattended crewmate has nobody to answer the permission prompt it falls back to, and the `claude-hook` busy fold keeps that pane reading as busy rather than surfacing a hold.
+Even while auto mode IS in force the classifier can require confirmation for an individual call or block it outright, so a `git push` or `gh pr create` is not guaranteed to complete unattended.
+The spawn sets `CLAUDE_CODE_DISABLE_FAST_MODE=1` to remove the one trigger a launch command controls, so a captain's own `/fast on` cannot degrade a running crewmate.
+The plan, model, settings, and classifier-transcript triggers all remain server-controlled and are not launch-controllable, so a server-side degradation can still strand an unattended Claude worker.
+It looks like a pane that stops progressing with no status write and no turn-end while still classified busy, so peek any such pane for a permission prompt before assuming it is working.
+Firstmate threads an arbitrary `--model` from the dispatch profile into this same launch, so a model without auto-mode support is the most likely local cause.
 
 ## Composer ghost
 
@@ -38,11 +43,6 @@ CLI `--prompt-suggestions` affects print or SDK mode only and did not suppress i
 As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.sh` removes SGR-2 runs before pending classification on styled tmux, Herdr, and Zellij readers.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
-
-## Feedback drafts
-
-The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
-The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
 ## Primary integration
 

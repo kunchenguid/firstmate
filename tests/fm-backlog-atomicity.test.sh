@@ -1956,7 +1956,7 @@ test_bootstrap_rechecks_worker_record_boundary_after_locking() {
   cat > "$case_dir/fakebin/ln" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *"$home/state/.meta-$id.lock"*)
+  *"$home/state/.locks/$id/meta.lock"*)
     if [ ! -e "$case_dir/state-swapped" ]; then
       : > "$case_dir/state-swapped"
       mv "$home/state" "$home/state-original" || exit 1
@@ -2175,7 +2175,7 @@ test_teardown_rechecks_record_parent_after_lock_acquisition() {
   cat > "$case_dir/fakebin/ln" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *"$home/state/.meta-$id.lock"*)
+  *"$home/state/.locks/$id/meta.lock"*)
     if [ ! -e "$case_dir/state-swapped" ]; then
       : > "$case_dir/state-swapped"
       mv "$home/state" "$home/state-original" || exit 1

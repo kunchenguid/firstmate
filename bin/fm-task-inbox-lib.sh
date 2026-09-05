@@ -121,9 +121,17 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
 
 fm_task_inbox_lock_acquire() {  # <lock-path>
   local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
-  local deadline probe
+  local deadline probe lock_parent
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
-  probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
+  lock_parent=${lock%/*}
+  # The whole protocol's artifacts live beside the lock path, and the per-task
+  # directory fm_meta_lock_path nests under state/ does not exist yet on first
+  # contact with a home that predates the relocation. Create it so the probe
+  # below tests that directory's writability rather than failing on a missing
+  # one; when the state directory itself is read-only the mkdir fails and the
+  # caller sees the same refusal it always has.
+  [ -d "$lock_parent" ] || mkdir -p -- "$lock_parent" 2>/dev/null || return 1
+  probe=$(mktemp "$lock_parent/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
   if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
     fm_lock_try_create "$lock" && return 0

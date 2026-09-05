@@ -1490,8 +1490,17 @@ fm_backend_herdr_workspace_find_all() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null
+  # Herdr 0.7.4 projects an ordinal before a configured label in workspace-list
+  # output (`[1] firstmate`), while other supported releases return the label
+  # directly.  The ordinal is presentation state, not part of Firstmate's
+  # configured per-home identity, so normalize it before matching.  Without
+  # this a second spawn cannot rediscover its home workspace and creates a new
+  # one on each call.
+  printf '%s' "$list" | jq -r --arg want "$label" '
+    def configured_label:
+      .label | if type == "string" then sub("^\\[[0-9]+\\] "; "") else "" end;
+    .result.workspaces[]? | select(configured_label == $want) | .workspace_id
+  ' 2>/dev/null
 }
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
@@ -3133,7 +3142,12 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '
+    def configured_label:
+      .label | if type == "string" then sub("^\\[[0-9]+\\] "; "") else "" end;
+    .result.tabs[]? | select(configured_label | startswith("fm-"))
+    | "\(.tab_id)\t\(configured_label)"
+  ' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

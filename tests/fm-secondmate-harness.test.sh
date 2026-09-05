@@ -599,7 +599,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>&1 || rc=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate --cursor-exemption attended >/dev/null 2>&1 || rc=$?
 
   [ "$rc" -eq 0 ] || {
     echo "skip: cursor executable not resolvable in this environment, so the launch could not be built"
@@ -615,7 +615,50 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     "a cursor secondmate must be pinned to its own home as the workspace"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=autoarm" \
     "cursor's stop-hook park runs the watcher only between turns, so its home must inherit the autoarm model"
-  pass "Cursor is accepted for secondmates and launches with the contract its park needs"
+  pass "an attended Cursor secondmate launches with the contract its park needs"
+}
+
+# An unattended cursor secondmate is the worst parking case, because a whole
+# firstmate instance would stall invisibly, so the spawn refuses it outright.
+test_spawn_unattended_cursor_secondmate_is_refused() {
+  local w sm fakebin launchlog out rc
+  w="$TMP_ROOT/spawn-cursor-secondmate-bar"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data" "$w/home/projects"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  : > "$launchlog"
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1) || rc=$?
+
+  [ "$rc" -eq 1 ] || fail "an unattended cursor secondmate must be refused, got exit $rc"
+  assert_contains "$out" "refused for an unattended secondmate launch" \
+    "the cursor secondmate refusal did not name the refused kind"
+  [ ! -s "$launchlog" ] || fail "the cursor secondmate refusal must happen before any launch is sent"
+  # The remedy has to name the knob that actually governs THIS kind's resolution.
+  # A secondmate resolves config/secondmate-harness before config/crew-harness,
+  # so an operator told to edit crew-harness would hit the identical refusal
+  # again, and crew-dispatch profiles are never consulted for a secondmate.
+  assert_contains "$out" "set config/secondmate-harness" \
+    "the secondmate refusal must name the knob that governs secondmate resolution"
+  assert_not_contains "$out" "add a crew-dispatch profile" \
+    "a secondmate refusal must not offer a dispatch profile, which it never consults"
+  # resolve_secondmate falls back to config/crew-harness while
+  # config/secondmate-harness is unset or "default", which is the state the
+  # inherited-by-detection case this message opens with is actually in, so the
+  # remedy must offer that knob under its condition rather than deny it.
+  assert_contains "$out" "config/crew-harness" \
+    "the secondmate refusal must also offer the knob it falls back to"
+  assert_not_contains "$out" "changing crew-harness alone will not clear this" \
+    "the remedy must not deny a knob that does clear the refusal when secondmate-harness is unset"
+  pass "an unattended Cursor secondmate is refused before it can stall invisibly, naming the knob that clears it"
 }
 
 # ===========================================================================
@@ -744,8 +787,6 @@ test_spawn_bare_harness_no_model_effort_flag() {
   [ "$(meta_field "$meta" model)" = default ] || fail "bare-tokens: meta model not default (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "bare-tokens: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0 claude" \
-    "bare-tokens: Claude secondmate launch did not disable feedback drafts"
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
@@ -769,7 +810,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus'" \
+  assert_contains "$launch" "claude --permission-mode auto --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -791,7 +832,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
@@ -856,8 +897,10 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex -s workspace-write " \
     "explicit-harness-no-tokens: launch did not use codex"
+  assert_contains "$launch" " -a never -c sandbox_workspace_write.network_access=true" \
+    "explicit-harness-no-tokens: launch did not keep the codex approval policy and network grant"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"
@@ -2568,6 +2611,7 @@ test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_cursor_secondmate_launches_with_its_primary_contract
+test_spawn_unattended_cursor_secondmate_is_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag

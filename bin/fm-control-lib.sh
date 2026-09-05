@@ -92,18 +92,225 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse and gemini are
-# crewmate/scout adapters only: neither has a primary supervision protocol,
-# and bin/fm-spawn.sh refuses a --secondmate launch on either. The control plane
-# asks this BEFORE it stops anything, so an incompatible relaunch target is
+# Which task kinds an adapter is verified to run. muse is a crewmate/scout
+# adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
+# refuses a --secondmate launch on it.
+#
+# cursor is refused for EVERY ordinary unattended kind - ship, scout, AND
+# secondmate. It launches under --auto-review --sandbox enabled, which keeps a
+# real filesystem sandbox but accepts that cursor's server classifier prompts
+# for any call it does not deem safe. An unattended pane has no approver, and
+# the cursor-transcript busy fold keeps a parked pane reading as working, so the
+# stall never surfaces as a hold. A cursor secondmate is the worst case, because
+# a whole firstmate instance stalls invisibly.
+#
+# The optional third argument is the caller's EXEMPTION grant, which is the only
+# opt-in past the cursor refusal:
+#   attended         - a person is in the pane and can answer the prompt.
+#   envelope:<name>  - the named outer isolation envelope governs the worker.
+# Any other value, including an empty one, is no exemption, so an ordinary
+# unattended spawn stays refused. The grant is PER TASK, never ambient: it
+# arrives as bin/fm-spawn.sh's --cursor-exemption flag and is recorded in that
+# task's own meta, so it can neither leak from one spawn to the next in a shell
+# nor be inherited by an unrelated spawn.
+#
+# The harness is canonicalized first, so a raw launch command whose basename is
+# `cursor-agent` is held to the same rule as the `cursor` adapter name rather
+# than slipping past the table through the unverified-adapter escape hatch.
+#
+# This function is the ONE owner of which kinds an adapter may run: both muse's
+# secondmate rule and cursor's unattended rule live here only, and
+# bin/fm-spawn.sh asks it for every verified harness rather than repeating any
+# of it, so the launch owner and the control plane cannot drift. The control
+# plane asks it BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
-fm_control_harness_supports_kind() {  # <harness> <kind>
-  local harness=${1-} kind=${2-}
-  fm_control_harness_supported "$harness" || return 1
-  case "$harness" in
+fm_control_harness_supports_kind() {  # <harness> <kind> [exemption]
+  local harness=${1-} kind=${2-} exemption=${3-} canonical
+  canonical=$(fm_control_harness_family "$harness") || return 1
+  fm_control_harness_supported "$canonical" || return 1
+  case "$canonical" in
     muse|gemini) [ "$kind" != secondmate ] || return 1 ;;
+    cursor) fm_control_cursor_exemption_valid "$exemption" || return 1 ;;
   esac
+  return 0
+}
+
+# The ONE owner of what a cursor exemption grant may say. `attended` is a fixed
+# token; an envelope grant must NAME its envelope in a bounded single-line
+# charset, exactly the way every other recorded posture field is whitelisted.
+# Two properties depend on that bound. An unnamed or free-form grant could not
+# be audited back to a real envelope later, and the grant is written verbatim
+# into the task record as `cursor_exemption=<grant>`, where a value carrying a
+# newline would append a second `key=` line that fm_meta_get's last-match
+# resolution would then prefer over the real one - a grant that could silently
+# rewrite the task's recorded merge authority. Both refusal sites ask here.
+fm_control_cursor_exemption_valid() {  # <grant>
+  local grant=${1-} name
+  # The bracket ranges below are COLLATION-ordered, so without this the bound
+  # this function advertises would differ per machine: under en_US.UTF-8
+  # `envelope:unicode-with-accents` matches [A-Za-z0-9] and is accepted, while
+  # under C it is refused. fm_task_id_path_safe in bin/fm-pr-lib.sh pins the
+  # locale for exactly this reason, and the one owner of the grant charset must
+  # answer the same question everywhere or the recorded grant is unauditable.
+  local LC_ALL=C
+  case "$grant" in
+    attended) return 0 ;;
+    envelope:*)
+      name=${grant#envelope:}
+      case "$name" in
+        ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# The grant that is still in force for an UNATTENDED relaunch of a task whose
+# record holds <recorded-grant> from <source-harness> onto <target-harness>.
+# Prints that grant, or nothing when none survives. Three independent conditions
+# must all hold.
+#
+# envelope:<name> describes a mechanically proven outer isolation envelope that
+# still governs the replacement agent, so it carries over and automatic recovery
+# keeps working. `attended` asserts that a PERSON IS IN THE PANE RIGHT NOW,
+# which a later relaunch cannot inherit: the captain who attested may have
+# walked away hours before firstmate's own stuck-worker recovery relaunches with
+# nobody there.
+#
+# The grant also describes an exemption from CURSOR's unattended bar and nothing
+# else, so it survives only from and onto cursor. A relaunch that resolves from
+# or to another adapter drops it rather than carrying it into that task's record,
+# where a later relaunch back onto cursor would read it as authority nobody
+# granted for cursor. Dropping is right here and refusing is not: the harness
+# switch itself is legitimate, and refusing it after the control plane had
+# already stopped the agent is the stranding this helper exists to prevent.
+#
+# This is the ONE owner of that inheritance rule. bin/fm-spawn.sh's --relaunch
+# path asks it for the grant it will actually launch under, and the control
+# plane's PRE-STOP capability check in bin/fm-control.sh asks it for the grant
+# it must evaluate the relaunch against. Restating the rule at either site
+# would let the two answers disagree, and a disagreement here stops a running
+# agent for a launch the owner then refuses.
+fm_control_cursor_exemption_inherited() {  # <recorded-grant> <source-harness> <target-harness>
+  local grant=${1-} source=${2-} target=${3-}
+  fm_control_cursor_exemption_valid "$grant" || return 0
+  [ "$grant" != attended ] || return 0
+  fm_control_cursor_exemption_applies "$source" || return 0
+  fm_control_cursor_exemption_applies "$target" || return 0
+  printf '%s' "$grant"
+}
+
+# Whether a cursor exemption is meaningful for a launch on <harness>. A grant
+# accepted and RECORDED on another adapter would leave a stale cursor grant in
+# that task's meta, which a later relaunch onto cursor would read back as
+# authority nobody granted for cursor. Every spawn route - the local launch
+# owner and the remote secondmate route alike - asks this one predicate, so a
+# route cannot be the one that forgets the rule.
+fm_control_cursor_exemption_applies() {  # <harness>
+  local canonical
+  canonical=$(fm_control_harness_family "${1-}" 2>/dev/null) || return 1
+  [ "$canonical" = cursor ]
+}
+
+fm_control_cursor_exemption_harness_refusal() {  # <harness>
+  printf -- "--cursor-exemption applies only to a cursor launch, but this spawn resolved harness=%s; drop the flag rather than recording a cursor grant that would outlive it" "${1-}"
+}
+
+# The operator-facing reason a harness cannot run a kind. Both refusal sites -
+# the launch owner in bin/fm-spawn.sh and the pre-stop relaunch check in
+# bin/fm-control.sh - print this, so the diagnostic cannot drift from the table
+# above the way a hand-written message at each site would.
+fm_control_harness_kind_refusal() {  # <harness> <kind>
+  local harness=${1-} kind=${2-} canonical cursor_remedy
+  canonical=$(fm_control_harness_family "$harness") || {
+    printf "'%s' is not a verified adapter, so it is not verified to run a %s task" "$harness" "$kind"
+    return 0
+  }
+  case "$canonical" in
+    muse|gemini)
+      # muse and gemini share one boundary: neither carries a primary
+      # supervision protocol, so neither may run a secondmate. The adapter
+      # name is interpolated so each refusal names the harness the operator
+      # actually selected rather than a hardcoded one.
+      printf '%s is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.' "$canonical"
+      ;;
+    cursor)
+      # The remedy is per KIND because the resolution chains differ, and naming a
+      # knob that cannot clear the refusal sends an operator to edit the wrong
+      # file and hit the identical message again. A secondmate resolves through
+      # config/secondmate-harness FIRST and falls back to config/crew-harness
+      # (bin/fm-harness.sh's resolve_secondmate), so BOTH knobs are named with the
+      # condition under which each works: naming only the first would be true but
+      # incomplete, and denying the second outright would be false in exactly the
+      # inherited-by-detection case this message opens with, where both are unset.
+      # crew-dispatch profiles are never consulted for a secondmate at all. It
+      # stays here rather than at the call sites so the one owner of the refusal
+      # owns its remedy too.
+      case "$kind" in
+        secondmate) cursor_remedy='set config/secondmate-harness to a verified adapter such as codex or claude, which always governs a secondmate, or set config/crew-harness while config/secondmate-harness is unset or "default", since a secondmate resolves the former first and falls back to the latter; crew-dispatch profiles are not consulted for a secondmate' ;;
+        *) cursor_remedy='set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind' ;;
+      esac
+      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, %s; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the invocation itself with --cursor-exemption attended or --cursor-exemption envelope:<name>, which both bin/fm-spawn.sh and bin/fm-control.sh's relaunch verb accept." "$kind" "$cursor_remedy"
+      ;;
+    *)
+      printf "'%s' is not verified to run a %s task" "$canonical" "$kind"
+      ;;
+  esac
+}
+
+# The ONE composite question "would a launch with this profile be refused, and
+# why". Prints the operator-facing reason and returns 1 when it would be refused;
+# prints nothing and returns 0 when it would proceed.
+#
+# This exists because the control plane and the launch owner must ask the SAME
+# question. bin/fm-spawn.sh asks it immediately before launching, and
+# bin/fm-control.sh's relaunch asks it BEFORE it stops anything. Twice on this
+# branch the pre-stop side asked a narrower question than the launch side - once
+# missing the inheritance rule, once missing the non-cursor grant rule - and both
+# times the result was identical: the pre-stop check passed, the running agent
+# was stopped, and the replacement was then refused, stranding the task with no
+# agent. Composing the POLICY rules here means a policy rule added for the launch
+# path is automatically enforced pre-stop and the two cannot drift.
+#
+# The bound is deliberate and a contributor adding a launch-time refusal has to
+# know it. What belongs here is every rule answerable from the recorded profile
+# ALONE - harness, kind, and effective grant - because that is what the control
+# plane can evaluate while the old agent is still running. What does not belong
+# here is the ENVIRONMENTAL class, defined by its rule rather than by a roster
+# that would go stale as adapters are added: any refusal whose answer depends on
+# the state of THIS MACHINE rather than on the recorded profile. bin/fm-spawn.sh
+# still refuses after this point for several of them - resolving an adapter's
+# executable on PATH and probing a live model catalog are two examples, not the
+# whole set. Those
+# cannot be answered without probing this machine and running the harness binary,
+# which this file must never do - it is sourced as a pure contract with no side
+# effects, no backend command, and no state reads - and their answer can change
+# between the check and the launch anyway, so asking them early would narrow the
+# window without closing it and would buy a false sense of an absolute guarantee.
+# The consequence is real and stays: `relaunch` onto a harness whose executable
+# is missing stops the agent and is then refused. Add a new rule here when it is
+# answerable from the profile; otherwise leave it at the launch and know that the
+# relaunch transaction can strand on it.
+#
+# The order below is the order the refusals are reported in, so the reason the
+# control plane prints pre-stop is the reason the launch would have printed. The
+# harness-family check gates only the KIND rule, preserving the launch owner's
+# escape hatch: an unverified raw launch command has no kind table to consult,
+# while the grant rule applies to it regardless because the family canonicalizer
+# still resolves a raw `cursor-agent` command to cursor.
+fm_control_launch_refusal() {  # <harness> <kind> <effective-grant>
+  local harness=${1-} kind=${2-} grant=${3-}
+  if [ -n "$grant" ] && ! fm_control_cursor_exemption_applies "$harness"; then
+    fm_control_cursor_exemption_harness_refusal "$harness"
+    return 1
+  fi
+  if fm_control_harness_family "$harness" >/dev/null 2>&1 &&
+    ! fm_control_harness_supports_kind "$harness" "$kind" "$grant"; then
+    fm_control_harness_kind_refusal "$harness" "$kind"
+    return 1
+  fi
   return 0
 }
 

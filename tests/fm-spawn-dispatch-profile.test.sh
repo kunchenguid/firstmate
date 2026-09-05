@@ -131,9 +131,9 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 CLAUDE_CODE_DISABLE_FAST_MODE=1 claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  pass "no --model/--effort records defaults and types the claude launch instructions with its feedback controls"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -147,7 +147,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
 }
@@ -345,8 +345,10 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write " \
     "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" " -a never -c sandbox_workspace_write.network_access=true" \
+    "explicit harness launch did not keep the codex approval policy and network grant"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -384,6 +386,137 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+# Cursor installs a legacy alias named `agent`, and a raw `agent ...` launch
+# records that basename as the harness. The basename is too generic for any
+# adapter table, so the recording resolves it through the verified cursor owner
+# instead: an `agent` that resolves into cursor's install tree is held to the
+# cursor unattended bar exactly like `cursor-agent`, while an unrelated
+# executable named agent stays an unverified adapter on the escape hatch.
+# The tree mirrors the real install shape (both names symlinked into
+# cursor-agent/versions/), so verification is structural and runs no probe.
+test_raw_agent_alias_resolves_to_the_cursor_bar() {
+  local rec id out status tree
+  id=profile-agent-alias-z16
+  rec=$(make_spawn_case profile-agent-alias claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  tree="$CASE_DIR/cursor-tree"
+  mkdir -p "$tree/share/cursor-agent/versions/v1" "$tree/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$tree/share/cursor-agent/versions/v1/cursor-agent"
+  chmod +x "$tree/share/cursor-agent/versions/v1/cursor-agent"
+  ln -s "$tree/share/cursor-agent/versions/v1/cursor-agent" "$FAKEBIN_DIR/agent"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env -S agent --flag")
+  status=$?
+  expect_code 1 "$status" "an env split-string alias must refuse before cursor verification can be bypassed"
+  assert_contains "$out" "split-string" \
+    "the split-string refusal must explain why raw launch classification stopped"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused split-string alias spawn must not compose a launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "FOO='two words' agent --flag")
+  status=$?
+  expect_code 1 "$status" "a quoted assignment must still resolve the cursor alias"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the quoted assignment must not hide the cursor alias from its refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused quoted-assignment alias spawn must not compose a launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "/usr/bin/env -S agent --flag")
+  status=$?
+  expect_code 1 "$status" "an absolute env wrapper must refuse before cursor verification can be bypassed"
+  assert_contains "$out" "absolute wrappers" \
+    "the absolute env refusal must explain why raw launch classification stopped"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused absolute-wrapper alias spawn must not compose a launch"
+
+  # 1. An unattended ship spawn through the verified alias is refused by the
+  # cursor bar, not launched through the unverified-adapter escape hatch.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env FM_CURSOR_ALIAS_TEST=1 agent --flag")
+  status=$?
+  expect_code 1 "$status" "a verified cursor alias must be refused for an unattended ship"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the raw agent alias must hit the cursor refusal, not the escape hatch"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the refused alias spawn must not compose a launch"
+
+  # 2. The same alias with a person in the pane launches, records the cursor
+  # family, and runs the operator's raw command unchanged.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "env FM_CURSOR_ALIAS_TEST=1 agent --flag" --mode direct-PR --yolo off --cursor-exemption attended)
+  status=$?
+  expect_code 0 "$status" "an attended cursor alias launch should proceed"
+  assert_contains "$out" "spawned $id harness=cursor-agent" \
+    "the recorded harness must show the alias resolved to the cursor family"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent default default
+  [ "$(cat "$LAUNCH_LOG")" = "env FM_CURSOR_ALIAS_TEST=1 agent --flag" ] \
+    || fail "the raw launch command itself must run unchanged: $(cat "$LAUNCH_LOG")"
+
+  rm -f "$FAKEBIN_DIR/agent"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN_DIR/agent"
+  chmod +x "$FAKEBIN_DIR/agent"
+  ln -s "$tree/share/cursor-agent/versions/v1/cursor-agent" "$tree/bin/agent"
+  for launch in "PATH=$tree/bin agent --flag" "env PATH=$tree/bin agent --flag" "bash -c agent"; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$launch")
+    status=$?
+    expect_code 1 "$status" "a runtime-changing raw launch must refuse before cursor verification can be bypassed"
+    assert_contains "$out" "direct executable" \
+      "the runtime-changing raw launch refusal must explain why classification stopped"
+    [ ! -s "$LAUNCH_LOG" ] || fail "the refused runtime-changing raw launch must not compose a launch"
+  done
+
+  # 3. An `agent` that does NOT resolve into cursor's tree is not cursor: the
+  # escape hatch still applies and the launch proceeds as an unverified adapter.
+  id=profile-agent-impostor-z17
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  # rm first: a plain write would follow the earlier symlink into the tree and
+  # leave the alias verified.
+  rm -f "$FAKEBIN_DIR/agent"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN_DIR/agent"
+  chmod +x "$FAKEBIN_DIR/agent"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "agent --unrelated")
+  status=$?
+  expect_code 0 "$status" "an unrelated agent executable must stay on the escape hatch"
+  assert_contains "$out" "spawned $id harness=agent" \
+    "an unverified agent must be recorded as the raw basename, not guessed into cursor"
+  pass "a raw agent alias is resolved through the verified cursor owner and held to the cursor bar"
+}
+
+# A raw cursor-family launch that carries --force (or its --yolo alias) would
+# disable cursor's own sandbox while every record and control plane still treats
+# the task as cursor-confined (measured on cursor-agent 2026.08.25: --force
+# overrides --auto-review --sandbox enabled at any flag order). The
+# classification must refuse such a launch by name before any cursor bar runs,
+# while the same flag on an unverified NON-cursor raw launch stays on the
+# documented escape hatch.
+test_raw_cursor_launch_refuses_sandbox_defeating_flags() {
+  local rec id out status
+  id=profile-raw-cursor-force-z17
+  rec=$(make_spawn_case profile-raw-cursor-force claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cursor-agent -p --force")
+  status=$?
+  expect_code 1 "$status" "a raw cursor launch passing --force must refuse"
+  assert_contains "$out" "--force/--yolo" \
+    "the --force refusal must name the flag and the confinement it would defeat"
+  assert_contains "$out" "--auto-review --sandbox enabled" \
+    "the --force refusal must name the cursor posture it overrides"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused raw cursor launch must not compose a launch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --force")
+  status=$?
+  expect_code 0 "$status" "the same flag on an unverified non-cursor raw launch must stay on the escape hatch"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "the refusal must be scoped to the cursor family, not to the flag itself"
+  pass "a raw cursor launch carrying --force/--yolo is refused by name before any cursor bar runs"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -395,9 +528,11 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
+  assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0" \
+    "claude launch lost the feedback-submission control when threading profile flags"
   pass "claude receives --model and --effort profile flags"
 }
 
@@ -412,8 +547,10 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write " \
     "codex launch did not thread model and reasoning effort config"
+  assert_contains "$launch" " -a never -c sandbox_workspace_write.network_access=true" \
+    "codex launch did not keep the codex approval policy and network grant"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -428,8 +565,10 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -s workspace-write " \
     "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" " -a never -c sandbox_workspace_write.network_access=true" \
+    "codex launch did not keep the codex approval policy and network grant"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -494,14 +633,17 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5-high --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --cursor-exemption attended --model cursor-grok-4.5-high --effort high)
   status=$?
-  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
+  expect_code 0 "$status" "an attended cursor scout spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
-    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+    "cursor launch did not carry trust, review, sandbox, model, and exact workspace flags"
+  # --force / --yolo would defeat --sandbox enabled, so neither may reach the launch.
+  assert_not_contains "$launch" " --force" "cursor launch must not defeat its sandbox with --force"
+  assert_not_contains "$launch" " --yolo" "cursor launch must not defeat its sandbox with --yolo"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
   # real installed names.
@@ -528,8 +670,8 @@ test_cursor_refuses_model_absent_from_live_catalog() {
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --cursor-exemption attended --model cursor-grok-4.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
   assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
@@ -547,8 +689,8 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   read_case_record "$rec"
 
   FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --model cursor-catalog-unreachable)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+      --cursor-exemption attended --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
   launch=$(cat "$LAUNCH_LOG")
@@ -556,6 +698,248 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
     "failed catalog lookup incorrectly removed the requested model"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
   pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
+test_cursor_is_refused_for_every_unattended_kind() {
+  local rec id out status
+  id=profile-cursor-ship-bar-z6f
+  rec=$(make_spawn_case profile-cursor-ship-bar cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unattended cursor ship spawn must be refused, not launched into a pane that can park"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "cursor ship refusal did not name the refused kind"
+  assert_contains "$out" "codex" "cursor refusal must name codex as a supported alternative"
+  assert_contains "$out" "claude" "cursor refusal must name claude as a supported alternative"
+  assert_contains "$out" "--cursor-exemption" \
+    "cursor refusal must name the per-spawn opt-in that covers an attended or enveloped launch"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor ship refusal must happen before any launch is sent"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 1 "$status" "a scout pane is unattended too, so cursor must be refused for it"
+  assert_contains "$out" "refused for an unattended scout launch" \
+    "cursor scout refusal did not name the refused kind"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor scout refusal must happen before any launch is sent"
+  pass "cursor is refused for ship and scout spawns and names codex and claude instead"
+}
+
+test_cursor_unrecognized_exemption_still_refuses() {
+  local rec id out status
+  id=profile-cursor-bad-exemption-z6h
+  rec=$(make_spawn_case profile-cursor-bad-exemption cursor "$id")
+  read_case_record "$rec"
+
+  # Fail closed: only the two recognized tokens are an opt-in, so a truthy-looking
+  # value must not be mistaken for one.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption 1)
+  status=$?
+  expect_code 1 "$status" "an unrecognized exemption token must not open the cursor bar"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "an unrecognized grant must say which two forms are accepted"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unrecognized exemption must refuse before launch"
+  pass "only the recognized cursor exemption tokens open the bar"
+}
+
+# Record integrity, not cosmetics. The grant is written verbatim into the task
+# record as `cursor_exemption=<grant>`, and fm_meta_get resolves a key to its
+# LAST matching line, so a grant carrying a line break would append a second
+# `yolo=` line that wins - silently rewriting the task's recorded merge
+# authority. The envelope name is therefore whitelisted to a bounded single-line
+# charset like every other recorded posture field.
+#
+# What this case proves is the refusal itself, and that it lands early enough
+# that no record is created to displace anything in. The displacement it guards
+# against is unreachable BY CONSTRUCTION once the charset holds, so there is no
+# honest assertion to make about a mangled record here; the companion case below
+# carries the other half by proving an ACCEPTED grant leaves a single-valued
+# record.
+test_cursor_exemption_rejects_a_record_injecting_grant() {
+  local rec id out status injected
+  id=profile-cursor-inject-z6m
+  rec=$(make_spawn_case profile-cursor-inject cursor "$id")
+  read_case_record "$rec"
+
+  injected=$'envelope:benchmark\nyolo=on'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption "$injected")
+  status=$?
+  expect_code 1 "$status" "a grant carrying a line break must be refused at parse time"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "the refusal must say which grant forms are accepted"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a record-injecting grant must refuse before any launch is sent"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] \
+    || fail "a grant refused at parse time must not have created a task record at all"
+
+  # A grant whose envelope name carries only shell-inert but unauditable
+  # characters is refused on the same whitelist, so the bound is the charset and
+  # not a special case for newlines.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption 'envelope:routing benchmark')
+  status=$?
+  expect_code 1 "$status" "an envelope name outside the whitelisted charset must be refused"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unbounded envelope name must refuse before any launch is sent"
+  pass "a cursor grant that could inject a second record line is refused before any record exists"
+}
+
+test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
+  local rec id out status launch
+  id=profile-cursor-exempt-z6g
+  rec=$(make_spawn_case profile-cursor-exempt cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption envelope:routing-benchmark)
+  status=$?
+  expect_code 0 "$status" "a proven isolation envelope must let a cursor ship spawn through"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled" \
+    "an exempted cursor launch must still keep the sandboxed review posture"
+  # The grant has to be auditable after the fact, on the task itself and on the
+  # line the spawn printed, or a later reader cannot tell attended from enveloped.
+  assert_grep "cursor_exemption=envelope:routing-benchmark" "$HOME_DIR/state/$id.meta" \
+    "the exemption grant must be recorded in the task meta"
+  assert_contains "$out" "cursor_exemption=envelope:routing-benchmark" \
+    "the spawned line must report the grant the launch used"
+  # The task record is a `key=value` contract whose readers resolve a key to its
+  # LAST matching line, so a recorded grant must leave every key single-valued or
+  # that resolution silently changes meaning. This is the reachable half of the
+  # record-integrity claim: the refusal case above can only prove no record was
+  # written, while this one proves a written grant displaces nothing.
+  [ "$(grep -c '^yolo=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+    || fail "recording a grant must leave exactly one yolo= line, got $(grep -c '^yolo=' "$HOME_DIR/state/$id.meta")"
+  [ "$(grep -c '^cursor_exemption=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+    || fail "recording a grant must leave exactly one cursor_exemption= line"
+  [ "$(grep '^yolo=' "$HOME_DIR/state/$id.meta" | tail -1)" = "yolo=off" ] \
+    || fail "the recorded merge authority must still resolve to the spawn's own --yolo off"
+  pass "a recognized cursor exemption permits the spawn, keeps the sandbox posture, and is recorded single-valued"
+}
+
+# A grant is inherited only when an EXISTING task is restarted from its own
+# record - `--relaunch`, or the `--secondmate` shape firstmate's liveness
+# recovery uses. An ordinary fresh spawn whose id happens to still carry a stale
+# record must NOT pick that grant up, or a launch nobody granted an exemption for
+# would run under a previous launch's authority, which is exactly the implicit
+# grant the per-invocation flag exists to prevent.
+test_a_fresh_spawn_never_inherits_a_stale_recorded_grant() {
+  local rec id out status
+  id=profile-cursor-stale-record-z6n
+  rec=$(make_spawn_case profile-cursor-stale-record cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption envelope:bench)
+  status=$?
+  expect_code 0 "$status" "the first enveloped cursor spawn should succeed"
+  assert_grep "cursor_exemption=envelope:bench" "$HOME_DIR/state/$id.meta" \
+    "the first spawn must leave the recorded grant this case depends on"
+
+  # The pane died and nothing tore the task down, so the record survives. An
+  # ordinary fresh spawn of that same id passes no flag and must be refused by
+  # the unattended bar rather than reusing the record's grant.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a fresh spawn must not inherit a stale record's cursor grant"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the unflagged fresh spawn must be refused on the ordinary cursor bar"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unflagged fresh spawn must be refused before any launch is sent"
+  pass "a fresh spawn never inherits a cursor grant from a stale record of the same id"
+}
+
+# The regression the per-invocation flag exists for: a grant used on one spawn
+# must not carry into the next spawn in the same shell.
+test_cursor_exemption_does_not_leak_to_a_later_spawn() {
+  local rec first second out status
+  first=profile-cursor-leak-first-z6i
+  second=profile-cursor-leak-second-z6j
+  rec=$(make_spawn_case profile-cursor-leak cursor "$first" "$second")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$first" "$PROJ_DIR" \
+    --cursor-exemption attended)
+  status=$?
+  expect_code 0 "$status" "the first attended cursor spawn should succeed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$second" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "the grant from the first spawn must not exempt a later unattended spawn"
+  assert_contains "$out" "cursor is a verified adapter but is refused" \
+    "the later unattended spawn must be refused on the cursor rule"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the later unattended spawn must be refused before any launch is sent"
+  pass "a cursor exemption does not leak from one spawn to the next in the same shell"
+}
+
+# The redesign replaced an inherited environment variable with a per-invocation
+# flag. Reintroducing any ambient fallback must fail CI, so drive the spawn with
+# plausible ambient grants (including the retired variable name) set in its
+# environment and require the refusal to hold.
+test_cursor_bar_ignores_an_ambient_environment_grant() {
+  local rec id out status ambient
+  id=profile-cursor-ambient-z6k
+  rec=$(make_spawn_case profile-cursor-ambient cursor "$id")
+  read_case_record "$rec"
+
+  for ambient in FM_CURSOR_UNATTENDED_EXEMPTION CURSOR_EXEMPTION FM_CURSOR_EXEMPTION; do
+    out=$(export "$ambient=attended"
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "an ambient $ambient must not grant the cursor exemption"
+    assert_contains "$out" "refused for an unattended ship launch" \
+      "an ambient $ambient must leave the unattended refusal in force"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an ambient $ambient must refuse before any launch is sent"
+  done
+  pass "an ambient environment grant never opens the cursor bar"
+}
+
+# A cursor grant is meaningful only for a cursor launch. Recording one on another
+# harness would leave a stale attestation in that task's meta that a later
+# relaunch onto cursor could read back as authority nobody granted for cursor.
+test_cursor_exemption_is_refused_on_a_non_cursor_harness() {
+  local rec id out status
+  id=profile-exempt-noncursor-z6l
+  rec=$(make_spawn_case profile-exempt-noncursor codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption attended)
+  status=$?
+  expect_code 1 "$status" "a cursor exemption on a codex spawn must be refused, not recorded"
+  assert_contains "$out" "applies only to a cursor launch" \
+    "the refusal should name the mismatch between the grant and the resolved harness"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the mismatched spawn must be refused before any launch is sent"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || {
+    grep -q '^cursor_exemption=' "$HOME_DIR/state/$id.meta" \
+      && fail "a refused spawn must not leave a cursor grant in the task meta"
+  }
+  pass "a cursor exemption is refused on a non-cursor harness rather than recorded as a stale grant"
+}
+
+# The captain's rule is that the bar holds however cursor was selected, including
+# when firstmate INHERITED it by detecting its own runtime, and that an
+# unconfigured cursor-hosted home is told exactly what to configure rather than
+# being handed a silent substitution. Both halves are pinned here: a silent
+# fallback to another adapter would make the first assertion fail, and dropping
+# the remedy from the message would make the second fail.
+test_inherited_cursor_selection_is_barred_and_names_the_configuration_remedy() {
+  local rec id out status
+  id=profile-cursor-inherited-z6m
+  rec=$(make_spawn_case profile-cursor-inherited cursor "$id")
+  read_case_record "$rec"
+  rm -f "$HOME_DIR/config/crew-harness"
+
+  out=$(CURSOR_INVOKED_AS=cursor-agent \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an inherited cursor selection must be refused, never silently substituted"
+  assert_contains "$out" "config/crew-harness" \
+    "the refusal must name the exact configuration remedy"
+  assert_contains "$out" "crew-dispatch profile" \
+    "the refusal must offer the dispatch-profile remedy too"
+  [ ! -s "$LAUNCH_LOG" ] || fail "no launch may be sent for a barred inherited cursor selection"
+  pass "an inherited cursor selection is barred and the refusal names config/crew-harness or a dispatch profile"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -731,15 +1115,12 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
-  # A creatable path: this spawn now pre-registers workspace trust in that store
-  # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
-  # The forwarding assertion below is what this case proves and is unchanged.
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DISABLE_FAST_MODE=1 claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -806,6 +1187,8 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_agent_alias_resolves_to_the_cursor_bar
+test_raw_cursor_launch_refuses_sandbox_defeating_flags
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
@@ -813,6 +1196,15 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_is_refused_for_every_unattended_kind
+test_cursor_exemption_is_refused_on_a_non_cursor_harness
+test_inherited_cursor_selection_is_barred_and_names_the_configuration_remedy
+test_cursor_unrecognized_exemption_still_refuses
+test_cursor_exemption_rejects_a_record_injecting_grant
+test_cursor_exemption_permits_an_attended_or_enveloped_spawn
+test_cursor_exemption_does_not_leak_to_a_later_spawn
+test_a_fresh_spawn_never_inherits_a_stale_recorded_grant
+test_cursor_bar_ignores_an_ambient_environment_grant
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

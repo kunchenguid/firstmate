@@ -121,6 +121,20 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  # The two cases that exercise a SUCCESSFUL cursor relaunch reach
+  # fm_cursor_resolve_binary, an environmental check that lives past the shared
+  # composite, so without this stub they would pass or fail on whether the
+  # developer happens to have the vendor CLI installed. Cursor's resolver accepts
+  # a `cursor-agent` on PATH by name, which is the same stub
+  # tests/fm-spawn-dispatch-profile.test.sh uses for the same reason.
+  cat > "$fb/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%b\n' "Available models\ncursor-grok-4.5-high - Grok 4.5 High"
+fi
+exit 0
+SH
+  chmod +x "$fb/cursor-agent"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -775,8 +789,10 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   out=$(run_control "$dir" sm7 relaunch --harness muse); rc=$?
   expect_code 1 "$rc" "a crewmate-only adapter should refuse a secondmate relaunch"
-  assert_contains "$out" "not verified to run a secondmate task" \
+  assert_contains "$out" "cannot run a secondmate" \
     "the refusal should name the kind the adapter cannot run"
+  assert_contains "$out" "no primary supervision protocol" \
+    "the refusal should give the adapter-specific reason, not a generic unverified line"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "the refusal must land before the running agent is stopped"
   [ "$(meta_field "$dir" sm7 harness)" = claude ] \
@@ -833,6 +849,195 @@ test_ship_relaunch_ignores_the_crew_harness_config() {
   [ "$(meta_field "$dir" rl20 harness)" = claude ] \
     || fail "a ship relaunch must not silently move onto the configured crew harness"
   pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
+}
+
+# The two cursor exemption grants differ in KIND, not degree, so relaunch treats
+# them differently. envelope:<name> describes a mechanically proven outer
+# isolation envelope that still governs the replacement agent, so it survives.
+# `attended` asserts a person is in the pane RIGHT NOW; the captain who attested
+# may have left hours before firstmate's stuck-worker recovery relaunches, so
+# inheriting it would let one attestation authorize unlimited unattended
+# launches. Both directions are pinned: a silent revert of either would let an
+# unattended cursor pane run on a stale human attestation.
+test_relaunch_never_inherits_an_attended_cursor_grant() {
+  local dir out status
+  dir=$(new_case cursorattended rl40)
+  add_ship_task "$dir" rl40 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl40.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl40 --relaunch 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a relaunch must not inherit an attended cursor grant, but the spawn succeeded: $out"
+  case "$out" in
+    *"refused for an unattended ship launch"*) ;;
+    *) fail "the relaunch should be refused on the cursor unattended rule, got: $out" ;;
+  esac
+  pass "fm-spawn --relaunch: an attended cursor grant is never inherited and the relaunch is refused"
+}
+
+# The control plane's PRE-STOP capability check must ask about the grant the
+# relaunch will actually run under, not the raw recorded one. This invocation
+# passes no --cursor-exemption, so an `attended` record leaves the replacement
+# launch with NO grant; if the pre-stop check accepted the record verbatim it
+# would pass,
+# stop the running agent, and only then hit the launch owner's refusal - leaving
+# the task with no agent at all, which is precisely what the pre-stop check
+# exists to prevent.
+test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping() {
+  local dir out rc
+  dir=$(new_case cursorattendedctl rl42)
+  add_ship_task "$dir" rl42 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl42.meta"
+  out=$(run_control "$dir" rl42 relaunch --note "stalled overnight"); rc=$?
+  expect_code 1 "$rc" "a relaunch that would launch unexempted onto cursor must be refused"
+  assert_contains "$out" "refused for an unattended ship launch" \
+    "the refusal should come from the shared capability table"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running agent must not be stopped for a relaunch that must be refused"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a refused relaunch must send nothing, but the pane received: $(cat "$dir/fake/literal")"
+  [ "$(meta_field "$dir" rl42 cursor_exemption)" = attended ] \
+    || fail "a refused relaunch must leave the durable record untouched"
+  pass "fm-control relaunch: an attended cursor grant is refused before the agent is stopped"
+}
+
+test_relaunch_inherits_a_named_isolation_envelope_grant() {
+  local dir out
+  dir=$(new_case cursorenvelope rl41)
+  add_ship_task "$dir" rl41 cursor
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl41.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch)
+  [ "$(meta_field "$dir" rl41 cursor_exemption)" = envelope:routing-benchmark ] \
+    || fail "a named isolation envelope must survive relaunch, got '$(meta_field "$dir" rl41 cursor_exemption)'"
+  assert_contains "$out" "spawned rl41 harness=cursor" \
+    "an enveloped cursor relaunch should proceed"
+  pass "fm-spawn --relaunch: a named isolation-envelope grant is inherited so automatic recovery still works"
+}
+
+test_control_relaunch_refuses_a_non_cursor_stale_envelope_before_stopping() {
+  local dir
+  dir=$(new_case cursorstalesource rl48)
+  add_ship_task "$dir" rl48 codex
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl48.meta"
+  assert_relaunch_refused_without_stopping "$dir" rl48 \
+    "refused for an unattended ship launch" \
+    "a non-cursor task's stale envelope" --harness cursor --note "moving runtimes"
+  pass "fm-control relaunch: a non-cursor stale envelope cannot authorize cursor"
+}
+
+# THE pre-stop invariant for POLICY refusals, stated once and driven for every
+# way it has been breached: if a relaunch would be refused on harness, kind, or
+# grant, the running agent must never be stopped. Both known doors are covered
+# here because each was found only after the other was closed - an `attended`
+# record that the launch drops, and an explicit grant on a harness the launch
+# will not record it on - and each time the cause was the same: the pre-stop
+# check asked a NARROWER question than the launch would. Driving both through the
+# control verb means a policy rule added to the launch path alone shows up here
+# as a stranded agent.
+#
+# Environmental refusals are deliberately out of scope, matching the bound stated
+# on fm_control_launch_refusal: any refusal that depends on the state of this
+# machine, such as a missing harness executable, is only discoverable at launch,
+# so those still strand a relaunch and no assertion here claims otherwise.
+assert_relaunch_refused_without_stopping() {  # <case-dir> <id> <expect> <label> <args...>
+  local dir=$1 id=$2 expect=$3 label=$4; shift 4
+  local out rc
+  out=$(run_control "$dir" "$id" relaunch "$@"); rc=$?
+  # The invariant is checked FIRST so a breach is reported as the stranding it
+  # is, rather than as a downstream message mismatch.
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "$label stopped the running agent for a launch that was then refused"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "$label must send nothing, but the pane received: $(cat "$dir/fake/literal")"
+  expect_code 1 "$rc" "$label should be refused"
+  assert_contains "$out" "$expect" "$label should print the launch owner's own reason"
+  assert_contains "$out" "would stop the running agent for a launch that must be refused" \
+    "$label should name the invariant it is protecting"
+}
+
+test_a_refused_relaunch_never_stops_the_running_agent() {
+  local dir
+  dir=$(new_case prestopinvariant rl46)
+  add_ship_task "$dir" rl46 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl46.meta"
+  assert_relaunch_refused_without_stopping "$dir" rl46 \
+    "refused for an unattended ship launch" \
+    "an uninheritable attended record" --note "stalled overnight"
+
+  dir=$(new_case prestopinvariant2 rl47)
+  add_ship_task "$dir" rl47 cursor
+  assert_relaunch_refused_without_stopping "$dir" rl47 \
+    "applies only to a cursor launch" \
+    "an explicit grant on a non-cursor target" \
+    --harness codex --cursor-exemption envelope:bench --note n
+  [ "$(meta_field "$dir" rl47 harness)" = cursor ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+
+  pass "fm-control relaunch: a refusal never stops the running agent, on either known door"
+}
+
+# The refusal an attended cursor task hits names --cursor-exemption as the way
+# forward, so that flag has to work on the verb the operator was just using or
+# following the instruction produces a second error. It is a FRESH per-invocation
+# attestation for this relaunch, which is why `attended` is accepted here even
+# though it is never inherited from the record, and the pre-stop check must
+# evaluate the passed grant rather than the recorded one.
+test_relaunch_accepts_a_fresh_attended_grant_on_the_verb() {
+  local dir out rc
+  dir=$(new_case cursorattendedflag rl44)
+  add_ship_task "$dir" rl44 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl44.meta"
+
+  out=$(run_control "$dir" rl44 relaunch --note "captain is watching" \
+    --cursor-exemption attended); rc=$?
+  expect_code 0 "$rc" "a fresh attended attestation should let the relaunch through: $out"
+  assert_contains "$out" "relaunched rl44 harness=cursor" \
+    "the relaunch should proceed on cursor under the passed grant"
+  [ "$(meta_field "$dir" rl44 cursor_exemption)" = attended ] \
+    || fail "the grant this relaunch ran under must be recorded, got '$(meta_field "$dir" rl44 cursor_exemption)'"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  pass "fm-control relaunch: a fresh attended grant passed on the verb permits the relaunch"
+}
+
+# A grant the verb cannot use must be refused at parse time, before the
+# transaction starts, so a typo never costs a running agent.
+test_relaunch_refuses_a_malformed_grant_before_stopping() {
+  local dir out rc
+  dir=$(new_case cursorbadflag rl45)
+  add_ship_task "$dir" rl45 cursor
+  printf 'cursor_exemption=envelope:bench\n' >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note n --cursor-exemption "envelope:bad name"); rc=$?
+  expect_code 1 "$rc" "a malformed grant must be refused"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "the refusal should name the accepted grant forms"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a malformed grant must be refused before the running agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
+  pass "fm-control relaunch: a malformed grant is refused before the agent is stopped"
+}
+
+# An envelope grant is inherited across relaunch, but it exempts a worker from
+# CURSOR's unattended bar and describes nothing about any other adapter, so it
+# must not ride a harness switch into a non-cursor task's record. If it did, a
+# later relaunch back onto cursor would read it out of that record as authority
+# nobody granted for cursor. The switch itself stays legitimate: the grant is
+# dropped, not the relaunch refused.
+test_relaunch_onto_another_harness_drops_the_cursor_grant() {
+  local dir out
+  dir=$(new_case cursorswitch rl43)
+  add_ship_task "$dir" rl43 cursor
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl43.meta"
+  out=$(run_control "$dir" rl43 relaunch --harness codex --note "moving off cursor")
+  assert_contains "$out" "relaunched rl43 harness=codex" \
+    "a harness switch away from cursor should still succeed"
+  [ "$(meta_field "$dir" rl43 harness)" = codex ] \
+    || fail "the relaunched task should be recorded on codex"
+  ! grep -q '^cursor_exemption=' "$dir/home/state/rl43.meta" \
+    || fail "a cursor grant must not survive into a non-cursor task's record, got '$(meta_field "$dir" rl43 cursor_exemption)'"
+  pass "fm-control relaunch: a cursor grant is dropped when the relaunch resolves to another harness"
 }
 
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
@@ -1369,7 +1574,7 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous() {
   dir=$(new_case continuous-meta-lock rl38)
   add_ship_task "$dir" rl38 claude
   printf 'zsh' > "$dir/fake/command"
-  lock="$dir/home/state/.meta-rl38.lock"
+  lock="$dir/home/state/.locks/rl38/meta.lock"
   mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1516,6 +1721,14 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_relaunch_never_inherits_an_attended_cursor_grant
+test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping
+test_relaunch_onto_another_harness_drops_the_cursor_grant
+test_a_refused_relaunch_never_stops_the_running_agent
+test_relaunch_accepts_a_fresh_attended_grant_on_the_verb
+test_relaunch_refuses_a_malformed_grant_before_stopping
+test_relaunch_inherits_a_named_isolation_envelope_grant
+test_control_relaunch_refuses_a_non_cursor_stale_envelope_before_stopping
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

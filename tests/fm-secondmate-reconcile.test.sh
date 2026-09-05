@@ -426,7 +426,7 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     case "$label" in
       reconcile) lock="$home/state/.mate.reconcile.lock" ;;
       control) lock="$home/state/.control-mate.lock" ;;
-      meta) lock="$home/state/.meta-mate.lock" ;;
+      meta) lock="$home/state/.locks/mate/meta.lock" ;;
     esac
     ready="$home/lock-ready"
     release="$home/lock-release"
@@ -547,7 +547,7 @@ SH
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_acquire_wait "$home/state/.control-mate.lock"
-    fm_lock_acquire_wait "$home/state/.meta-mate.lock"
+    fm_lock_acquire_wait "$home/state/.locks/mate/meta.lock"
     rm -rf "$home/state/mate.inbox"
     rm -f "$home/state/mate.meta" "$home/state/mate.reconcile-nudged"
     cat > "$home/state/mate.meta" <<META
@@ -559,7 +559,7 @@ spawn_gen=spawn-replacement
 home=$mate
 worktree=$mate
 META
-    fm_lock_release "$home/state/.meta-mate.lock"
+    fm_lock_release "$home/state/.locks/mate/meta.lock"
     fm_lock_release "$home/state/.control-mate.lock"
     : > "$lifecycle_done"
   ) &
@@ -671,14 +671,14 @@ SH
 
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$home/state/.control-remote-send-race-mate.lock"
-  fm_lock_acquire_wait "$home/state/.meta-remote-send-race-mate.lock"
+  fm_lock_acquire_wait "$home/state/.locks/remote-send-race-mate/meta.lock"
   sed 's/^remote_host=.*/remote_host=new-host/' \
     "$home/state/remote-send-race-mate.meta" > "$home/state/remote-send-race-mate.meta.tmp"
   mv "$home/state/remote-send-race-mate.meta.tmp" "$home/state/remote-send-race-mate.meta"
   sed 's/host: old-host/host: new-host/' \
     "$home/data/secondmates.md" > "$home/data/secondmates.md.tmp"
   mv "$home/data/secondmates.md.tmp" "$home/data/secondmates.md"
-  fm_lock_release "$home/state/.meta-remote-send-race-mate.lock"
+  fm_lock_release "$home/state/.locks/remote-send-race-mate/meta.lock"
   fm_lock_release "$home/state/.control-remote-send-race-mate.lock"
   : > "$release"
   wait "$notify_pid" || rc=$?
@@ -919,7 +919,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   for lock in \
     "$home/state/.remote-offpath-mate.reconcile.lock" \
     "$home/state/.control-remote-offpath-mate.lock" \
-    "$home/state/.meta-remote-offpath-mate.lock"; do
+    "$home/state/.locks/remote-offpath-mate/meta.lock"; do
     [ ! -e "$lock" ] || fail "the request path left a mate lifecycle lock held: $lock"
   done
 
@@ -974,7 +974,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
   for lock in \
     "$home/state/.remote-offpath-mate.reconcile.lock" \
     "$home/state/.control-remote-offpath-mate.lock" \
-    "$home/state/.meta-remote-offpath-mate.lock"; do
+    "$home/state/.locks/remote-offpath-mate/meta.lock"; do
     [ ! -e "$lock" ] || fail "later supervision delivery left a mate lifecycle lock held: $lock"
   done
   pass "Bearings records locally, returns before a delayed remote queue, and supervision delivers later"

@@ -218,6 +218,107 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+test_meta_lock_artifacts_stay_in_the_task_scope() {
+  local dir state id lock entry owner_count stray
+  dir=$(make_case meta-lock-scope)
+  state="$dir/state"
+  id=scope-task
+  : > "$state/$id.meta"
+
+  lock=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_meta_lock_path "$2"
+  ' _ "$LIB" "$state/$id.meta") || fail "fm_meta_lock_path refused a valid task meta"
+  [ "$lock" = "$state/.locks/$id/meta.lock" ] \
+    || fail "the task metadata lock path is not the per-task directory layout: $lock"
+
+  # Hold the lock in a live subprocess, then inspect where its artifacts landed.
+  # Every entry the protocol creates must stay inside state/.locks/<id>/ and the
+  # shared state directory must gain nothing, because that directory is exactly
+  # what a codex scout's writable-root grant has to keep denying.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    : > "$3/held"
+    while [ ! -e "$3/release" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lock" "$dir" &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/held" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$dir/held" ] || fail "the holder never acquired the relocated meta lock"
+  [ -L "$lock" ] || fail "the held lock is not the protocol's owner symlink"
+  owner_count=0
+  for entry in "$state/.locks/$id"/*; do
+    [ -e "$entry" ] || continue
+    case "${entry##*/}" in meta.lock.owner.*) owner_count=$((owner_count + 1)) ;; esac
+  done
+  [ "$owner_count" -ge 1 ] || fail "no mktemp owner directory was created inside the per-task lock directory"
+  stray=
+  for entry in "$state"/* "$state"/.*; do
+    case "${entry##*/}" in .|..|.locks|"$id.meta") continue ;; esac
+    [ -e "$entry" ] || continue
+    stray="$stray ${entry##*/}"
+  done
+  [ -z "$stray" ] || fail "the lock protocol created entries directly in state/:$stray"
+
+  # Mutual exclusion survives the relocation: a second acquirer loses to the
+  # live holder, and release leaves nothing behind in the shared directory.
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lock" 2>/dev/null; then
+    : > "$dir/release"
+    fail "a second acquirer won the task-scoped meta lock while it was held"
+  fi
+  : > "$dir/release"
+  wait "$holder" || fail "the holder failed to release the meta lock"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    fail "the released lock path lingered in the per-task lock directory"
+  fi
+  pass "the meta lock protocol lives entirely inside state/.locks/<id>/ and still excludes a second acquirer"
+}
+
+# The relocatable layout keeps every artifact inside state/.locks/<id>/, so an
+# acquirer meeting a task whose lock directory does not exist yet - a home that
+# predates the relocation, or any task whose spawn did not pre-create it - must
+# still be able to take that task's meta lock. fm-send's inbox plane acquires
+# the meta lock through fm_task_inbox_lock_acquire, whose writability probe
+# creates a file beside the lock BEFORE acquiring; drive that public path
+# against a fresh fixture home and require both the probe and the acquire to
+# succeed, with the lock artifacts still landing inside the per-task directory.
+test_meta_lock_acquire_creates_its_task_scope_on_first_contact() {
+  local dir state id lock entry stray
+  dir=$(make_case meta-lock-first-contact)
+  state="$dir/state"
+  id='first-contact'
+  : > "$state/$id.meta"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    . "$3"
+    lock=$(fm_meta_lock_path "$2")
+    fm_task_inbox_lock_acquire "$lock" || exit 10
+    fm_lock_release "$lock" || exit 11
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/$id.meta" "$ROOT/bin/fm-task-inbox-lib.sh" \
+    || fail "the meta lock could not be acquired through the inbox plane on a home with no .locks tree"
+
+  [ -d "$state/.locks/$id" ] \
+    || fail "first contact did not create the per-task lock directory"
+  lock="$state/.locks/$id/meta.lock"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    fail "the released lock path lingered after first-contact acquisition"
+  fi
+  stray=
+  for entry in "$state"/* "$state"/.*; do
+    case "${entry##*/}" in .|..|.locks|"$id.meta") continue ;; esac
+    [ -e "$entry" ] || continue
+    stray="$stray ${entry##*/}"
+  done
+  [ -z "$stray" ] || fail "first contact left entries directly in state/:$stray"
+  pass "first contact with a legacy home creates state/.locks/<id>/ and acquires the meta lock through the inbox plane"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1111,6 +1212,8 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_meta_lock_artifacts_stay_in_the_task_scope
+test_meta_lock_acquire_creates_its_task_scope_on_first_contact
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed

@@ -37,6 +37,17 @@ REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
+# The raw-launch escape hatch is intentionally limited to direct executables so
+# Cursor aliases cannot be hidden behind a shell.  The presentation fixture only
+# needs a long-lived process, so provide one directly instead of testing through
+# a wrapper that the launch boundary must reject.
+HOLD_COMMAND="$TMP_ROOT/presentation-hold"
+cat > "$HOLD_COMMAND" <<'SH'
+#!/usr/bin/env bash
+sleep 120
+SH
+chmod +x "$HOLD_COMMAND"
+
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
 # remains the sole process which appends the real trailing session flag.
@@ -398,7 +409,7 @@ EOF
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$HOLD_COMMAND --run" --mode no-mistakes --yolo off --backend herdr
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -423,7 +434,7 @@ finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$HOLD_COMMAND --run" --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>

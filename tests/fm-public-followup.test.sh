@@ -2673,7 +2673,7 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging() {
   sleep 300 &
   holder=$!
   PF_TEST_LOCK_HOLDER=$holder
-  lock="$remote/state/.meta-work-lock.lock"
+  lock="$remote/state/.locks/work-lock/meta.lock"
   mkdir -p "$lock"
   printf '%s\n' "$holder" > "$lock/pid"
 

@@ -1122,10 +1122,12 @@ status_presentation_marker_offset() {
 status_presentation_marker_report() {
   local marker=$1 reported=$2 raw classified=-
   _status_presentation_signature_valid "$reported" || return 1
+  [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || [ -f "$marker" ] || return 1
   if raw=$(cat "$marker" 2>/dev/null) && status_presentation_marker_parse "$raw"; then
     classified=$STATUS_PRESENTATION_CLASSIFIED
   fi
-  printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
+  _status_presentation_marker_write "$marker" "$reported" "$classified"
 }
 
 status_presentation_marker_commit() {
@@ -1135,7 +1137,20 @@ status_presentation_marker_commit() {
   [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
   classified="${endpoint}@${ident}"
-  printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
+  _status_presentation_marker_write "$marker" "$reported" "$classified"
+}
+
+_status_presentation_marker_write() {
+  local marker=$1 reported=$2 classified=$3 tmp
+  [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || [ -f "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "${marker}.tmp.XXXXXX") || return 1
+  if ! printf 'v2\t%s\t%s' "$reported" "$classified" > "$tmp" \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ]
 }
 
 status_retire_presentation_task() {  # <state> <task-id>

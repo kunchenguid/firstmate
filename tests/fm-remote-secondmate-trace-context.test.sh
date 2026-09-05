@@ -90,6 +90,24 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+# The remote launch of an enveloped cursor secondmate resolves cursor's own
+# executable ON THE REMOTE HOST, and the transport's child environment is
+# composed from the filesystem (env -i with a PATH the worker builds starting at
+# the remote root's bin/), so the caller's PATH never crosses the wire. Without
+# a resolvable cursor the wire test below would pass or fail on whether the
+# developer's machine happens to have the vendor CLI installed. A stub named
+# cursor-agent is accepted by the verified resolver on its name alone, the same
+# hermeticity stub tests/fm-control-relaunch.test.sh uses for its successful
+# relaunch cases; --list-models is answered for symmetry with a model-bearing
+# config, which this suite never sets.
+cat > "$REMOTE_ROOT/bin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%b\n' "Available models\ncursor-grok-4.5-high - Grok 4.5 High"
+fi
+exit 0
+SH
+chmod +x "$REMOTE_ROOT/bin/cursor-agent"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -306,5 +324,206 @@ try_flag 'requires a non-empty value' \
   "an empty carrier must be refused rather than silently ignored" \
   --secondmate --traceparent=
 pass "delivery: a parent-supplied carrier is accepted only for a secondmate launch and only as a strict W3C value"
+
+# --- cursor unattended bar on the REMOTE secondmate route -------------------
+# spawn_remote_secondmate launches and returns long before the shared capability
+# guard the local path reaches, so it asks fm_control_harness_supports_kind
+# itself. The local refusal in tests/fm-secondmate-harness.test.sh hits the other
+# guard, so only a remote-route case fails if this one is removed.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'cursor\n' > "$PARENT/config/secondmate-harness"
+if CURSOR_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "an unattended cursor remote secondmate must be refused, not launched on the remote host"
+fi
+assert_contains "$CURSOR_OUT" "refused for an unattended secondmate launch" \
+  "the remote route must refuse cursor with the shared capability-table reason"
+assert_contains "$CURSOR_OUT" "--cursor-exemption" \
+  "the remote refusal must name the per-spawn grant that would permit it"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the remote cursor refusal must land before any remote launch is dispatched"
+pass "remote route: an unattended cursor secondmate is refused before the remote host is reached"
+
+# A cursor exemption is meaningful only for a cursor launch, so the remote route
+# refuses it on any other harness rather than forwarding and RECORDING it. An
+# earlier revision of this test asserted the opposite - that a codex remote
+# secondmate launches and records the grant - which is the very stale-grant
+# hazard the rule exists to stop: a `cursor_exemption=` left in the parent's task
+# record would later be read back by fm-control.sh's pre-stop check as authority
+# nobody granted for cursor. The refusal lands locally, before the round trip.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'codex\n' > "$PARENT/config/secondmate-harness"
+if MISMATCH_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:routing-benchmark 2>&1); then
+  fail "a cursor exemption on a codex remote secondmate must be refused, not launched"
+fi
+assert_contains "$MISMATCH_OUT" "applies only to a cursor launch" \
+  "the remote refusal must name why the grant cannot travel with a non-cursor harness"
+[ ! -f "$PARENT/state/ios.meta" ] || ! grep -q '^cursor_exemption=' "$PARENT/state/ios.meta" \
+  || fail "a refused remote spawn must record no cursor grant"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the mismatch refusal must land before any remote launch is dispatched"
+pass "remote route: a cursor exemption is refused on a non-cursor harness rather than recorded"
+
+# The forwarded envelope grant, end to end over the wire. Trace context is still
+# enabled here, so the parent sends BOTH self-describing trailing arguments -
+# `traceparent:<value>` and `exemption:<grant>` - which is the case an argument
+# count on the remote dispatcher silently rejected while each argument alone
+# passed. The grant is proven to have ARRIVED rather than merely been composed:
+# the remote host's own fm-spawn refuses an unattended cursor secondmate, so the
+# cursor launch appearing in the remote pane log is only reachable if
+# `--cursor-exemption` got there.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'cursor\n' > "$PARENT/config/secondmate-harness"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:routing-benchmark >/dev/null 2>&1 \
+  || fail "an enveloped cursor remote secondmate should launch, so the grant must cross the wire"
+grep -q -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG" \
+  || fail "the remote pane should have launched cursor under its sandboxed review posture"
+grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
+  || fail "the carrier must still be delivered when an exemption argument rides alongside it"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the parent record must carry the grant this remote launch was made under"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "the remote endpoint record must carry the grant its own spawn ran under"
+pass "remote route: an envelope grant and a carrier both cross the wire and reach the remote spawn"
+
+# RECOVERY, not relaunch. firstmate's secondmate liveness sweep brings a dead
+# secondmate back by re-running exactly `fm-spawn.sh <id> --secondmate` with no
+# --cursor-exemption (bin/fm-bootstrap.sh's dead/missing remote branch), which is
+# the invocation driven here. The envelope that justified the grant is a durable
+# property of the environment and still governs the replacement, so recovery must
+# work; before the recorded grant was honored on this path the respawn was
+# refused by the unattended bar and the secondmate stayed down.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the recovery case needs the enveloped record the previous spawn published"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+  || fail "an enveloped cursor secondmate must be recoverable by an unflagged respawn"
+grep -q -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG" \
+  || fail "the recovered secondmate should have relaunched cursor under its sandboxed review posture"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "recovery must republish the grant it ran under, so the next recovery still has it"
+pass "recovery: an unflagged respawn inherits the recorded envelope grant and brings the secondmate back"
+
+# The other half of the same rule. `attended` attests to a person in the pane
+# RIGHT NOW, and recovery runs unattended by definition, so a recorded attended
+# grant must NOT resurrect a cursor secondmate the way an envelope grant does.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+sed 's/^cursor_exemption=.*/cursor_exemption=attended/' "$PARENT/state/ios.meta" > "$PARENT/state/ios.meta.attended"
+mv "$PARENT/state/ios.meta.attended" "$PARENT/state/ios.meta"
+if ATTENDED_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "a recorded attended grant must not bring a cursor secondmate back unattended"
+fi
+assert_contains "$ATTENDED_OUT" "refused for an unattended secondmate launch" \
+  "the attended record must fall back to the ordinary unattended bar"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the attended refusal must land before any remote launch is dispatched"
+pass "recovery: a recorded attended grant is never inherited, so it cannot resurrect a cursor secondmate"
+
+# The parent records the grant the ENDPOINT reports carrying, not the one a
+# launch request happened to carry. A spawn that finds the remote endpoint
+# already alive reuses it without relaunching, so the running agent never saw
+# the newly requested grant; recording the request would leave the parent's
+# audit line - and the pre-stop relaunch check that reads it - claiming cursor
+# authority the live worker does not have. The route block reports the
+# endpoint's own recorded grant for exactly this reason, the same way it
+# reports the carrier the endpoint actually holds.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+sed 's/^cursor_exemption=.*/cursor_exemption=envelope:wire-request/' "$PARENT/state/ios.meta" > "$PARENT/state/ios.meta.wr"
+mv "$PARENT/state/ios.meta.wr" "$PARENT/state/ios.meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:wire-request >/dev/null 2>&1 \
+  || fail "the endpoint-actual grant case needs a live enveloped launch first"
+[ "$(grep -c -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG")" = 1 ] \
+  || fail "the fixture is wrong: exactly one cursor launch should have dispatched"
+# The reuse spawn: alive endpoint, DIFFERENT requested grant. The launch must
+# succeed (the request is valid), the pane must not see a second launch, and the
+# parent must record the endpoint's wire-request grant rather than the newer ask.
+REUSE_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:other-request 2>&1) \
+  || fail "a reuse spawn with a valid grant must succeed: $REUSE_OUT"
+[ "$(grep -c -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG")" = 1 ] \
+  || fail "an already-alive endpoint must be reused, not relaunched under the new grant"
+assert_contains "$REUSE_OUT" "cursor_exemption=envelope:wire-request" \
+  "the success line must report the grant the endpoint actually carries"
+grep -q '^cursor_exemption=envelope:wire-request$' "$PARENT/state/ios.meta" \
+  || fail "the parent record must carry the endpoint's actual grant, not the requested envelope:other-request"
+grep -q '^cursor_exemption=envelope:other-request' "$PARENT/state/ios.meta" \
+  && fail "the never-delivered requested grant must not be recorded as authority"
+# An endpoint carrying NO grant reports none, and the parent then records none:
+# the honest record of an agent that did not launch under any exemption.
+sed '/^cursor_exemption=/d' "$REMOTE_HOME/state/parent-route/ios.meta" > "$REMOTE_HOME/state/parent-route/ios.meta.none"
+mv "$REMOTE_HOME/state/parent-route/ios.meta.none" "$REMOTE_HOME/state/parent-route/ios.meta"
+NONE_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:requested-anyway 2>&1) \
+  || fail "a reuse spawn against a grant-less endpoint must still succeed: $NONE_OUT"
+case "$NONE_OUT" in *cursor_exemption=*) \
+  fail "a grant-less endpoint must not be reported as exempted: $NONE_OUT" ;; esac
+! grep -q '^cursor_exemption=' "$PARENT/state/ios.meta" \
+  || fail "a parent whose endpoint carries no grant must record no cursor_exemption line"
+pass "remote route: the parent records the endpoint's actual grant, never an undelivered request"
+
+sed -e 's/^harness=.*/harness=codex/' -e '/^cursor_exemption=/d' \
+  "$REMOTE_HOME/state/parent-route/ios.meta" > "$REMOTE_HOME/state/parent-route/ios.meta.stale"
+printf 'cursor_exemption=envelope:stale-codex\n' >> "$REMOTE_HOME/state/parent-route/ios.meta.stale"
+mv "$REMOTE_HOME/state/parent-route/ios.meta.stale" "$REMOTE_HOME/state/parent-route/ios.meta"
+STALE_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness codex 2>&1) \
+  || fail "a live non-cursor remote endpoint should be reused: $STALE_OUT"
+case "$STALE_OUT" in *cursor_exemption=*) \
+  fail "a non-cursor remote endpoint must not report a cursor exemption: $STALE_OUT" ;; esac
+! grep -q '^cursor_exemption=' "$PARENT/state/ios.meta" \
+  || fail "a parent must drop a stale grant reported by a non-cursor remote endpoint"
+pass "remote route: a reused non-cursor endpoint cannot republish a stale cursor grant"
+
+# Mixed-version wire contract, OLD parent against this NEW remote. Before the
+# self-describing tokens existed a parent sent its carrier as a bare positional
+# sixth argument, and a fleet upgrades one host at a time, so that shape must
+# still launch: rejecting it would break every carrier-bearing remote spawn from
+# a not-yet-upgraded parent, including ordinary codex launches that have nothing
+# to do with cursor. The launch verb is driven directly here because only the
+# remote half of the wire is under test; an upgraded parent no longer emits this
+# shape. A bare argument that is NOT a carrier must still be refused.
+LEGACY_TP='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+LEGACY_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios codex - - herdr "$LEGACY_TP" 2>&1) \
+  || fail "an old parent's bare positional carrier must still launch: $LEGACY_OUT"
+grep -q "export TRACEPARENT=$LEGACY_TP" "$HERDR_LOG" \
+  || fail "the bare positional carrier must reach the remote pane as the traceparent it has always been"
+pass "wire: an older parent's bare positional carrier is still accepted as the traceparent"
+
+if BOGUS_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios codex - - herdr not-a-carrier 2>&1); then
+  fail "a bare argument that is not a carrier must be refused, not guessed at"
+fi
+assert_contains "$BOGUS_OUT" "unrecognized remote launch argument" \
+  "a non-carrier bare argument must still fail closed on the self-describing contract"
+pass "wire: a bare argument that is not a carrier is still refused"
+
+# The receiver validates the grant it CONSUMES rather than trusting the sender.
+# The parent already refuses to compose `exemption:attended`, so this shape is
+# not reachable from a shipped caller - it is the trust boundary being closed on
+# its own side, because an attended grant honored here would attest to a person
+# at the SENDING pane for a worker on this host that nobody is watching.
+if ATTENDED_WIRE=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios cursor - - herdr exemption:attended 2>&1); then
+  fail "the wire receiver must refuse an attended grant, not forward it to the remote spawn"
+fi
+assert_contains "$ATTENDED_WIRE" "cannot carry an 'attended' cursor exemption" \
+  "the receiver refusal should say why attended cannot describe a worker on this host"
+if BOGUS_WIRE=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch \
+  ios cursor - - herdr exemption:not-a-grant 2>&1); then
+  fail "the wire receiver must refuse a grant that is not envelope-shaped"
+fi
+assert_contains "$BOGUS_WIRE" "forwards only exemption:envelope:<name>" \
+  "the receiver should name the only grant form the wire carries"
+pass "wire: the receiver forwards only an envelope grant, refusing attended and malformed grants"
 
 echo "ALL TESTS PASSED"
