@@ -494,11 +494,19 @@ status_open_decisions() {  # <status-file>
 }
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
+# Ship/scout terminal declarations supersede stale log decisions; a secondmate's
+# terminal event may describe other work and cannot close an unrelated decision.
 # An open blocker wins over unrelated events, then an open needs-decision wins;
 # within each kind the fold's most recently opened record supplies the detail.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
-status_current_line() {  # <status-file>
-  local open key verb note blocked='' decision=''
+status_current_line() {  # <status-file> <kind>
+  local last open key verb note blocked='' decision=''
+  last=$(last_status_line "$1")
+  if [ "$2" != secondmate ]; then
+    case "$(status_line_verb "$last")" in
+      done|failed) printf '%s\n' "$last"; return 0 ;;
+    esac
+  fi
   open=$(status_open_decisions "$1")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in
@@ -511,7 +519,7 @@ EOF
   if [ -n "$blocked$decision" ]; then
     printf '%s\n' "${blocked:-$decision}"
   else
-    last_status_line "$1"
+    printf '%s\n' "$last"
   fi
 }
 
