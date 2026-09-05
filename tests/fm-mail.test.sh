@@ -127,6 +127,42 @@ SH
   pass "fm-mail: poll propagates errors instead of swallowing them"
 }
 
+test_poll_dedupes_surfaces_by_uid() {
+  local fakebin homedir_bin
+  fakebin=$(fm_fakebin fm-mail)
+
+  # Fake python3 that emits one UID'd poll_list line (uid \t date \t from \t subj).
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '42\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  # Provide the real wake lib under the temp home so wake_for can append wakes
+  # into the temp home's state (never the repo's).
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed when python3 lists mail"
+  assert_contains "$out" "woke for 42" "first poll wakes the new uid"
+  local wakeq="$HOME_DIR/state/.wake-queue"
+  assert_contains "$(cat "$wakeq" 2>/dev/null)" "mail from alice@example.com" "wake queue names the sender"
+  assert_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "42" "cursor records the surfaced uid"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "second poll must succeed"
+  assert_not_contains "$out" "woke for 42" "re-polling the same uid must not re-wake"
+  assert_contains "$out" "no new mail" "second poll reports no new mail"
+  pass "fm-mail: poll surfaces each new uid exactly once"
+}
+
 test_missing_secret_fails_cleanly
 test_status_without_network
 test_help_plumbing
@@ -134,3 +170,4 @@ test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status
 test_send_passes_body
 test_poll_error_propagates
+test_poll_dedupes_surfaces_by_uid
