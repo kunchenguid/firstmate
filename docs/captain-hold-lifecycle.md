@@ -114,8 +114,8 @@ On the Beads backend, an attested legacy markdown id that resolves to no task is
 Only when no row carries that marker line is the legacy id tried under the configured beads prefix, and that name-only guess is accepted solely for a single row still held for the captain - two such rows refuse rather than attest.
 Because that acceptance rests on a name rather than on evidence, `complete` names the resolved row beside each prefix-attested legacy id in its completion line, so the guess is auditable after the fact.
 A markdown home keeps its legacy rows verbatim, so its resolution is unchanged.
-The shim recognizes an exact replay of a pre-collapse routed resolution by its historical answer digest and routed ids, then finishes any still-recorded dependency-edge cleanup without rewriting the old decision text.
-`bin/fm-decision-hold.sh` itself remains for one release as a thin command-mapping shim over `bin/fm-captain-hold.sh`, so in-flight work briefed before the collapse keeps working; its header owns the exact mapping.
+A pre-collapse routed resolution is recognized by its historical answer digest and routed ids wherever a record is read, and any still-recorded dependency-edge cleanup finishes without rewriting the old decision text.
+The one-release `bin/fm-decision-hold.sh` command-mapping shim has been removed per its scheduled retirement; work still holding the old spellings re-issues them through `bin/fm-captain-hold.sh`.
 
 ## Verification record
 

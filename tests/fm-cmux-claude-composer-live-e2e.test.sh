@@ -20,7 +20,6 @@ cleanup() {
       && ! grep -q '^resolved \[key=probe-decision\]' "$LAB/state/$TASK.status" 2>/dev/null; then
       printf '%s\n' 'resolved [key=probe-decision]: live guard cleanup' >> "$LAB/state/$TASK.status"
     fi
-    FM_HOME="$LAB" "$ROOT/bin/fm-decision-hold.sh" complete "$TASK" --none >/dev/null 2>&1 || true
     FM_HOME="$LAB" "$ROOT/bin/fm-teardown.sh" "$TASK" >/dev/null 2>&1 || true
   }
   [ -z "$LAB" ] || rm -rf -- "$LAB"
