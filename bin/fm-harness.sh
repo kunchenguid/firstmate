@@ -108,6 +108,12 @@ detect_own() {
   # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
   # an inherited launcher marker, not a Gemini identity.
   [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
+  # rovo (Atlassian Rovo CLI) sets ATLASSIAN_AGENT_TYPE=rovo, ROVODEV_CLI=1, and
+  # AGENT=rovodev_cli on its tool subprocesses (verified, rovo 202609.1.2). It does
+  # NOT scrub an inherited CLAUDECODE, so a rovo worker launched from a claude
+  # session carries both markers - this must be tested BEFORE the CLAUDECODE line,
+  # the same ordering hazard cursor documents above (see issue #3517). bin/fm-spawn.sh
+  # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
@@ -120,8 +126,14 @@ detect_own() {
     return
   fi
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # muse (Muse Code) publishes no verified child-process identity marker, so it
-  # is detected by ancestry alone above rather than by any inherited MUSE_* env.
+  # muse (Muse Code) publishes no harness-identity marker of its own. The only
+  # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
+  # a per-session log PATH rather than an identity, and its export to tool
+  # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
+  # by ancestry alone above rather than by any inherited MUSE_* env. Do NOT
+  # promote MUSE_CURRENT_SESSION_LOG to a marker without verifying it reaches
+  # children AND that it cannot survive in a multiplexer's stored environment,
+  # which is the precedence hazard above.
   echo unknown
 }
 

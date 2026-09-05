@@ -2016,6 +2016,39 @@ copilot_hook_path_safe() {  # <worktree> <hook-path>
   fi
 }
 
+# rovo confines every file-tool operation (open_files, create_file, grep, ...)
+# to its worktree by default; toolPermissions.allowedExternalPaths
+# (~/.rovo/config.yml) is the only lift, and it must be granted at launch
+# through --config-override since there is no per-session escalation once
+# the process is running. rovo's bash tool is NOT covered by this grant and
+# stays confined to the worktree regardless (confirmed live) - the standard
+# crewmate flow's literal `echo ... >> status file` bash line therefore still
+# fails under rovo, but the worker recovers by falling back to its own file
+# tools for the same append (confirmed live), which the grant below does cover.
+# --config-override itself is single-value (a second occurrence silently
+# discards the first, confirmed live), so this is the ONE place that must
+# also fold in agent.efficiencyLevel when a supported effort was requested.
+# Granted paths are real (symlink-resolved) directories/files under this
+# task's home, matching BRIEF_REAL's own resolution: the brief dir (covers
+# brief.md/launch-brief.md/report.md), the steering inbox directory (covers
+# every steer and its handled/ acknowledgement), and the status file itself.
+rovo_config_override_flag() {
+  local effort=$1 data_dir=$2 state_dir=$3 id=$4
+  local data_real state_real agent_json paths_json config_json
+  data_real=$(cd "$data_dir" && pwd -P) || return 1
+  state_real=$(cd "$state_dir" && pwd -P) || return 1
+  agent_json=
+  case "$effort" in
+    low|medium|high|max) agent_json="\"agent\":{\"efficiencyLevel\":\"$(json_escape "$effort")\"}," ;;
+  esac
+  paths_json=$(printf '"%s","%s","%s"' \
+    "$(json_escape "$data_real/$id")" \
+    "$(json_escape "$state_real/$id.inbox")" \
+    "$(json_escape "$state_real/$id.status")")
+  config_json="{${agent_json}\"toolPermissions\":{\"allowedExternalPaths\":[${paths_json}]}}"
+  printf -- '--config-override %s ' "$(shell_quote "$config_json")"
+}
+
 resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
@@ -2029,7 +2062,6 @@ resolve_project_dir_arg() {
     *) printf '%s\n' "$path" ;;
   esac
 }
-
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
