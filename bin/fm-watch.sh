@@ -1472,11 +1472,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
     # for that is still a loud failure. Without this gate the arm would wait on,
     # and then quietly excuse, a lock no watcher can ever be confirmed behind.
     if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$WATCHER_STALE_GRACE" "$FM_HOME"; then
-      if [ -e "$BEAT" ]; then
-        echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=${FM_WATCHER_BUSY_BEACON_AGE}s (grace ${WATCHER_STALE_GRACE}s)"
-      else
-        echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=none (grace ${WATCHER_STALE_GRACE}s)"
-      fi
+      echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=${FM_WATCHER_BUSY_BEACON_AGE}s (grace ${WATCHER_STALE_GRACE}s)"
       exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
     fi
     if [ -e "$BEAT" ]; then

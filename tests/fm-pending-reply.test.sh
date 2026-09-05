@@ -1197,6 +1197,30 @@ test_tick_end_to_end_missed_then_escalate() {
   pass "tick end-to-end: miss -> one recovery -> escalate -> durable"
 }
 
+test_remote_observation_is_bounded_below_beacon_grace() {
+  local home state corr fakebin timeout_log
+  home=$(setup_parent remote-observation-bound)
+  state="$home/state"
+  fakebin=$(make_stubs "$home")
+  timeout_log="$home/timeout-seconds"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" > "$FM_TIMEOUT_LOG"
+exit 124
+SH
+  chmod +x "$fakebin/timeout"
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" ios "bound remote observation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$timeout_log" FM_WATCHER_STALE_GRACE=10 \
+    fm_pending_reply_tick "$state" || fail "bounded remote observation tick failed"
+  [ "$(cat "$timeout_log" 2>/dev/null)" = 5 ] \
+    || fail "remote observation was not bounded below the 10s beacon grace"
+  pass "remote observation stays bounded below the watcher beacon grace"
+}
+
 test_remote_repost_waits_for_the_reply_channel() {
   local home state corr hook_log rec lines
   home=$(setup_parent remote-repost)
@@ -1570,6 +1594,7 @@ test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_remote_observation_is_bounded_below_beacon_grace
 test_remote_repost_waits_for_the_reply_channel
 test_mirrored_remote_reply_never_triggers_a_repost
 test_same_basename_self_home_corr_resolves_on_tick
@@ -1744,6 +1769,45 @@ test_legacy_settled_record_in_hot_set_is_archived_by_the_tick() {
   pass "a legacy settled record in the hot set is archived by the tick"
 }
 
+test_resolved_escalation_retry_archives_immediately() {
+  local home state corr hot archive
+  home=$(setup_parent retention-resolve-retry)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7480
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "retry resolved escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$hot" phase resolved
+  fm_pending_reply_set "$hot" escalated_epoch 7470
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=retry resolved escalation\n' \
+    "$corr" "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "resolved escalation retry should succeed"
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
+  [ ! -e "$hot" ] || fail "a successful resolve retry left the settled record hot"
+  [ -f "$archive" ] || fail "a successful resolve retry did not archive the record"
+  [ -n "$(fm_pending_reply_get "$archive" escalation_closed_epoch)" ] \
+    || fail "resolve retry archived before recording the escalation close"
+  pass "a successful resolved-escalation retry archives immediately"
+}
+
+test_archived_wrong_home_lookup_is_inert() {
+  local home state sm_home corr
+  home=$(setup_parent retention-archived-wrong-home)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" mate)
+  export FM_PENDING_REPLY_NOW=7490
+  corr=$(fm_pending_reply_create "$home" "$state" mate "archived wrong-home lookup")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: settled\n' "$corr" > "$state/mate.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "record should resolve"
+  printf 'done [corr=%s]: late duplicate\n' "$corr" > "$sm_home/state/mate.status"
+  fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" \
+    || fail "wrong-home lookup must find an archived correlation"
+  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
+    || fail "wrong-home lookup moved or lost the archived record"
+  pass "wrong-home lookup finds archived correlations as inert records"
+}
+
 test_settled_record_with_an_open_escalation_stays_hot() {
   local home state corr hot
   home=$(setup_parent retention-open-escalation)
@@ -1772,6 +1836,8 @@ test_archived_record_is_still_found_by_correlation_id
 test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
+test_resolved_escalation_retry_archives_immediately
+test_archived_wrong_home_lookup_is_inert
 test_settled_record_with_an_open_escalation_stays_hot
 
 printf 'ok - all pending-reply tests passed\n'
