@@ -182,6 +182,67 @@ EOF
   pass "an archived fast reply completes its pending receiver wake"
 }
 
+test_receiver_wake_snapshots_archive_transition_under_lock() {
+  local home="$TMP_ROOT/archive-race-main" sub="$TMP_ROOT/archive-race-sub"
+  local corr=00000000000000dd marker hot archive lock holder handoff i status=0 racebin
+  setup_homes "$home" "$sub"
+  mkdir -p "$sub/data" "$home/state/pending-replies/archive"
+  printf '## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  cat > "$sub/data/backlog.md" <<'EOF'
+## Queued
+- [ ] archive-race - already routed (repo: alpha)
+
+## Done
+EOF
+  marker="$home/state/.backlog-handoff-design.wake-pending"
+  hot="$home/state/pending-replies/$corr"
+  archive="$home/state/pending-replies/archive/$corr"
+  lock="$home/state/.pending-reply-$corr.lock"
+  printf 'pending:%s\n' "$corr" > "$marker"
+  cat > "$hot" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=design
+delivered_epoch=100
+phase=resolved
+resolved_epoch=101
+EOF
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -e "$4" ]; do /bin/sleep 0.02; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/lock-ready" "$home/lock-release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$home/lock-ready" ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$home/lock-ready" ] || fail "the archive-race lock holder did not start"
+  racebin="$home/racebin"
+  mkdir "$racebin"
+  cat > "$racebin/sleep" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_ARCHIVE_RACE_WAITING"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$racebin/sleep"
+  PATH="$racebin:$PATH" FM_ARCHIVE_RACE_WAITING="$home/handoff-waiting" FM_HOME="$home" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design archive-race > "$home/handoff.out" 2>&1 &
+  handoff=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$home/handoff-waiting" ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$home/handoff-waiting" ] || fail "the handoff did not reach correlation-lock contention"
+  mv "$hot" "$archive"
+  touch "$home/lock-release"
+  wait "$holder" || fail "the archive-race lock holder failed"
+  wait "$handoff" || status=$?
+  [ "$status" -eq 0 ] || fail "the hot-to-archive transition failed the handoff: $(cat "$home/handoff.out")"
+  assert_absent "$marker" "the hot-to-archive transition left the receiver wake pending"
+  [ "$(inbox_record_count "$home/state" design)" -eq 0 ] \
+    || fail "the hot-to-archive transition duplicated the receiver instruction"
+  pass "receiver wake snapshots a hot-to-archive transition under the correlation lock"
+}
+
 test_known_receiver_failure_remains_retryable_after_grace() {
   local home="$TMP_ROOT/known-fail-main" sub="$TMP_ROOT/known-fail-sub"
   local basebin rejectbin="$TMP_ROOT/known-fail-reject" out corr rec_count rc=0
@@ -1379,6 +1440,7 @@ EOF
 test_handoff_wakes_live_local_receiver
 test_failed_wake_retries_when_the_item_is_already_present
 test_archived_fast_reply_clears_pending_receiver_wake
+test_receiver_wake_snapshots_archive_transition_under_lock
 test_known_receiver_failure_remains_retryable_after_grace
 test_known_failure_restores_retry_after_reconciliation_race
 test_move_crash_keeps_wake_pending_for_recovery
