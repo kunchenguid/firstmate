@@ -61,7 +61,7 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
-   A codex task's recorded Codex account home (`codex_home=`, the directory holding that account's `auth.json`) carries forward unchanged on a same-harness relaunch unless `--codex-home` names another, is dropped by a relaunch onto any other harness, and is refused as a flag on a non-codex target.
+   A codex task's recorded Codex account home (`codex_home=`, the directory holding that account's `auth.json`) carries forward unchanged on a same-harness relaunch unless `--codex-home` names another, is dropped by a relaunch onto any other harness, and is refused as a flag on a non-codex target or on a `kind=secondmate` task, which has no Codex account axis.
    The carried or named account is validated before the old agent is stopped, so a missing or signed-out account refuses while the agent is still running instead of stranding the task; [`bin/fm-codex-home-lib.sh`](../bin/fm-codex-home-lib.sh) owns that check.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
