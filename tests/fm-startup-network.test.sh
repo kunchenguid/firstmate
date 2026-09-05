@@ -17,6 +17,8 @@
 #     staying "in progress" forever
 #   - phase-aware single-flight: a covering worker is reused, while a later
 #     locked request supersedes an in-flight probe-only worker
+#   - no worker outlives the world it was launched into, so a suite run cannot
+#     leave a detached process polling a directory that no longer exists
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -85,6 +87,16 @@ fi
 SH
   chmod +x "$root/bin/ps"
   printf '%s|%s|%s\n' "$home" "$root" "$w/bootstrap.log"
+}
+
+# Every worker this run launched, and only those. The match is this run's own
+# temp root, which fm_test_tmproot has already resolved physically - the same
+# form the worker's own argv carries, since it re-derives its directory with
+# `cd`/`pwd`. Matching that exact prefix is what keeps the sweep from ever
+# touching a concurrent suite run or a real fleet home on the same machine.
+launched_workers() {
+  ps -eo pid=,args= 2>/dev/null | awk -v root="$TMP_ROOT/" '
+    index($0, root) && index($0, "fm-startup-network.sh run") { print $1 }'
 }
 
 # The detached worker records itself a moment after `start` returns - that gap is
@@ -759,6 +771,39 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+# Every case above launches workers that deliberately outlive the command which
+# started them. What must NOT outlive them is the world they were launched into:
+# a worker still polling a home that has been removed is a process nothing will
+# ever reap, and enough of them starve the machine every timing-sensitive
+# assertion in this suite is measured on. Removing the homes is exactly what the
+# teardown below does a moment later, so this asserts the property the teardown
+# depends on rather than inventing a new one.
+test_no_worker_outlives_the_world_it_was_launched_into() {
+  local home waited=0 survivors
+  for home in "$TMP_ROOT"/*/home; do
+    [ -d "$home" ] || continue
+    rm -rf "$home"
+  done
+
+  while [ "$waited" -lt 300 ]; do
+    survivors=$(launched_workers)
+    [ -n "$survivors" ] || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  survivors=$(launched_workers)
+  if [ -n "$survivors" ]; then
+    # Reaped here as well as named: a run that fails this assertion is a run that
+    # just proved these processes will never stop on their own.
+    printf '%s\n' "$survivors" | while read -r pid; do
+      [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    done
+    fail "detached workers outlived the removed homes they were launched into: $(printf '%s' "$survivors" | tr '\n' ' ')"
+  fi
+  pass "fm-startup-network: no detached worker outlives the world it was launched into"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -779,4 +824,5 @@ test_records_share_one_origin_so_offsets_form_a_timeline
 test_timings_are_published_and_only_the_on_demand_report_prints_them
 test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
 test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
+test_no_worker_outlives_the_world_it_was_launched_into
 echo "# fm-startup-network.test.sh: all assertions passed"

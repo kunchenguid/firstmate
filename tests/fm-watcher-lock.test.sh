@@ -337,6 +337,85 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
+# The steal walk recurses once per abandoned level, so a chain left by repeated
+# crashes is reclaimed only by walking all of it. Capping that depth is what
+# turns noisy recovery into a permanent refusal, with fm_lock_acquire_wait
+# spinning on it forever, so this pins the walk as unbounded by depth.
+test_lock_walks_a_fully_abandoned_steal_chain() {
+  local dir state lockdir rc newpid level
+  dir=$(make_case lock-abandoned-chain)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  # Built the way a chain is built in the wild: a process holding the steal
+  # mutex at each level dies without releasing any of them.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_try_acquire "$2.steal" || exit 7
+    fm_lock_try_acquire "$2.steal.steal" || exit 7
+    fm_lock_try_acquire "$2.steal.steal.steal" || exit 7
+    kill -9 "${BASHPID:-$$}"
+  ' _ "$LIB" "$lockdir" >/dev/null 2>&1
+  for level in "$lockdir" "$lockdir.steal" "$lockdir.steal.steal" "$lockdir.steal.steal.steal"; do
+    [ -e "$level" ] || [ -L "$level" ] || fail "abandoned chain was not built: $level missing"
+  done
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer refused a fully abandoned steal chain (rc=$rc)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  for level in "$lockdir.steal" "$lockdir.steal.steal" "$lockdir.steal.steal.steal"; do
+    if [ -e "$level" ] || [ -L "$level" ]; then
+      fail "steal chain was reclaimed but not cleaned up: $level survived"
+    fi
+  done
+  pass "a fully abandoned steal chain is walked and cleaned up"
+}
+
+# The mirror case: no abandoned holder to displace at all. Every deeper steal
+# level fails identically while the name grows, so the recursion never returns.
+# Bounded here rather than left to hang, since the regression is an unbounded
+# loop and a hanging suite reports nothing.
+test_lock_refuses_to_recurse_when_the_lock_cannot_be_created() {
+  local dir state lockdir worker rc waited out warnings
+  dir=$(make_case lock-uncreatable)
+  state="$dir/state"
+  # The state directory removed or moved out from under a running watcher.
+  lockdir="$state/gone/.contend.lock"
+  out="$dir/out"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+  ' _ "$LIB" "$lockdir" > "$out" 2>&1 &
+  worker=$!
+  waited=0
+  while kill -0 "$worker" 2>/dev/null && [ "$waited" -lt 150 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$worker" 2>/dev/null; then
+    kill -9 "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    fail "acquiring an uncreatable lock never returned (unbounded steal recursion)"
+  fi
+  rc=0
+  wait "$worker" || rc=$?
+  [ "$rc" -ne 0 ] || fail "acquiring an uncreatable lock reported success"
+  grep -q 'cannot create' "$out" \
+    || fail "uncreatable lock was refused silently: $(cat "$out")"
+  # The refusal is reached ten times a second by fm_lock_acquire_wait, so it
+  # must not turn a persistent fault into unbounded stderr.
+  warnings=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || true
+    fm_lock_try_acquire "$2" || true
+  ' _ "$LIB" "$lockdir" 2>&1 | grep -c 'cannot create')
+  [ "$warnings" -eq 1 ] || fail "expected one refusal warning per path, got $warnings"
+  pass "an uncreatable lock is refused loudly instead of recursed on"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1115,6 +1194,8 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_walks_a_fully_abandoned_steal_chain
+test_lock_refuses_to_recurse_when_the_lock_cannot_be_created
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
