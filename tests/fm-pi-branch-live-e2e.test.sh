@@ -771,8 +771,49 @@ if (rendered.split(record.summary).length !== 2) {
   throw new Error(`active Pi transcript rendered the outcome more than once: ${rendered}`);
 }
 
+// Exercise Pi's real delivery and transcript reconstruction without a provider.
+const quietSummaries = [
+  "worker completed a turn",
+  "preview stopped; work remains preserved",
+  "already reported blocker unchanged",
+  "already reported blocker unchanged",
+  "fleet heartbeat unchanged",
+];
+let agentStarts = 0;
+const stopCounting = created.session.subscribe((event) => {
+  if (event.type === "agent_start") agentStarts += 1;
+});
+for (const summary of quietSummaries) {
+  capturedApi.sendMessage({ customType: "fm-branch-merge", content: `⛵ worker: ${summary}`, display: false });
+}
+// Historical entries used display:true. Preserve saved data, but hide the
+// known routine prefix when Pi reconstructs the transcript after reload.
+for (const summary of quietSummaries) {
+  manager.appendCustomMessageEntry("fm-branch-merge", `⛵ worker: ${summary}`, true);
+}
+manager.appendCustomMessageEntry("fm-branch-merge", "⚓ legacy captain decision", true);
+manager.appendCustomMessageEntry("fm-branch-merge", "unrecognized legacy message", true);
+manager.appendCustomMessageEntry("ordinary-extension", "ordinary custom message", true);
+manager.appendMessage({ role: "user", content: "ordinary captain question", timestamp: Date.now() });
+interactive.chatContainer.clear();
+interactive.renderSessionEntries(manager.buildContextEntries());
+const historicalView = interactive.chatContainer.render(240).join("\n");
+for (const summary of quietSummaries) {
+  if (historicalView.includes(summary)) throw new Error(`routine history remained visible: ${summary}`);
+}
+for (const visible of [record.summary, "⚓ legacy captain decision", "unrecognized legacy message", "ordinary custom message", "ordinary captain question"]) {
+  if (!historicalView.includes(visible)) throw new Error(`unrelated or captain message disappeared: ${visible}`);
+}
+if (agentStarts !== 0) throw new Error("routine delivery opened a provider turn");
+stopCounting();
 const reopened = SessionManager.open(manager.getSessionFile(), sessions);
 const entries = reopened.getEntries();
+for (const summary of quietSummaries) {
+  const saved = entries.filter((candidate) => candidate.type === "custom_message" && candidate.content === `⛵ worker: ${summary}`);
+  if (!saved.some((candidate) => candidate.display === true) || !saved.some((candidate) => candidate.display === false)) {
+    throw new Error(`routine presentation rewrote or dropped saved evidence: ${summary}`);
+  }
+}
 const entry = entries.find((candidate) => candidate.type === "custom" && candidate.customType === "fm-branch-visible-outcome");
 if (!entry || JSON.stringify(entry.data) !== JSON.stringify(record)) {
   throw new Error(`appendEntry did not persist the exact record across reopen: ${JSON.stringify(entry)}`);
@@ -790,7 +831,7 @@ out=$(cat "$TMP_ROOT/delivery-output")
 if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
   fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"
+pass "real Pi SDK $PI_VERSION renders captain entries, hides routine delivery and history without turns, preserves ordinary messages and saved evidence, and excludes captain entries from model context"
 
 # Sixth probe: the vendor event contract watcher continuity rests on, against
 # the real AgentSession and ExtensionRunner with the tracked watcher extension

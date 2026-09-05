@@ -54,6 +54,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
+    *"All routine outcomes remain durable but invisible"*"Direct answers to explicit captain questions also use verdict captain."*"Worker turn completion, stopped previews with preserved work"*"An already-reported unchanged blocker is routine unless the captain explicitly requested an update"*"Never replace silent routine outcomes with a shipshape reply"*) ;;
+    *) fail "branch prompt lost quiet routine presentation or explicit-answer delivery" ;;
+  esac
+  case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
