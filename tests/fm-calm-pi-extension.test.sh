@@ -17,7 +17,7 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-# Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
+# Verified against Pi 0.81.1, 0.82.0, and 0.84.4 (docs/calm-mode-feasibility.md). This is
 # known-good evidence, not a support ceiling: the fixtures below run against whatever
 # Pi is actually installed, and record_pi_version_evidence never rejects a newer
 # version. The tracked presentation adapters probe the exact API they patch (see
@@ -1462,12 +1462,83 @@ const assistantBase = {
   timestamp: 1,
 };
 const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
+const captainPreToolExplanation =
+  "CAPTAIN_PRE_TOOL_EXPLANATION: Captain, this action still requires your explicit authorization before I can proceed.";
+const supervisionReturnRule =
+  "SUPERVISION_RETURN_RULE: The existing supervision cycle stays active; your next unmarked message means you have returned.";
+const signedText = (text, id, phase = "commentary") => ({
+  type: "text",
+  text,
+  textSignature: JSON.stringify({ v: 1, id, phase }),
+});
 const messages = {
-  // The reported incident: narration emitted in the same assistant message as a tool call.
+  // Ordinary narration emitted in the same assistant message as a tool call is hidden.
   midTurn: {
     ...assistantBase,
     stopReason: "toolUse",
     content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+  },
+  // Pi's versioned commentary phase distinguishes text explicitly addressed to the
+  // captain from unsigned working narration, even when both precede the same tool.
+  captainFacingBeforeTool: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      signedText(
+        `${captainPreToolExplanation}\n\n${supervisionReturnRule}`,
+        "msg_calm_captain_pre_tool",
+      ),
+      { type: "text", text: "INTERNAL_WORKING_NARRATION" },
+      toolCall,
+    ],
+  },
+  // Both phases in Pi's public v1 shape are explicitly user-facing.
+  finalPhaseBeforeTool: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      signedText("EXPLICIT_FINAL_PHASE_BEFORE_TOOL", "msg_calm_final_phase", "final_answer"),
+      toolCall,
+    ],
+  },
+  // A phase-less versioned signature carries provider continuity, not an explicit
+  // presentation phase, so it must not turn ordinary narration into visible copy.
+  phaseLessMidTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{
+      type: "text",
+      text: "PHASELESS_WORKING_NARRATION",
+      textSignature: JSON.stringify({ v: 1, id: "msg_calm_phase_less" }),
+    }, toolCall],
+  },
+  // Unknown versions and malformed JSON must stay on the conservative hidden path.
+  unrecognizedSignatureMidTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{
+      type: "text",
+      text: "UNRECOGNIZED_SIGNATURE_NARRATION",
+      textSignature: '{"v":2,"id":"msg_calm_unknown","phase":"commentary"}',
+    }, toolCall],
+  },
+  unknownPhaseMidTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{
+      type: "text",
+      text: "UNKNOWN_PHASE_NARRATION",
+      textSignature: '{"v":1,"id":"msg_calm_unknown_phase","phase":"analysis"}',
+    }, toolCall],
+  },
+  malformedSignatureMidTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{
+      type: "text",
+      text: "MALFORMED_SIGNATURE_NARRATION",
+      textSignature: '{"v":1,"id":"msg_calm_malformed","phase":"commentary"',
+    }, toolCall],
   },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
@@ -1500,7 +1571,7 @@ for (const [name, message] of Object.entries(messages)) {
   rows[name] = new AssistantMessageComponent(message, true);
   components.push(rows[name]);
 }
-const rendered = (name) => rows[name].render(100);
+const rendered = (name) => rows[name].render(240);
 const renderedText = (name) => rendered(name).join("\n");
 const snapshot = () => {
   const shot = {};
@@ -1528,6 +1599,9 @@ for (const name of Object.keys(rows)) {
   if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+requireVisible("captainFacingBeforeTool", captainPreToolExplanation, "Calm off");
+requireVisible("captainFacingBeforeTool", supervisionReturnRule, "Calm off");
+requireVisible("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "Calm off");
 
 await calm.calmCommand.handler("", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
@@ -1535,6 +1609,20 @@ if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
 }
 if (rendered("midTurn").length !== 0) {
   throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+}
+requireVisible("captainFacingBeforeTool", captainPreToolExplanation, "Calm on");
+requireVisible("captainFacingBeforeTool", supervisionReturnRule, "Calm on");
+requireHidden("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "Calm on");
+requireVisible("finalPhaseBeforeTool", "EXPLICIT_FINAL_PHASE_BEFORE_TOOL", "Calm on");
+for (const name of [
+  "phaseLessMidTurn",
+  "unrecognizedSignatureMidTurn",
+  "unknownPhaseMidTurn",
+  "malformedSignatureMidTurn",
+]) {
+  if (rendered(name).length !== 0) {
+    throw new Error(`Calm on trusted non-explicit ${name} text: ${JSON.stringify(rendered(name))}`);
+  }
 }
 requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
 // Pi owns the wording of its truncation notice; Calm must leave that row's own notice
@@ -1548,6 +1636,13 @@ requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
 if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
   throw new Error("Calm on changed the genuine final reply row");
 }
+const calmCaptainFacingRows = JSON.stringify(rendered("captainFacingBeforeTool"));
+ui.setHiddenThinkingLabel(undefined);
+ui.setHiddenThinkingLabel("");
+if (JSON.stringify(rendered("captainFacingBeforeTool")) !== calmCaptainFacingRows) {
+  throw new Error("a Pi assistant-row redraw changed phase-marked pre-tool explanations");
+}
+requireHidden("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "Calm redraw");
 if (JSON.stringify(messages) !== messagesBefore) {
   throw new Error("Calm on mutated the assistant messages instead of a presentation copy");
 }
@@ -1559,6 +1654,7 @@ if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
   throw new Error("/calm max was still read as a level instead of the plain toggle");
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
+requireVisible("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", "Calm off after /calm max");
 const restoredRows = snapshot();
 for (const name of Object.keys(rows)) {
   if (restoredRows[name] !== stockRows[name]) {
@@ -1596,6 +1692,10 @@ for (const persisted of ["on\n", "max\n", "max"]) {
         `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide mid-turn working notes`,
       );
     }
+    requireVisible("captainFacingBeforeTool", captainPreToolExplanation, `${reason} session`);
+    requireVisible("captainFacingBeforeTool", supervisionReturnRule, `${reason} session`);
+    requireHidden("captainFacingBeforeTool", "INTERNAL_WORKING_NARRATION", `${reason} session`);
+    requireVisible("finalPhaseBeforeTool", "EXPLICIT_FINAL_PHASE_BEFORE_TOOL", `${reason} session`);
     requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
   }
   // A session restored as on toggles to off; one that had wrongly dropped to off would
@@ -1614,7 +1714,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps phase-marked pre-tool explanations and supervision/return guidance visible, hides unsigned or unrecognized mid-turn narration, preserves final replies and Calm-off rendering, and survives redraw plus every reload reason without mutating messages"
 }
 
 test_operational_followup_turn_e2e() {
@@ -3304,7 +3404,7 @@ TS
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
 {"type":"message","id":"a0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Show a deterministic tool example."}],"timestamp":1}}
-{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first internal reasoning block"},{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
+{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first internal reasoning block"},{"type":"text","text":"CAPTAIN_PRE_TOOL_EXPLANATION: Captain, this action still requires your explicit authorization before I can proceed.\\n\\nSUPERVISION_RETURN_RULE: The existing supervision cycle stays active; your next unmarked message means you have returned.","textSignature":"{\"v\":1,\"id\":\"msg_calm_pre_tool\",\"phase\":\"commentary\"}"},{"type":"text","text":"INTERNAL_WORKING_NARRATION: checking implementation details."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-sol","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
 {"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_calm_e2e","toolName":"bash","content":[{"type":"text","text":"CALM_E2E_OUTPUT"}],"details":{},"isError":false,"timestamp":3}}
 {"type":"message","id":"a0000004","parentId":"a0000003","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"second internal reasoning block"},{"type":"toolCall","id":"call_grep_e2e","name":"grep","arguments":{"pattern":"CALM_EXPORT_GREP","path":"."}},{"type":"toolCall","id":"call_find_e2e","name":"find","arguments":{"pattern":"CALM_EXPORT_FIND*","path":"."}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":4}}
 {"type":"message","id":"a0000005","parentId":"a0000004","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_grep_e2e","toolName":"grep","content":[{"type":"text","text":"sample.txt:1:CALM_EXPORT_GREP"}],"details":{},"isError":false,"timestamp":5}}
@@ -3329,6 +3429,9 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
   assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
+  assert_contains "$(cat "$default_snapshot")" "CAPTAIN_PRE_TOOL_EXPLANATION" "Calm-off transcript hid a captain-facing pre-tool explanation"
+  assert_contains "$(cat "$default_snapshot")" "SUPERVISION_RETURN_RULE" "Calm-off transcript hid supervision/return guidance"
+  assert_contains "$(cat "$default_snapshot")" "INTERNAL_WORKING_NARRATION" "Calm-off transcript hid ordinary mid-turn narration"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
@@ -3359,7 +3462,9 @@ JSON
     # on screen through this whole redraw rather than disappearing with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
-      ! grep -Fq "I will run one command." "$hidden_snapshot" &&
+      ! grep -Fq "INTERNAL_WORKING_NARRATION" "$hidden_snapshot" &&
+      grep -Fq "CAPTAIN_PRE_TOOL_EXPLANATION" "$hidden_snapshot" &&
+      grep -Fq "SUPERVISION_RETURN_RULE" "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
@@ -3396,9 +3501,12 @@ JSON
   do
     assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
   done
-  # Mid-turn narration emitted alongside the tool call is a working note, which Calm
-  # hides against the real Pi renderer; the genuine reply that ended the response stays.
-  assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a mid-turn assistant working note in the transcript"
+  # The real Pi renderer preserves the versioned commentary block immediately before
+  # the tool while removing the unsigned working block beside it. The response-ending
+  # assistant message remains visible through its existing final-response path.
+  assert_contains "$(cat "$hidden_snapshot")" "CAPTAIN_PRE_TOOL_EXPLANATION" "/calm removed a phase-marked captain-facing pre-tool explanation"
+  assert_contains "$(cat "$hidden_snapshot")" "SUPERVISION_RETURN_RULE" "/calm removed phase-marked supervision/return guidance"
+  assert_not_contains "$(cat "$hidden_snapshot")" "INTERNAL_WORKING_NARRATION" "/calm left unsigned mid-turn assistant narration in the transcript"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
@@ -3562,6 +3670,9 @@ const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id=
 if (!messages || !tree) process.exit(1);
 if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
 if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
+for (const assistantText of ["CAPTAIN_PRE_TOOL_EXPLANATION", "SUPERVISION_RETURN_RULE", "INTERNAL_WORKING_NARRATION"]) {
+  if (!messages.includes(assistantText)) process.exit(1);
+}
 if (messages.includes('<div class="hook-message"')) process.exit(1);
 if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
 for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
@@ -3585,8 +3696,12 @@ JS
     "/export left a synthetic Firstmate user-role presentation in the Calm transcript"
   assert_not_contains "$(cat "$export_settled_snapshot")" "Thinking..." \
     "/export left collapsed thinking labels in the Calm transcript"
-  assert_not_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
-    "/export left a mid-turn assistant working note in the Calm transcript"
+  assert_contains "$(cat "$export_settled_snapshot")" "CAPTAIN_PRE_TOOL_EXPLANATION" \
+    "/export repaint removed a phase-marked captain-facing pre-tool explanation"
+  assert_contains "$(cat "$export_settled_snapshot")" "SUPERVISION_RETURN_RULE" \
+    "/export repaint removed phase-marked supervision/return guidance"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "INTERNAL_WORKING_NARRATION" \
+    "/export repaint left unsigned mid-turn assistant narration in the Calm transcript"
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
@@ -3606,8 +3721,8 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "second /calm did not restore tool result output"
-  wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
-    || fail "second /calm did not restore a synthetic row received while Calm was active"
+  wait_for_text "$restored_snapshot" "CURRENT_LAUNCH_BRIEF_E2E" \
+    || fail "second /calm did not finish restoring operational rows received while Calm was active"
   assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "second /calm did not restore the Firstmate watcher tool shell"
   assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "second /calm did not restore the synthetic Firstmate user row"
   for restored in \
@@ -3623,7 +3738,9 @@ JS
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
-  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm did not restore the mid-turn assistant working note"
+  assert_contains "$(cat "$restored_snapshot")" "CAPTAIN_PRE_TOOL_EXPLANATION" "second /calm lost the captain-facing pre-tool explanation"
+  assert_contains "$(cat "$restored_snapshot")" "SUPERVISION_RETURN_RULE" "second /calm lost supervision/return guidance"
+  assert_contains "$(cat "$restored_snapshot")" "INTERNAL_WORKING_NARRATION" "second /calm did not restore unsigned mid-turn assistant narration"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
@@ -3951,6 +4068,9 @@ JS
     assert_not_contains "$(cat "$restarted_snapshot")" "$hidden" "restart/resume rendered operational input $hidden"
   done
   assert_not_contains "$(cat "$restarted_snapshot")" "calm transcript" "restart/resume added a persistent Calm status row"
+  assert_contains "$(cat "$restarted_snapshot")" "CAPTAIN_PRE_TOOL_EXPLANATION" "restart/resume removed a phase-marked captain-facing pre-tool explanation"
+  assert_contains "$(cat "$restarted_snapshot")" "SUPERVISION_RETURN_RULE" "restart/resume removed phase-marked supervision/return guidance"
+  assert_not_contains "$(cat "$restarted_snapshot")" "INTERNAL_WORKING_NARRATION" "restart/resume restored unsigned mid-turn assistant narration"
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_PROMPT" "restart/resume removed a genuine user prompt"
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_RESPONSE" "restart/resume removed a genuine assistant response"
   [ "$(cat "$home/config/calm")" = on ] || fail "restart/resume changed the persisted active choice"
@@ -3959,10 +4079,12 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$resumed_restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "/calm after restart did not restore ordinary transcript rows"
+  assert_contains "$(cat "$resumed_restored_snapshot")" "INTERNAL_WORKING_NARRATION" \
+    "/calm after restart did not restore unsigned mid-turn assistant narration"
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
+  pass "Pi Calm native E2E preserves phase-marked pre-tool explanations and supervision/return guidance across redraw, export repaint, and restart while hiding unsigned narration, and retains working-ship, operational-row, Calm-off, persistence, export, and Ctrl+O behavior"
 }
 
 test_home_resolution

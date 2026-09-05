@@ -29,8 +29,10 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm is on or off. "assistant-working-note" is deliberately absent from the allowlist:
-// Calm hides mid-turn assistant working notes, keeping the genuine final reply.
+// Calm is on or off.
+// "assistant-working-note" is deliberately absent from the allowlist, so Calm hides
+// ordinary mid-turn narration while the assistant layout classifies explicitly
+// phase-marked captain-facing text as a genuine agent response.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
