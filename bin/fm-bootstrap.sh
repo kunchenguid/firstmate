@@ -1206,7 +1206,7 @@ backlog_record_reconcile() {
     echo "error: backlog reconciliation refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
     return 2
   fi
-  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
+  if fm_backlog_transition_applies "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
     :
   else
     gate_status=$?
@@ -1375,7 +1375,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       done
     fi
   fi
-  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
+  if fm_backlog_transition_applies "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
     :
   else
     BOOTSTRAP_BACKLOG_GATE_STATUS=$?

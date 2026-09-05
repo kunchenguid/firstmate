@@ -104,15 +104,13 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so the
-  # fused backlog close is skipped and the follow-up echo takes the plain-message
-  # path; there is no tasks-axi and no backlog in this fixture.
+  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report an incompatible
+  # tasks-axi so the fused backlog close is skipped and the follow-up echo takes
+  # the plain-message path; there is no tasks-axi and no backlog in this fixture.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 FM_TASKS_AXI_MIN=0.2.4
 fm_tasks_axi_backend() { printf 'markdown\n'; }
-fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
-fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
@@ -202,9 +200,7 @@ SH
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 FM_TASKS_AXI_MIN=0.2.4
 fm_tasks_axi_backend() { printf 'markdown\n'; }
-fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
-fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
   # No tasktmp= line at all.

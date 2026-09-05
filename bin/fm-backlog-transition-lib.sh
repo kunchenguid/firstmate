@@ -175,15 +175,15 @@ fm_backlog_data_relative() {  # <data-dir>
   esac
 }
 
-fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local data authorized_data=$2 kind=$3 file root
+fm_backlog_transition_applies() {  # <data-dir> <kind>
+  local data authorized_data=$1 kind=$2 file root
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
     return 1
   fi
-  if ! data=$(fm_backlog_data_absolute "$2"); then
-    FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $2"
+  if ! data=$(fm_backlog_data_absolute "$1"); then
+    FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 2
   fi
   root=$(fm_backlog_root "$data") || return 2
