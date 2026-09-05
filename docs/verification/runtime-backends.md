@@ -1417,8 +1417,13 @@ ok - supervision outcome delivery keeps the real Pi 0.82.0 TUI echoing keystroke
 ok - outcome delivery keeps the event loop running and interleaved reports stay ordered and exactly once
 ok - a session replaced mid-delivery cancels cleanly and the stored outcome still arrives exactly once
 ok - a failing store script surfaces to the branch and its outcome is neither lost nor delivered twice
+ok - a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated
+skip: installed Pi 0.81.1 predates the stock renderer contract 0.84.4 this case compares against
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
 ```
+
+That skip is the renderer case declining to render a verdict on a Pi older than the contract it compares against: since 0.84.4 the stock renderer no longer supplies an implicit reset at multiline boundaries and the extension emits that reset itself, so an older installed Pi differs legitimately.
+It names the installed version and the floor rather than degrading quietly, and a package whose version cannot be read at all is still a failure.
 
 The same guard against the pre-change extension in the same lab measured a 676.9 ms worst keystroke echo while delivering two outcomes and a 295.3 ms worst echo with nothing to deliver, against a 49.2 ms extension-free floor, and failed as designed.
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.

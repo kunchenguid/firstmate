@@ -1242,11 +1242,33 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
-    .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts)
+    .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
+    .pi/extensions/lib/fm-branch-dispatch.ts)
+      # The portable suites that actually load these files, named one by one.
+      # Left unmapped, a Pi extension library resolves through the reference
+      # scan, which widens to each referencing suite's WHOLE family - and
+      # these suites sit in four different families, so that pulls in dozens
+      # of suites with nothing to do with Pi.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-wake-queue.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
       # Whether an arriving outcome still lets the captain type is a fact only
-      # a real Pi TUI can answer, so the live guard is selected alongside the
-      # portable regression.
-      printf '%s\n' standalone
+      # a real Pi TUI can answer, so the live guards are selected too.
+      printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/lib/fm-operational-input.ts)
+      # The same rule for the operational-input library, whose reach is wider:
+      # every Pi extension that classifies or encodes operational text.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
+      printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\

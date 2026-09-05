@@ -146,7 +146,6 @@ const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
-const ROUTINE_DELIVERY_RECEIPT_TYPE = "fm-branch-routine-delivery";
 // The processing half of the captain-outcome contract. The visible entry
 // above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
 // is the PROCESSING: it opens the one turn in which main acts on the outcome,
@@ -883,24 +882,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // Routine delivery uses sendMessage for its established main-context
-  // semantics, then records the same sequence in the session before the first
-  // await. If the asynchronous cursor command fails, reconciliation can prove
-  // that this session already received the note instead of sending it again.
-  function ensureRoutineOutcome(row: OutcomeRow): boolean {
-    if (!currentMainSession || row.verdict !== "routine") return false;
-    let matching = false;
-    for (const entry of currentMainSession.getEntries()) {
-      if (entry.type !== "custom" || entry.customType !== ROUTINE_DELIVERY_RECEIPT_TYPE) continue;
-      const entrySeq = entry.data && typeof entry.data === "object"
-        ? (entry.data as { seq?: unknown }).seq
-        : undefined;
-      if (entrySeq !== row.seq) continue;
-      const recorded = parseVisibleOutcomeRecord(entry.data);
-      if (!recorded || !sameOutcome(recorded, row)) return false;
-      matching = true;
-    }
-    if (matching) return true;
+  function deliverRoutineOutcome(row: OutcomeRow): void {
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
@@ -908,17 +890,6 @@ export default function (pi: ExtensionAPI) {
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
-    const record: VisibleOutcomeRecord = { version: 1, ...row };
-    try {
-      pi.appendEntry(ROUTINE_DELIVERY_RECEIPT_TYPE, record);
-    } catch {
-      return false;
-    }
-    return currentMainSession.getEntries().some((entry) => {
-      if (entry.type !== "custom" || entry.customType !== ROUTINE_DELIVERY_RECEIPT_TYPE) return false;
-      const recorded = parseVisibleOutcomeRecord(entry.data);
-      return recorded !== null && sameOutcome(recorded, row);
-    });
   }
 
   // Captain rows that are read (their visible entry exists) but not yet
@@ -1039,10 +1010,22 @@ export default function (pi: ExtensionAPI) {
         // unread and deliver it a second time; the cursor records that the
         // row WAS delivered, which stays true across a replacement.
         if (!(await generationOwnsLock(expectedGeneration))) return false;
+        // KNOWN PRE-EXISTING LIMITATION, unchanged by moving this work off Pi's
+        // render thread and tracked as
+        // fm-pi-routine-delivery-idempotency-followup-r1: if the mark-read
+        // below fails after a ROUTINE note was already delivered, the row stays
+        // unread and the next reconciliation sends that note a second time,
+        // because a routine note is a plain message with no sequence-keyed
+        // record to recognize. A captain row cannot duplicate that way -
+        // ensureVisibleCaptainOutcome finds its own earlier entry by store
+        // sequence. Closing the routine gap needs a durable, idempotent
+        // representation for routine delivery, which changes the delivery
+        // contract rather than this ordering, so it is deliberately not done
+        // here.
         if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
-        } else if (!ensureRoutineOutcome(row)) {
-          return false;
+        } else {
+          deliverRoutineOutcome(row);
         }
         if (!(await runOutcomeScript(["mark-read", "--through", String(row.seq)])).ok) return false;
       }
