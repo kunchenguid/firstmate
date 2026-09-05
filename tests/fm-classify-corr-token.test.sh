@@ -524,6 +524,7 @@ EOF
   FM_HOME="$mate" "$REPORT" "done" "$corr" "audit clean" \
     || fail "$REPORT failed writing a correlated report"
   helper_line=$(tail -1 "$state/pinned.status")
+  status_line_at_epoch "$helper_line" >/dev/null || fail "report helper emitted no time"
   verb=$(status_line_verb "$helper_line")
   [ "$verb" = "done" ] \
     || fail "the classifier did not read through the helper's own line '$helper_line' (verb=[$verb])"
@@ -533,6 +534,7 @@ EOF
   FM_HOME="$mate" "$REPORT" --doc needs-decision "$corr" data/x/report.md "see the report" \
     || fail "$REPORT failed writing a correlated doc-pointer report"
   helper_line=$(tail -1 "$state/pinned.status")
+  status_line_at_epoch "$helper_line" >/dev/null || fail "doc report helper emitted no time"
   verb=$(status_line_verb "$helper_line")
   [ "$verb" = needs-decision ] \
     || fail "the classifier did not read through the helper's doc line '$helper_line' (verb=[$verb])"
@@ -552,6 +554,12 @@ test_optional_event_time() {
   [ "$(_fm_decision_key "$stamped")" = timed ] || fail "time changed key"
   [ "$(status_line_note "$stamped")" = 'choose: A or B' ] || fail "time changed note"
   [ "$(status_stamp_line "$stamped")" = "$stamped" ] || fail "restamping changed emission time"
+  line='done [at=1700000000]: old event'
+  [ "$(status_stamp_line "$line")" = "$line" ] || fail "writer replaced an old emission time"
+  (
+    date() { return 1; }
+    [ "$(status_stamp_line 'done: clock unavailable')" = 'done: clock unavailable' ]
+  ) || fail "clock failure lost the event"
   for line in 'done: legacy' 'done: [at=1700000000] prose' \
     'done [at=bad]: malformed' 'done [at=-1]: negative' \
     'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
@@ -563,6 +571,23 @@ test_optional_event_time() {
     [ "$(status_line_at_epoch "$line")" = 1700000000 ] || fail "metadata order changed time"
   done
   dir=$(make_case event-time)
+  # The real parent publisher deduplicates a retry against both timed and
+  # legacy records without rewriting the first event's time.
+  . "$ROOT/bin/fm-parent-channel-lib.sh"
+  line="done [corr=$CORR]: path: C:\\notes"
+  printf '%s\n' "$(status_stamp_line "$line")" > "$dir/state/retry.status"
+  stamped=$(cat "$dir/state/retry.status")
+  fm_parent_channel_append_once "$dir/state/retry.status" "$line" || fail "parent retry failed"
+  [ "$(cat "$dir/state/retry.status")" = "$stamped" ] || fail "retry duplicated or restamped event"
+  printf '%s\n' "$line" > "$dir/state/legacy.status"
+  fm_parent_channel_append_once "$dir/state/legacy.status" "$line" || fail "legacy retry failed"
+  [ "$(cat "$dir/state/legacy.status")" = "$line" ] || fail "legacy retry acquired an invented time"
+  fm_parent_channel_append_once "$dir/state/retry.status" "done [corr=$CORR2]: path: C:\\notes"
+  [ "$(wc -l < "$dir/state/retry.status")" -eq 2 ] || fail "dedup discarded different correlation"
+  fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=1]'
+  fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=2]'
+  [ "$(wc -l < "$dir/state/retry.status")" -eq 4 ] || fail "dedup stripped a time mention from prose"
+  stamped=$(status_stamp_line "needs-decision corr=$CORR [key=timed]: choose: A or B")
   printf '%s\n' "$stamped" 'working [at=1700000000]: unrelated progress' > "$dir/state/task.status"
   [ -n "$(status_open_decisions "$dir/state/task.status")" ] || fail "time cleared an open decision"
   printf '%s\n' 'resolved [at=1700000001] [key=timed]: answered' >> "$dir/state/task.status"

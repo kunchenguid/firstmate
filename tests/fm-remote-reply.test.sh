@@ -94,7 +94,7 @@ assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 RUNNER=$!
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
-printf 'done [corr=0123456789abcdef]: build verified (data/reply/report.md)\n' \
+printf 'done [corr=0123456789abcdef] [at=1700000000]: build verified (data/reply/report.md)\n' \
   >> "$REMOTE/state/parent-replies.status"
 wait "$RUNNER" || fail "remote reply source failed to capture its first delta"
 RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.1.result" -print -quit 2>/dev/null)
@@ -159,6 +159,8 @@ cmp -s "$SOURCE_AFTER" "$REMOTE/state/parent-replies.status" \
   || fail "handling consumed or rewrote the remote append-only log"
 expected_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$expected_offset" "$PARENT/state/remote-replies/ios.cursor" "reply cursor did not advance to the committed delta"
+assert_grep 'done [corr=0123456789abcdef] [at=1700000000]: build verified' "$PARENT/state/ios.status" \
+  "relay replaced the source event time with observation time"
 pass "ingest appends one validated line, fetches its document, and advances the cursor"
 
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
@@ -197,6 +199,8 @@ assert_contains "$out" 'ingested: ios appended=0' "earlier generation did not re
 assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remained unacknowledged after later cursor advancement"
 [ "$(grep -cF 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "earlier generation replay duplicated its parent status"
+grep -Fxq 'working [corr=1111111111111111]: second generation' "$PARENT/state/ios.status" \
+  || fail "relay invented an emission time for a legacy source event"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
 # The channel mirrors the remote mate's content-bearing status lines at most once
