@@ -325,7 +325,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
-  local dir out rc head
+  local dir out rc head fetch_head
   dir=$(new_case linked-home rl42)
   add_ship_task "$dir" rl42 claude
   git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
@@ -336,14 +336,29 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-work
   head=$(git -C "$dir/wt" rev-parse HEAD)
   printf 'unfinished task work\n' >> "$dir/wt/task.txt"
+  fetch_head=$(git -C "$dir/wt" rev-parse --git-path FETCH_HEAD)
 
   out=$(run_control "$dir" rl42 relaunch --note "continue from linked home"); rc=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: linked-home relaunch\n'
+    printf '$ bin/fm-control.sh rl42 relaunch --note "continue from linked home"\n%s\nexit=%s\n' "$out" "$rc"
+    printf 'worker HEAD before=%s after=%s\n' "$head" "$(git -C "$dir/wt" rev-parse HEAD)"
+    printf 'saved task metadata:\n'; cat "$dir/home/state/rl42.meta"
+    printf 'worker status:\n'; git -C "$dir/wt" status --short
+    printf 'preserved task.txt:\n'; cat "$dir/wt/task.txt"
+    if [ -e "$fetch_head" ]; then
+      printf 'worker FETCH_HEAD:\n'; cat "$fetch_head"
+    else
+      printf 'worker FETCH_HEAD absent\n'
+    fi
+    printf '# evidence end\n'
+  fi
   expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
   [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
   [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
   [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
   assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
-  [ ! -e "$dir/proj/.git/FETCH_HEAD" ] || fail "relaunch fetched instead of preserving the recorded copy"
+  [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 

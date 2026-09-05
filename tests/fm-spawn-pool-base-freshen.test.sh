@@ -83,6 +83,24 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
 
     out=$(run_spawn "$id" --scout)
     status=$?
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: linked-home spawn, returned=%s\n' "$returned"
+      printf '$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+      printf 'primary HEAD before=%s after=%s\n' "$INITIAL_SHA" "$(git -C "$primary" rev-parse HEAD)"
+      printf 'primary reflog before:\n%s\nprimary reflog after:\n%s\n' "$before_reflog" "$(git -C "$primary" reflog)"
+      if [ -e "$primary/.git/FETCH_HEAD" ]; then
+        printf 'FETCH_HEAD:\n'; cat "$primary/.git/FETCH_HEAD"
+      else
+        printf 'FETCH_HEAD absent\n'
+      fi
+      if [ -e "$HOME_DIR/state/$id.meta" ]; then
+        printf 'saved task metadata:\n'; cat "$HOME_DIR/state/$id.meta"
+        printf 'worker HEAD=%s origin/main=%s\n' "$(git -C "$POOL_DIR" rev-parse HEAD)" "$(git -C "$POOL_DIR" rev-parse origin/main)"
+      else
+        printf 'task metadata absent\n'
+      fi
+      printf '# evidence end\n'
+    fi
     if [ "$returned" = scout ]; then
       expect_code 0 "$status" "a genuine scout copy from a linked home should launch"$'\n'"$out"
       assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \

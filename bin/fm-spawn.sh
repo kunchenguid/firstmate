@@ -143,10 +143,11 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
+#   Only after this isolation check, a fresh ship or scout's clean task worktree
+#   fetches origin, resolves the current remote default branch, and resets to its tip.
+#   Relaunch reuses the recorded worktree without fetching or resetting its base.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   refuses a fresh spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
