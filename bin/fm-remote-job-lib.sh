@@ -1399,6 +1399,25 @@ fm_remote_job_wait_for_supervisor_lease_release() { # <state>
   return 1
 }
 
+fm_remote_job_recorded_supervisor_scope() { # <pid> <account-home>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
+  local pid=$1 account_home=$2 state lock root
+  [ -n "$account_home" ] || return 1
+  fm_remote_job_prepare_state "$account_home" || return 1
+  state=$FM_REMOTE_JOB_STATE
+  lock="$state/supervisor.lock"
+  fm_remote_job_lock_owner_matches_process "$account_home" "$lock" || return 1
+  [ "$FM_REMOTE_JOB_OWNER_PID" = "$pid" ] || return 1
+  if [ "$(fm_remote_job_host_platform)" = linux ]; then
+    fm_remote_job_process_scope "$pid" || return 1
+    [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
+    return 0
+  fi
+  root=$(fm_remote_job_read_single_line "$lock/root" 8192) || return 1
+  case "$root" in /*) ;; *) return 1 ;; esac
+  FM_REMOTE_JOB_PROCESS_ROOT=$root
+  FM_REMOTE_JOB_PROCESS_STATE=$state
+}
+
 fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT/STATE
   local pid=$1 account_home=${HOME:-} lock pid_file recorded_pid recorded_start actual_start supervisor state
   [ -n "$account_home" ] || return 1
@@ -1416,9 +1435,9 @@ fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT
   [ -n "$actual_start" ] || return 1
   fm_remote_job_start_identity_matches "$pid" "$recorded_start" "$actual_start" || return 1
   fm_remote_job_process_non_zombie "$pid" && return 1
-  fm_remote_job_lock_owner_matches_process "$account_home" "$state/supervisor.lock" || return 1
-  supervisor=$FM_REMOTE_JOB_OWNER_PID
-  fm_remote_job_process_scope "$supervisor" || return 1
+  supervisor=$(fm_remote_job_read_single_line "$state/supervisor.lock/pid" 64) || return 1
+  case "$supervisor" in ''|*[!0-9]*) return 1 ;; esac
+  fm_remote_job_recorded_supervisor_scope "$supervisor" "$account_home" || return 1
   [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
 }
 
@@ -1446,7 +1465,7 @@ fm_remote_job_resolve_stop_owner() { # <worker-pid> [validated-start]; sets FM_R
   if fm_remote_job_lock_owner_matches_process "${HOME:-}" "$state/supervisor.lock"; then
     FM_REMOTE_JOB_STOP_PID=$FM_REMOTE_JOB_OWNER_PID
     FM_REMOTE_JOB_STOP_START=$FM_REMOTE_JOB_OWNER_START
-    fm_remote_job_process_scope "$FM_REMOTE_JOB_STOP_PID" || return 1
+    fm_remote_job_recorded_supervisor_scope "$FM_REMOTE_JOB_STOP_PID" "${HOME:-}" || return 1
     [ "$FM_REMOTE_JOB_PROCESS_ROOT" = "$root" ] &&
       [ "$FM_REMOTE_JOB_PROCESS_STATE" = "$state" ] || return 1
     return 0
@@ -1473,7 +1492,8 @@ fm_remote_job_stop_worker_tree() { # <pid> <validated-start>
     fm_remote_job_report_stop_guard_mismatch "$pid" "$expected_start"
     return 1
   fi
-  if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
+  if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid" ||
+    fm_remote_job_recorded_supervisor_scope "$pid" "${HOME:-}"; then
     root=$FM_REMOTE_JOB_PROCESS_ROOT
     state=$FM_REMOTE_JOB_PROCESS_STATE
     for signal in TERM KILL; do
