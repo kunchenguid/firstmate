@@ -228,7 +228,7 @@ main() {
   . "$SCRIPT_DIR/fm-classify-lib.sh"
 
   mkdir -p "$STATE" || return 1
-  fm_lock_acquire_wait "$LOCK"
+  fm_lock_acquire_wait "$LOCK" || return 1
   trap 'fm_lock_release "$LOCK"' EXIT
   write_pending_seed || { fm_lock_release "$LOCK"; trap - EXIT; return 1; }
   return_reconcile

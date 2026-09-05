@@ -3207,7 +3207,7 @@ spawn_record_traceparent() {
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
     SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    fm_lock_acquire_wait "$SPAWN_META_LOCK" || return 1
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
