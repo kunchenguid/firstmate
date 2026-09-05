@@ -18,18 +18,20 @@ fm_root_is_secondmate_home() {
 }
 
 # Return 0 when linked worktree $1 is a leased primary home: $2 is its own state/,
-# no parent home records $1 as a task worktree in state/<id>.meta, and the session
-# lock there is held by this process's own harness ancestry (docs/turnend-guard.md).
+# no worktree of this repository records $1 as a task worktree in state/<id>.meta,
+# and the session lock there is held by this harness ancestry (docs/turnend-guard.md).
 fm_linked_root_is_own_home() {
-  local root=$1 state=$2 common parent meta value lib
+  local root=$1 state=$2 list home meta value lib
   [ "$state" -ef "$root/state" ] || return 1
-  common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  parent=$(dirname -- "$common")
-  for meta in "$parent"/state/*.meta; do
-    [ -f "$meta" ] || continue
-    value=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -n 1)
-    [ -n "$value" ] && [ "$value" -ef "$root" ] && return 1
-  done
+  list=$(git -C "$root" worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r home; do
+    [ -n "$home" ] || continue
+    for meta in "$home"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      value=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | tail -n 1)
+      [ -n "$value" ] && [ "$value" -ef "$root" ] && return 1
+    done
+  done <<< "$(printf '%s\n' "$list" | sed -n 's/^worktree //p')"
   [ -L "$state/.lock" ] && return 1
   [ -f "$state/.lock" ] || return 1
   if ! declare -F fm_session_lock_owned_by_self >/dev/null; then

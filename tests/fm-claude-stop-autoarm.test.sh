@@ -296,6 +296,34 @@ test_inert_in_task_worktree_recorded_by_parent_home() {
   pass "auto-arm: inert in a task worktree its parent home records, even with its own live self-owned lock"
 }
 
+# The leased-home topology: HOME is a linked worktree of a base clone and spawns
+# CHILD as a worktree of ITSELF, so git resolves CHILD's common dir to the base
+# clone, not to HOME. Only HOME records CHILD, so scanning the recording home
+# alone would miss it and admit a task worktree.
+test_inert_in_task_worktree_of_leased_home() {
+  local base home child ccd bcd out status
+  base="$TMP_ROOT/leased-chain-base"
+  home="$TMP_ROOT/leased-chain-home"
+  child="$TMP_ROOT/leased-chain-child"
+  make_crewmate_worktree_dir "$base" "$home" >/dev/null
+  git -C "$home" worktree add --quiet -b fm/autoarm-leased-child "$child"
+  mkdir -p "$child/state"
+  : > "$child/AGENTS.md"
+  install_autoarm_scripts "$child"
+  ccd=$(git -C "$child" rev-parse --path-format=absolute --git-common-dir)
+  bcd=$(git -C "$base" rev-parse --path-format=absolute --git-dir)
+  [ "$ccd" -ef "$bcd" ] || fail "leased-chain fixture: child common dir must be the base clone, got $ccd vs $bcd"
+  printf 'worktree=%s\nkind=ship\n' "$child" > "$home/state/task-child.meta"
+  [ ! -e "$base/state/task-child.meta" ] || fail "leased-chain fixture: only HOME may record the child"
+  : > "$child/state/task.meta"
+  write_arm_fixture "$child" actionable
+  out=$(run_autoarm "$child" 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stay inert in a task worktree of a leased home"
+  [ ! -e "$child/state/arm-ran" ] || fail "hook armed inside a task worktree recorded only by its leased spawning home"
+  [ ! -e "$child/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a task worktree recorded only by its leased spawning home"
+  pass "auto-arm: inert in a task worktree whose only recording home is a leased linked worktree"
+}
+
 # A linked worktree whose lock names a live pid outside this harness ancestry is
 # not this session's home, whatever that process is.
 test_inert_in_linked_worktree_with_foreign_live_lock() {
@@ -303,7 +331,7 @@ test_inert_in_linked_worktree_with_foreign_live_lock() {
   base="$TMP_ROOT/foreign-lock-base"
   dir="$TMP_ROOT/foreign-lock-wt"
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
-  sleep 60 &
+  sleep 600 &
   sleeper=$!
   printf '%s\n' "$sleeper" > "$dir/state/.lock"
   : > "$dir/state/task.meta"
@@ -498,7 +526,7 @@ test_actionable_close_with_live_successor_rewakes_once() {
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live successor for actionable close"
   record_watcher_lock "$dir" "$pid" "$identity"
@@ -617,7 +645,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   dir=$(make_primary_dir "$TMP_ROOT/benign-live")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" benign-live
-  sleep 60 &
+  sleep 600 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
@@ -646,14 +674,14 @@ test_positive_recovery_budget_contention_preserves_episode() {
   dir=$(make_primary_dir "$TMP_ROOT/recovery-budget-contention")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" benign-live
-  sleep 60 &
+  sleep 600 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for recovery contention"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
-  sleep 60 &
+  sleep 600 &
   holder=$!
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
@@ -682,7 +710,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" reset-boundary
-  sleep 60 &
+  sleep 600 &
   watcher=$!
   watcher_id=$(watcher_identity "$dir" "$watcher") || fail "could not identify reset-contention watcher"
   record_watcher_lock "$dir" "$watcher" "$watcher_id"
@@ -696,7 +724,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
     sleep 0.05
     i=$((i + 1))
   done
-  sleep 60 &
+  sleep 600 &
   holder=$!
   mkdir -p "$dir/state/.claude-autoarm.lock"
   printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
@@ -805,7 +833,7 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   : > "$dir/state/task1.meta"
   : > "$dir/state/task2.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_epoch "$dir" 464 "$pid" rewake
@@ -829,7 +857,7 @@ test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/arming-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   # An owner foregrounds the arm for the whole watcher cycle, so an old "arming"
@@ -855,7 +883,7 @@ test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/fresh-arming-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
@@ -877,7 +905,7 @@ test_claim_not_named_by_the_ledger_is_never_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/unnamed-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   # A fresh claimant holds the lock before it writes "arming", so until it does
@@ -907,7 +935,7 @@ test_pid_reused_arming_claim_is_reclaimed_and_rearms() {
   : > "$dir/state/task1.meta"
   : > "$dir/state/task2.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$$" || fail "could not record a claim pid-identity"
@@ -934,7 +962,7 @@ test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms() {
   dir=$(make_primary_dir "$TMP_ROOT/reused-pid-no-ledger")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$$" || fail "could not record a claim pid-identity"
@@ -959,7 +987,7 @@ test_identity_matched_arming_claim_is_never_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/identity-matched-arming")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
@@ -981,7 +1009,7 @@ test_terminal_check_claim_is_never_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/terminal-check-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   # The synchronous guard takes the same lock under its own role while it decides
   # the attended fail-open. Reclaiming that would race the guard's own decision.
@@ -1005,7 +1033,7 @@ test_stuck_live_legacy_owner_is_retired_and_reclaimed() {
   dir=$(make_primary_dir "$TMP_ROOT/legacy-term")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
@@ -1030,7 +1058,7 @@ test_stopped_legacy_owner_is_reclaimed_with_term_pending() {
   dir=$(make_primary_dir "$TMP_ROOT/legacy-term-stopped")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
@@ -1078,7 +1106,7 @@ test_open_generation_claim_defers_without_any_lock() {
   dir=$(make_primary_dir "$TMP_ROOT/v2-open-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_v2_claim "$dir" 464 "$pid" arming "$pid" || fail "could not record a v2 claim"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
@@ -1103,7 +1131,7 @@ test_stuck_generation_claim_is_superseded_and_rearms() {
   : > "$dir/state/task1.meta"
   : > "$dir/state/task2.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   record_autoarm_v2_claim "$dir" 464 "$pid" arming "$pid" || fail "could not record a v2 claim"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
@@ -1128,7 +1156,7 @@ test_identityless_ledger_never_defers() {
   dir=$(make_primary_dir "$TMP_ROOT/v2-identityless-ledger")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
+  sleep 600 &
   pid=$!
   printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" \
     > "$dir/state/.claude-autoarm-epoch"
@@ -1254,6 +1282,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_in_linked_worktree_with_dead_lock
 test_inert_in_task_worktree_recorded_by_parent_home
+test_inert_in_task_worktree_of_leased_home
 test_inert_in_linked_worktree_with_foreign_live_lock
 test_arms_in_linked_worktree_holding_own_live_lock
 test_inert_without_session_lock
