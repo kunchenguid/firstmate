@@ -33,7 +33,7 @@ STP = int(os.environ['FM_SMTP_PORT'])
 CTX = ssl.create_default_context()
 
 
-def _mail_timeout():
+def mail_timeout():
     """Seconds for IMAP/SMTP sockets. Invalid or non-positive values become 20."""
     raw = os.environ.get('FM_MAIL_TIMEOUT', '20')
     try:
@@ -45,7 +45,7 @@ def _mail_timeout():
     return value
 
 
-MAIL_TIMEOUT = _mail_timeout()
+MAIL_TIMEOUT = mail_timeout()
 socket.setdefaulttimeout(MAIL_TIMEOUT)
 
 MAX_PREVIEW = 200
