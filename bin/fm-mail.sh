@@ -487,12 +487,19 @@ mail_poll() {
           return 1
         fi
       fi
+      if [ "$status" = retry ]; then
+        # Clear the retry BEFORE the wake so a recovered uid can never be
+        # woken again by a stale retry record; a failed clear fails the poll
+        # so the next poll retries instead of duplicating the recovery wake.
+        if ! mail_retry_remove "$uid"; then
+          echo "fm-mail: could not clear retry for recovered $uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+      fi
       if wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}"; then
         echo "fm-mail: woke for $uid"
         woke=$((woke + 1))
-        if [ "$status" = retry ]; then
-          mail_retry_remove "$uid" || true
-        fi
       else
         # Keep a degraded uid's retry record on a failed wake: a rolled-back
         # wake leaves the uid unseen so the next poll re-emits it degraded,
