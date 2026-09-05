@@ -22,6 +22,14 @@
 # guard after any harness upgrade and before trusting refreshed evidence.
 set -u
 
+# Isolate from the ambient fleet environment before anything else runs. This
+# suite does not source tests/lib.sh - it owns its own reporters, ROOT and EXIT
+# trap - so it calls the shared owner directly. bin/fm-test-env-lib.sh owns the
+# pointer list; this is a caller, never a second copy of it.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+fm_test_env_isolate || exit 2
+
 if [ "${FM_HARNESS_LIVENESS_DRIFT:-0}" != 1 ]; then
   echo "skip: set FM_HARNESS_LIVENESS_DRIFT=1 to run the installed-harness liveness drift guard"
   exit 0

@@ -123,6 +123,17 @@ RUN_STARTED_MS=$(now_ms)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Clear the ambient fleet environment once, in this process, before anything can
+# start a test script. Every selected script - serial or --jobs worker - is a
+# child of this process, so this run path cannot hand a test the live home and no
+# caller has to remember a flag. bin/fm-test-env-lib.sh owns the pointer list.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$ROOT/bin/fm-test-env-lib.sh"
+fm_test_env_isolate || {
+  printf 'fm-test-run: refusing to run: the live fleet home is still reachable\n' >&2
+  exit 2
+}
+
 MODE=
 LIST_ONLY=0
 LIST_SCHEDULED=0
@@ -230,7 +241,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-env-lib.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1168,6 +1179,19 @@ families_for_changed_path() {
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
+      ;;
+    bin/fm-test-env-lib.sh)
+      # tests/lib.sh and the suites that route to this owner directly are callers
+      # too, so this file's pointer list shapes the environment of very
+      # nearly every suite, not just the runner's own contract tests. Select
+      # through the same reference scan tests/lib.sh gets, so a pointer edit
+      # here selects the suites it can break rather than only
+      # pure-contract-unit. Selection expands each emitted family to all of its
+      # suites, so reasoning about which suites a needle matches, rather than
+      # which families, gives the wrong answer.
+      printf '%s\n' pure-contract-unit
+      families_for_test_reference lib.sh \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
@@ -2242,8 +2266,6 @@ else
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
       set +e

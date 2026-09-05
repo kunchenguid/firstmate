@@ -7,13 +7,13 @@
 # window. Cleanup uses only creation-time pane/process identities.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 if [ "${FM_GROK_STOP_LIVE_E2E:-0}" != 1 ]; then
   echo "skip: set FM_GROK_STOP_LIVE_E2E=1 with FM_GROK_NATIVE_BIN and FM_GROK_LEGACY_BIN"
   exit 0
 fi
-
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 NATIVE_BIN=${FM_GROK_NATIVE_BIN:-}
 LEGACY_BIN=${FM_GROK_LEGACY_BIN:-}

@@ -24,13 +24,13 @@
 # path and is the only state left outside the temp dir.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 if [ "${FM_CURSOR_PRIMARY_LIVE_E2E:-0}" != 1 ]; then
   echo "skip: set FM_CURSOR_PRIMARY_LIVE_E2E=1 to run the live Cursor primary guard"
   exit 0
 fi
-
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CURSOR_BIN=${FM_CURSOR_BIN:-$(command -v cursor-agent || true)}
 [ -n "$CURSOR_BIN" ] && [ -x "$CURSOR_BIN" ] \

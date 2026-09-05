@@ -24,7 +24,6 @@
 if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
   return 0
 fi
-FM_TEST_LIB_SOURCED=1
 
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
@@ -39,6 +38,28 @@ export FM_GATE_REFUSE_BYPASS=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Isolate this process from the ambient fleet environment before any fixture is
+# built. bin/fm-test-run.sh already does this for every suite it starts, so a
+# run through the runner is covered; a suite invoked directly - `bash
+# tests/<file>.test.sh` from a firstmate worker - is not, and inherits the live
+# home. That is not cosmetic: the pointers reach the production scripts a suite
+# drives, so a fixture that exports only the subset it cares about leaves the
+# rest aimed at the live home. bin/fm-test-env-lib.sh owns the pointer list;
+# this is a second CALLER of that one owner, never a second copy of the list.
+#
+# A failed isolate refuses the whole process, the same way both runners do,
+# rather than returning to a suite that would then build fixtures over the live
+# home. The sourced guard is latched only after this succeeds, so a refusal can
+# never leave a half-initialised library behind for a second source to accept.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$ROOT/bin/fm-test-env-lib.sh"
+if ! fm_test_env_isolate; then
+  printf 'tests/lib.sh: refusing to run a suite against the live fleet home\n' >&2
+  exit 2
+fi
+
+FM_TEST_LIB_SOURCED=1
 
 # --- reporters --------------------------------------------------------------
 

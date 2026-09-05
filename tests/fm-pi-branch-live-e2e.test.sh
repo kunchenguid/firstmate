@@ -30,13 +30,13 @@
 # (docs/verification/runtime-backends.md).
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 if [ "${FM_PI_BRANCH_LIVE_E2E:-0}" != 1 ]; then
   echo "skip: set FM_PI_BRANCH_LIVE_E2E=1 to run the real-SDK Pi branch regression"
   exit 0
 fi
-
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 export NODE_NO_WARNINGS=1
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
