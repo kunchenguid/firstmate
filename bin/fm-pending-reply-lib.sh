@@ -1075,17 +1075,19 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
 # that exact escalation remains open. If an unrelated decision has since taken
 # over that key, the close is withheld so the unrelated decision is not cleared.
 fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
-  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key
+  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key key note
   [ -f "$status_file" ] || return 0
   [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 0
   own_key=$(fm_pending_reply_escalation_key "$corr")
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$(status_line_verb "$line")" = blocked ] || continue
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$own_key" ] || [ "$key" = default ] || continue
+    note=$(status_line_note "$line")
     for kind in missed delivery-unknown recovery-delivery; do
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
-      case "$line" in
-        "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
-        "blocked [key=$own_key]: $payload "*|"blocked: $payload "*) found=$line; break ;;
+      case "$note" in
+        "$payload"|"$payload "*) found=$line; break ;;
       esac
     done
   done < "$status_file"
@@ -1237,8 +1239,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
+  if ! status_event_recorded "$parent_status" "$line"; then
+    printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1

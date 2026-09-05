@@ -185,6 +185,64 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# --- optional event emission time -------------------------------------------
+# New writers may append "[at=<epoch>]" before the first colon, alongside key
+# and corr tags in any order. Epoch is UTC Unix seconds: canonical unsigned
+# decimal, at most 12 digits (bounded for safe shell arithmetic). For example:
+#   resolved [key=api-shape] [at=1788576000]: answered: use REST
+# No colons appear inside this field, so existing verb/key/note readers retain
+# their grammar. Missing, malformed, or duplicate time fields mean UNKNOWN time;
+# never infer emission time from file mtime, a wake, or observation time. Relays
+# preserve source tags and leave legacy source events unstamped. Time describes
+# event history only and must never decide current state or decision closure.
+status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
+  local head epoch rest
+  case "$1" in *:*) head=${1%%:*} ;; *) return 1 ;; esac
+  case "$head" in *\[at=*\]*) ;; *) return 1 ;; esac
+  rest=${head#*\[at=}
+  epoch=${rest%%\]*}
+  case "${rest#*\]}" in *\[at=*) return 1 ;; esac
+  case "$epoch" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "${#epoch}" -le 12 ] || return 1
+  printf '%s' "$epoch"
+}
+
+# Stamp only a newly emitted event. Preserve an existing tag, even malformed,
+# and preserve the event itself if the clock cannot be read. Never use this to
+# timestamp a copied historical line.
+status_stamp_line() {  # <new-status-line> -> line (without newline)
+  local head epoch
+  case "$1" in
+    *:*) head=${1%%:*} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  case "$head" in *\[at=*) printf '%s' "$1"; return 0 ;; esac
+  if epoch=$(date +%s); then
+    printf '%s [at=%s]:%s' "$head" "$epoch" "${1#*:}"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Producer retry deduplication ignores only the optional numeric time tag;
+# all other bytes, including correlation metadata, still identify the event.
+# Relays instead compare exact source bytes to retain distinct source events.
+status_event_recorded() {  # <status-file> <new-status-line>
+  [ -f "$1" ] || return 1
+  FM_STATUS_COMPARE=$2 awk '
+    function untimed(s, colon, head) {
+      colon = index(s, ":")
+      if (!colon) return s
+      head = substr(s, 1, colon - 1)
+      gsub(/ \[at=[0-9]+\]/, "", head)
+      return head substr(s, colon)
+    }
+    BEGIN { wanted = untimed(ENVIRON["FM_STATUS_COMPARE"]) }
+    untimed($0) == wanted { found = 1; exit }
+    END { exit !found }
+  ' "$1"
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

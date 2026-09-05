@@ -56,6 +56,8 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Emission-time syntax and legacy unknown-time handling are owned by
+# bin/fm-classify-lib.sh; the shell evaluates each stamp at append time.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -276,7 +278,7 @@ $INBOX_SECTION
 # Escalation to main firstmate
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=\$(date +%s)]: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
@@ -369,7 +371,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=\$(date +%s)]: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
@@ -447,7 +449,7 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=\$(date +%s)]: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

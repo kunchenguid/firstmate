@@ -202,7 +202,7 @@ EOF
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close the live status decisions: $open"
-  grep -F 'captain-held [key=route]: tracked by sample-route-call' "$home/state/$id.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/$id.status" | grep -F 'captain-held [key=route]: tracked by sample-route-call' >/dev/null \
     || fail "the transfer line does not name the tracking inventory"
 
   before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
@@ -778,7 +778,7 @@ EOF
   run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
     || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
   tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
+  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\] \\[at=[0-9]+\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
     "$parent/state/sample-mate.status" \
     || fail "the scout's final line did not reach the parent at teardown"
 
@@ -824,13 +824,13 @@ EOF
   run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" \
     --origin quoted-origin >/dev/null || fail "quoted-record hold failed"
   assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
-    "$channel" "body prose was incorrectly counted as a resolution record"
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "body prose was incorrectly counted as a resolution record"
 
   run_captain "$mate" hold mate-call --title "Choose the mate release" \
     --reason "release choice pending" --repo sample >/dev/null \
     || fail "mate hold failed"
   assert_grep 'needs-decision [key=captain-hold-mate-call-1]: captain hold mate-call: release choice pending' \
-    "$channel" "the mate's hold did not reach the parent channel"
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "the mate's hold did not reach the parent channel"
   run_captain "$mate" hold mate-call --reason "release choice pending" >/dev/null \
     || fail "repeated mate hold failed"
   [ "$(grep -c 'captain-hold-mate-call-1' "$channel")" = 1 ] \
@@ -840,17 +840,17 @@ EOF
   run_captain "$mate" answer mate-call --decision-file "$decision" --release >/dev/null \
     || fail "mate release answer failed"
   assert_grep 'resolved [key=captain-hold-mate-call-1]: captain hold mate-call: released' \
-    "$channel" "the released answer did not close the parent decision"
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "the released answer did not close the parent decision"
 
   run_captain "$mate" hold mate-call --reason "second release choice" >/dev/null \
     || fail "re-hold after release failed"
   assert_grep 'needs-decision [key=captain-hold-mate-call-2]: captain hold mate-call: second release choice' \
-    "$channel" "a re-held task did not open a distinct parent decision"
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "a re-held task did not open a distinct parent decision"
   printf 'ship it\n' > "$decision"
   run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
     || fail "mate close answer failed"
   assert_grep 'resolved [key=captain-hold-mate-call-2]: captain hold mate-call: answered' \
-    "$channel" "the closing answer did not close the second parent decision"
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "the closing answer did not close the second parent decision"
   run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
     || fail "idempotent answer retry failed"
   [ "$(grep -c 'captain-hold-mate-call-2' "$channel")" = 2 ] \

@@ -56,7 +56,9 @@
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
-#     current state.
+#     current state. emitted_at_epoch and age_seconds are null when unknown;
+#     fm-classify-lib.sh owns the optional emission-time field. A future event
+#     time is retained, but its age stays unknown rather than clamped to zero.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -329,20 +331,25 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
 }
 
 status_event_json() {  # <observed-status-log> [<contract-path>]
-  local log=$1 path=${2:-$1} present=0 raw='' verb='' note=''
+  local log=$1 path=${2:-$1} present=0 raw='' verb='' note='' epoch=null age=null
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    epoch=$(status_line_at_epoch "$raw") || epoch=null
+    if [ "$epoch" != null ] && [ "$epoch" -le "$SNAPSHOT_EPOCH" ]; then
+      age=$((SNAPSHOT_EPOCH - epoch))
+    fi
   fi
   jq -n \
     --arg path "$path" \
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
+    --argjson epoch "$epoch" --argjson age "$age" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,emitted_at_epoch:$epoch,age_seconds:$age}}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -1086,11 +1093,9 @@ case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECON
 # pollute arithmetic input before failing. Select the platform syntax once.
 if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
   SNAPSHOT_STAT_STYLE=bsd
-  file_mtime_epoch() { stat -f '%m' "$1" 2>/dev/null || true; }
   file_mode_octal() { stat -f '%Lp' "$1" 2>/dev/null || true; }
 else
   SNAPSHOT_STAT_STYLE=gnu
-  file_mtime_epoch() { stat -c '%Y' "$1" 2>/dev/null || true; }
   file_mode_octal() { stat -c '%a' "$1" 2>/dev/null || true; }
 fi
 
@@ -1696,12 +1701,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     activity_scan=$(bounded_parent_activities_json "$status_observation_file")
     activities=$(printf '%s' "$activity_scan" | jq -c '.records')
     decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
-    event_epoch=$(file_mtime_epoch "$status_observation_file")
-    event_age=null
-    if [ -n "$event_epoch" ]; then
-      event_age=$((SNAPSHOT_EPOCH - event_epoch))
-      [ "$event_age" -lt 0 ] && event_age=0
-    fi
+    event_epoch=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.emitted_at_epoch // "null"')
+    event_age=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.age_seconds // "null"')
 
     reason=$registry_error
     summary_index=$((summary_index + 1))
@@ -1799,7 +1800,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --argjson registered "$registered" --slurpfile summary "$summary_file" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
+        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" --argjson event_epoch "$event_epoch" '
         ($summary[0]) as $summary
         |
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
@@ -1812,7 +1813,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
+         parent_event:{raw:$event_raw,note:$event_note,emitted_at_epoch:$event_epoch,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
     else
       if [ -n "$event_raw" ]; then
@@ -1832,7 +1833,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
+        --argjson registered "$registered" --argjson event_age "$event_age" --argjson event_epoch "$event_epoch" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" --slurpfile summary "$summary_file" --argjson summary_sampled "$summary_sampled" '
         ($summary[0]) as $summary
         |
@@ -1843,7 +1844,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
-         parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
+         parent_event:{raw:$event_raw,note:$event_note,emitted_at_epoch:$event_epoch,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}' >> "$records_file" || return 1
     fi
   done <<EOF

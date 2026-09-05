@@ -297,6 +297,8 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -2525,7 +2527,7 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
 

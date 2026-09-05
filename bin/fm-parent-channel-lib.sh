@@ -42,7 +42,7 @@
 # crewmate's status stream, so a captain-relevant line becomes a parent wake.
 #
 # Lines follow the charter's "<state> [key=<slug>]: <note>" shape and are
-# appended at most once by exact content, so a retried publication cannot
+# appended at most once by content excluding emission time, so a retried publication cannot
 # duplicate a delivered event. An existing destination must be a regular,
 # non-symlinked file; a missing one is created with its directory.
 #
@@ -60,6 +60,8 @@
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-classify-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -129,7 +131,7 @@ fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Append <line> to <path> unless that exact line is already there.
+# Emit <line> once, using fm-classify-lib.sh's event-time and retry contract.
 fm_parent_channel_append_once() {  # <path> <line>
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -137,10 +139,10 @@ fm_parent_channel_append_once() {  # <path> <line>
   else
     mkdir -p "$(dirname "$path")" || return 1
   fi
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
+  if status_event_recorded "$path" "$line"; then
     return 0
   fi
-  printf '%s\n' "$line" >> "$path"
+  printf '%s\n' "$(status_stamp_line "$line")" >> "$path"
 }
 
 # Publish one parent-facing line from <home>. See the return codes above.
