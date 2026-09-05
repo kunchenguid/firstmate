@@ -945,6 +945,18 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+### Pipeline-state watch (`when-nm-state-<task-id>`)
+
+Every `--mode no-mistakes` ship spawn arms one `when` source per task whose condition is `bin/fm-nm-state-condition.sh <worktree> state/<id>.nm-state` and whose action rings that task's steering inbox through `bin/fm-send.sh`.
+It exists so a worker never spends model turns waiting: `bin/fm-dod-lib.sh`'s Definition of done tells the worker to append `paused: no-mistakes run in progress, clears on its own` and end its turn, and this source is what brings it back.
+
+The condition compares a PROJECTION of `no-mistakes axi status` (`status`, `outcome`, `step`, `round`) against a snapshot, not the whole output, because the raw output carries elapsed times that churn on every poll.
+A missing key contributes an empty field, so a no-mistakes release that renames a key degrades the watch to a coarser one rather than to a wrong one.
+The first poll after arming writes the snapshot and returns false, so arming never fires on its own baseline.
+A probe that errors exits 2 and is counted against the source's error budget; it is never read as a true.
+
+`bin/fm-spawn.sh` arms it and `bin/fm-teardown.sh` retires it. Arming is best-effort: a failure warns and the spawn continues, and the worker then falls back to one status check per resume.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
