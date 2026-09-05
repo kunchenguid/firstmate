@@ -303,6 +303,13 @@ wake_for() {
   # holds the uid, and the next poll wakes the mail again. A possible duplicate
   # (never a missed mail) is the deliberate, bounded tradeoff for keeping the
   # durable record write on the same held lock as the publish.
+  #
+  # Returns:
+  #   0 - the wake row was appended and a durable uid record landed.
+  #   1 - the wake row was appended and rolled back; nothing was delivered.
+  #   2 - the wake row survived with no durable record (fail-closed); the drain
+  #       delivers it and the next poll's heal records the uid.
+  #   3 - the wake row was never appended; nothing was delivered.
   local generation=$1 id=$2 summary=$3 lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
@@ -326,10 +333,11 @@ wake_for() {
       echo "fm-mail: wake for $id durably recorded after the queue rewrite failed" >&2
     else
       echo "fm-mail: wake for $id could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
-      status=1
+      status=2
     fi
   else
-    status=1
+    echo "fm-mail: wake append failed for $id; retried on next poll" >&2
+    status=3
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
@@ -409,7 +417,7 @@ mail_poll() {
   # each poll first heals a run interrupted between its phases (mail_heal), so
   # an overlapping poll or an interrupted run can never lose a mail or
   # double-surface it.
-  local list generation uid fr subj status woke=0 need_wake line
+  local list generation uid fr subj status woke=0 need_wake line wake_rc=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -503,15 +511,29 @@ mail_poll() {
           return 1
         fi
       fi
-      if wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}"; then
+      wake_rc=0
+      wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}" || wake_rc=$?
+      if [ "$wake_rc" -eq 0 ]; then
         echo "fm-mail: woke for $uid"
         woke=$((woke + 1))
+        if [ "$status" != degraded ]; then
+          # Newly surfaced (ok) or recovered (retry) mail carries real
+          # metadata: no retry record may remain, and a stale entry left by a
+          # rolled-back earlier wake is cleaned here.
+          mail_retry_remove "$uid" || true
+        fi
       else
-        # Keep a degraded uid's retry record on a failed wake: a rolled-back
-        # wake leaves the uid unseen so the next poll re-emits it degraded,
-        # while a fail-closed wake leaves the row queued for the next poll's
-        # heal to record the uid - either way the retry must survive so the
-        # real metadata can still recover.
+        if [ "$status" = retry ] && [ "$wake_rc" -ne 2 ]; then
+          # Nothing was delivered (append failed or rolled back): restore the
+          # retry record so the recovered metadata is re-fetched instead of
+          # stranded, while a fail-closed wake (code 2) already delivered its
+          # row and must not be re-woken.
+          if ! mail_retry_add "$uid"; then
+            echo "fm-mail: could not restore retry for recovered $uid" >&2
+            fm_lock_release "$STATE_DIR/.mail-seen.lock"
+            return 1
+          fi
+        fi
         echo "fm-mail: wake failed for $uid; retried on next poll" >&2
         fm_lock_release "$STATE_DIR/.mail-seen.lock"
         return 1
