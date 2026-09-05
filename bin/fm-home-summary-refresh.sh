@@ -79,8 +79,10 @@ case "$HOME_SUMMARY_IF_IDLE" in
 esac
 
 if [ "$HOME_SUMMARY_MODE" != parent ]; then
-  # shellcheck source=bin/fm-wake-lib.sh
-  # shellcheck disable=SC1091
+  # fm-wake-lib.sh is a canonical lint root in its own right; this conditional
+  # load stays an analysis boundary (source-graph budget:
+  # .agents/skills/firstmate-coding-guidelines/SKILL.md).
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
 fi
 

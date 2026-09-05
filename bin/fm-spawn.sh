@@ -253,9 +253,14 @@ esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# The largest libraries this runtime sources are canonical lint roots in their
+# own right and stay analysis boundaries here: ShellCheck inlines every followed
+# source at every source site, and this runtime's inlined graph must fit the
+# lint memory cap (source-graph budget:
+# .agents/skills/firstmate-coding-guidelines/SKILL.md).
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-backlog-transition-lib.sh
+# shellcheck source=/dev/null # analysis boundary: bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 resolve_directory_input() {
@@ -295,7 +300,7 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=/dev/null # analysis boundary: bin/fm-wake-lib.sh (see the source block above)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -303,7 +308,7 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
-# shellcheck source=bin/fm-config-inherit-lib.sh
+# shellcheck source=/dev/null # analysis boundary: bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -311,11 +316,11 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null # analysis boundary: bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null # analysis boundary: bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
