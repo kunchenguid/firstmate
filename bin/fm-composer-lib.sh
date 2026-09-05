@@ -66,7 +66,15 @@
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#                strict rule's unidentifiable blank row. Current claude draws
+#                its OWN composer the same way - a bare `❯` between two `─`
+#                rules - and embeds the session/task title in the rule itself
+#                (" First ─", verified live, task afk-composer-read-claude-
+#                herdr); a titled rule is tolerated the same way a box's
+#                titled bottom border is (below), so it is still recognized as
+#                the rule that pairs with its partner rather than reading as
+#                an orphaned trailing separator that invalidates the bare row
+#                inside it.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -571,17 +579,34 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
+# _fm_composer_pi_separator_row: a solid `─` rule, at least 8 columns wide,
+# optionally carrying a TITLE embedded in the rule itself (current claude's
+# " First ─"). The width floor is a literal substring test on the run of rule
+# glyphs, so it is byte-exact in every locale and unaffected by a title's
+# presence or length. A titled rule is tolerated the same way
+# _fm_composer_titled_bottom_ok tolerates a box's titled bottom border: the
+# row must still start and end with the rule glyph (the title sits framed
+# inside it, never replacing an edge), and everything else in the row must be
+# ASCII-printable-or-whitespace once every rule glyph is stripped - any other
+# residue (an unrelated box-drawing glyph, say) is real ambiguity and this
+# still reads `unknown`/`unproven` rather than a false separator match.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+  local row=$1 residue
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
   case "$row" in
-    *────────*) return 0 ;;
+    *────────*) ;;
+    *) return 1 ;;
   esac
-  return 1
+  case "$row" in
+    '─'*'─') ;;
+    *) return 1 ;;
+  esac
+  residue=${row//─/}
+  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$residue" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
