@@ -10,11 +10,12 @@
 # question "is this closed row a delivery the captain should see", so the rule
 # lives here and neither program restates it.
 #
-# A closed row is never held: tasks-axi clears the held flag when a task closes
-# and keeps hold-kind and the hold reason as the record of the call that was
-# made. So a captain hold-kind on a Done row marks work the captain personally
-# routed, not work that closed while still waiting on him, and treating the
-# marker itself as the exclusion drops exactly the deliveries he approved.
+# A closed row is never actively held: tasks-axi clears the held flag when a
+# task closes, but a non-release answer keeps hold-kind and the hold reason.
+# Merge approval removes those annotations through the release contract before
+# cleanup records the merged PR, so a PR on a Done captain-hold row is not a
+# delivery. A retained scout closes with its hold-kind intact, so its recorded
+# report remains a delivery.
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
@@ -34,6 +35,7 @@ FM_LANDED_JQ_DEFS='
     end;
   def landed_delivery:
     (.kind != "captain"
+      and .hold_kind != "captain"
       and .completion.verb == "merged"
       and (.pr_url // null) != null)
     or (.kind != "captain"
