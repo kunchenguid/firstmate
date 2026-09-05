@@ -215,6 +215,7 @@ test_session_lock_identity_matches_copilot() {
   case "$out" in
     ''|*[!0-9]*) fail "Copilot MainThread lock identity returned '$out'" ;;
   esac
+  # shellcheck disable=SC2016 # Child shell intentionally expands its positional parameter.
   out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node /opt/copilot/bin/copilot --allow-all' \
     bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
