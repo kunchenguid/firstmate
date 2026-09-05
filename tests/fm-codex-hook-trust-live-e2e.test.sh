@@ -7,10 +7,10 @@
 # against an exact vendor Codex binary in a private tmux server.
 # It gives Codex an isolated config home with one untrusted global hook and a
 # trusted scratch worktree with one untrusted project hook.
-# The treatment command must reach its brief, suppress both hooks, and emit the
-# existing notify= turn-end marker without showing the review dialog.
+# The treatment command must launch a real Codex secondmate, reach its charter,
+# and suppress both hooks without showing the review dialog.
 # The otherwise-identical control removes only hook suppression and must park at
-# the review dialog before its brief or notify marker can fire.
+# the review dialog before its charter can run.
 set -u
 
 if [ "${FM_CODEX_HOOK_TRUST_LIVE_E2E:-0}" != 1 ]; then
@@ -37,10 +37,8 @@ WORKTREE="$LAB/worktree"
 TEST_HOME="$LAB/fmhome"
 CODEX_TEST_HOME="$LAB/codex-home"
 SHIM_DIR="$LAB/bin"
-TREAT_ID="codex-hook-treatment-$$"
-CONTROL_ID="codex-hook-control-$$"
-TREAT_BRIEF_MARKER="$LAB/treatment-brief-reached"
-CONTROL_BRIEF_MARKER="$LAB/control-brief-reached"
+TASK_ID="codex-hook-secondmate-$$"
+BRIEF_MARKER="$LAB/secondmate-brief-reached"
 GLOBAL_HOOK_MARKER="$LAB/global-hook-fired"
 PROJECT_HOOK_MARKER="$LAB/project-hook-fired"
 TREAT_LOG="$LAB/treatment-launch.log"
@@ -49,7 +47,7 @@ TIMEOUT=${FM_CODEX_HOOK_TRUST_LIVE_TIMEOUT:-240}
 
 cleanup() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  rm -rf -- "$LAB" "/tmp/fm-$TREAT_ID" "/tmp/fm-$CONTROL_ID"
+  rm -rf -- "$LAB" "/tmp/fm-$TASK_ID"
 }
 trap cleanup EXIT INT TERM
 
@@ -77,18 +75,16 @@ wait_for_text() {  # <window> <text>
   return 1
 }
 
-compose_launch() {  # <task-id> <brief-marker> <log>
-  local task_id=$1 brief_marker=$2 log=$3 out status
-  fm_test_spawn_brief "$TEST_HOME" "$task_id" \
-    "Run exactly \`touch $brief_marker\`, then reply with exactly BRIEF_REACHED."
+compose_launch() {  # <log>
+  local log=$1 out status
   : > "$log"
   out=$(FM_FAKE_LAUNCH_LOG="$log" \
     fm_test_run_spawn "$TEST_HOME" "$WORKTREE" "$FAKEBIN" \
-      "$task_id" "$PROJECT" --scout 2>&1)
+      "$TASK_ID" "$WORKTREE" --secondmate 2>&1)
   status=$?
-  [ "$status" -eq 0 ] || fail "fm-spawn could not compose $task_id: $out"
+  [ "$status" -eq 0 ] || fail "fm-spawn could not compose the Codex secondmate: $out"
   [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ] \
-    || fail "fm-spawn emitted an unexpected launch-command count for $task_id"
+    || fail "fm-spawn emitted an unexpected secondmate launch-command count"
 }
 
 git clone -q --no-hardlinks "$ROOT" "$PROJECT" || fail "could not create scratch project"
@@ -96,8 +92,12 @@ git -C "$PROJECT" worktree add -q --detach "$WORKTREE" HEAD \
   || fail "could not create scratch worktree"
 fm_test_spawn_home "$TEST_HOME" codex
 FAKEBIN=$(fm_test_make_spawn_fakebin "$LAB/fake")
-compose_launch "$TREAT_ID" "$TREAT_BRIEF_MARKER" "$TREAT_LOG"
-compose_launch "$CONTROL_ID" "$CONTROL_BRIEF_MARKER" "$CONTROL_LOG"
+mkdir -p "$WORKTREE/data"
+printf '%s\n' "$TASK_ID" > "$WORKTREE/.fm-secondmate-home"
+printf "Run exactly \`touch %s\`, then reply with exactly BRIEF_REACHED.\n" \
+  "$BRIEF_MARKER" > "$WORKTREE/data/charter.md"
+compose_launch "$TREAT_LOG"
+cp "$TREAT_LOG" "$CONTROL_LOG"
 
 mkdir -p "$WORKTREE/.codex" "$CODEX_TEST_HOME" "$SHIM_DIR"
 cat > "$WORKTREE/.codex/hooks.json" <<EOF
@@ -160,22 +160,19 @@ case "$CONTROL_LAUNCH" in
 esac
 CONTROL_LAUNCH=${CONTROL_LAUNCH/ --disable hooks/}
 
-TREAT_TASK_TMP=$(sed -n 's/^tasktmp=//p' "$TEST_HOME/state/$TREAT_ID.meta")
-CONTROL_TASK_TMP=$(sed -n 's/^tasktmp=//p' "$TEST_HOME/state/$CONTROL_ID.meta")
-[ -n "$TREAT_TASK_TMP" ] && [ -n "$CONTROL_TASK_TMP" ] \
+TASK_TMP=$(sed -n 's/^tasktmp=//p' "$TEST_HOME/state/$TASK_ID.meta")
+[ -n "$TASK_TMP" ] \
   || fail "fm-spawn metadata omitted a task temp root"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s hooktrust -n treatment -x 180 -y 45 \
   -c "$WORKTREE" -- env CODEX_HOME="$CODEX_TEST_HOME" \
   FM_CODEX_HOOK_TRUST_VENDOR_BIN="$CODEX_VENDOR_BIN" \
-  GOTMPDIR="$TREAT_TASK_TMP/gotmp" PATH="$SHIM_DIR:$PATH" \
+  GOTMPDIR="$TASK_TMP/gotmp" PATH="$SHIM_DIR:$PATH" \
   /bin/bash -c "$TREAT_LAUNCH" \
   || fail "could not start hook-disabled Codex treatment"
 
-wait_for_file "$TREAT_BRIEF_MARKER" \
-  || { capture treatment >&2; fail "hook-disabled Codex did not reach the launch brief"; }
-wait_for_file "$TEST_HOME/state/$TREAT_ID.turn-ended" \
-  || { capture treatment >&2; fail "hook-disabled Codex did not emit the notify= turn-end signal"; }
+wait_for_file "$BRIEF_MARKER" \
+  || { capture treatment >&2; fail "hook-disabled Codex secondmate did not reach its charter"; }
 [ ! -e "$GLOBAL_HOOK_MARKER" ] && [ ! -e "$PROJECT_HOOK_MARKER" ] \
   || { capture treatment >&2; fail "hook-disabled Codex executed a hook"; }
 if capture treatment | grep -Fq 'Hooks need review'; then
@@ -183,23 +180,21 @@ if capture treatment | grep -Fq 'Hooks need review'; then
   fail "hook-disabled Codex still showed the hook-trust dialog"
 fi
 
-rm -f "$GLOBAL_HOOK_MARKER" "$PROJECT_HOOK_MARKER"
+rm -f "$BRIEF_MARKER" "$GLOBAL_HOOK_MARKER" "$PROJECT_HOOK_MARKER"
 "$REAL_TMUX" -L "$SOCKET" new-window -d -t hooktrust: -n control -c "$WORKTREE" -- \
   env CODEX_HOME="$CODEX_TEST_HOME" \
   FM_CODEX_HOOK_TRUST_VENDOR_BIN="$CODEX_VENDOR_BIN" \
-  GOTMPDIR="$CONTROL_TASK_TMP/gotmp" PATH="$SHIM_DIR:$PATH" \
+  GOTMPDIR="$TASK_TMP/gotmp" PATH="$SHIM_DIR:$PATH" \
   /bin/bash -c "$CONTROL_LAUNCH" \
   || fail "could not start hooks-enabled Codex control"
 
 wait_for_text control 'Hooks need review' \
   || { capture control >&2; fail "hooks-enabled Codex did not reproduce the hook-trust dialog"; }
-[ ! -e "$CONTROL_BRIEF_MARKER" ] \
-  || fail "hooks-enabled Codex reached the brief while parked at hook review"
-[ ! -e "$TEST_HOME/state/$CONTROL_ID.turn-ended" ] \
-  || fail "hooks-enabled Codex emitted the turn-end signal while parked at hook review"
+[ ! -e "$BRIEF_MARKER" ] \
+  || fail "hooks-enabled Codex secondmate reached its charter while parked at hook review"
 [ ! -e "$GLOBAL_HOOK_MARKER" ] && [ ! -e "$PROJECT_HOOK_MARKER" ] \
   || fail "hooks-enabled Codex ran hooks before trust was resolved"
 
 CODEX_VERSION=$($CODEX_VENDOR_BIN --version 2>/dev/null | head -1)
-printf 'ok - %s hook-disabled fm-spawn launch reached the brief, suppressed hooks, emitted notify, and showed no hook review\n' "$CODEX_VERSION"
-printf 'ok - %s hooks-enabled counterfactual parked at Hooks need review before hooks, brief, or notify\n' "$CODEX_VERSION"
+printf 'ok - %s hook-disabled fm-spawn secondmate reached its charter, suppressed hooks, and showed no hook review\n' "$CODEX_VERSION"
+printf 'ok - %s hooks-enabled secondmate counterfactual parked at Hooks need review before hooks or charter\n' "$CODEX_VERSION"

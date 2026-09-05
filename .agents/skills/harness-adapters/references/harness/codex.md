@@ -20,10 +20,10 @@ Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
 Codex 0.153.2 can also show a hooks trust dialog: "Hooks need review" with options to review hooks, trust all and continue, or continue without trusting.
-Codex crewmate and scout launches include `--disable hooks`, which prevents the dialog without accepting or executing project hook sources.
+Every interactive Codex launch Firstmate composes includes `--disable hooks`, including crewmate, scout, secondmate, and accepted raw Codex launches.
+This prevents the dialog without accepting or executing unreviewed hook sources.
 Crewmate and scout turn-end detection retains the independent launch `notify=` signal.
-Codex secondmates instead include `--dangerously-bypass-hook-trust`, because their tracked Stop and PreToolUse hooks are required supervision guards.
-The bypass is invocation-scoped, leaves those hooks enabled, and prevents the dialog without persisting a trust decision.
+Codex secondmates therefore do not run project lifecycle hooks from their home.
 If an already-parked worker shows this dialog, choose "Continue without trusting" by running these commands in order, then verify that the brief starts processing.
 Replace `TASK_ID` with the recorded task ID.
 

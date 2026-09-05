@@ -418,7 +418,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_hook_policy_preserves_secondmate_supervision() {
+test_all_codex_launches_disable_hooks() {
   local rec id out status launch sm harness
   id=profile-codex-hook-trust-z3b
   rec=$(make_spawn_case profile-codex-hook-trust codex "$id")
@@ -458,10 +458,10 @@ test_codex_hook_policy_preserves_secondmate_supervision() {
   status=$?
   expect_code 0 "$status" "secondmate codex spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "secondmate codex launch did not bypass the interactive hook-trust dialog"
-  assert_not_contains "$launch" "--disable hooks" \
-    "secondmate codex launch disabled its supervised lifecycle hooks"
+  assert_contains "$launch" "--disable hooks" \
+    "secondmate codex launch did not suppress hooks"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "secondmate codex launch crossed the hook-trust boundary"
   assert_not_contains "$launch" "notify=" \
     "secondmate codex launch gained the parent worker's turn-end notify configuration"
 
@@ -475,10 +475,10 @@ test_codex_hook_policy_preserves_secondmate_supervision() {
   status=$?
   expect_code 0 "$status" "raw codex secondmate spawn should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "raw codex secondmate launch did not bypass the interactive hook-trust dialog"
-  assert_not_contains "$launch" "--disable hooks" \
-    "raw codex secondmate launch disabled its supervised lifecycle hooks"
+  assert_contains "$launch" "--disable hooks" \
+    "raw codex secondmate launch did not suppress hooks"
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "raw codex secondmate launch crossed the hook-trust boundary"
 
   id=profile-codex-hook-trust-raw-z3e
   rec=$(make_spawn_case profile-codex-hook-trust-raw codex "$id")
@@ -590,7 +590,7 @@ test_codex_hook_policy_preserves_secondmate_supervision() {
     assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
       "$harness launch received the Codex-only hook-trust bypass"
   done
-  pass "codex workers suppress hooks while secondmates keep supervised hooks without showing trust dialogs"
+  pass "all codex launch paths suppress hooks without crossing hook trust"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -984,7 +984,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_hook_policy_preserves_secondmate_supervision
+test_all_codex_launches_disable_hooks
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
