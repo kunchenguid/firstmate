@@ -242,10 +242,13 @@ write_child_meta() {
     "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
-for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
+for t in tmux no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done
+# This remote home owns its own Treehouse pool, so the stub must advertise the
+# pinned build's --root option or the return is refused as too old a treehouse.
+fm_fake_treehouse "$TMP_ROOT/childfake"
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0

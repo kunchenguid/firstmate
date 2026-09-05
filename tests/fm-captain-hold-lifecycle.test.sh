@@ -29,7 +29,8 @@ make_home() {  # <name>
 ## Done
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$home"
 }
 
@@ -757,7 +758,8 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse "$fakebin"
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
@@ -814,7 +816,8 @@ test_secondmate_home_publishes_holds_and_answers() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
+  fm_fake_treehouse "$fakebin"
   channel="$parent/state/channel-mate.status"
   decision="$mate/decision.txt"
 
@@ -1547,6 +1550,12 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
     || fail "completion gate failed for the cleanup-failure fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 exit 1
 SH
   chmod +x "$home/fakebin/treehouse"
@@ -1568,7 +1577,7 @@ SH
   assert_not_contains "$show" "Deliverable of the finished work" \
     "the deliverable was recorded before destructive cleanup succeeded"
 
-  fm_fake_exit0 "$home/fakebin" treehouse
+  fm_fake_treehouse "$home/fakebin"
   bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \

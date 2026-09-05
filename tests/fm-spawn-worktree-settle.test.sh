@@ -63,7 +63,9 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # The stub advertises the pinned build's --root option, which a home owning its
+  # own pool requires; the older-Treehouse case re-stubs it with --no-root.
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -247,8 +249,33 @@ test_secondmate_home_uses_own_treehouse_pool() {
   pass "a linked secondmate home scopes Treehouse get to its own project pool and passes Claude trust"
 }
 
+test_secondmate_home_refuses_treehouse_without_root_option() {
+  local rec id out status
+  id=settle-secondmate-pool-oldth-z4
+  rec=$(make_secondmate_pool_case settle-secondmate-pool-oldth "$id")
+  read_secondmate_pool_record "$rec"
+  # Treehouse before v2.2.0 has no --root and ignores TREEHOUSE_ROOT too, so the
+  # pool identity would silently resolve to whichever clone shares this remote -
+  # the primary home's. Refusing is the only safe outcome.
+  fm_fake_treehouse "$SECOND_FAKEBIN" --no-root
+
+  out=$(run_secondmate_pool_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse when treehouse cannot scope the pool to this home"
+  assert_contains "$out" "no --root option" \
+    "the refusal did not name the missing Treehouse option"
+  assert_absent "$SECOND_HOME/state/$id.meta" \
+    "a refused spawn must not record task metadata"
+  # The refusal lands before anything is typed, so the log usually does not exist
+  # at all; guard the read so the case still states the invariant that matters.
+  [ ! -f "$SECOND_LAUNCHLOG" ] || assert_no_grep "treehouse get" "$SECOND_LAUNCHLOG" \
+    "a refused spawn must not type an unscoped Treehouse acquisition"
+  pass "a secondmate home refuses to acquire a worktree when treehouse cannot scope the pool to it"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_secondmate_home_uses_own_treehouse_pool
+test_secondmate_home_refuses_treehouse_without_root_option
 
 echo "# all fm-spawn-worktree-settle tests passed"

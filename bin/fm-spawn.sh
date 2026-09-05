@@ -2554,6 +2554,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
   if [ -n "$TREEHOUSE_HOME_ROOT" ]; then
+    # An installed Treehouse without --root would silently hand this home a
+    # worktree of whichever clone owns the shared pool identity, which is the
+    # exact cross-home leak this root binding exists to prevent. Refuse before
+    # any worker endpoint holds work in another home's clone.
+    if ! fm_treehouse_supports_root; then
+      echo "error: this home needs its own Treehouse pool root, but the installed treehouse has no --root option; upgrade treehouse to v2.2.0 or newer and rerun" >&2
+      exit 1
+    fi
     TREEHOUSE_GET_COMMAND="treehouse get --root $(printf '%q' "$TREEHOUSE_HOME_ROOT")"
   else
     TREEHOUSE_GET_COMMAND='treehouse get'

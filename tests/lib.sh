@@ -184,6 +184,27 @@ SH
   done
 }
 
+# fm_fake_treehouse <fakebin> [--no-root]
+# Drops a treehouse stub whose `get --help` advertises the global --root option
+# the way the pinned CI build does, so a fixture that exercises a non-primary
+# home's own pool is not refused simply because a no-op stub answers with
+# nothing. Pass --no-root to model a build older than Treehouse v2.2.0.
+fm_fake_treehouse() {
+  local fakebin=$1 root_help=1
+  [ "${2:-}" != "--no-root" ] || root_help=0
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  [ "$root_help" = 1 ] && printf '%s\\n' '      --root string   Worktree root directory'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

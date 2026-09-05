@@ -807,7 +807,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -877,7 +877,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -938,6 +938,12 @@ SH
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
