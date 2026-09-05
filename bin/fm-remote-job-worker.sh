@@ -306,10 +306,23 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
 }
 
 worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
-  local job=$1 kind=$2 signal=$3 pid=$4 identity_status
+  local job=$1 kind=$2 signal=$3 pid=$4 identity_status recorded_start snapshot group_snapshot
   if [ "$kind" = process ]; then
     worker_supervisor_identity_status "$job" "$pid" || return 0
   else
+    recorded_start=$(fm_remote_job_read_single_line "$job/.claim/group_start" 256 2>/dev/null || true)
+    if [ "$(fm_remote_job_platform)" = linux ]; then
+      case "$recorded_start" in
+        linux:*:*) ;;
+        *)
+          snapshot=$(fm_remote_job_scope_snapshot "$FM_ROOT" "$FM_REMOTE_JOB_STATE") || return 0
+          group_snapshot=$(printf '%s\n' "$snapshot" | awk -F '\t' -v group="$pid" '$3 == group')
+          [ -z "$group_snapshot" ] ||
+            fm_remote_job_signal_scope_snapshot "$group_snapshot" "$FM_ROOT" "$FM_REMOTE_JOB_STATE" "$signal" "$pid"
+          return 0
+          ;;
+      esac
+    fi
     worker_group_identity_status "$job" "$pid"
     identity_status=$?
     case "$identity_status" in 0|3) ;; *) return 0 ;; esac
@@ -318,7 +331,7 @@ worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
 }
 
 worker_stop_recorded_execution() { # <job-dir>
-  local job=$1 kind file pid attempt still_alive
+  local job=$1 kind file pid attempt still_alive recorded_start actual_start snapshot
   for kind in process group; do
     case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
     [ ! -e "$file" ] && [ ! -L "$file" ] && continue
@@ -345,7 +358,20 @@ worker_stop_recorded_execution() { # <job-dir>
     [ "$still_alive" -eq 1 ] || break
     sleep 0.01
   done
-  [ "$still_alive" -eq 0 ] || return 1
+  if [ "$still_alive" -ne 0 ]; then
+    file="$job/.claim/group"
+    if [ -e "$file" ] && [ ! -L "$file" ]; then
+      pid=$(worker_read_process_id "$file" 2>/dev/null || true)
+      recorded_start=$(fm_remote_job_read_single_line "$job/.claim/group_start" 256 2>/dev/null || true)
+      if [ -n "$pid" ] && [ -n "$recorded_start" ]; then
+        actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null || printf '%s' -)
+        snapshot=$(printf '%s\t%s\t%s\t%s\t%s' \
+          "$pid" "$actual_start" "$pid" "$recorded_start" "${job##*/}")
+        fm_remote_job_report_unsafe_claim_survivors "$snapshot" || true
+      fi
+    fi
+    return 1
+  fi
   rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
     "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
 }
@@ -547,10 +573,14 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   ) &
   group_pid=$!
   set +m
-  if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" = 1 ]; then
-    group_start=
+  if [ "$(fm_remote_job_platform)" = linux ]; then
+    if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" = 1 ]; then
+      group_start=
+    else
+      group_start=$(fm_remote_job_process_kernel_start "$group_pid" 2>/dev/null || true)
+    fi
   else
-    group_start=$(fm_remote_job_process_kernel_start "$group_pid" 2>/dev/null || true)
+    group_start=$(fm_remote_job_process_start "$group_pid" 2>/dev/null || true)
   fi
   [ -n "$group_start" ] || {
     worker_signal_process_or_group group KILL "$group_pid"

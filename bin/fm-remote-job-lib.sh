@@ -921,7 +921,8 @@ fm_remote_job_process_kernel_start() { # <pid>
 
 fm_remote_job_process_start() {
   local pid=$1 ps_bin value
-  if [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+  if [ "${FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY:-0}" != 1 ] &&
+    [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
     fm_remote_job_process_kernel_start "$pid"
     return
   fi
