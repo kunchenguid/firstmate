@@ -606,7 +606,21 @@ export default function (pi: ExtensionAPI) {
     // also let a check-kind trigger itself slip past main's delivery.
     const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
-    const eligible = !isCheckTrigger && scope.eligible;
+    // A signal close containing a needs-decision status file, or a stale close
+    // for a captain-held task, gets the identical main-only treatment as a
+    // check-kind trigger. Cross-reference only this trigger's keys so independent
+    // unread scans and heartbeat handling remain unchanged.
+    const triggerKeys = /^signal:/.test(message)
+      ? message
+        .slice("signal:".length)
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((path) => path.split("/").pop() ?? path)
+      : /^stale:/.test(message)
+        ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
+        : [];
+    const isNeedsDecisionTrigger = triggerKeys.some((key) => scope.needsDecisionKeys.includes(key));
+    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;

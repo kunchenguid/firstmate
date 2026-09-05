@@ -1522,6 +1522,64 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+# A needs-decision status append surfaced through this actionable signal path
+# must skip the Pi supervision branch and reach main directly
+# (docs/pi-supervision-branch.md "Autonomy"). The row still
+# queues as an ordinary signal-kind wake - fm-branch-dispatch.ts's
+# scopeForUnreadWake tells it apart from a routine signal by this payload
+# marker, not by kind.
+test_needs_decision_signal_payload_marked_for_branch_exclusion() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case needs-decision-payload); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable needs-decision signal"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+    || fail "a needs-decision signal row was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  pass "a needs-decision signal row's queued payload is marked needs-decision: for branch exclusion"
+}
+
+# A needs-decision whose key transition was rejected by the reserved-key
+# vocabulary is reported as a "reconciliation-required: " wrapped event
+# (fm-classify-lib.sh's status_span_first_actionable_record), but it is still a
+# needs-decision signal that this path routes directly to main - the payload
+# marker must not be fooled by that wrapper.
+test_needs_decision_reconciliation_required_still_marked() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case needs-decision-reconciliation); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'needs-decision [key=pending-reply-x]: unrelated request\nworking: awaiting reconciliation\n' \
+    > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not exit for a rejected-reserved-key needs-decision"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+    || fail "a reconciliation-required needs-decision row was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  pass "a reconciliation-required needs-decision row's queued payload is still marked needs-decision:"
+}
+
+# A routine (non-needs-decision) captain-relevant event must keep its ordinary
+# payload: only a genuine needs-decision gets the exclusion marker.
+test_routine_signal_payload_not_marked_needs_decision() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case routine-signal-payload); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: setup\ndone: migration complete ; needs-decision: documented in follow-up\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable done signal"
+  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+    && fail "a routine done signal was incorrectly payload-marked needs-decision: $(cat "$state/.wake-queue")"
+  grep -F "$(printf 'signal\ttask.status\tsignal:')" "$state/.wake-queue" >/dev/null \
+    || fail "a routine signal lost its ordinary payload: $(cat "$state/.wake-queue")"
+  pass "a routine event containing a needs-decision phrase keeps its ordinary payload, unmarked"
+}
+
 # The reported bug, end to end through a real watcher: a crew reports something
 # the captain must act on and then keeps appending routine progress, which is
 # ordinary while the watcher lingers its signal grace window to coalesce a status
@@ -4032,6 +4090,9 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
+test_needs_decision_signal_payload_marked_for_branch_exclusion
+test_needs_decision_reconciliation_required_still_marked
+test_routine_signal_payload_not_marked_needs_decision
 test_actionable_signal_survives_a_later_routine_append
 test_release_completion_survives_a_later_routine_append
 test_routine_appends_after_a_classified_event_stay_absorbed
