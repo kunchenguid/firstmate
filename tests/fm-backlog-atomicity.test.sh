@@ -1306,7 +1306,13 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   case_dir=$(make_home close-destructive-interrupt "$id")
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
-  out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
+  # local-only: this case tests close-before-destructive-step ordering, not
+  # backlog_done_args's separate confirmed-merged-PR gate, so it must not need
+  # a resolvable PR to reach the destructive step being interrupted.
+  sed -i.bak 's/^Delivery contract: mode=.*/Delivery contract: mode=local-only/' \
+    "$home/data/$id/brief.md" && rm -f "$home/data/$id/brief.md.bak"
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode local-only --yolo off) \
+    || fail "spawn failed: $out"
   marker="$home/state/$id.backlog-close"
   interrupt_teardown_during_treehouse_return "$case_dir"
 
