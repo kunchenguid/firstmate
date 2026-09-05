@@ -80,6 +80,18 @@ add_hold() {  # <home> <id> <reason> [--until <date>]
     --file "$home/data/backlog.md" >/dev/null
 }
 
+# A held item exactly like the captain's own pool-capacity holds: --kind load,
+# with the spelling the pipeline itself writes ("pool capacity: dispatch when
+# a slot frees ... recheck daily").
+add_load_hold() {  # <home> <id> [--until <date>]
+  local home=$1 id=$2; shift 2
+  tasks-axi add "$id" "capacity fixture $id" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi hold "$id" \
+    --reason "pool capacity: dispatch when a slot frees; recheck daily" \
+    --kind load "$@" --file "$home/data/backlog.md" >/dev/null
+}
+
 # Backdate a queued row's recorded start date, the only date tasks-axi keeps for
 # a held item and therefore the one the stale-hold age is measured from.
 backdate_row() {  # <home> <id> <days>
@@ -337,6 +349,93 @@ test_fresh_hold_is_not_stale() {
   pass "hold hygiene: a hold younger than a day is not yet stale"
 }
 
+# --- held on capacity only ---------------------------------------------------
+# 2026-09-05: the fleet sat idle for hours with four items held purely on pool
+# capacity (--kind load, --until dated) while slots were free the whole time -
+# `tasks-axi ready` reported 0 and this block stayed silent because it counted
+# only unblocked queued items. These cases pin the fix: a hold that exists only
+# because a slot was scarce at hold time is named the moment a slot frees,
+# without ever releasing the hold itself.
+
+test_capacity_held_load_kind_listed() {
+  local home out
+  home=$(make_home capacity-held-listed 2)
+  add_load_hold "$home" cap-load --until 2099-01-01
+  out=$(report "$home")
+  case "$out" in
+    *"IDLE CAPACITY: 1 item(s) held on capacity only while 2 slot(s) are free: cap-load"*) ;;
+    *) fail "a --kind load hold with a free slot must be named, got: $out" ;;
+  esac
+  pass "capacity hold: a --kind load hold with a free slot is listed"
+}
+
+test_capacity_held_silent_with_no_free_slots() {
+  local home out
+  home=$(make_home capacity-held-full 0)
+  add_load_hold "$home" cap-load --until 2099-01-01
+  out=$(report "$home")
+  case "$out" in
+    *"held on capacity"*) fail "a --kind load hold with no free slot must stay silent, got: $out" ;;
+  esac
+  pass "capacity hold: a --kind load hold with no free slot stays silent"
+}
+
+test_capacity_held_reason_phrase_listed_under_other_kind() {
+  local home out
+  home=$(make_home capacity-held-phrase 2)
+  add_hold "$home" cap-phrase "pool capacity: dispatch when a slot frees" --until 2099-01-01
+  out=$(report "$home")
+  case "$out" in
+    *"IDLE CAPACITY: 1 item(s) held on capacity only while 2 slot(s) are free: cap-phrase"*) ;;
+    *) fail "a hold reason naming a capacity phrase must be named regardless of kind, got: $out" ;;
+  esac
+  pass "capacity hold: a hold reason naming a capacity/slot phrase is listed even under --kind captain"
+}
+
+test_capacity_held_captain_kind_not_listed() {
+  local home out
+  home=$(make_home capacity-held-captain 2)
+  add_hold "$home" cap-captain "waiting on the captain" --until 2099-01-01
+  out=$(report "$home")
+  case "$out" in
+    *"held on capacity"*) fail "a --kind captain hold with an unrelated reason must never be named, got: $out" ;;
+  esac
+  pass "capacity hold: a --kind captain hold with no capacity phrase is never listed"
+}
+
+capacity_escalate_once() {  # <home>
+  PATH="$1/fakebin:$PATH" bash -c '
+    . "$2/bin/fm-supervision-lib.sh"
+    fm_idle_capacity_compute "$1/state" "$1/data" "$1"
+    if fm_idle_capacity_should_escalate "$1/state"; then
+      echo escalate
+      fm_idle_capacity_mark_escalated "$1/state"
+    else
+      echo dedup
+    fi' _ "$1" "$ROOT"
+}
+
+test_capacity_held_escalates_once_per_unchanged_tuple() {
+  local home r1 r2
+  home=$(make_home capacity-held-dedupe 2)
+  add_load_hold "$home" cap-load --until 2099-01-01
+  r1=$(capacity_escalate_once "$home")
+  r2=$(capacity_escalate_once "$home")
+  [ "$r1" = escalate ] || fail "a fresh capacity hold with a free slot must escalate, got: $r1"
+  [ "$r2" = dedup ] || fail "an unchanged capacity-held tuple must not escalate twice, got: $r2"
+  pass "capacity hold: escalation dedupe fires once per unchanged tuple, matching the ready-work dedupe"
+}
+
+test_capacity_held_needs_supervision_with_zero_ready() {
+  local home verdict
+  home=$(make_home capacity-held-predicate 2)
+  add_load_hold "$home" cap-load --until 2099-01-01
+  verdict=$(predicate_needed "$home")
+  [ "$verdict" = "true true" ] \
+    || fail "a fully-held queue with a capacity hold and a free slot must still need supervision, got: $verdict"
+  pass "capacity hold: a capacity-only hold with a free slot needs supervision even when nothing is ready"
+}
+
 # --- state 2: present + idle (the widened predicate) ------------------------
 
 test_predicate_true_on_idle_capacity() {
@@ -512,6 +611,25 @@ test_guard_silent_without_idle_capacity() {
   pass "state 1: a full pool with no in-flight work still lets the turn end"
 }
 
+test_guard_banner_names_capacity_held() {
+  local home out rc
+  home=$(make_home guard-capacity-held 2)
+  install_guard_home "$home"
+  add_load_hold "$home" cap-load --until 2099-01-01
+  set +e
+  out=$(printf '{"stop_hook_active":false,"session_id":"s1"}' |
+    PATH="$home/fakebin:$PATH" FM_HOME="$home" "$home/bin/fm-turnend-guard.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "a capacity-only hold with a free slot and no live watcher must block the turn (rc=$rc): $out"
+  case "$out" in
+    *"IDLE CAPACITY: 1 item(s) held on capacity only while 2 slot(s) are free: cap-load"*) ;;
+    *) fail "the blocked banner must carry the held-on-capacity line, got: $out" ;;
+  esac
+  pass "state 1: the turn-end guard blocks and names a capacity-only hold sitting on a free slot"
+}
+
 # --- state 2: present + idle (teardown of the last task) --------------------
 
 make_teardown_home() {  # <name> <available-slots>
@@ -583,6 +701,38 @@ test_teardown_prints_idle_capacity() {
   pass "state 2: teardown of the last task prints the idle-capacity line"
 }
 
+test_teardown_prints_capacity_held() {
+  local home out rc
+  home=$(make_teardown_home teardown-capacity-held 4)
+  add_load_hold "$home" cap-load --until 2099-01-01
+  tasks-axi add task-t1 "teardown fixture" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi start task-t1 --file "$home/data/backlog.md" >/dev/null
+  fm_write_meta "$home/state/task-t1.meta" \
+    "window=firstmate:fm-task-t1" \
+    "endpoint_task_id=task-t1" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=idle-capacity-test-task-t1-capacity"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" task-t1 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of landed local-only work must succeed (rc=$rc): $out"
+  case "$out" in
+    *"IDLE CAPACITY: 1 item(s) held on capacity only while 4 slot(s) are free: cap-load"*) ;;
+    *) fail "teardown of the last task must report the capacity-only hold, got: $out" ;;
+  esac
+  pass "state 2: teardown of the last task prints the held-on-capacity line, even with nothing ready"
+}
+
 # --- states 3 and 4: away mode ----------------------------------------------
 
 # Drive the daemon's real housekeeping scan in library mode, which is how the
@@ -644,6 +794,19 @@ test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple() {
   pass "away scan: an unchanged idle-capacity tuple escalates once across repeated scans, not once per scan"
 }
 
+test_away_idle_scan_buffers_capacity_held() {
+  local home
+  home=$(make_home away-capacity-held 3)
+  cp -R "$ROOT/bin" "$home/bin"
+  add_load_hold "$home" cap-load --until 2099-01-01
+  : > "$home/state/.afk"
+  run_away_scan "$home" >/dev/null 2>&1 || true
+  grep -q "IDLE CAPACITY: 1 item(s) held on capacity only while 3 slot(s) are free: cap-load" \
+    "$home/state/.subsuper-escalations" \
+    || fail "the away scan must buffer the held-on-capacity line even with nothing ready: $(cat "$home/state/.subsuper-escalations" 2>/dev/null)"
+  pass "away scan: an idle home with a capacity-only hold and free slots buffers the held-on-capacity line"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_report_counts_and_disposition
@@ -662,6 +825,12 @@ test_hold_with_until_is_not_stale
 test_hold_past_due_reported
 test_hold_due_today_reported
 test_fresh_hold_is_not_stale
+test_capacity_held_load_kind_listed
+test_capacity_held_silent_with_no_free_slots
+test_capacity_held_reason_phrase_listed_under_other_kind
+test_capacity_held_captain_kind_not_listed
+test_capacity_held_escalates_once_per_unchanged_tuple
+test_capacity_held_needs_supervision_with_zero_ready
 test_predicate_true_on_idle_capacity
 test_predicate_false_when_both_false
 test_predicate_unchanged_when_work_in_flight
@@ -673,7 +842,10 @@ test_cap_zero_blocks_idle_capacity_with_no_in_flight_work
 test_guard_banner_names_idle_capacity
 test_guard_banner_names_idle_only_need
 test_guard_silent_without_idle_capacity
+test_guard_banner_names_capacity_held
 test_teardown_prints_idle_capacity
+test_teardown_prints_capacity_held
 test_away_live_scan_buffers_idle_capacity
 test_away_idle_scan_buffers_idle_capacity
 test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple
+test_away_idle_scan_buffers_capacity_held

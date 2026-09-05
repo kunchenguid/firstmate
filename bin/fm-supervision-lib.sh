@@ -56,6 +56,15 @@
 # hold whose `--until` has already passed is reported as HOLD_DUE instead of
 # being silently skipped just because it carries a date at all - a captain call
 # that has come due needs the same attention as one nobody scheduled.
+# HELD ON CAPACITY ONLY. A hold filed --kind load, or whose reason names a
+# capacity/slot phrase (fm_idle_reason_is_capacity_phrase: "capacity" or "slot
+# frees"), sitting in front of a free slot in its own project's pool, is an
+# idle slot in disguise: the captain's rule is that dispatchable capacity never
+# sits unused while ready-shaped work is only held because a slot was scarce
+# at hold time. This never releases the hold - it only reports it, in its own
+# "IDLE CAPACITY: N item(s) held on capacity only ..." line, and folds into the
+# same escalation dedupe as the ready-work line so it nags once per unchanged
+# state rather than once per poll.
 # PARSING. Ready rows read `id` and `repo` from the LEFT (columns one and four
 # of `tasks-axi ready`'s own declared `id,state,kind,repo,title` header); only
 # the trailing `title` is free text, so both are safe regardless of it. Held
@@ -153,6 +162,19 @@ fm_idle_reason_names_event() {  # <reason>
   return 1
 }
 
+# Does a hold reason use one of the phrasings firstmate itself writes when a
+# hold exists only to wait for a free worktree slot ("pool capacity: dispatch
+# when a slot frees ... recheck daily")? Used alongside --kind load below so a
+# capacity hold filed under the wrong kind is still caught.
+fm_idle_reason_is_capacity_phrase() {  # <reason>
+  local lower
+  lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *capacity*|*"slot frees"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Resolve one project's own worktree pool root, so a ready item is weighed
 # only against ITS project's free slots, never a sibling's. "-"/empty is a
 # firstmate item: its pool is this home's own root, no registry lookup. A
@@ -195,6 +217,15 @@ fm_idle_project_root() {  # <data-dir> <root> <project-label>
 #   FM_IDLE_STALE   "<id> <age>d" HOLD_STALE lines for holds with neither date
 #                   nor event, and "<id> <age>d overdue" HOLD_DUE lines for
 #                   holds whose --until date has already passed
+#   FM_IDLE_CAPACITY_HELD  one "<repo>\t<id>\t<free>" line per held item whose
+#                   hold is --kind load, or whose reason names a capacity/slot
+#                   phrase (fm_idle_reason_is_capacity_phrase), sitting in
+#                   front of a free slot in ITS OWN project's pool. Never a
+#                   hold is released automatically - this only surfaces it.
+#                   Independent of FM_IDLE_READY, since the whole point is a
+#                   queue that is entirely held still reports free capacity;
+#                   left empty while at cap or frozen, since there is nothing
+#                   to dispatch into either way
 #   FM_IDLE_FREEZE  the FREEZE line when the captain's record applies
 #   FM_IDLE_WARN    one line naming a tool that could not be read at all
 #                   (tasks-axi itself, or the backlog); one unresolvable
@@ -216,9 +247,11 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
   local state=$1 data=${2:-} root=${3:-$FM_IDLE_SELF_ROOT} config=${4:-}
   local backlog ready_out held_out due_out meta row id until_date reason days due_days
   local cap project_ready_lines label ready_n project_root free
+  local repo hold_kind is_capacity
   FM_IDLE_READY=0; FM_IDLE_HELD=0; FM_IDLE_LIVE=0
   FM_IDLE_IDS=''; FM_IDLE_STALE=''; FM_IDLE_FREEZE=''; FM_IDLE_WARN=''
   FM_IDLE_PROJECTS=''
+  FM_IDLE_CAPACITY_HELD=''
   FM_IDLE_AT_CAP=false
   FM_IDLE_CAPACITY=false
   FM_IDLE_READY_READ=false
@@ -260,6 +293,13 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
 
   FM_IDLE_FREEZE=$(fm_idle_freeze_line "$state") || FM_IDLE_FREEZE=''
 
+  cap=13
+  if [ -f "$config/concurrency-cap" ]; then
+    IFS= read -r cap < "$config/concurrency-cap" 2>/dev/null || cap=13
+    case "$cap" in ''|*[!0-9]*) cap=13 ;; esac
+  fi
+  [ "$FM_IDLE_LIVE" -lt "$cap" ] || FM_IDLE_AT_CAP=true
+
   if [ "$FM_IDLE_HELD" -gt 0 ]; then
     # hold_until and created are date-or-"-" columns with no comma or quote, so
     # the two rightmost columns are read from the right and the id from the left.
@@ -290,6 +330,48 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
     fi
   fi
 
+  # Held-on-capacity-only items: a hold filed --kind load, or one whose reason
+  # names a capacity/slot phrase, sitting in front of a free slot in its OWN
+  # project's pool. Independent of FM_IDLE_READY (these items are held, not
+  # ready, so a fully-held queue must still surface them) and skipped outright
+  # while at cap or frozen, since there is nothing to dispatch into either way.
+  # held[ rows are "id,state,kind,repo,title,hold_reason,hold_kind,hold_until"
+  # (tasks-axi ready --include-held's own declared header). id (leftmost) and
+  # repo (fourth column, reached by stripping id/state/kind off the front) are
+  # both safe positionally because state and kind never contain commas; hold_kind
+  # is read by stripping hold_until (the true last field) off the END of the row
+  # first, for the same reason PARSING above reads hold_until/created that way -
+  # immune to a comma inside title or hold_reason, the two free-text fields in
+  # between, because suffix removal is anchored to the actual end of the string
+  # rather than a counted field.
+  if [ "$FM_IDLE_HELD" -gt 0 ] && [ "$FM_IDLE_AT_CAP" != true ] && [ -z "$FM_IDLE_FREEZE" ]; then
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      id=${row%%,*}
+      repo=${row#*,}; repo=${repo#*,}; repo=${repo#*,}; repo=${repo%%,*}
+      repo=${repo#\"}; repo=${repo%\"}
+      hold_kind=${row%,*}; hold_kind=${hold_kind##*,}
+      hold_kind=${hold_kind#\"}; hold_kind=${hold_kind%\"}
+      is_capacity=false
+      [ "$hold_kind" = load ] && is_capacity=true
+      if [ "$is_capacity" != true ]; then
+        reason=$(tasks-axi show "$id" --file "$backlog" --full 2>/dev/null |
+          sed -n 's/^[[:space:]]*hold_reason:[[:space:]]*//p' | head -1)
+        reason=${reason#\"}; reason=${reason%\"}
+        fm_idle_reason_is_capacity_phrase "$reason" && is_capacity=true
+      fi
+      [ "$is_capacity" = true ] || continue
+      project_root=$(fm_idle_project_root "$data" "$root" "$repo") || continue
+      free=$(fm_idle_pool_free "$project_root") || continue
+      case "$free" in ''|*[!0-9]*) continue ;; esac
+      [ "$free" -gt 0 ] || continue
+      FM_IDLE_CAPACITY_HELD="${FM_IDLE_CAPACITY_HELD}${repo}$(printf '\t')${id}$(printf '\t')${free}"$'\n'
+    done < <(printf '%s\n' "$ready_out" | awk '
+      /^held\[/ { rows = 1; next }
+      /^[^[:space:]]/ { rows = 0 }
+      rows && /^[[:space:]]/ { sub(/^[[:space:]]+/, ""); print }')
+  fi
+
   [ "$FM_IDLE_READY" -gt 0 ] || return 0
 
   # A hold whose --until date has arrived reads as resumed (queued, not held)
@@ -314,13 +396,6 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
   else
     [ -n "$FM_IDLE_WARN" ] || FM_IDLE_WARN='IDLE CAPACITY WARN: queued rows could not be read, so due holds are unknown.'
   fi
-
-  cap=13
-  if [ -f "$config/concurrency-cap" ]; then
-    IFS= read -r cap < "$config/concurrency-cap" 2>/dev/null || cap=13
-    case "$cap" in ''|*[!0-9]*) cap=13 ;; esac
-  fi
-  [ "$FM_IDLE_LIVE" -lt "$cap" ] || FM_IDLE_AT_CAP=true
 
   # One "<label>\tready=<n>" per distinct project referenced by a ready item,
   # first-seen order, from a single awk pass over the same rows FM_IDLE_IDS
@@ -388,21 +463,47 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
 # second project adds its own indented "<label>: ready=N free_slots=K" line
 # instead of trying to force multiple pools into that one free_slots number.
 # show-idle (default true) omits just the IDLE CAPACITY block - the header, any
-# per-project lines, the ready ids, and the disposition line - while WARN,
-# FRONTIER EMPTY, and STALE/DUE lines still print regardless; a push-escalating
-# caller passes false once fm_idle_capacity_should_escalate below says this
-# exact (ready ids, free counts) tuple already escalated.
+# per-project lines, the ready ids, the disposition line, and the held-on-
+# capacity line below - while WARN, FRONTIER EMPTY, and STALE/DUE lines still
+# print regardless; a push-escalating caller passes false once
+# fm_idle_capacity_should_escalate below says this exact (ready ids, free
+# counts, capacity-held ids) tuple already escalated.
 # Always returns 0: this is a report, never a gate.
 # shellcheck disable=SC2120 # show-idle is optional; every existing caller
 # correctly omits it and gets the default true (full render, unchanged).
 fm_idle_capacity_render() {  # [show-idle]
   local show_idle=${1:-true}
   local data=$FM_IDLE_DATA shown=0 id project_count label ready_n free_n
+  local held_block=''
   [ -z "$FM_IDLE_WARN" ] || printf '%s\n' "$FM_IDLE_WARN"
   if [ -n "$FM_IDLE_FREEZE" ]; then
     printf '%s\n' "$FM_IDLE_FREEZE"
     return 0
   fi
+
+  # FM_IDLE_CAPACITY_HELD rows are "<repo>\t<id>\t<free>"; group into one line
+  # per project so one pool's free count is never presented as if it covered a
+  # sibling's own capacity holds. Never set while at cap or frozen (the compute
+  # step already leaves it empty then), matching "silent when no slots are free".
+  if [ "$show_idle" = true ] && [ -n "$FM_IDLE_CAPACITY_HELD" ]; then
+    held_block=$(printf '%s\n' "$FM_IDLE_CAPACITY_HELD" | awk -F'\t' '
+      NF >= 3 {
+        if (!(($1) in seen)) { order[++n] = $1; seen[$1] = 1 }
+        free[$1] = $3
+        ids[$1] = ids[$1] $2 " "
+        count[$1]++
+      }
+      END {
+        for (i = 1; i <= n; i++) {
+          label = order[i]
+          idlist = ids[label]
+          sub(/ $/, "", idlist)
+          printf "IDLE CAPACITY: %s item(s) held on capacity only while %s slot(s) are free: %s\n", count[label], free[label], idlist
+        }
+      }')
+  fi
+  [ -z "$held_block" ] || printf '%s\n' "$held_block"
+
   if [ "$FM_IDLE_READY" -eq 0 ]; then
     [ "$FM_IDLE_HELD" -gt 0 ] && printf 'FRONTIER EMPTY, HELD=%s\n' "$FM_IDLE_HELD"
     [ -z "$FM_IDLE_STALE" ] || printf '%s' "$FM_IDLE_STALE"
@@ -462,33 +563,36 @@ fm_idle_capacity_report() {  # <state-dir> [data-dir] [root] [config-dir]
 }
 
 # A deterministic one-line signature of the CURRENT (ready ids, per-project
-# free counts) tuple, from the fields fm_idle_capacity_compute already
-# populated. Two calls with the same ready work and the same free slots always
-# produce the same signature, regardless of WARN or STALE/DUE noise around it.
+# free counts, capacity-held ids) tuple, from the fields
+# fm_idle_capacity_compute already populated. Two calls with the same ready
+# work, the same free slots, and the same capacity-held ids always produce the
+# same signature, regardless of WARN or STALE/DUE noise around it.
 fm_idle_capacity_signature() {
-  printf '%s|%s' "$FM_IDLE_IDS" "$FM_IDLE_PROJECTS" | tr '\n\t' ';:'
+  printf '%s|%s|%s' "$FM_IDLE_IDS" "$FM_IDLE_PROJECTS" "$FM_IDLE_CAPACITY_HELD" | tr '\n\t' ';:'
 }
 
 # fm_idle_capacity_should_escalate <state-dir>
-# True only when FM_IDLE_CAPACITY is true AND its (ready ids, free counts)
-# tuple differs from the last one this state dir actually escalated - so a
-# daemon polling every heartbeat nags once per real change, never once per
-# poll. Call after fm_idle_capacity_compute. Never writes the marker itself:
-# a caller must call fm_idle_capacity_mark_escalated only once the escalation
-# it gates has actually landed (e.g. after fm_wake_append succeeds), or a
-# failed escalation would be recorded as delivered and never retried.
+# True only when FM_IDLE_CAPACITY is true OR some item is held on capacity
+# alone with a free slot (FM_IDLE_CAPACITY_HELD non-empty), AND its (ready ids,
+# free counts, capacity-held ids) tuple differs from the last one this state
+# dir actually escalated - so a daemon polling every heartbeat nags once per
+# real change, never once per poll. Call after fm_idle_capacity_compute. Never
+# writes the marker itself: a caller must call fm_idle_capacity_mark_escalated
+# only once the escalation it gates has actually landed (e.g. after
+# fm_wake_append succeeds), or a failed escalation would be recorded as
+# delivered and never retried.
 fm_idle_capacity_should_escalate() {  # <state-dir>
   local state=$1 marker="$1/.idle-capacity-last-escalated" sig
-  [ "$FM_IDLE_CAPACITY" = true ] || return 1
+  { [ "$FM_IDLE_CAPACITY" = true ] || [ -n "$FM_IDLE_CAPACITY_HELD" ]; } || return 1
   sig=$(fm_idle_capacity_signature)
   [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] && return 1
   return 0
 }
 
 # fm_idle_capacity_mark_escalated <state-dir>
-# Records the current (ready ids, free counts) tuple as escalated. Call only
-# after the escalation fm_idle_capacity_should_escalate gated has actually
-# been delivered.
+# Records the current (ready ids, free counts, capacity-held ids) tuple as
+# escalated. Call only after the escalation fm_idle_capacity_should_escalate
+# gated has actually been delivered.
 fm_idle_capacity_mark_escalated() {  # <state-dir>
   printf '%s\n' "$(fm_idle_capacity_signature)" > "$1/.idle-capacity-last-escalated" 2>/dev/null || true
 }
@@ -501,12 +605,15 @@ fm_idle_capacity_mark_escalated() {  # <state-dir>
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
 #                         ready backlog work with a free worktree slot in its
-#                         own project's pool, or ready work sitting behind a
-#                         freeze that still needs a watcher alive for the
+#                         own project's pool, an item held on capacity alone
+#                         with a free slot in its own project's pool
+#                         (FM_IDLE_CAPACITY_HELD), or ready work sitting behind
+#                         a freeze that still needs a watcher alive for the
 #                         recheck once the freeze's own until date passes
-#   FM_SUP_IDLE_CAPACITY  true/false - the dispatch-now branch alone carried
-#                         FM_SUP_NEEDED; false while frozen even when
-#                         FM_SUP_NEEDED is true for the recheck above
+#   FM_SUP_IDLE_CAPACITY  true/false - the dispatch-now or held-on-capacity
+#                         branch alone carried FM_SUP_NEEDED; false while
+#                         frozen even when FM_SUP_NEEDED is true for the
+#                         recheck above
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -541,7 +648,7 @@ fm_supervision_status() {
     # Only reached when the cheap records say this home is idle, so the two
     # subprocess reads behind the idle branch are never paid by a busy fleet.
     fm_idle_capacity_compute "$state" "$data" "${root:-$FM_IDLE_SELF_ROOT}" "$config"
-    if [ "$FM_IDLE_CAPACITY" = true ]; then
+    if [ "$FM_IDLE_CAPACITY" = true ] || [ -n "$FM_IDLE_CAPACITY_HELD" ]; then
       # shellcheck disable=SC2034 # Read by callers (fm-turnend-guard.sh) after sourcing.
       FM_SUP_IDLE_CAPACITY=true
       FM_SUP_NEEDED=true
