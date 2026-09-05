@@ -49,6 +49,17 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) readable /proc process tree                           -> ALLOW
+#   (aa) /proc unavailable                                    -> REFUSE loudly
+#   (ab) /proc cwd root owned by another uid                  -> skip, ALLOW
+#   (ac) ancestry changes between snapshots                   -> retry, then ALLOW
+#   (ad) foreign-uid intermediary with owned descendant       -> reap owned only
+#   (ae) parent exits before nested descendant reap            -> reparent + ALLOW
+#   (af) live current-uid identity unreadable                   -> REFUSE loudly
+#   (ag) process exits mid-scan                                 -> converge + ALLOW
+#   (ah) parent exits mid-scan, child cwd outside roots         -> carry lineage, ALLOW
+#   (ai) enumerable-but-empty /proc snapshot                    -> REFUSE loudly
+#   (aj) abort after first root scan, parent exits, child outside -> carry all roots, ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -60,10 +71,73 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
-REAL_PS_FOR_TEST=$(command -v ps)
-export REAL_PS_FOR_TEST
+REAL_READLINK_FOR_TEST=$(command -v readlink)
+export REAL_READLINK_FOR_TEST
+REAL_CAT_FOR_TEST=$(command -v cat)
+export REAL_CAT_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+
+FM_TEARDOWN_TEST_PROCESS_RECORDS=
+FM_TEARDOWN_TEST_PROCESS_GROUPS=
+
+fm_teardown_test_register_pid() {
+  local pid=$1 identity
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  identity=$(fm_test_pid_identity "$pid" 2>/dev/null) || return 0
+  FM_TEARDOWN_TEST_PROCESS_RECORDS=${FM_TEARDOWN_TEST_PROCESS_RECORDS}${pid}$'\t'${identity}$'\n'
+}
+
+fm_teardown_test_register_process_group() {
+  local pgid=$1
+  case "$pgid" in ''|*[!0-9]*) return 0 ;; esac
+  FM_TEARDOWN_TEST_PROCESS_GROUPS=${FM_TEARDOWN_TEST_PROCESS_GROUPS}${pgid}$'\n'
+}
+
+fm_teardown_test_unregister_process_group() {
+  local target=$1 pgid retained=
+  while IFS= read -r pgid; do
+    [ -n "$pgid" ] || continue
+    [ "$pgid" = "$target" ] && continue
+    retained=${retained}${pgid}$'\n'
+  done <<EOF
+$FM_TEARDOWN_TEST_PROCESS_GROUPS
+EOF
+  FM_TEARDOWN_TEST_PROCESS_GROUPS=$retained
+}
+
+fm_teardown_test_pid_is_reaped() {  # <pid>
+  local pid=$1 state
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || return 0
+  [ "$state" = Z ]
+}
+
+fm_teardown_test_cleanup() {
+  local records=$FM_TEARDOWN_TEST_PROCESS_RECORDS groups=$FM_TEARDOWN_TEST_PROCESS_GROUPS
+  local pgid pid identity current
+  FM_TEARDOWN_TEST_PROCESS_RECORDS=
+  FM_TEARDOWN_TEST_PROCESS_GROUPS=
+  while IFS= read -r pgid; do
+    [ -n "$pgid" ] || continue
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+  done <<EOF
+$groups
+EOF
+  while IFS=$'\t' read -r pid identity; do
+    [ -n "$pid" ] || continue
+    current=$(fm_test_pid_identity "$pid" 2>/dev/null) || continue
+    [ "$current" = "$identity" ] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done <<EOF
+$records
+EOF
+  fm_test_cleanup
+}
+
+trap fm_teardown_test_cleanup EXIT
+trap 'fm_teardown_test_cleanup; exit 130' INT
+trap 'fm_teardown_test_cleanup; exit 143' TERM
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -76,7 +150,14 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$case_dir/fake-proc" "$fakebin"
+
+  # A real host's /proc always has numeric entries (PID 1 at minimum), so the
+  # enumerator now refuses an enumerable-but-empty /proc as a broken
+  # enumerator. Every case seeds one wholly synthetic process whose cwd is the
+  # case root itself - outside every task root, so it can never be collected
+  # as a leak, but enough to keep the default fake /proc non-empty.
+  add_fake_proc_cwd "$case_dir/fake-proc" 999999990 "$case_dir"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -89,6 +170,13 @@ SH
 #!/usr/bin/env bash
 # tmux kill-window etc.: succeed silently.
 exit 0
+SH
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${REAL_LSOF_FOR_TEST:-}" ]; then
+  exec "$REAL_LSOF_FOR_TEST" "$@"
+fi
+exit 1
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
   # number fails. This keeps the landed-work check hermetic (never reaching the real
@@ -161,7 +249,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/lsof" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -445,15 +533,11 @@ git_index_lock_path() {
 }
 
 # fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
-# code), so a lock's staleness is decided by age alone. The cwd scan is a
-# separate successful empty query.
+# code), so a lock's staleness is decided by age alone.
 add_lsof_no_holder() {
   local case_dir=$1
   cat > "$case_dir/fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
-case " $* " in
-  *" -d cwd "*) exit 0 ;;
-esac
 exit 1
 SH
   chmod +x "$case_dir/fakebin/lsof"
@@ -536,6 +620,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$case_dir/fake-proc}" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -559,17 +644,41 @@ backlog_row_state() {
     sed -n 's/^  state: *//p' | head -1
 }
 
-# Build the teardown test's executable search path without lsof, regardless of
-# whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
-make_path_without_lsof() {  # <case-dir>
-  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
-  mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
-    resolved=$(command -v "$cmd" 2>/dev/null) || continue
-    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
-  done
-  printf '%s\n' "$path_dir"
+add_fake_proc_entry() {  # <proc-root> <pid> [uid]
+  local proc_root=$1 pid=$2 uid=${3:-}
+  mkdir -p "$proc_root/$pid"
+  # /proc is the sole birth-identity authority, so a faked /proc entry must also
+  # supply a bindable stat record or the scan correctly refuses to cover it.
+  # Link the REAL stat rather than synthesising one: a real entry disappears when
+  # the process exits, which is what teardown relies on to tell "already gone"
+  # from "still alive". A static fake file would keep reporting a dead process as
+  # live, so a process that TERM already reaped would look like a failed KILL.
+  if [ -e "/proc/$pid/stat" ]; then
+    ln -sfn "/proc/$pid/stat" "$proc_root/$pid/stat"
+  elif [ ! -e "$proc_root/$pid/stat" ]; then
+    # Wholly synthetic pid (no live process): field 20 after the comm is
+    # starttime, and the pid doubles as a stable value.
+    printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' "$pid" "$pid" \
+      > "$proc_root/$pid/stat"
+  fi
+  rm -f "$proc_root/$pid/status"
+  if [ -n "$uid" ]; then
+    printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" \
+      > "$proc_root/$pid/status"
+  elif [ -e "/proc/$pid/status" ]; then
+    ln -sfn "/proc/$pid/status" "$proc_root/$pid/status"
+  else
+    uid=$(id -u)
+    printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" \
+      > "$proc_root/$pid/status"
+  fi
+}
+
+add_fake_proc_cwd() {  # <proc-root> <pid> <dir> [uid]
+  local canonical
+  canonical=$(cd "$3" && pwd -P) || return 1
+  add_fake_proc_entry "$1" "$2" "${4:-}" || return 1
+  ln -sfn "$canonical" "$1/$2/cwd"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1076,7 +1185,7 @@ test_lsof_error_never_clears_index_lock() {
   set -e
 
   expect_code 1 "$rc" "lsof-error-index-lock: teardown should refuse when lsof errors"
-  assert_grep "REFUSED: cannot determine leaked processes" "$case_dir/stderr" \
+  assert_grep "lsof check failed" "$case_dir/stderr" \
     "lsof-error-index-lock: teardown did not report the lsof failure"
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "lsof-error-index-lock: teardown removed a lock after lsof failed"
@@ -2742,6 +2851,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
+  fm_teardown_test_register_pid "$pid"
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
@@ -2824,11 +2934,13 @@ test_leaked_worktree_process_is_reaped() {
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
+  fm_teardown_test_register_pid "$pid"
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "leaked-process-reap: setup sleeper did not start"
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_PROC_ROOT_OVERRIDE=/proc \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "leaked-process-reap: teardown should still succeed"
   if kill -0 "$pid" 2>/dev/null; then
@@ -2851,11 +2963,13 @@ test_leaked_tasktmp_process_is_reaped() {
   ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
   pid=$!
   disown
+  fm_teardown_test_register_pid "$pid"
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "leaked-tasktmp-reap: setup sleeper did not start"
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_PROC_ROOT_OVERRIDE=/proc \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "leaked-tasktmp-reap: teardown should still succeed"
   if kill -0 "$pid" 2>/dev/null; then
@@ -2867,119 +2981,551 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
-test_lsof_absent_reaps_tmux_process_group() {
-  local case_dir rc pid path_without_lsof
-  case_dir=$(make_case lsof-absent-process-group-reap)
+test_proc_reaps_whole_process_tree() {
+  local case_dir rc pid child_pid child_file release
+  case_dir=$(make_case proc-process-tree-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
-  path_without_lsof=$(make_path_without_lsof "$case_dir")
-  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
-    && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes lsof"
+  mkdir -p "$case_dir/outside"
+  child_file="$case_dir/child.pid"
+  release="$case_dir/release"
 
-  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($release, $child_file, $outside) = @ARGV;
+      my $deadline = time + 5;
+      until (-e $release) {
+        die "release wait timed out" if time > $deadline;
+        select undef, undef, undef, 0.01;
+      }
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if (!$child) {
+        chdir $outside or die "chdir: $!";
+        $SIG{TERM} = "IGNORE";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $child_file or die "open: $!";
+      print {$fh} "$child\n";
+      close $fh;
+      $SIG{TERM} = sub { exit 0; };
+      sleep 300;
+    ' "$release" "$child_file" "$case_dir/outside" ) &
   pid=$!
   disown
-  sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "lsof-absent-process-group-reap: setup sleeper did not start"
-  cat > "$case_dir/fakebin/tmux" <<EOF
-#!/usr/bin/env bash
-if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
-  printf '%s\n' '$pid'
-fi
-exit 0
-EOF
-  chmod +x "$case_dir/fakebin/tmux"
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  : > "$release"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$child_file" ] && break
+    sleep 0.1
+  done
+  child_pid=$(cat "$child_file" 2>/dev/null || true)
+  fm_teardown_test_register_pid "$child_pid"
+  kill -0 "$pid" 2>/dev/null || fail "proc-process-tree-reap: setup parent did not start"
+  [ -n "$child_pid" ] || fail "proc-process-tree-reap: setup child did not start"
+  kill -0 "$child_pid" 2>/dev/null || fail "proc-process-tree-reap: setup child did not start"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  expect_code 0 "$rc" "proc-process-tree-reap: teardown should succeed"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
-    fail "lsof-absent-process-group-reap: tmux process group survived teardown"
+    fail "proc-process-tree-reap: leaked parent survived teardown"
   fi
-  assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
-    "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
-  pass "missing lsof falls back to reaping the tmux pane process group"
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "proc-process-tree-reap: child with changed cwd survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process(es)" "$case_dir/stderr" \
+    "proc-process-tree-reap: teardown did not report exact-PID process reaping"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "/proc reaps a whole process tree, including a child whose cwd changed"
 }
 
-test_lsof_error_refuses_before_removal() {
-  local case_dir rc
-  case_dir=$(make_case lsof-error-refusal)
+test_reparented_nested_tree_is_reaped_after_parent_exit() {
+  local case_dir rc parent_pid child_pid grandchild_pid child_ppid grandchild_ppid
+  local child_alive=0 grandchild_alive=0 cleanup_pid pid_file outside release
+  case_dir=$(make_case reparented-before-teardown)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
-  cat > "$case_dir/fakebin/lsof" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
+  pid_file="$case_dir/nested-pids"
+  outside="$case_dir/outside"
+  release="$case_dir/release"
+  mkdir -p "$outside"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($release, $pid_file, $outside) = @ARGV;
+      my $deadline = time + 5;
+      until (-e $release) {
+        die "release wait timed out" if time > $deadline;
+        select undef, undef, undef, 0.01;
+      }
+      my $child = fork();
+      die "fork child: $!" unless defined $child;
+      exit 0 if $child;
+      my $grandchild = fork();
+      die "fork grandchild: $!" unless defined $grandchild;
+      if (!$grandchild) {
+        chdir $outside or die "chdir: $!";
+        $SIG{TERM} = "IGNORE";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $pid_file or die "open: $!";
+      print {$fh} "$$ $grandchild\n";
+      close $fh;
+      $SIG{TERM} = sub { exit 0; };
+      sleep 300;
+    ' "$release" "$pid_file" "$outside" ) &
+  parent_pid=$!
+  fm_teardown_test_register_process_group "$parent_pid"
+  fm_teardown_test_register_pid "$parent_pid"
+  : > "$release"
+  wait "$parent_pid" || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  read -r child_pid grandchild_pid < "$pid_file" 2>/dev/null || true
+  fm_teardown_test_register_pid "$child_pid"
+  fm_teardown_test_register_pid "$grandchild_pid"
+  case "${child_pid:-}:${grandchild_pid:-}" in
+    *[!0-9:]*|:*|*:)
+      for cleanup_pid in "${child_pid:-}" "${grandchild_pid:-}"; do
+        case "$cleanup_pid" in ''|*[!0-9]*) continue ;; esac
+        kill -KILL "$cleanup_pid" 2>/dev/null || true
+      done
+      fail "reparented-before-teardown: nested process ids were not captured"
+      ;;
+  esac
+  child_ppid=$(ps -p "$child_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  grandchild_ppid=$(ps -p "$grandchild_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$child_ppid" ] || [ "$child_ppid" = "$parent_pid" ] \
+     || [ "$grandchild_ppid" != "$child_pid" ]; then
+    for cleanup_pid in "$child_pid" "$grandchild_pid"; do
+      kill -KILL "$cleanup_pid" 2>/dev/null || true
+    done
+    fail "reparented-before-teardown: setup did not prove the nested child reparented after its parent exited"
+  fi
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE=/proc \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  child_alive=0
+  grandchild_alive=0
+  fm_teardown_test_pid_is_reaped "$child_pid" || child_alive=1
+  fm_teardown_test_pid_is_reaped "$grandchild_pid" || grandchild_alive=1
+  for cleanup_pid in "$child_pid" "$grandchild_pid"; do
+    kill -KILL "$cleanup_pid" 2>/dev/null || true
+  done
+
+  expect_code 0 "$rc" "reparented-before-teardown: teardown should reap the nested tree"
+  [ "$child_alive" -eq 0 ] \
+    || fail "reparented-before-teardown: reparented cwd-root child survived teardown"
+  [ "$grandchild_alive" -eq 0 ] \
+    || fail "reparented-before-teardown: nested changed-cwd descendant survived teardown"
+  assert_grep "reaping leaked worktree process(es)" "$case_dir/stderr" \
+    "reparented-before-teardown: teardown did not report exact-PID process reaping"
+  fm_teardown_test_unregister_process_group "$parent_pid"
+  pass "a nested process tree is reaped after its original parent exits"
+}
+
+test_proc_unavailable_refuses_before_removal() {
+  local case_dir rc
+  case_dir=$(make_case proc-unavailable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
-
-  rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "lsof-error-refusal: teardown should refuse"
-  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
-    "lsof-error-refusal: teardown did not explain the lsof refusal"
-  assert_present "$case_dir/wt" "lsof-error-refusal: teardown removed the worktree"
-  assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
-  assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
-  pass "an erroring lsof scan refuses teardown and preserves the task"
-}
-
-test_reused_pid_identity_is_not_force_killed() {
-  local case_dir rc pid
-  case_dir=$(make_case reused-pid-identity)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-
-  perl -e '$SIG{TERM} = "IGNORE"; sleep 300' &
-  pid=$!
-  disown
-  sleep 0.2
-  cat > "$case_dir/fakebin/lsof" <<EOF
-#!/usr/bin/env bash
-count=0
-[ ! -f '$case_dir/lsof-count' ] || count=\$(cat '$case_dir/lsof-count')
-count=\$((count + 1))
-printf '%s\n' "\$count" > '$case_dir/lsof-count'
-if [ "\$count" -le 3 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
-EOF
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_REUSED_PID:-}" ] \
-   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
-  count=0
-  [ ! -f "$FM_FAKE_PS_COUNT" ] || count=$(cat "$FM_FAKE_PS_COUNT")
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
-  if [ "$count" -le 2 ]; then printf 'Tue Aug  4 10:00:00 2026\n'
-  else printf 'Tue Aug  4 10:00:01 2026\n'; fi
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps"
+  chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
-  FM_FAKE_REUSED_PID="$pid" FM_FAKE_PS_COUNT="$case_dir/ps-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "reused-pid-identity: teardown should skip the replacement process"
-  if ! kill -0 "$pid" 2>/dev/null; then
-    fail "reused-pid-identity: teardown force-killed a process whose start time changed"
-  fi
+  expect_code 1 "$rc" "proc-unavailable: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (/proc process-cwd enumeration is unavailable)" "$case_dir/stderr" \
+    "proc-unavailable: teardown did not explain the missing enumerator"
+  assert_present "$case_dir/wt" "proc-unavailable: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "proc-unavailable: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "proc-unavailable: teardown returned the worktree"
+  pass "teardown refuses loudly when /proc cannot establish the process set"
+}
+
+test_proc_live_identity_unreadable_refuses_before_removal() {
+  local case_dir rc pid fake_proc
+  case_dir=$(make_case proc-unbindable-live-identity)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  sleep 300 &
+  pid=$!
+  disown
+  fm_teardown_test_register_pid "$pid"
+  fake_proc="$case_dir/fake-proc"
+  # A live process whose birth identity cannot be bound is uncovered ground:
+  # coverage must refuse and name the pid rather than skip it silently. A
+  # dangling stat link makes the record unreadable while the real process is
+  # demonstrably alive, which is exactly the refusal condition.
+  mkdir -p "$fake_proc/$pid"
+  ln -sfn "/proc/$pid/unreadable-stat" "$fake_proc/$pid/stat"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "proc-unbindable-live-identity: teardown should refuse"
   kill -KILL "$pid" 2>/dev/null || true
-  pass "a reused pid with a different start time is never force-killed"
+  assert_grep "cannot bind process identity for live snapshot pid $pid" "$case_dir/stderr" \
+    "proc-unbindable-live-identity: teardown did not name the live pid it could not bind"
+  assert_present "$case_dir/wt" "proc-unbindable-live-identity: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "proc-unbindable-live-identity: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "proc-unbindable-live-identity: teardown returned the worktree"
+  pass "a live current-uid process whose identity cannot be bound refuses teardown and names the pid"
+}
+
+test_proc_unreadable_cwd_refuses_before_removal() {
+  local case_dir rc pid readable_pid fake_proc
+  case_dir=$(make_case proc-unreadable-cwd)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  sleep 300 &
+  pid=$!
+  disown
+  fm_teardown_test_register_pid "$pid"
+  # A second process WITH a readable cwd, because a machine where nothing at all
+  # can be inspected is a broken enumerator and is refused on separately. The
+  # real shape is a mostly-readable process table containing a few processes
+  # that hide their cwd, and that is what this case models.
+  sleep 300 &
+  readable_pid=$!
+  disown
+  fm_teardown_test_register_pid "$readable_pid"
+  fake_proc="$case_dir/fake-proc"
+  add_fake_proc_cwd "$fake_proc" "$readable_pid" "$case_dir"
+  add_fake_proc_entry "$fake_proc" "$pid"
+  # Birth identity must bind so the CWD read is the step that fails: this case is
+  # about an unreadable cwd, not an unbindable identity, and each refuses with
+  # its own message. Link the real stat so the identity is genuine and vanishes
+  # with the process, exactly as it would in production.
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  # This process is ours and hides its cwd, but the ancestry walk never reached
+  # it, so there is no evidence it belongs to this task - the shape of every
+  # user session manager and ssh session process on an ordinary Linux host.
+  # It must be NAMED so the operator knows what was not read, and teardown must
+  # still complete: refusing on it would refuse forever on every real machine.
+  expect_code 0 "$rc" "proc-unreadable-cwd: an unreadable cwd outside the tree must not block teardown"
+  kill -0 "$pid" 2>/dev/null \
+    || fail "proc-unreadable-cwd: teardown signaled a process it could not cover"
+  kill -KILL "$pid" "$readable_pid" 2>/dev/null || true
+  assert_grep "could not read the working directory of $pid" "$case_dir/stderr" \
+    "proc-unreadable-cwd: teardown did not name the uncovered current-uid pid"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "proc-unreadable-cwd: an unreadable cwd outside the tree must be disclosed, not refused"
+  pass "an unreadable cwd outside the task tree is disclosed by pid and does not block teardown"
+}
+
+test_foreign_uid_cwd_root_is_skipped_before_signal() {
+  local case_dir rc pid foreign_uid fake_proc
+  case_dir=$(make_case foreign-uid-cwd-root)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  sleep 300 &
+  pid=$!
+  disown
+  fm_teardown_test_register_pid "$pid"
+  foreign_uid=$(( $(id -u) + 1 ))
+  fake_proc="$case_dir/fake-proc"
+  add_fake_proc_cwd "$fake_proc" "$pid" "$case_dir/wt" "$foreign_uid"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "foreign-uid-cwd-root: teardown should ignore a determined foreign process"
+  kill -0 "$pid" 2>/dev/null \
+    || fail "foreign-uid-cwd-root: teardown signaled a process not owned by the current uid"
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "foreign-uid-cwd-root: a determined foreign process blocked teardown"
+  pass "a cwd root attributed to another uid is skipped and never signaled"
+}
+
+test_foreign_uid_intermediary_keeps_owned_descendant_in_tree() {
+  local case_dir rc root_pid bridge_pid child_pid current_uid foreign_uid fake_proc
+  local pid_file outside
+  case_dir=$(make_case foreign-uid-intermediary)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  pid_file="$case_dir/tree-pids"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($pid_file, $outside) = @ARGV;
+      my $bridge = fork();
+      die "fork bridge: $!" unless defined $bridge;
+      if (!$bridge) {
+        chdir $outside or die "chdir: $!";
+        my $child = fork();
+        die "fork child: $!" unless defined $child;
+        if (!$child) {
+          $SIG{TERM} = "IGNORE";
+          sleep 300;
+          exit 0;
+        }
+        open my $fh, ">", $pid_file or die "open: $!";
+        print {$fh} "$$ $child\n";
+        close $fh;
+        $SIG{TERM} = "IGNORE";
+        sleep 300;
+        exit 0;
+      }
+      $SIG{TERM} = sub { exit 0; };
+      sleep 300;
+    ' "$pid_file" "$outside" ) &
+  root_pid=$!
+  disown
+  fm_teardown_test_register_process_group "$root_pid"
+  fm_teardown_test_register_pid "$root_pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  read -r bridge_pid child_pid < "$pid_file" 2>/dev/null || true
+  case "${bridge_pid:-}:${child_pid:-}" in
+    *[!0-9:]*|:*|*:)
+      fail "foreign-uid-intermediary: setup did not capture the intermediary tree"
+      ;;
+  esac
+  fm_teardown_test_register_pid "$bridge_pid"
+  fm_teardown_test_register_pid "$child_pid"
+  current_uid=$(id -u)
+  foreign_uid=$((current_uid + 1))
+  fake_proc="$case_dir/fake-proc"
+  add_fake_proc_cwd "$fake_proc" "$root_pid" "$case_dir/wt"
+  # The owned descendant sits OUTSIDE the task roots on purpose: it must be found
+  # through ancestry across the foreign intermediary, not by its own cwd. The
+  # foreign bridge has no readable cwd entry because foreign rows are filtered
+  # before cwd-root collection, but its real stat still carries the ancestry
+  # needed to reach the owned child below it.
+  add_fake_proc_entry "$fake_proc" "$bridge_pid" "$foreign_uid"
+  add_fake_proc_cwd "$fake_proc" "$child_pid" "$outside"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$root_pid" 2>/dev/null; then
+    kill -KILL "$root_pid" 2>/dev/null || true
+    fail "foreign-uid-intermediary: owned cwd root survived teardown"
+  fi
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "foreign-uid-intermediary: owned descendant behind foreign intermediary survived teardown"
+  fi
+  kill -0 "$bridge_pid" 2>/dev/null \
+    || fail "foreign-uid-intermediary: foreign intermediary was signaled"
+  kill -KILL "$bridge_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "foreign-uid-intermediary: teardown should reap only owned records"
+  fm_teardown_test_unregister_process_group "$root_pid"
+  pass "ancestry crosses a foreign-uid intermediary without signaling it"
+}
+
+test_unstable_ancestry_snapshot_restarts_before_signal() {
+  local case_dir rc pid child_pid child_file outside release snapshot_count
+  case_dir=$(make_case unstable-ancestry-snapshot)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  child_file="$case_dir/child.pid"
+  outside="$case_dir/outside"
+  release="$case_dir/release"
+  mkdir -p "$outside"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($release, $child_file, $outside) = @ARGV;
+      my $deadline = time + 5;
+      until (-e $release) {
+        die "release wait timed out" if time > $deadline;
+        select undef, undef, undef, 0.01;
+      }
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if (!$child) {
+        chdir $outside or die "chdir: $!";
+        $SIG{TERM} = "IGNORE";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $child_file or die "open: $!";
+      print {$fh} "$child\n";
+      close $fh;
+      $SIG{TERM} = sub { exit 0; };
+      sleep 300;
+    ' "$release" "$child_file" "$outside" ) &
+  pid=$!
+  disown
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  : > "$release"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$child_file" ] && break
+    sleep 0.1
+  done
+  child_pid=$(cat "$child_file" 2>/dev/null || true)
+  fm_teardown_test_register_pid "$child_pid"
+  [ -n "$child_pid" ] || fail "unstable-ancestry-snapshot: setup child did not start"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
+  cat > "$case_dir/fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID/cwd" ]; then
+  count=0
+  [ ! -f "$FM_FAKE_SNAPSHOT_COUNT" ] || count=$(cat "$FM_FAKE_SNAPSHOT_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 1 ]; then
+    mkdir -p "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID"
+    ln -sfn "/proc/$FM_FAKE_CHILD_PID/stat" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/stat"
+    ln -sfn "/proc/$FM_FAKE_CHILD_PID/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/status"
+    ln -sfn "$FM_FAKE_CHILD_CWD" "$FM_FAKE_PROC/$FM_FAKE_CHILD_PID/cwd"
+  fi
+fi
+exec "$REAL_READLINK_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/readlink"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_PARENT_PID="$pid" FM_FAKE_CHILD_PID="$child_pid" \
+  FM_FAKE_CHILD_CWD="$outside" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  snapshot_count=$(cat "$case_dir/snapshot-count" 2>/dev/null || printf '0')
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "unstable-ancestry-snapshot: parent survived teardown"
+  fi
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "unstable-ancestry-snapshot: child omitted by the first snapshot survived teardown"
+  fi
+  expect_code 0 "$rc" "unstable-ancestry-snapshot: teardown should stabilize and succeed"
+  [ "$snapshot_count" -ge 3 ] \
+    || fail "unstable-ancestry-snapshot: enumeration did not restart after the process tree expanded"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "an expanding ancestry snapshot stabilizes before exact-PID signaling"
+}
+
+test_reused_pid_identity_is_not_force_killed() {
+  local case_dir rc pid child_a child_b outside
+  case_dir=$(make_case reused-pid-identity)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+
+  sleep 300 &
+  pid=$!
+  disown
+  fm_teardown_test_register_pid "$pid"
+  sleep 300 &
+  child_a=$!
+  disown
+  fm_teardown_test_register_pid "$child_a"
+  sleep 300 &
+  child_b=$!
+  disown
+  fm_teardown_test_register_pid "$child_b"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
+  # PID reuse is simulated through /proc, which is the sole birth-identity
+  # authority: this pid starts life with starttime 1000, and once the first
+  # candidate scan has walked it the same record flips to 2000 with a cwd
+  # outside the task roots and two children attached - exactly as a different
+  # process reusing the number would look. Replace the real-stat symlink with
+  # a synthetic record so the starttime is ours to control.
+  rm -f "$case_dir/fake-proc/$pid/stat"
+  printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1000\n' "$pid" \
+    > "$case_dir/fake-proc/$pid/stat"
+  flip_marker="$case_dir/reused-flip"
+  cat > "$case_dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/stat" ]; then
+  count=0
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 5 ] && [ ! -e "$FM_FAKE_FLIP_MARKER" ]; then
+    printf '%s (fake) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2000\n' \
+      "$FM_FAKE_REUSED_PID" > "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/stat"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_REUSED_PID/cwd"
+    mkdir -p "$FM_FAKE_PROC/$FM_FAKE_CHILD_A" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B"
+    printf '%s (fake) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
+      "$FM_FAKE_CHILD_A" "$FM_FAKE_REUSED_PID" "$FM_FAKE_CHILD_A" \
+      > "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/stat"
+    printf '%s (fake) S %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %s\n' \
+      "$FM_FAKE_CHILD_B" "$FM_FAKE_REUSED_PID" "$FM_FAKE_CHILD_B" \
+      > "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/stat"
+    ln -sfn "/proc/$FM_FAKE_CHILD_A/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/status"
+    ln -sfn "/proc/$FM_FAKE_CHILD_B/status" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/status"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_CHILD_A/cwd"
+    ln -sfn "$FM_FAKE_OUTSIDE" "$FM_FAKE_PROC/$FM_FAKE_CHILD_B/cwd"
+    : > "$FM_FAKE_FLIP_MARKER"
+  fi
+fi
+exec "$REAL_CAT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/cat"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_OUTSIDE="$outside" FM_FAKE_FLIP_MARKER="$flip_marker" \
+  FM_FAKE_REUSED_PID="$pid" FM_FAKE_CHILD_A="$child_a" FM_FAKE_CHILD_B="$child_b" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "reused-pid-identity: teardown should skip the replacement tree"
+  kill -0 "$pid" 2>/dev/null \
+    || fail "reused-pid-identity: teardown signaled a recycled pid"
+  kill -0 "$child_a" 2>/dev/null \
+    || fail "reused-pid-identity: teardown adopted a replacement child"
+  kill -0 "$child_b" 2>/dev/null \
+    || fail "reused-pid-identity: teardown adopted a replacement child"
+  assert_present "$flip_marker" \
+    "reused-pid-identity: the simulated reuse never fired, so the case proved nothing"
+  kill -KILL "$pid" "$child_a" "$child_b" 2>/dev/null || true
+  pass "a recycled pid is not adopted as lineage and its replacement children are not signaled"
 }
 
 test_exec_changed_process_is_still_reaped() {
-  local case_dir rc pid marker done_flag survived=0
+  local case_dir rc pid marker done_flag survived=0 i
   case_dir=$(make_case exec-changed-process)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -2988,47 +3534,30 @@ test_exec_changed_process_is_still_reaped() {
 
   ( cd "$case_dir/wt" && exec perl -e '
       my ($marker, $done) = @ARGV;
-      until (-e $marker) { select undef, undef, undef, 0.01; }
+      my $deadline = time + 5;
+      until (-e $marker) {
+        die "exec wait timed out" if time > $deadline;
+        select undef, undef, undef, 0.01;
+      }
       open my $fh, ">", $done or die "open";
       close $fh;
       exec "perl", "-e", '\''$SIG{TERM} = "IGNORE"; sleep 300'\'';
     ' "$marker" "$done_flag" ) &
   pid=$!
   disown
-  sleep 0.2
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
-   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
-  out=$("$REAL_PS_FOR_TEST" "$@") || exit $?
-  [ -e "$FM_FAKE_EXEC_MARKER" ] || : > "$FM_FAKE_EXEC_MARKER"
-  printf '%s\n' "$out"
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  cat > "$case_dir/fakebin/lsof" <<'SH'
-#!/usr/bin/env bash
-count=0
-[ ! -f "$FM_FAKE_LSOF_COUNT" ] || count=$(cat "$FM_FAKE_LSOF_COUNT")
-count=$((count + 1))
-printf '%s\n' "$count" > "$FM_FAKE_LSOF_COUNT"
-if [ "$count" -eq 2 ]; then
+  fm_teardown_test_register_pid "$pid"
+  : > "$marker"
   i=0
   while [ "$i" -lt 100 ]; do
-    [ ! -e "$FM_FAKE_EXEC_DONE" ] || break
-    sleep 0.01
+    [ -e "$done_flag" ] && break
+    sleep 0.05
     i=$((i + 1))
   done
-fi
-exec "$REAL_LSOF_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
+  [ -e "$done_flag" ] || fail "exec-changed-process: process did not exec before teardown"
+  kill -0 "$pid" 2>/dev/null || fail "exec-changed-process: exec-changed process exited before teardown"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
-  FM_FAKE_EXEC_PID="$pid" FM_FAKE_EXEC_MARKER="$marker" \
-  FM_FAKE_EXEC_DONE="$done_flag" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
+  FM_PROC_ROOT_OVERRIDE=/proc \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if kill -0 "$pid" 2>/dev/null; then
@@ -3041,14 +3570,22 @@ SH
 }
 
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
-  local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  local case_dir rc pid child_file release child_pid="" parent_survived=0 child_survived=0
   case_dir=$(make_case grace-spawn-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   child_file="$case_dir/child.pid"
+  release="$case_dir/release"
 
   ( cd "$case_dir/wt" && exec perl -e '
-      my $file = shift;
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($release, $file) = @ARGV;
+      my $deadline = time + 5;
+      until (-e $release) {
+        die "release wait timed out" if time > $deadline;
+        select undef, undef, undef, 0.01;
+      }
       $SIG{TERM} = sub {
         my $child = fork();
         die "fork" unless defined $child;
@@ -3059,16 +3596,21 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
         exit 0;
       };
       sleep 300;
-    ' "$child_file" ) &
+    ' "$release" "$child_file" ) &
   pid=$!
   disown
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  : > "$release"
   sleep 0.2
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_PROC_ROOT_OVERRIDE=/proc \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
-  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+  fm_teardown_test_register_pid "$child_pid"
+  if [ -n "$child_pid" ] && ! fm_teardown_test_pid_is_reaped "$child_pid"; then
     child_survived=1
     kill -KILL "$child_pid" 2>/dev/null || true
   fi
@@ -3077,10 +3619,12 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
     kill -KILL "$pid" 2>/dev/null || true
   fi
   expect_code 0 "$rc" "grace-spawn-convergence: teardown should converge"
-  assert_present "$child_file" "grace-spawn-convergence: TERM handler did not spawn a child"
+  [ -n "$child_pid" ] \
+    || fail "grace-spawn-convergence: TERM handler did not execute and spawn its child"
   [ "$child_survived" -eq 0 ] || fail "grace-spawn-convergence: spawned child survived"
   [ "$parent_survived" -eq 0 ] || fail "grace-spawn-convergence: original process survived"
-  pass "a process spawned during grace is reaped on a later pass"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "a TERM-handler spawn during reap cannot leak past teardown"
 }
 
 test_persistent_scan_refuses_after_bounded_retries() {
@@ -3089,72 +3633,351 @@ test_persistent_scan_refuses_after_bounded_retries() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
-  cat > "$case_dir/fakebin/lsof" <<EOF
-#!/usr/bin/env bash
-printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
-EOF
-  cat > "$case_dir/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
-   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
-  printf 'Tue Aug  4 10:00:00 2026\n'
-  exit 0
-fi
-exec "$REAL_PS_FOR_TEST" "$@"
-SH
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$fake_pid" "$wt_path"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_PERSISTENT_PID="$fake_pid" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "persistent-reap-refusal: teardown should refuse"
-  assert_grep "remain after 3 reap attempts" "$case_dir/stderr" \
-    "persistent-reap-refusal: teardown did not report bounded non-convergence"
+  # Coverage claimed this pid, so failing to signal it is an OBSERVED failure to
+  # reap, not a possibility: teardown must say so and preserve everything rather
+  # than report a clean sweep it cannot stand behind.
+  assert_grep "cannot signal exact leaked process $fake_pid with TERM for task-x1" "$case_dir/stderr" \
+    "persistent-reap-refusal: teardown did not refuse when a covered process could not be signaled"
   assert_present "$case_dir/wt" "persistent-reap-refusal: teardown removed the worktree"
   assert_present "$case_dir/state/task-x1.meta" "persistent-reap-refusal: teardown removed task metadata"
-  pass "persistent leaked processes refuse teardown after bounded retries"
+  pass "a covered process that cannot be signaled refuses teardown and preserves the task"
 }
 
-test_process_exit_during_identity_lookup_does_not_refuse() {
-  local case_dir rc wt_path fake_pid=99999998
-  case_dir=$(make_case identity-exit-convergence)
+test_proc_empty_snapshot_refuses_before_removal() {
+  local case_dir rc
+  case_dir=$(make_case proc-empty-snapshot)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
-  wt_path=$(cd "$case_dir/wt" && pwd -P)
-  cat > "$case_dir/fakebin/lsof" <<EOF
+  # Enumerable but empty: the default seed entry is removed, leaving a /proc
+  # the glob can read that yields no processes at all - a real host always has
+  # PID 1, so this is broken-enumerator evidence and must refuse.
+  rm -rf "$case_dir/fake-proc"
+  mkdir -p "$case_dir/fake-proc"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-count=0
-[ ! -f "$case_dir/lsof-count" ] || count=\$(cat "$case_dir/lsof-count")
-count=\$((count + 1))
-printf '%s\n' "\$count" > "$case_dir/lsof-count"
-if [ "\$count" -eq 1 ]; then
-  printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
-fi
+printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
-  cat > "$case_dir/fakebin/ps" <<'SH'
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "proc-empty-snapshot: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes" "$case_dir/stderr" \
+    "proc-empty-snapshot: teardown did not refuse on an enumerable-but-empty /proc"
+  assert_grep "found no processes" "$case_dir/stderr" \
+    "proc-empty-snapshot: teardown did not explain the empty-snapshot refusal"
+  assert_present "$case_dir/wt" "proc-empty-snapshot: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "proc-empty-snapshot: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "proc-empty-snapshot: teardown returned the worktree"
+  pass "an enumerable /proc that yields no processes refuses before destructive cleanup"
+}
+
+test_parent_exit_mid_scan_preserves_bound_descendant() {
+  local case_dir rc pid child_pid pid_file outside snapshot_count
+  case_dir=$(make_case mid-scan-parent-exit)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  pid_file="$case_dir/child.pid"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($pid_file, $outside) = @ARGV;
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if (!$child) {
+        chdir $outside or die "chdir: $!";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $pid_file or die "open: $!";
+      print {$fh} "$child\n";
+      close $fh;
+      $SIG{TERM} = "IGNORE";
+      sleep 300;
+    ' "$pid_file" "$outside" ) &
+  pid=$!
+  disown
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  child_pid=$(cat "$pid_file" 2>/dev/null || true)
+  fm_teardown_test_register_pid "$child_pid"
+  [ -n "$child_pid" ] || fail "mid-scan-parent-exit: setup child did not start"
+  kill -0 "$pid" 2>/dev/null || fail "mid-scan-parent-exit: setup parent did not start"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$child_pid" "$outside"
+
+  # The parent dies after the snapshot binds it but before its ancestry-walk
+  # recheck: the readlink mock kills it (and waits until it is fully gone, so
+  # the recheck observes "gone" rather than a live zombie) the first time its
+  # cwd is read, then removes the fake entry exactly as a real /proc entry
+  # disappears with its process. The child, reparented with a cwd outside the
+  # roots, can then only be found through the aborted attempt's carried
+  # lineage.
+  cat > "$case_dir/fakebin/readlink" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXITED_PID:-}" ]; then
-  exit 1
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID/cwd" ]; then
+  count=0
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 1 ]; then
+    result=$("$REAL_READLINK_FOR_TEST" "$1" 2>/dev/null) || true
+    kill -KILL "$FM_FAKE_PARENT_PID" 2>/dev/null || true
+    i=0
+    while kill -0 "$FM_FAKE_PARENT_PID" 2>/dev/null; do
+      sleep 0.02
+      i=$((i + 1))
+      [ "$i" -lt 250 ] || break
+    done
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID"
+    printf '%s\n' "$result"
+    exit 0
+  fi
 fi
-exec "$REAL_PS_FOR_TEST" "$@"
+exec "$REAL_READLINK_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/readlink" "$case_dir/fakebin/treehouse"
 
   rc=0
-  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_EXITED_PID="$fake_pid" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_PARENT_PID="$pid" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "identity-exit-convergence: teardown should succeed"
+  snapshot_count=$(cat "$case_dir/snapshot-count" 2>/dev/null || printf '0')
+  expect_code 0 "$rc" "mid-scan-parent-exit: teardown should converge and succeed"
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "mid-scan-parent-exit: the reparented changed-cwd child survived teardown"
+  fi
+  kill -0 "$pid" 2>/dev/null \
+    && fail "mid-scan-parent-exit: the mid-scan exiting parent survived"
+  [ "$snapshot_count" -ge 1 ] \
+    || fail "mid-scan-parent-exit: the mid-scan parent exit was never exercised"
   assert_present "$case_dir/treehouse.log" \
-    "identity-exit-convergence: teardown did not reach worktree return"
+    "mid-scan-parent-exit: teardown did not reach worktree return"
   ! grep -q REFUSED "$case_dir/stderr" || \
-    fail "identity-exit-convergence: a disappeared process caused teardown refusal"
-  pass "a process exiting during identity lookup does not block teardown"
+    fail "mid-scan-parent-exit: teardown refused on a mid-scan parent exit"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "a parent exiting mid-scan carries its bound child into the retry and reaps it"
+}
+
+test_abort_after_first_root_keeps_earlier_bound_root_and_child() {
+  local case_dir rc pid child_pid q_pid pid_file outside
+  case_dir=$(make_case abort-after-first-root-carry)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/tasktmp"
+  land_shippable_commit "$case_dir"
+  pid_file="$case_dir/child.pid"
+  outside="$case_dir/outside"
+  mkdir -p "$outside"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      use POSIX ();
+      POSIX::setsid() >= 0 or die "setsid: $!";
+      my ($pid_file, $outside) = @ARGV;
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if (!$child) {
+        chdir $outside or die "chdir: $!";
+        exec "sleep", "300";
+        die "exec: $!";
+      }
+      open my $fh, ">", $pid_file or die "open: $!";
+      print {$fh} "$child\n";
+      close $fh;
+      $SIG{TERM} = "IGNORE";
+      sleep 300;
+    ' "$pid_file" "$outside" ) &
+  pid=$!
+  disown
+  fm_teardown_test_register_process_group "$pid"
+  fm_teardown_test_register_pid "$pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+  done
+  child_pid=$(cat "$pid_file" 2>/dev/null || true)
+  fm_teardown_test_register_pid "$child_pid"
+  [ -n "$child_pid" ] || fail "abort-after-first-root-carry: setup child did not start"
+  kill -0 "$pid" 2>/dev/null || fail "abort-after-first-root-carry: setup parent did not start"
+  q_pid=99999998
+  add_fake_proc_cwd "$case_dir/fake-proc" "$pid" "$case_dir/wt"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$child_pid" "$outside"
+  add_fake_proc_cwd "$case_dir/fake-proc" "$q_pid" "$case_dir/tasktmp"
+
+  # The abort fires during the SECOND root's cwd scan, after the first root's
+  # scan has already bound the parent: the first read of the fake tasktmp
+  # root's cwd happens while scanning the worktree root (no match), and the
+  # second - inside the tasktmp scan - kills the parent, removes both fake
+  # entries, and makes the fake root's own recheck observe "gone", aborting
+  # the attempt. The child, reparented with a cwd outside the roots, can then
+  # only be found through the carried lineage of the earlier bound parent.
+  cat > "$case_dir/fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_Q_PID/cwd" ]; then
+  count=0
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 2 ]; then
+    result=$("$REAL_READLINK_FOR_TEST" "$1" 2>/dev/null) || true
+    kill -KILL "$FM_FAKE_PARENT_PID" 2>/dev/null || true
+    i=0
+    while kill -0 "$FM_FAKE_PARENT_PID" 2>/dev/null; do
+      sleep 0.02
+      i=$((i + 1))
+      [ "$i" -lt 250 ] || break
+    done
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_PARENT_PID"
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_Q_PID"
+    : > "$FM_FAKE_ABORT_MARKER"
+    printf '%s\n' "$result"
+    exit 0
+  fi
+fi
+exec "$REAL_READLINK_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/readlink" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_Q_PID="$q_pid" FM_FAKE_PARENT_PID="$pid" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+  FM_FAKE_ABORT_MARKER="$case_dir/abort-marker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "abort-after-first-root-carry: teardown should converge and succeed"
+  if ! fm_teardown_test_pid_is_reaped "$child_pid"; then
+    kill -KILL "$child_pid" 2>/dev/null || true
+    fail "abort-after-first-root-carry: the reparented changed-cwd child survived teardown"
+  fi
+  kill -0 "$pid" 2>/dev/null \
+    && fail "abort-after-first-root-carry: the mid-scan exiting parent survived"
+  assert_present "$case_dir/abort-marker" \
+    "abort-after-first-root-carry: the second-root scan abort was never exercised"
+  assert_present "$case_dir/treehouse.log" \
+    "abort-after-first-root-carry: teardown did not reach worktree return"
+  ! grep -q REFUSED "$case_dir/stderr" || \
+    fail "abort-after-first-root-carry: teardown refused on a mid-scan parent exit"
+  fm_teardown_test_unregister_process_group "$pid"
+  pass "an abort after the first root's scan still reaps a child whose parent exited mid-scan"
+}
+
+test_process_exit_mid_scan_converges_without_refusal() {
+  local case_dir rc wt_path fake_pid=99999998
+  case_dir=$(make_case mid-scan-exit-convergence)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  add_fake_proc_cwd "$case_dir/fake-proc" "$fake_pid" "$wt_path"
+  # The process is alive when the snapshot binds it and dies between cwd
+  # discovery and the ancestry walk's identity recheck - ordinary churn, the
+  # exact window that must not be treated as a refusal. The fake readlink
+  # removes the /proc entry (a real entry disappears with its process) the
+  # first time its cwd is read, after capturing the answer the scan needs.
+  cat > "$case_dir/fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_FAKE_PROC/$FM_FAKE_EXITED_PID/cwd" ]; then
+  count=0
+  if [ -f "$FM_FAKE_SNAPSHOT_COUNT" ]; then
+    count=$(< "$FM_FAKE_SNAPSHOT_COUNT") || count=0
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_SNAPSHOT_COUNT"
+  if [ "$count" -eq 1 ]; then
+    result=$("$REAL_READLINK_FOR_TEST" "$1" 2>/dev/null) || true
+    rm -rf "$FM_FAKE_PROC/$FM_FAKE_EXITED_PID"
+    printf '%s\n' "$result"
+    exit 0
+  fi
+fi
+exec "$REAL_READLINK_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/readlink" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/fake-proc" FM_FAKE_EXITED_PID="$fake_pid" \
+  FM_FAKE_PROC="$case_dir/fake-proc" \
+  FM_FAKE_SNAPSHOT_COUNT="$case_dir/snapshot-count" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "mid-scan-exit-convergence: teardown should succeed"
+  assert_present "$case_dir/treehouse.log" \
+    "mid-scan-exit-convergence: teardown did not reach worktree return"
+  ! grep -q REFUSED "$case_dir/stderr" || \
+    fail "mid-scan-exit-convergence: a process exiting mid-scan caused teardown refusal"
+  [ "$(cat "$case_dir/snapshot-count" 2>/dev/null || printf 0)" -ge 1 ] || \
+    fail "mid-scan-exit-convergence: the mid-scan exit was never exercised"
+  pass "a process exiting mid-scan stabilizes the scan and does not block teardown"
+}
+
+# Every other enumeration case here builds a synthetic /proc and scores the code
+# inside that world. That is exactly how a version of this change once passed its
+# whole suite while refusing on every real machine: the fake /proc contained no
+# nondumpable processes, so the "unreadable cwd" branch never fired. This case
+# deliberately uses the REAL /proc of the running machine, where the user session
+# manager, its pam helper and the ssh session processes genuinely hide their cwd.
+# It asserts the scan reaches a usable verdict on real data instead of refusing.
+test_real_proc_scan_reaches_a_verdict() {
+  local case_dir rc
+  case_dir=$(make_case real-proc-verdict)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # Enumeration reads /proc directly, so the synthetic cases above never see
+  # the real machine's nondumpable processes; that is exactly the world in
+  # which a broken version once refused on every real host. This case pins the
+  # scan to the real /proc so it must reach a verdict on the actual process
+  # table, hidden cwds included.
+
+  # run_teardown defaults the proc root to the case's fake-proc; pin it to the
+  # real one so this case genuinely reads the running machine.
+  rc=0
+  FM_PROC_ROOT_OVERRIDE=/proc \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "real-proc-verdict: a real-/proc scan must reach a verdict, not refuse"
+  ! grep -q "cannot determine leaked processes" "$case_dir/stderr" \
+    || fail "real-proc-verdict: the real-/proc scan refused; unreadable cwds must be disclosed, not fatal"
+  ! grep -q "REFUSED" "$case_dir/stderr" \
+    || fail "real-proc-verdict: teardown refused against real /proc"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "real-proc-verdict: teardown did not complete against real /proc"
+  pass "a scan of the real machine's processes reaches a verdict instead of refusing"
 }
 
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
@@ -3168,6 +3991,7 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
+  fm_teardown_test_register_pid "$pid"
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "abort-then-reap-then-remove-order: setup sleeper did not start"
 
@@ -3184,6 +4008,7 @@ EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
+  FM_PROC_ROOT_OVERRIDE=/proc \
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$abort_log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -3264,11 +4089,21 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
-test_lsof_absent_reaps_tmux_process_group
-test_lsof_error_refuses_before_removal
+test_proc_reaps_whole_process_tree
+test_reparented_nested_tree_is_reaped_after_parent_exit
+test_proc_unavailable_refuses_before_removal
+test_proc_empty_snapshot_refuses_before_removal
+test_proc_live_identity_unreadable_refuses_before_removal
+test_proc_unreadable_cwd_refuses_before_removal
+test_foreign_uid_cwd_root_is_skipped_before_signal
+test_foreign_uid_intermediary_keeps_owned_descendant_in_tree
+test_unstable_ancestry_snapshot_restarts_before_signal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
-test_process_exit_during_identity_lookup_does_not_refuse
+test_process_exit_mid_scan_converges_without_refusal
+test_parent_exit_mid_scan_preserves_bound_descendant
+test_abort_after_first_root_keeps_earlier_bound_root_and_child
+test_real_proc_scan_reaches_a_verdict
 test_run_abort_precedes_process_reap_precedes_worktree_removal

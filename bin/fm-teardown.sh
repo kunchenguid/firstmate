@@ -156,12 +156,25 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     root via the reusable `bin/fm-process-tree-lib.sh` enumerator (cheap:
+#     bounded by process count, not by walking the worktree's file tree), then
+#     closes over every current-user descendant so a changed cwd cannot hide a
+#     child. /proc is the sole cwd coverage authority; there is no lsof path.
+#     Only exact PIDs bound to their birth identity at the moment of the
+#     decision are signaled, and identity is rechecked immediately before every
+#     individual signal, so a recycled PID is never hit. There is no pattern
+#     matching (no pkill, no killall, no ps-grep-xargs): sibling worktree
+#     processes carry identical command lines. It sends TERM, gives handlers a
+#     fixed one-second grace, then sends KILL to identity-matching survivors,
+#     and a final full discovery pass verifies the result - anything still found
+#     is an observed leak and teardown refuses rather than claim a clean reap.
+#     Both roots are unique per task and never shared, so this can never reach
+#     another task's or the primary's processes. If /proc cannot prove coverage,
+#     teardown refuses before destructive cleanup and says why: a reap that
+#     cannot verify what it reaped must never report success. A process whose
+#     cwd cannot be read and which is not in this task's tree is DISCLOSED by
+#     pid rather than refused on - see bin/fm-process-tree-lib.sh for why, and
+#     for the one leak shape that escapes as a result.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -209,6 +222,9 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-process-tree-lib.sh
+. "$SCRIPT_DIR/fm-process-tree-lib.sh"
+FM_PROCESS_EXCLUDE_PID=$$
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1631,231 +1647,193 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
-pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
-}
-
+# Fix 2 (see script header): the shared process-tree library enumerates every
+# current-user process whose cwd is exactly $1 or under it, then closes over all
+# current-user descendants so children whose cwd changed are not undercounted.
+# /proc is the sole coverage authority. Teardown refuses when /proc cannot prove
+# a complete snapshot. Only exact PIDs from that snapshot are ever signaled.
 task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
-  local -a stat_fields
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
-    return 0
-  fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value=$(fm_nm_trim "$value")
-  [ -n "$value" ] || return 1
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf 'lstart=%s\n' "$value"
+  fm_process_identity "$@"
 }
 
 task_process_identity_matches() {  # <pid> <identity>
-  local current
-  current=$(task_process_identity "$1") || return 1
-  [ "$current" = "$2" ]
+  fm_process_identity_matches "$@"
 }
 
-task_pid_list_contains() {  # <pid-list> <pid>
-  printf '%s\n' "$1" | grep -Fxq "$2"
+task_process_record_status() {  # <pid> <identity>
+  TASK_PROCESS_RECORD_STATUS=
+  if ! fm_process_record_status "$@"; then
+    TASK_PROCESS_RECORD_STATUS=$FM_PROCESS_RECORD_STATUS
+    return 1
+  fi
+  TASK_PROCESS_RECORD_STATUS=$FM_PROCESS_RECORD_STATUS
 }
+
+task_process_merge_records() {  # <retained-records> <scanned-records>
+  TASK_PROCESS_MERGED_RECORDS=
+  TASK_PROCESS_RECORD_ERROR_PID=
+  if ! fm_process_merge_records "$@"; then
+    TASK_PROCESS_RECORD_ERROR_PID=$FM_PROCESS_RECORD_ERROR_PID
+    return 1
+  fi
+  TASK_PROCESS_MERGED_RECORDS=$FM_PROCESS_MERGED_RECORDS
+}
+
+# The exact-identity check is the FINAL operation before the signal: nothing
+# reads or computes anything between the check and the kill. The residual window
+# between them cannot be closed from shell - there is no signal-if-still-this-
+# process primitive available here - so it is stated rather than papered over.
+# It is bounded by two adjacent builtins, and the previous shape (identity read,
+# then a separate `ps`, then the kill) is gone: that widened the window and could
+# misread an empty `ps` result as a live match.
+task_process_signal_record() {  # <signal> <pid> <identity>
+  local signal=$1 pid=$2 identity=$3
+  TASK_PROCESS_SIGNAL_STATUS=
+  if ! task_process_record_status "$pid" "$identity"; then
+    TASK_PROCESS_SIGNAL_STATUS=unknown
+    return 1
+  fi
+  if [ "$TASK_PROCESS_RECORD_STATUS" != matching ]; then
+    TASK_PROCESS_SIGNAL_STATUS=stale
+    return 1
+  fi
+  if kill -"$signal" "$pid" 2>/dev/null; then
+    TASK_PROCESS_SIGNAL_STATUS=signaled
+    return 0
+  fi
+  if ! task_process_record_status "$pid" "$identity"; then
+    TASK_PROCESS_SIGNAL_STATUS=unknown
+  elif [ "$TASK_PROCESS_RECORD_STATUS" = matching ]; then
+    TASK_PROCESS_SIGNAL_STATUS=failed
+  else
+    TASK_PROCESS_SIGNAL_STATUS=stale
+  fi
+  return 1
+}
+
 
 task_pids_under_roots() {  # <dir>...
-  TASK_PIDS=
-  TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
-  for dir in "$@"; do
-    [ -n "$dir" ] || continue
-    if ! dir_pids=$(pids_with_cwd_under "$dir"); then
-      TASK_PIDS_FAILED_DIR=$dir
-      return 1
-    fi
-    pids="$pids
-$dir_pids"
-  done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  if ! fm_process_pids_under_roots "$@"; then
+    TASK_PROCESS_RECORDS=$FM_PROCESS_RECORDS
+    TASK_PIDS_FAILED_DIR=$FM_PROCESS_FAILED_DIR
+    return 1
+  fi
+  TASK_PROCESS_RECORDS=$FM_PROCESS_RECORDS
+  TASK_PIDS_FAILED_DIR=$FM_PROCESS_FAILED_DIR
+  TASK_PROCESS_UNCOVERED_PIDS=$FM_PROCESS_UNCOVERED_PIDS
 }
 
-reap_task_backend_process_group() {  # <label>
-  local label=$1 leader leader_start pgid current_pgid own_pgid
-  if [ "$BACKEND" != tmux ]; then
-    echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
-    return 0
-  fi
-  leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
-  case "$leader" in ''|*[!0-9]*)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
-    ;;
-  esac
-  leader_start=$(task_process_identity "$leader") || {
-    echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
-    return 0
-  }
-  pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
-  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
-  case "$pgid" in ''|*[!0-9]*|0|1)
-    echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
-    return 0
-    ;;
-  esac
-  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
-  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
-  if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
-    return 0
-  fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
-  current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
-  current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
-  [ "$current_pgid" = "$pgid" ] || return 0
-  echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
-  kill -TERM -- "-$pgid" 2>/dev/null || true
-  sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
-     && kill -0 -- "-$pgid" 2>/dev/null; then
-    echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
-    kill -KILL -- "-$pgid" 2>/dev/null || true
-  fi
+# Name what we could not read. These are processes of ours whose cwd is hidden
+# and which the ancestry walk never reached, so there is no evidence they belong
+# to this task - but we cannot prove they do not, so we say so rather than let
+# the reap imply a completeness it does not have. Disclosure is not a refusal:
+# claim what you can observe, disclose what you cannot, refuse only on evidence.
+task_process_disclose_uncovered() {
+  [ -n "${TASK_PROCESS_UNCOVERED_PIDS:-}" ] || return 0
+  echo "teardown: note - could not read the working directory of $(printf '%s' "$TASK_PROCESS_UNCOVERED_PIDS" | tr '\n' ' ') for $ID; none is in this task's process tree, so none is treated as a leak." >&2
+  TASK_PROCESS_UNCOVERED_PIDS=
+}
+
+reap_task_process_scan_refusal() {
+  echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (${FM_PROCESS_ENUMERATION_ERROR:-process enumeration failed}); preserving the worktree/tasktmp for manual inspection or retry." >&2
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
-# first, then KILL after a short grace period for anything still alive; a
-# process that exits on its own between the two passes is simply absent from
-# the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# - both unique per task and never shared - before either is removed.
+#
+# Enumeration is the point of this function. bin/fm-process-tree-lib.sh walks
+# the WHOLE tree from each cwd-matching root, because counting orphans by
+# PPID==1 undercounts badly: an orphan's own children are reparented to that
+# orphan and read as healthy, so a handful of apparent orphans can be the tip of
+# a much larger tree. /proc is the sole coverage authority; if it cannot prove a
+# complete snapshot, teardown REFUSES before destructive work rather than report
+# success. A reap that cannot verify what it reaped must never claim it worked -
+# a guard that silently no-ops is worse than no guard, because it is trusted.
+#
+# Only exact PIDs bound to their birth identity at the moment of the decision
+# are signaled, and identity is rechecked immediately before every individual
+# signal, so a PID recycled between the decision and the signal is never hit.
+# There is deliberately no pattern matching (no pkill, no killall, no
+# ps-grep-xargs): sibling worktree processes carry identical command lines, and
+# one careless pattern once killed four unrelated workers.
+#
+# Signaling is TERM, a fixed one-second handler grace, then KILL, matching the
+# behaviour teardown already had. Identity-bound candidates are retained across
+# rescans, including descendants of reparented records, and each pass rediscovers
+# the tree. After the passes, one final full discovery pass verifies the result:
+# anything still found is an OBSERVED leak, and teardown refuses rather than
+# report a clean reap. Claim what you can observe, disclose what you cannot, and
+# refuse only on evidence.
 reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
-  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  local label=$1 pids pid identity pass=1 max_passes=3
+  local retained_records='' remaining_records=''
   shift
-  if ! command -v lsof >/dev/null 2>&1; then
-    reap_task_backend_process_group "$label"
-    return 0
-  fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      reap_task_process_scan_refusal
       return 1
     fi
-    pids=$TASK_PIDS
-    [ -n "$pids" ] || return 0
-    tracked_pids=()
-    tracked_identities=()
-    while IFS= read -r pid; do
+    task_process_disclose_uncovered
+    if ! task_process_merge_records "$retained_records" "$TASK_PROCESS_RECORDS"; then
+      echo "REFUSED: cannot verify leaked process ${TASK_PROCESS_RECORD_ERROR_PID:-<unknown>} identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+      return 1
+    fi
+    retained_records=$TASK_PROCESS_MERGED_RECORDS
+    if [ -z "$retained_records" ]; then
+      return 0
+    fi
+    pids=
+    while IFS=$'\t' read -r pid identity; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
-        if ! task_pids_under_roots "$@"; then
-          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-          return 1
-        fi
-        if task_pid_list_contains "$TASK_PIDS" "$pid"; then
-          echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
-          return 1
-        fi
-        continue
-      fi
-      tracked_pids+=("$pid")
-      tracked_identities+=("$identity")
+      pids=${pids}${pid}$'\n'
     done <<EOF
-$pids
+$retained_records
 EOF
-    if [ "${#tracked_pids[@]}" -eq 0 ]; then
-      pass=$((pass + 1))
-      continue
-    fi
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-      return 1
-    fi
-    current_pids=$TASK_PIDS
     echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
-    for i in "${!tracked_pids[@]}"; do
-      pid=${tracked_pids[$i]}
-      identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
-        kill -TERM "$pid" 2>/dev/null || true
+    while IFS=$'\t' read -r pid identity; do
+      [ -n "$pid" ] || continue
+      if ! task_process_signal_record TERM "$pid" "$identity"; then
+        if [ "$TASK_PROCESS_SIGNAL_STATUS" != stale ]; then
+          echo "REFUSED: cannot signal exact leaked process $pid with TERM for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+          return 1
+        fi
       fi
-    done
+    done <<EOF
+$retained_records
+EOF
     sleep 1
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    while IFS=$'\t' read -r pid identity; do
+      [ -n "$pid" ] || continue
+      if ! task_process_signal_record KILL "$pid" "$identity"; then
+        if [ "$TASK_PROCESS_SIGNAL_STATUS" != stale ]; then
+          echo "REFUSED: cannot signal exact leaked process $pid with KILL for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+          return 1
+        fi
+      fi
+    done <<EOF
+$retained_records
+EOF
+    sleep 0.1
+    if ! task_process_merge_records "$retained_records" ""; then
+      echo "REFUSED: cannot verify leaked process ${TASK_PROCESS_RECORD_ERROR_PID:-<unknown>} identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
-    current_pids=$TASK_PIDS
-    remaining_pids=()
-    remaining_identities=()
-    for i in "${!tracked_pids[@]}"; do
-      pid=${tracked_pids[$i]}
-      identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
-        remaining_pids+=("$pid")
-        remaining_identities+=("$identity")
-      fi
-    done
-    if [ "${#remaining_pids[@]}" -gt 0 ]; then
-      echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
-      if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-        return 1
-      fi
-      current_pids=$TASK_PIDS
-      for i in "${!remaining_pids[@]}"; do
-        pid=${remaining_pids[$i]}
-        identity=${remaining_identities[$i]}
-        if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
-          kill -KILL "$pid" 2>/dev/null || true
-        fi
-      done
-    fi
+    remaining_records=$TASK_PROCESS_MERGED_RECORDS
+    retained_records=$remaining_records
     pass=$((pass + 1))
   done
   if ! task_pids_under_roots "$@"; then
-    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    reap_task_process_scan_refusal
     return 1
   fi
-  [ -z "$TASK_PIDS" ] && return 0
+  if ! task_process_merge_records "$retained_records" "$TASK_PROCESS_RECORDS"; then
+    echo "REFUSED: cannot verify leaked process ${TASK_PROCESS_RECORD_ERROR_PID:-<unknown>} identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+    return 1
+  fi
+  retained_records=$TASK_PROCESS_MERGED_RECORDS
+  if [ -z "$retained_records" ]; then
+    return 0
+  fi
   echo "REFUSED: leaked $label processes for $ID remain after $max_passes reap attempts; preserving the worktree/tasktmp for manual inspection or retry." >&2
   return 1
 }
