@@ -352,12 +352,16 @@ SH
 }
 
 test_poll_missing_wake_lib_does_not_suppress() {
-  local fakebin miss_home
+  local fakebin miss_home miss_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
   miss_home="$TMP_ROOT/misslib-home"
-  mkdir -p "$miss_home"
-  # No bin/fm-wake-lib.sh in this home: wake_for must fail, not silently
-  # succeed and record the uid without a wake.
+  miss_bin="$TMP_ROOT/misslib-bin"
+  mkdir -p "$miss_home" "$miss_bin"
+  # Hide the script-relative wake library: poll sources fm-wake-lib.sh from
+  # next to fm-mail.sh, not from $FM_HOME/bin. Copy only the plane scripts.
+  cp "$ROOT/bin/fm-mail.sh" "$miss_bin/fm-mail.sh"
+  cp "$ROOT/bin/fm-mail.py" "$miss_bin/fm-mail.py"
+  chmod +x "$miss_bin/fm-mail.sh"
 
   cat > "$fakebin/python3" <<'SH'
 #!/usr/bin/env bash
@@ -369,8 +373,9 @@ SH
   local out rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$miss_home" PATH="$fakebin:$PATH" \
-    "$MAIL" poll 2>&1) || rc=$?
+    "$miss_bin/fm-mail.sh" poll 2>&1) || rc=$?
   expect_code 1 "$rc" "poll must stop when the wake library is missing"
+  assert_contains "$out" "fm-wake-lib.sh missing" "missing-lib error names the wake library"
   assert_not_contains "$(cat "$miss_home/state/.mail-seen" 2>/dev/null)" "33" "a failed wake must never be committed to the cursor"
   pass "fm-mail: a missing wake library fails the poll instead of suppressing mail"
 }
@@ -545,10 +550,46 @@ SH
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
     "$MAIL" poll 2>&1) || rc=$?
-  expect_code 0 "$rc" "poll must succeed even when the heal cannot record"
+  expect_code 1 "$rc" "poll must fail when the heal cannot record a uid"
+  assert_contains "$out" "heal could not record a uid" "poll reports the unrecordable heal"
   assert_contains "$(cat "$HOME_DIR/state/.mail-woken" 2>/dev/null)" "55" "journal evidence survives an unrecordable heal"
   chmod 0600 "$HOME_DIR/state/.mail-seen"
   pass "fm-mail: the journal survives when the heal cannot commit a uid"
+}
+
+test_poll_heal_failure_does_not_rewake_unseen_mail() {
+  local fakebin homedir_bin heal_home out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  heal_home="$TMP_ROOT/heal-fail-home"
+  homedir_bin="$heal_home/bin"
+  mkdir -p "$homedir_bin" "$heal_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  # Journal names uid 55; the cursor cannot be appended to; IMAP still lists
+  # 55 as UNSEEN. The poll must fail closed before the wake loop so the uid
+  # is not surfaced a second time.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '55\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$heal_home/state/.mail-seen"
+  printf '%s\t%s\n' '90009' '55' > "$heal_home/state/.mail-woken"
+  : > "$heal_home/state/.wake-queue"
+  chmod 0400 "$heal_home/state/.mail-seen"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$heal_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "heal failure with unseen mail must fail the poll"
+  assert_not_contains "$out" "woke for 55" "heal failure must not re-wake a journaled uid"
+  assert_contains "$(cat "$heal_home/state/.mail-woken" 2>/dev/null)" "55" "journal evidence is kept"
+  local wakeq
+  wakeq=$(grep -c "check: mail 55" "$heal_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 0 "$wakeq" "heal failure must not append a second wake"
+  chmod 0600 "$heal_home/state/.mail-seen"
+  pass "fm-mail: heal failure with unseen mail fails the poll instead of re-waking"
 }
 
 test_body_preview_falls_back_from_empty_plain() {
@@ -571,6 +612,91 @@ PYEOF
   out=$(python3 "$harness" "$ROOT/bin/fm-mail.py")
   assert_contains "$out" "Hello" "empty plain-text alternative falls back to the html preview"
   pass "fm-mail: an empty plain-text alternative falls back to the html preview"
+}
+
+test_body_preview_tolerates_none_payload() {
+  local harness out rc=0
+  harness="$TMP_ROOT/none-payload-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({'FM_MAIL_USER':'t','FM_MAIL_PASS':'p','FM_IMAP_HOST':'h','FM_IMAP_PORT':'993','FM_SMTP_HOST':'s','FM_SMTP_PORT':'465'})
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+class NonePart:
+    def walk(self):
+        yield self
+    def get_content_type(self):
+        return 'text/plain'
+    def get_payload(self, decode=True):
+        return None
+
+print(repr(mod.body_preview(NonePart())))
+PYEOF
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py") || rc=$?
+  expect_code 0 "$rc" "None payload must not crash body_preview"
+  assert_contains "$out" "''" "None payload yields an empty preview"
+  pass "fm-mail: body_preview does not crash on a None payload"
+}
+
+test_read_surfaces_unfetchable_uid() {
+  local harness out rc=0
+  harness="$TMP_ROOT/read-unfetchable-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+})
+class FakeConn:
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'7 8'])
+        if cmd == 'fetch':
+            if args[0] == b'7':
+                return ('NO', None)
+            return ('OK', [(b'', b'From: a@b.c\r\nSubject: ok\r\n\r\nplain body\r\n')])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_read())
+PYEOF
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "read must succeed when one uid is unfetchable"
+  assert_contains "$out" "Uid: 7" "unfetchable uid is still named"
+  assert_contains "$out" "unfetchable body" "unfetchable uid is reported degraded"
+  assert_contains "$out" "Subj: ok" "a later fetchable uid is still shown"
+  pass "fm-mail: read does not silently hide an unfetchable uid"
+}
+
+test_invalid_port_fails_cleanly() {
+  local out rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
+    FM_IMAP_PORT=abc FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) || rc=$?
+  expect_code 1 "$rc" "a non-numeric IMAP port must fail"
+  assert_contains "$out" "FM_IMAP_PORT" "invalid IMAP port names the variable"
+  assert_not_contains "$out" "ValueError" "invalid port must not leak a python traceback"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=h FM_SMTP_HOST=h \
+    FM_SMTP_PORT=abc FM_HOME="$HOME_DIR" "$MAIL" status 2>&1) || rc=$?
+  expect_code 1 "$rc" "a non-numeric SMTP port must fail"
+  assert_contains "$out" "FM_SMTP_PORT" "invalid SMTP port names the variable"
+  pass "fm-mail: a non-numeric port fails cleanly in bash"
 }
 
 test_poll_caps_wakes_per_run() {
@@ -616,31 +742,71 @@ SH
 }
 
 test_poll_sanitizes_header_fields() {
-  local fakebin homedir_bin
+  local fakebin homedir_bin real_py harness
   fakebin=$(fm_fakebin "$TMP_ROOT")
   homedir_bin="$HOME_DIR/bin"
   mkdir -p "$homedir_bin"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+  real_py=$(command -v python3)
+  harness="$TMP_ROOT/sanitize-poll-harness.py"
 
-  # A subject containing a literal tab and a subject containing a literal
-  # newline must not split the poll row or inject a fake uid line.
-  cat > "$fakebin/python3" <<'SH'
-#!/usr/bin/env bash
-printf 'uidvalidity\t90009\n'
-printf '60\t2026-09-05T00:00:00Z\talice@example.com\tTab\there\n'
-printf '61\t2026-09-05T00:00:00Z\talice@example.com\tLine\nBreak\n'
-SH
+  # Drive the real poll_list/clean path through a stubbed IMAP connection so a
+  # tab in Subject and an RFC-2047-encoded newline cannot split the TSV or
+  # inject a forged uid for the bash wake loop.
+  cat > "$harness" <<'PYEOF'
+import imaplib, importlib.util, sys
+
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'60 61'])
+        if cmd == 'fetch':
+            if args[0] == b'60':
+                return ('OK', [(b'', b'Subject: Tab\there\r\nFrom: alice@example.com\r\nDate: 5 Sep 2026 00:00:00 +0000\r\n\r\n')])
+            # RFC-2047 payload of "Line\n99\tfake" so decode keeps the newline
+            # and tab; clean() must collapse them or bash would wake forged uid 99.
+            raw = b'Subject: =?utf-8?b?TGluZQo5OQlmYWtl?=\r\nFrom: alice@example.com\r\nDate: 5 Sep 2026 00:00:00 +0000\r\n\r\n'
+            return ('OK', [(b'', raw)])
+        return ('NO', None)
+    def logout(self):
+        pass
+
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if len(sys.argv) > 2 and sys.argv[2] == 'poll_list':
+    sys.exit(mod.cmd_poll_list())
+sys.exit(1)
+PYEOF
+  cat > "$fakebin/python3" <<EOF
+#!/bin/bash
+exec "$real_py" "$harness" "\$@"
+EOF
   chmod +x "$fakebin/python3"
   printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
   : > "$HOME_DIR/state/.wake-queue"
 
-  local out rc=0
+  local out rc=0 wakeq
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
     "$MAIL" poll 2>&1) || rc=$?
   expect_code 0 "$rc" "sanitizing poll must succeed"
   assert_contains "$out" "woke for 60" "tab-bearing subject still wakes once"
   assert_contains "$out" "woke for 61" "newline-bearing subject still wakes once"
+  assert_not_contains "$out" "woke for 99" "a newline in Subject must not inject a forged uid"
+  assert_not_contains "$out" "woke for fake" "a tab in Subject must not inject a forged uid"
+  wakeq=$(grep -c "check: mail" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
+  expect_code 2 "$wakeq" "exactly the two real uids wake"
+  assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" "mail:90009/60" "wake key is the real uid 60"
+  assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" "mail:90009/61" "wake key is the real uid 61"
   pass "fm-mail: poll sanitizes tabs and newlines in header fields"
 }
 
@@ -741,4 +907,8 @@ test_poll_sanitizes_header_fields
 test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_keeps_journal_when_heal_cannot_record
+test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain
+test_body_preview_tolerates_none_payload
+test_read_surfaces_unfetchable_uid
+test_invalid_port_fails_cleanly

@@ -14,6 +14,7 @@
 import imaplib
 import os
 import re
+import socket
 import ssl
 import sys
 import email
@@ -29,6 +30,22 @@ IMP = int(os.environ['FM_IMAP_PORT'])
 STH = os.environ['FM_SMTP_HOST']
 STP = int(os.environ['FM_SMTP_PORT'])
 CTX = ssl.create_default_context()
+
+
+def _mail_timeout():
+    """Seconds for IMAP/SMTP sockets. Invalid or non-positive values become 20."""
+    raw = os.environ.get('FM_MAIL_TIMEOUT', '20')
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 20.0
+    if value <= 0:
+        value = 20.0
+    return value
+
+
+MAIL_TIMEOUT = _mail_timeout()
+socket.setdefaulttimeout(MAIL_TIMEOUT)
 
 MAX_PREVIEW = 200
 READ_LIMIT = 20
@@ -52,7 +69,7 @@ def clean(s):
 
 
 def connect_mailbox():
-    m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX)
+    m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX, timeout=MAIL_TIMEOUT)
     m.login(USER, PW)
     return m
 
@@ -63,12 +80,12 @@ def body_preview(msg):
     valid message never loses its promised preview."""
     for part in msg.walk():
         if part.get_content_type() == 'text/plain':
-            text = part.get_payload(decode=True).decode('utf-8', 'replace').strip()
+            text = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace').strip()
             if text:
                 return text
     for part in msg.walk():
         if part.get_content_type() == 'text/html':
-            raw = part.get_payload(decode=True).decode('utf-8', 'replace')
+            raw = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
             raw = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', raw)
             preview = re.sub(r'<[^>]+>', ' ', raw)
             preview = ' '.join(preview.split())
@@ -88,8 +105,14 @@ def cmd_read():
             m.logout()
             return 0
         for i in ids[-READ_LIMIT:]:
+            uid = i.decode() if isinstance(i, bytes) else str(i)
             typ, msg = m.uid('fetch', i, '(BODY.PEEK[])')
             if typ != 'OK' or not msg or not msg[0]:
+                print('---')
+                print('Uid:', uid)
+                print('From:', '(unfetchable)')
+                print('Date:', '')
+                print('Subj:', 'unfetchable body - see fm-mail read')
                 continue
             mi = email.message_from_bytes(msg[0][1])
             print('---')
@@ -117,7 +140,7 @@ def cmd_send(to, subj, body):
         m['Subject'] = subj
         m['Date'] = formatdate(localtime=True)
         m.set_content(body)
-        with smtplib.SMTP_SSL(STH, STP, context=CTX) as s:
+        with smtplib.SMTP_SSL(STH, STP, context=CTX, timeout=MAIL_TIMEOUT) as s:
             s.login(USER, PW)
             s.send_message(m)
         print('sent to', to)

@@ -37,28 +37,32 @@
 #
 # Deployment - credentials and endpoints live ONLY in the gitignored
 # $FM_HOME/.env (same convention as the Relay/FMX token). Add these four
-# required values, plus the optional ports:
+# required values, plus the optional ports and timeout:
 #   FM_MAIL_USER=<imap/smtp account>
 #   FM_MAIL_PASS=<password>
 #   FM_IMAP_HOST=<imap host>
-#   FM_IMAP_PORT=<imap port>     (default 993)
+#   FM_IMAP_PORT=<imap port>     (default 993, implicit TLS)
 #   FM_SMTP_HOST=<smtp host>
-#   FM_SMTP_PORT=<smtp port>     (default 465)
+#   FM_SMTP_PORT=<smtp port>     (default 465, implicit TLS)
+#   FM_MAIL_TIMEOUT=<seconds>    (default 20; IMAP/SMTP socket timeout)
 # FM_HOME falls back to the repo root when unset. This script carries no secret
 # and no default endpoint that could resolve against a wrong home; the four
 # FM_MAIL_* credential and endpoint values are always required, and
-# FM_MAIL_PASS is never logged.
+# FM_MAIL_PASS is never logged. The wake library is sourced from next to this
+# script, not from $FM_HOME/bin; cursor, journal, and queue stay under
+# $FM_HOME/state.
 #
-# IMAP/SMTP work is delegated to bin/fm-mail.py (imaplib/smtplib, in-process
-# TLS). BODY.PEEK is used on read/poll so mail is never marked seen before
-# firstmate actually answers it.
+# IMAP/SMTP work is delegated to bin/fm-mail.py (imaplib/smtplib, implicit TLS
+# on 993/465). STARTTLS and port 587 are not supported. BODY.PEEK is used on
+# read/poll so mail is never marked seen before firstmate actually answers it.
 
 set -euo pipefail
 
 # --- resolve home, env, and endpoints -------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-}"
 if [ -z "$FM_HOME" ]; then
-  FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  FM_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 ENV_FILE="$FM_HOME/.env"
 # Load the home .env for keys not already set, so a direct invocation's
@@ -102,6 +106,18 @@ IMAP_HOST="$FM_IMAP_HOST"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
 SMTP_HOST="$FM_SMTP_HOST"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
+case "$IMAP_PORT" in
+  ''|*[!0-9]*|0)
+    echo "fm-mail: FM_IMAP_PORT must be a positive integer, got: ${FM_IMAP_PORT:-}" >&2
+    exit 1
+    ;;
+esac
+case "$SMTP_PORT" in
+  ''|*[!0-9]*|0)
+    echo "fm-mail: FM_SMTP_PORT must be a positive integer, got: ${FM_SMTP_PORT:-}" >&2
+    exit 1
+    ;;
+esac
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in
   ''|*[!0-9]*|0) MAIL_MAX_WAKES=20 ;;
@@ -115,7 +131,7 @@ if [ -z "$PY" ]; then
   echo "fm-mail: python3 required" >&2
   exit 1
 fi
-PY_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-mail.py"
+PY_BIN="$SCRIPT_DIR/fm-mail.py"
 if [ ! -f "$PY_BIN" ]; then
   echo "fm-mail: $PY_BIN missing" >&2
   exit 1
@@ -227,7 +243,7 @@ wake_for() {
   # holds the uid, and the next poll wakes the mail again. A possible duplicate
   # (never a missed mail) is the deliberate, bounded tradeoff for keeping the
   # durable record write on the same held lock as the publish.
-  local generation=$1 id=$2 summary=$3 lib="$FM_HOME/bin/fm-wake-lib.sh" status=0
+  local generation=$1 id=$2 summary=$3 lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
@@ -236,7 +252,8 @@ wake_for() {
     echo "fm-mail: $lib missing; cannot wake" >&2
     return 1
   fi
-  # shellcheck source=/dev/null
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
@@ -320,6 +337,7 @@ mail_heal() {
       fi
     fi
   done < <(fm_wake_queued_keys check 2>/dev/null || true)
+  return "$heal_ok"
 }
 
 mail_poll() {
@@ -330,12 +348,13 @@ mail_poll() {
   # phases (mail_heal), so an overlapping poll or an interrupted run can never
   # lose a mail or double-surface it.
   local list generation uid _ fr subj woke=0
-  if [ ! -f "$FM_HOME/bin/fm-wake-lib.sh" ]; then
-    echo "fm-mail: $FM_HOME/bin/fm-wake-lib.sh missing; cannot poll" >&2
+  if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
+    echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
   fi
-  # shellcheck source=/dev/null
-  . "$FM_HOME/bin/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
   list="$(run_py poll_list)"
   generation="$(printf '%s\n' "$list" | head -n1 | cut -f2)"
@@ -351,7 +370,11 @@ mail_poll() {
     : > "$WOKEN"
   fi
 
-  mail_heal "$generation"
+  if ! mail_heal "$generation"; then
+    echo "fm-mail: heal could not record a uid; journal kept; retried on next poll" >&2
+    fm_lock_release "$STATE_DIR/.mail-seen.lock"
+    return 1
+  fi
 
   while IFS=$'\t' read -r uid _ fr subj; do
     [ -z "$uid" ] && continue
