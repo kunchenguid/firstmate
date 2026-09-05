@@ -1315,16 +1315,6 @@ EOF
   return 1
 }
 
-inspectable_git_worktree() {
-  local target=$1 top
-  [ -n "$target" ] || return 1
-  [ -d "$target" ] || return 1
-  top=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ -n "$top" ] || return 1
-  [ -d "$top" ] || return 1
-  git -C "$top" rev-parse --git-dir >/dev/null 2>&1
-}
-
 canonical_existing_dir() {
   local target=$1
   [ -n "$target" ] || return 1
@@ -2396,7 +2386,6 @@ teardown_herdr_require_prerequisites() {  # <task-id>
   for prerequisite in \
     fm_backend_herdr_parse_target \
     fm_backend_herdr_pane_presence_state \
-    fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
@@ -2404,15 +2393,6 @@ teardown_herdr_require_prerequisites() {  # <task-id>
       return 1
     fi
   done
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fi
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
-    || ! declare -F fm_lock_release >/dev/null 2>&1; then
-    echo "error: herdr teardown lock machinery is unavailable for $task_id; nothing was changed - restore the lock support and rerun teardown" >&2
-    return 1
-  fi
 }
 
 teardown_herdr_preflight_target() {  # <target> <task-id>

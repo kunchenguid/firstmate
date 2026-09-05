@@ -169,9 +169,6 @@ printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.m
 printf '%s\n' "$SM2_ID" > "$SM2_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
 
-# A third primary-shaped home that keeps presentation spaces ON through the
-# historical empty opt-in file, so the default-on migration is exercised against
-# real Herdr while the opted-out homes above assert the flat layout in isolation.
 write_ship_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task

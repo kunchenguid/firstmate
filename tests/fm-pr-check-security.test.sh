@@ -1245,12 +1245,6 @@ SH
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
 }
 
-# The GitLab watch must follow a merge request exactly as the GitHub watch
-# follows a pull request, on any instance, and must never turn an unreadable
-# merge request into a merge. Its evidence against the public fixture project
-# https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
-# docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
-
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"

@@ -151,18 +151,6 @@ reject_repo_overrides() {
   done
 }
 
-reject_head_overrides() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      --sha|--sha=*)
-        echo "error: extra merge arguments must not override the head commit" >&2
-        return 1
-        ;;
-    esac
-  done
-}
-
 reject_repo_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
