@@ -2139,7 +2139,7 @@ ${context.command}
   // legacy captain and unrecognized messages without rewriting history.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    if (note.startsWith(`${MERGE_NOTE_BOAT} `)) return new Container();
+    if (/^⛵ [A-Za-z0-9._-]+: /.test(note)) return new Container();
     return new Text(theme.fg("dim", note), 1, 0);
   });
 }

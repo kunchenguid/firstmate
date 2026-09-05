@@ -865,6 +865,7 @@ for (const expanded of [false, true]) {
 }
 assertRenderedNote("⚓ task: approval needed", "⚓");
 assertRenderedNote("ordinary unrecognized message", "ordinary");
+assertRenderedNote("⛵ unrecognized message: keep visible", "unrecognized");
 const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   captainEntries[0],
   { expanded: false },
@@ -1886,8 +1887,8 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, renderers } = globalThis.__t;
 import { existsSync } from "node:fs";
 
 let now = 1_000_000;
@@ -1994,6 +1995,16 @@ const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Su
 if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
   throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
 }
+const assertHealthNoteVisible = ({ message }) => {
+  if (message.display !== true) throw new Error("health note was delivered hidden");
+  for (const expanded of [false, true]) {
+    const rendered = renderers.get(message.customType)(message, { expanded }, { fg: (_color, text) => text });
+    if (rendered.text !== message.content) {
+      throw new Error(`health renderer hid or changed the notification: ${message.content}`);
+    }
+  }
+};
+assertHealthNoteVisible(pauseNotes[0]);
 
 // No provider attempt occurs inside the first five-minute cooldown. Exactly
 // one probe is accepted when it elapses, and all other wakes remain on main
@@ -2040,6 +2051,7 @@ const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes(
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
   throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
 }
+assertHealthNoteVisible(recoveryNotes[0]);
 
 // The durable report cleared both the latch and the old streak: one new
 // provider error falls back but does not latch, so a following wake still
