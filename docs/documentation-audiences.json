@@ -237,6 +237,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/ticket-board/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },

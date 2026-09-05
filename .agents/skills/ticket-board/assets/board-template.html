@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tickets - firstmate</title>
+<style>
+/* ============================================================
+   Ticket board - Firstmate Design System, inlined for portability.
+   Tokens and shared components (.fm-badge, .fm-btn, .fm-card, .fm-sign) copied
+   verbatim from .agents/skills/bearings/assets/board-template.html so the two
+   boards read as one system.
+   ============================================================ */
+@import url("https://fonts.googleapis.com/css2?family=Chango&family=Jost:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  --rust-700: #8f2f17; --rust-600: #a93a1f; --rust-500: #c0452a;
+  --rust-400: #d35f3f; --rust-300: #e08365; --rust-100: #f4d8c9; --rust-050: #fbece3;
+  --navy-700: #1a2238; --navy-600: #222c49; --navy-500: #2a3656;
+  --navy-300: #6c7796; --navy-100: #d9deea;
+  --gold-600: #b5791c; --gold-500: #e0a52e; --gold-300: #f0d38c; --gold-100: #f8ecc9;
+  --ocean-600: #2f6688; --ocean-500: #3c7ea6; --ocean-200: #b6d4e2; --ocean-050: #e8f1f5;
+  --sea-700: #234e3a; --sea-500: #2f6b4f; --sea-200: #b9d4c5; --sea-050: #e9f2ec;
+  --paper-000: #fbf4e2; --paper-100: #f6ecd3; --paper-200: #f0e3c4; --paper-300: #e7d6ae;
+  --cream-line: #ddc89c;
+  --ink-900: #241c14; --ink-700: #3f3224; --ink-500: #6f5e46; --ink-300: #9c8a6c;
+  --white: #fffdf7;
+  --bg-page: var(--paper-100);
+  --surface-card: var(--white);
+  --surface-card-warm: var(--paper-000);
+  --text-strong: var(--ink-900); --text-body: var(--ink-700);
+  --text-muted: var(--ink-500); --text-faint: var(--ink-300);
+  --border-default: var(--cream-line); --border-soft: var(--paper-300);
+  --status-online: var(--sea-500); --status-online-soft: var(--sea-050);
+  --status-warn: var(--gold-600); --status-warn-soft: var(--gold-100);
+  --status-danger: var(--rust-600); --status-danger-soft: var(--rust-050);
+  --status-info: var(--ocean-500); --status-info-soft: var(--ocean-050);
+  --font-display: "Chango", "Cooper Black", Rockwell, Georgia, serif;
+  --font-sans: "Jost", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --fs-h3: 1.4rem; --fs-h4: 1.15rem; --fs-base: 1rem; --fs-sm: 0.9375rem;
+  --fs-xs: 0.8125rem; --fs-2xs: 0.6875rem;
+  --ls-caps: 0.16em;
+  --radius-xs: 6px; --radius-sm: 9px; --radius-md: 12px; --radius-banner: 7px;
+  --radius-lg: 18px; --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(36, 28, 20, 0.06), 0 4px 10px rgba(36, 28, 20, 0.06);
+  --shadow-hard: 4px 4px 0 var(--ink-900);
+  --shadow-hard-sm: 3px 3px 0 var(--ink-900);
+  --texture-paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+  --focus-ring: 0 0 0 3px var(--gold-300);
+  --container-app: 1180px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--text-body);
+  background: var(--bg-page);
+  background-image: var(--texture-paper);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+
+/* ---- fm-badge (enamel sign-pin), verbatim contract ---- */
+.fm-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-2xs); font-weight: 800; line-height: 1;
+  padding: 5px 9px 4px; text-transform: uppercase; letter-spacing: 0.07em;
+  border-radius: var(--radius-xs); border: 1.5px solid var(--ink-900);
+  box-shadow: 2px 2px 0 var(--ink-900); white-space: nowrap;
+}
+.fm-badge--online  { background: var(--sea-500);  color: var(--paper-000); }
+.fm-badge--warn    { background: var(--gold-500); color: var(--navy-700); }
+.fm-badge--danger  { background: var(--rust-600); color: var(--paper-000); }
+.fm-badge--info    { background: var(--ocean-500); color: var(--paper-000); }
+.fm-badge--neutral { background: var(--paper-000); color: var(--ink-900); }
+.fm-badge--solid   { background: var(--rust-500); color: var(--paper-000); }
+
+/* ---- fm-card ---- */
+.fm-card {
+  background: var(--surface-card); border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.fm-card--poster { border: 2px solid var(--ink-900); box-shadow: var(--shadow-hard); border-radius: var(--radius-md); }
+.fm-card--warm { background: var(--surface-card-warm); }
+
+/* ---- fm-sign (eyebrow section label) ---- */
+.fm-sign {
+  display: inline-flex; align-items: center; gap: 8px; font-weight: 800;
+  text-transform: uppercase; letter-spacing: var(--ls-caps); font-size: var(--fs-xs);
+  line-height: 1; white-space: nowrap;
+}
+.fm-sign--eyebrow { color: var(--rust-500); }
+.fm-sign--muted { color: var(--ink-500); }
+.fm-sign svg { width: 14px; height: 14px; }
+.fm-ico { width: 1.15em; height: 1.15em; flex: none; vertical-align: -0.18em; }
+
+/* ============================================================
+   Board chrome (tb-*) - built on the same tokens as the bearings board
+   ============================================================ */
+.tb-nav {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper-100) 86%, transparent);
+  backdrop-filter: saturate(150%) blur(10px);
+  border-bottom: 1px solid var(--border-default);
+}
+.tb-nav__inner {
+  max-width: var(--container-app); margin: 0 auto; padding: 0 28px; height: 64px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.tb-brand { display: inline-flex; align-items: center; gap: 12px; }
+.tb-brand__disc {
+  display: grid; place-items: center; width: 34px; height: 34px; flex: none;
+  border-radius: 999px; background: var(--rust-500); color: var(--paper-000);
+  border: 2px solid var(--ink-900); box-shadow: var(--shadow-hard-sm);
+}
+.tb-brand__disc svg { width: 60%; height: 60%; }
+.tb-brand__wm { font-family: var(--font-display); font-size: 23px; color: var(--text-strong); line-height: 1; }
+.tb-meta-mono { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+
+.tb-main {
+  max-width: var(--container-app); margin: 0 auto;
+  padding: 26px 28px 72px; display: flex; flex-direction: column; gap: 22px;
+}
+
+/* how-to banner: the board itself carries no creation form, so this is the
+   one place that explains the mechanism */
+.tb-howto {
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px 18px;
+  background: var(--ocean-050); border: 1.5px solid var(--ocean-200);
+  border-radius: var(--radius-md);
+}
+.tb-howto svg { width: 20px; height: 20px; flex: none; color: var(--ocean-600); margin-top: 2px; }
+.tb-howto__body { min-width: 0; font-size: var(--fs-sm); color: var(--text-body); line-height: 1.5; }
+.tb-howto__body strong { color: var(--text-strong); }
+
+/* stat strip */
+.tb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tb-stat {
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 0;
+  background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+}
+.tb-stat__num { font-family: var(--font-mono); font-size: var(--fs-h3); font-weight: 600; line-height: 1; color: var(--text-strong); }
+.tb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+
+/* kanban columns */
+.tb-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.tb-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.tb-col__head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.tb-col__cards { display: flex; flex-direction: column; gap: 10px; min-height: 64px; }
+
+.tb-ticket { padding: 13px 15px; display: flex; flex-direction: column; gap: 6px; }
+.tb-ticket__title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.35; }
+.tb-ticket__body {
+  font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tb-ticket__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.tb-ticket__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); }
+.tb-ticket__date { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); }
+
+.tb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
+
+.tb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
+
+@media (max-width: 900px) {
+  .tb-cols { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header class="tb-nav">
+  <div class="tb-nav__inner">
+    <span class="tb-brand">
+      <span class="tb-brand__disc">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+        </svg>
+      </span>
+      <span class="tb-brand__wm">tickets</span>
+    </span>
+  </div>
+</header>
+
+<main class="tb-main">
+
+  <div class="tb-howto">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+    <span class="tb-howto__body">
+      <strong>To add a ticket:</strong> type the description in the conversation panel on the right and send it to the agent.
+      Firstmate turns it into a new card in Backlog the next time it checks in - no form to fill out here.
+    </span>
+  </div>
+
+  <div class="tb-stats" id="tb-stats"></div>
+
+  <div class="tb-cols" id="tb-cols">
+    <section class="tb-col" data-status="backlog">
+      <div class="tb-col__head">
+        <span class="fm-sign fm-sign--eyebrow">Backlog</span>
+        <span class="fm-sign fm-sign--muted" data-col-count></span>
+      </div>
+      <div class="tb-col__cards" data-col-cards></div>
+    </section>
+    <section class="tb-col" data-status="in_progress">
+      <div class="tb-col__head">
+        <span class="fm-sign fm-sign--eyebrow">In Progress</span>
+        <span class="fm-sign fm-sign--muted" data-col-count></span>
+      </div>
+      <div class="tb-col__cards" data-col-cards></div>
+    </section>
+    <section class="tb-col" data-status="done">
+      <div class="tb-col__head">
+        <span class="fm-sign fm-sign--eyebrow">Done</span>
+        <span class="fm-sign fm-sign--muted" data-col-count></span>
+      </div>
+      <div class="tb-col__cards" data-col-cards></div>
+    </section>
+  </div>
+
+  <footer class="tb-foot">
+    <span class="tb-meta-mono" id="tb-provenance">-</span>
+  </footer>
+
+</main>
+
+<!-- ONE SLOT. bin/fm-ticket-board.sh build injects the fresh
+     fm-ticket-board.v1 payload in place of the placeholder below; everything
+     above and below is the shipped template and is never regenerated per run. -->
+<script id="ticket-board-data" type="application/json">
+__FM_TICKET_BOARD_DATA__
+</script>
+
+<script>
+(function () {
+  "use strict";
+
+  /* Fail closed: a board with unreadable or wrong-schema data says so plainly
+     instead of rendering an empty page that looks like an empty board. */
+  function renderBoardError(msg) {
+    var main = document.querySelector(".tb-main");
+    main.innerHTML = "";
+    var card = document.createElement("div");
+    card.className = "fm-card fm-card--poster tb-ticket";
+    var h = document.createElement("div");
+    h.className = "tb-ticket__title";
+    h.textContent = "This board could not load";
+    var d = document.createElement("div");
+    d.className = "tb-ticket__body";
+    d.textContent = msg + " - ask firstmate to rebuild the board.";
+    card.appendChild(h);
+    card.appendChild(d);
+    main.appendChild(card);
+  }
+
+  var data;
+  try {
+    data = JSON.parse(document.getElementById("ticket-board-data").textContent);
+  } catch (e) {
+    renderBoardError("The board data is not valid JSON");
+    return;
+  }
+  if (!data || data.schema !== "fm-ticket-board.v1" || !Array.isArray(data.tickets)) {
+    renderBoardError("Unsupported or malformed board data schema: " + (data && data.schema ? data.schema : "(none)"));
+    return;
+  }
+  var ticketsValid = data.tickets.every(function (t) {
+    return t && typeof t === "object" &&
+      typeof t.id === "string" && t.id.length > 0 &&
+      typeof t.title === "string" && t.title.length > 0 &&
+      (t.status === "backlog" || t.status === "in_progress" || t.status === "done") &&
+      typeof t.created === "string" && t.created.length > 0;
+  });
+  if (!ticketsValid) {
+    renderBoardError("The board data does not have the required ticket structure");
+    return;
+  }
+
+  try {
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  document.getElementById("tb-provenance").textContent = data.schema + " · " + data.generated;
+
+  var byStatus = { backlog: [], in_progress: [], done: [] };
+  data.tickets.forEach(function (t) { byStatus[t.status].push(t); });
+
+  var strip = document.getElementById("tb-stats");
+  [
+    { n: byStatus.backlog.length, l: "backlog" },
+    { n: byStatus.in_progress.length, l: "in progress" },
+    { n: byStatus.done.length, l: "done" },
+    { n: data.tickets.length, l: "total tickets" }
+  ].forEach(function (s) {
+    var t = el("div", "tb-stat");
+    t.appendChild(el("span", "tb-stat__num", String(s.n)));
+    t.appendChild(el("span", "tb-stat__label", s.l));
+    strip.appendChild(t);
+  });
+
+  function formatDate(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toISOString().slice(0, 10);
+  }
+
+  document.querySelectorAll(".tb-col").forEach(function (col) {
+    var status = col.getAttribute("data-status");
+    var rows = byStatus[status] || [];
+    col.querySelector("[data-col-count]").textContent =
+      rows.length + " ticket" + (rows.length === 1 ? "" : "s");
+    var cards = col.querySelector("[data-col-cards]");
+    if (!rows.length) {
+      cards.appendChild(el("div", "tb-empty", "Nothing here."));
+      return;
+    }
+    rows.forEach(function (t) {
+      var card = el("div", "fm-card tb-ticket");
+      card.appendChild(el("div", "tb-ticket__title", t.title));
+      if (t.body && t.body !== t.title) card.appendChild(el("div", "tb-ticket__body", t.body));
+      var foot = el("div", "tb-ticket__foot");
+      foot.appendChild(el("span", "tb-ticket__id", t.id));
+      foot.appendChild(el("span", "tb-ticket__date", formatDate(t.created)));
+      card.appendChild(foot);
+      cards.appendChild(card);
+    });
+  });
+  } catch (e) {
+    renderBoardError("The board data could not be rendered");
+  }
+})();
+</script>
+</body>
+</html>

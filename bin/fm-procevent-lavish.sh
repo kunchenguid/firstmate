@@ -8,6 +8,8 @@
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh read <result-file>
+#   fm-procevent-lavish.sh messages <result-file>
+#   fm-procevent-lavish.sh has-content <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
@@ -79,6 +81,25 @@
 # `read` is the presentation command summarized above; keyed intake remains
 # the separate `answers` contract described here.
 #
+# `messages` is the sibling read for a board whose queued content is freeform
+# prose rather than structured decisions: it reports every row tagged `message`
+# as `<title>\t<body>` lines, title being the row's first line (capped 200
+# characters) and body its full text with control characters flattened (capped
+# 4000 characters, decoded/re-encoded as UTF-8 so the cap lands on a character
+# boundary rather than splitting a multi-byte character). Any caller reading
+# what the captain typed into a board's conversation
+# panel calls this instead of re-parsing the `prompts[N]{...}` wire format
+# itself - that format is this adapter's contract, stated once here, per the
+# one-owner rule in `firstmate-coding-guidelines`.
+#
+# `has-content` exposes this adapter's own answer to "did the result carry any
+# queued content at all", the same question `silent` is built on: exit 0 means
+# content is present, exit 1 means the result provably carries none, and exit 2
+# means the check could not tell. A caller whose own parse of `answers` or
+# `messages` comes back empty must consult this before concluding "the captain
+# said nothing" - an empty parse and a genuinely empty result look identical
+# unless something asks this question explicitly.
+#
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
@@ -123,7 +144,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,130p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -474,14 +495,6 @@ cmd_answers() {
   ' "$file"
 }
 
-# Present one already-captured result for a handler. Body lines are prefixed
-# so a captain-supplied string cannot forge a section label. The session-ending
-# message is printed before the count line and before any annotation, because
-# that is the field a truncated grep of the raw capture historically dropped.
-# A non-choice annotation that carries a freeform `prompt` prints that comment
-# as its own field; a selector must not hide the typed words, even when the
-# comment matches the captured element text. Choice rows keep Context data
-# out of that field. A pure annotation has no prompt.
 cmd_read() {
   local file=${1-} lifecycle session_ended
   [ -n "$file" ] || usage
@@ -613,6 +626,117 @@ cmd_read() {
   ' "$file" "$lifecycle" "$session_ended"
 }
 
+# Print `<title>\t<body>` for every freeform message the captain sent through a
+# board's own conversation panel, reading the same `prompts[N]{...}` wire
+# format `cmd_answers` reads but keeping rows tagged `message` instead of
+# `choice`. `prompt` carries the full sent text; Lavish's generic `text` label
+# ("Freeform message") is used only when `prompt` is absent. Title is the
+# row's first line, trimmed and capped at 200 characters (falling back to the
+# full text when the first line is blank); body is the full text with embedded
+# control characters flattened to spaces, capped at 4000 characters. Both
+# fields are decoded/re-encoded as UTF-8 so the cap lands on a character
+# boundary rather than splitting a multi-byte character. A row with no usable
+# text after trimming is skipped.
+#
+# Row completeness is checked with the same reconciliation `cmd_read` already
+# proved out: a value split producing MORE fields than declared is folded
+# back into `prompt`/`text` (captain prose legitimately contains unescaped
+# commas), but a row that still does not resolve to exactly the declared
+# field count - or a capture that yields fewer rows than its own declared
+# count, i.e. the write was cut off mid-row - is a truncated or malformed
+# capture, not "no messages". Exit 3 in that case instead of silently
+# skipping the bad row while still emitting whatever came before it, so a
+# partial capture can never look like a clean, complete zero-or-more read to
+# the caller.
+cmd_messages() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  perl -e '
+    use strict; use warnings;
+    binmode STDOUT, ":encoding(UTF-8)";
+    my ($path) = @ARGV;
+    open my $fh, "<:encoding(UTF-8)", $path or exit 1;
+    my (@fields, $want, @rows);
+    while (my $line = <$fh>) {
+      if (!@fields) {
+        next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($want, @fields) = ($1, split /,/, $2);
+        next;
+      }
+      last unless $line =~ /^\s/;
+      last if @rows >= $want;
+      chomp $line;
+      push @rows, $line;
+    }
+    close $fh;
+    $want = 0 unless defined $want;
+    my $presented = 0;
+    my $malformed = 0;
+    for my $row (@rows) {
+      $row =~ s/^\s+//;
+      my @vals;
+      while (length $row) {
+        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+          push @vals, $1;
+        } else {
+          $row =~ s/^([^,]*)//;
+          push @vals, $1;
+        }
+        last unless $row =~ s/^,//;
+      }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
+      $presented++;
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      my %f;
+      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      next unless defined $f{tag} && $f{tag} eq "message";
+      my $raw = (defined $f{prompt} && length $f{prompt}) ? $f{prompt} : $f{text};
+      next unless defined $raw;
+      $raw =~ s/^\s+|\s+$//g;
+      next unless length $raw;
+      my ($title) = split /\n/, $raw, 2;
+      $title =~ s/[\x00-\x1f\x7f]/ /g;
+      $title =~ s/^\s+|\s+$//g;
+      $title = $raw unless length $title;
+      $title = substr($title, 0, 200);
+      my $body = $raw;
+      $body =~ s/[\x00-\x1f\x7f]+/ /g;
+      $body =~ s/^\s+|\s+$//g;
+      next unless length $body;
+      $body = substr($body, 0, 4000);
+      print "$title\t$body\n";
+    }
+    exit 3 if $malformed || $presented != $want;
+  ' "$file"
+}
+
+# Exit 0 when the captured result carries any queued content block at all
+# (`prompts[N]{...}` or `feedback[N]{...}`), exit 1 when it provably carries
+# none, exit 2 when the check could not tell. This is the same question
+# `cmd_silent` answers internally, exposed so a caller whose own read of
+# `answers` or `messages` came back empty can tell "the captain said nothing"
+# apart from "something kept this from being read" before treating an empty
+# parse as silence.
+cmd_has_content() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  result_has_queued_content "$file"
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
@@ -623,6 +747,8 @@ case "${1-}" in
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   read)      shift; cmd_read "$@" ;;
+  messages)  shift; cmd_messages "$@" ;;
+  has-content) shift; cmd_has_content "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac
