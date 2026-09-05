@@ -9,7 +9,12 @@
 # distinct real files or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
-# promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
+# promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
+# heading and the project-owned mark below (standalone line, LF or CRLF):
+# <!-- firstmate:maintained-by-project -->
+# Projects may place this mark alongside equivalent retained maintenance
+# guidance under their own heading. It declares that guidance is present, not
+# permission to remove governance. No prose equivalence is inferred.
 # Owns the canonical CLAUDE.md pointer content (the exact two-line @AGENTS.md
 # form). A real-file pointer cannot follow a write into AGENTS.md, which is why
 # the installer never creates a CLAUDE.md symlink.
@@ -25,6 +30,14 @@ set -eu
 
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
+  cat >&2 <<'EOF'
+
+To retain equivalent project-owned maintenance guidance without adding the
+canonical section, place this exact standalone line in AGENTS.md (LF or CRLF):
+<!-- firstmate:maintained-by-project -->
+The mark declares retained guidance, not permission to remove governance.
+Without the mark or the exact canonical heading, the helper adds the section.
+EOF
 }
 
 case "${1:-}" in
@@ -61,14 +74,14 @@ write_maintenance_section_with_eol() {
   done < <(write_maintenance_section)
 }
 
-# Idempotently append the canonical self-governance section to AGENTS.md when it
-# is absent. Sets MAINT_INJECTED=1 when it appends and 0 when the section is
-# already present, so callers can report whether the file changed.
+# Idempotently append the canonical self-governance section to AGENTS.md when
+# neither its heading nor the project-owned mark is present. Sets
+# MAINT_INJECTED=1 when it appends and 0 otherwise, for caller change reporting.
 MAINT_INJECTED=0
 ensure_maintenance_section() {
   MAINT_INJECTED=0
-  if grep -Fqx '## Maintaining this file' "$AGENTS" ||
-    grep -Fqx $'## Maintaining this file\r' "$AGENTS"; then
+  if grep -Fqx -e '## Maintaining this file' -e '<!-- firstmate:maintained-by-project -->' "$AGENTS" ||
+    grep -Fqx -e $'## Maintaining this file\r' -e $'<!-- firstmate:maintained-by-project -->\r' "$AGENTS"; then
     return 0
   fi
   local eol=$'\n' sep=''

@@ -190,6 +190,55 @@ test_existing_agents_md_with_section_reports_unchanged() {
   pass "fm-ensure-agents-md.sh: AGENTS.md that already has the section stays unchanged"
 }
 
+test_marked_project_guidance_stays_unchanged() {
+  local repo eol route out
+  for eol in $'\n' $'\r\n'; do
+    for route in bare pointer symlink promotion; do
+      repo=$(mktemp -d "$TMP_ROOT/marked-$route.XXXXXX")
+      printf '%s%s' '# Project memory' "$eol" \
+        '<!-- firstmate:maintained-by-project -->' "$eol" \
+        '## Editing these notes' "$eol" \
+        'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' "$eol" \
+        'Preserve these rules for every agent.' "$eol" > "$repo/AGENTS.md"
+      cp "$repo/AGENTS.md" "$repo/.before"
+      case "$route" in
+        pointer) write_fixture_claude_pointer "$repo" ;;
+        symlink) ln -s AGENTS.md "$repo/CLAUDE.md" ;;
+        promotion) mv "$repo/AGENTS.md" "$repo/CLAUDE.md" ;;
+      esac
+      "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+        || fail "ensure failed for marked project ($route)"
+      cmp -s "$repo/.before" "$repo/AGENTS.md" \
+        || fail "marked project guidance was modified ($route)"
+      assert_claude_pointer "$repo/CLAUDE.md"
+      out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+        || fail "ensure failed on marked project re-run ($route)"
+      assert_contains "$out" "unchanged:" "marked project re-run did not report unchanged"
+      cmp -s "$repo/.before" "$repo/AGENTS.md" \
+        || fail "marked project re-run modified guidance ($route)"
+      assert_claude_pointer "$repo/CLAUDE.md"
+    done
+  done
+  pass "fm-ensure-agents-md.sh: marked project guidance is preserved across ensure paths and line endings"
+}
+
+test_reworded_guidance_requires_explicit_marker() {
+  local repo marker count
+  for marker in '' 'Use <!-- firstmate:maintained-by-project --> here.' '<!-- firstmate:maintained-by-project-extra -->'; do
+    repo=$(mktemp -d "$TMP_ROOT/reworded.XXXXXX")
+    printf '%s\n' '# Project memory' "$marker" '## Editing these notes' \
+      'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' \
+      'Preserve these rules for every agent.' > "$repo/AGENTS.md"
+    "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+      || fail "ensure failed for unmarked reworded guidance"
+    assert_grep '## Editing these notes' "$repo/AGENTS.md" "ensure removed project guidance"
+    count=$(grep -Fxc '## Maintaining this file' "$repo/AGENTS.md")
+    [ "$count" -eq 1 ] || fail "unmarked reworded guidance did not gain the canonical section"
+    assert_claude_pointer "$repo/CLAUDE.md"
+  done
+  pass "fm-ensure-agents-md.sh: reworded prose and marker mentions do not replace an explicit mark"
+}
+
 test_existing_crlf_agents_md_with_section_stays_unchanged() {
   local repo agents out count
   repo="$TMP_ROOT/crlf-formed-project"
@@ -363,6 +412,8 @@ test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
+test_reworded_guidance_requires_explicit_marker
+test_marked_project_guidance_stays_unchanged
 test_canonical_pointer_is_accepted_when_both_are_real_files
 test_distinct_real_files_are_refused
 test_agents_md_symlink_is_refused
