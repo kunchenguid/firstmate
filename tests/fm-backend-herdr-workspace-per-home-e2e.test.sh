@@ -84,8 +84,8 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 # --- scratch world: a primary-shaped home, a secondmate-shaped home, two projects ---
 
-# This test asserts the per-home FLAT workspace shape, so both homes opt out of
-# the default-on presentation projection rather than depending on that default.
+# This test asserts the per-home FLAT workspace shape: one workspace per home
+# with one tab per task.
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'

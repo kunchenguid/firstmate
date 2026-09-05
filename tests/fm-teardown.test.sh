@@ -1946,7 +1946,7 @@ SH
   [ -e "$case_dir/state/task-x1.turn-ended" ] \
     || fail "herdr-preflight-$mode: refusal erased the turn-end record"
   [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
-  [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
+  [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted a pane close"
 }
 
 test_herdr_flat_teardown_preflight_refuses_before_changes() {

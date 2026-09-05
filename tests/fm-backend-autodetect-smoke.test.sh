@@ -87,8 +87,8 @@ trap on_exit EXIT
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
 mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
-# Backend auto-detection is what is under test here, so opt out of the default-on
-# presentation projection and keep the assertions on the flat per-home workspace.
+# Backend auto-detection is what is under test here; the assertions stay on the
+# flat per-home workspace.
 cat > "$DATA/$ID/brief.md" <<'EOF'
 # Task
 ## Captain's intent

@@ -212,6 +212,10 @@ run_merge_entry() {
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
 INVALID_URLS=(
+  'https://gitlab.com/group/project/-/merge_requests/1'
+  'https://gitlab.com/group/sub/deep/project/-/merge_requests/42'
+  'https://gitlab.example.co.uk/g/p/-/merge_requests/7'
+  'https://code.internal/team/tools/ci-runner/-/merge_requests/123456'
   'https://gitlab.com/single/-/merge_requests/1'
   'https://gitlab.com/g/p/-/merge_requests/0'
   'https://gitlab.com/g/p/-/merge_requests/01'
