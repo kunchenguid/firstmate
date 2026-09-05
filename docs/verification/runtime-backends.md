@@ -1075,6 +1075,294 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## thurbox
+
+The current compatibility floor is thurbox-cli 2.11.1, and the active live evidence uses 2.11.0 and 2.11.1 on Linux x86_64, verified 2026-09-01 and 2026-09-02.
+Real checks create only `fm-*-probe` sessions in a scratch git repository and remove them with `session delete --force`.
+
+```sh
+thurbox-cli version --json
+```
+
+Observed version:
+
+```text
+{"data_dir":"/home/<user>/.local/share/thurbox","schema_version":41,"tmux_socket":"thurbox","version":"2.11.1"}
+```
+
+The compatibility floor is 2.11.1 rather than 2.11.0 because 2.11.0 could not
+report a parked session; see "Parked sessions" below.
+
+### 2.18.0 verification pass
+
+Re-verified 2026-09-05 against thurbox-cli 2.18.0, seven minor releases after the
+adapter was written. All twelve documented contracts below still hold and the
+2.11.1 floor stays correct. Two defects surfaced, neither caused by that drift;
+both are fixed and both carry a regression.
+
+**`session send` argument order.** With the text as a trailing positional the
+parser claims a leading dash:
+
+```sh
+thurbox-cli session send <id> '-x --weird' --no-enter --json
+```
+
+```text
+{"error":"unexpected argument '-x' found","suggestion":"..."}
+exit 2
+```
+
+Nothing is typed. The working form is `session send --no-enter --json <id> -- <text>`.
+
+**The undo window.** A soft delete removes the row while the pane keeps running,
+and that row cannot then be force-deleted - `delete` addresses live rows:
+
+```text
+session delete <id>            -> {"deleted":true,"killed_window":false}
+session delete <id> --force    -> {"error":"Session not found: ..."}   exit 1
+tmux -L thurbox list-windows   -> tb-<name> still present
+```
+
+This is deliberate and documented, not a leak: it is thurbox's lossless undo
+window. `session delete --help` states that the windows come down "once the undo
+window closes - by a running interface, by the `automation tick` heartbeat, or on
+demand with `session reap`", while the worktrees stay. An initial reading of this
+pass called it an orphaned pane and a thurbox defect; that was wrong, and the
+correction is recorded here rather than removed.
+
+`session reap` releases the pane on demand, which is what a headless driver
+needs:
+
+```text
+before reap:  windows on socket: 1
+session reap  -> {"reaped": true}
+after  reap:  windows on socket: 0
+row retained in --deleted (reaping is not deleting)
+```
+
+It is idempotent, and refuses a live session outright
+(`Deleted session not found`), so it cannot take down a running task.
+
+The deleted row cannot report any of this: it is byte-identical before and after
+a reap, and `session get`/`session capture` refuse it either way. `force_deleted`
+separates the two delete modes, and the row's `backend_id` against the socket
+answers the rest:
+
+```text
+fmfix-hard   force_deleted=true    windows on socket: 0
+fmfix-soft   force_deleted=false   windows on socket: 1
+```
+
+**Stream resume.** Every event carries a monotonic `seq` and `watch --since`
+replays what was missed - the help names the case, "the gap a stream otherwise
+has across a restart". Events also carry `from_state` and
+`hook_blocked_is_heuristic`; the latter reads `true` for a claude session, which
+is why a blocked edge is corroborated before it is raised.
+
+**`session exec` identity.** The 2.11 leak is fixed and the help says so: the
+`THURBOX_*` namespace is scrubbed of the caller's values and replaced with the
+target's. Everything outside that namespace is still inherited, so it is safe
+for identity but is not a clean environment. The adapter still does not use it.
+
+`tests/fm-backend-thurbox-smoke.test.sh` pins both defects against the real
+binary, because a fake can only ever model the argument parser and the deleted
+inventory.
+
+### Error stream
+
+`thurbox-cli` reports failures as a JSON object on stdout with an empty stderr and a non-zero exit.
+
+```sh
+thurbox-cli session get 00000000-0000-0000-0000-000000000000 --json
+```
+
+```text
+{"error":"Session not found: 00000000-0000-0000-0000-000000000000","suggestion":"the command ran and failed; the message says what went wrong - `thurbox-cli` prints the state it was working against"}
+```
+
+Exit status 1, stderr empty.
+The consequence for a driver is that a naive parse turns the failure into a silent empty success:
+
+```sh
+thurbox-cli session get 00000000-0000-0000-0000-000000000000 --json | jq -r '.state // empty'
+```
+
+```text
+(no output)
+exit 0
+```
+
+This is why the adapter checks the CLI's own exit status before any parse and additionally rejects an `error`-keyed payload.
+
+### Capture bounds
+
+`--lines N` prepends up to N scrollback rows to the whole visible screen, matching tmux's `capture-pane -p -S -N`.
+Measured on a 63-row pane after writing 400 lines of scrollback:
+
+| `--lines` | Rows returned |
+| --- | --- |
+| 0 | 63 |
+| 50 | 113 |
+| 500 | 403 |
+| 2000 | 403 |
+
+The 500 and 2000 results are equal because that is all the scrollback the pane held.
+A pane running an alternate-screen agent holds no scrollback, so every value returns the visible screen there.
+
+`cursor_row` is 0-based relative to the visible pane and does not shift when scrollback is prepended, which is why the composer read uses `--lines 0`.
+
+### Event stream
+
+`thurbox-cli watch --json` emits one newline-delimited JSON object per transition.
+Observed across a full create/signal/stop/delete cycle on a probe session:
+
+```text
+{"at":...,"backend_id":"%52","event":"created","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":"blocked","stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":"working","stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":true}
+{"at":...,"backend_id":"%52","event":"gone","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":true}
+```
+
+`--initial` additionally emits one `present` row per live session before the first change.
+Event timestamps trailed each `session signal` by about one second, so the stream removes the driver's poll but is not synchronous with the agent's hook.
+
+### Pane identity
+
+A session created for one task carries that task's own identity in its pane.
+
+```sh
+thurbox-cli session send <probe> 'echo "PANE_THURBOX_SESSION=$THURBOX_SESSION"'
+```
+
+```text
+PANE_THURBOX_SESSION=<probe uuid>
+```
+
+The value is the probe's uuid, not the creating session's, so an agent's hooks in a spawned pane report state for the correct session.
+
+`session exec` does not share that guarantee.
+
+```sh
+thurbox-cli session exec <probe> -- sh -c 'echo FM_PROBE=$FM_PROBE; echo THURBOX_SESSION=$THURBOX_SESSION'
+```
+
+```text
+FM_PROBE=
+THURBOX_SESSION=<calling session uuid>
+```
+
+`--env FM_PROBE=1` given at create time is absent, and the caller's own `THURBOX_SESSION` is inherited.
+`session exec` therefore sets the cwd and host but not the session's environment.
+The adapter does not use it.
+
+### Parked sessions
+
+`session stop` removes a session's pane but leaves its row, and from 2.11.1 the
+ordinary read verbs report that:
+
+```sh
+thurbox-cli session get <probe> --json   # before and after `session stop`
+```
+
+```text
+running: {"state":"uncovered","stopped":false}
+parked:  {"state":"stopped","stopped":true}
+```
+
+Verified on 2.11.1, 2026-09-02.
+
+The rest of this subsection records 2.11.0's behaviour, which the adapter's
+version floor exists to refuse.
+
+`session stop` removed a session's pane but the ordinary read
+verbs did not report that.
+
+```sh
+thurbox-cli session get <probe> --json   # before and after `session stop`
+```
+
+```text
+before:  {"state":"uncovered","state_source":null,"backend_id":"%70"}
+after:   {"state":"uncovered","state_source":null,"backend_id":"%70"}
+```
+
+Identical, including a `backend_id` naming a window that no longer exists.
+Neither read emits a `stopped` field at all; the session also remains in
+`session list`. Only `watch` reports the flag:
+
+```sh
+thurbox-cli watch --initial --session <probe> --for-secs 1 --json
+```
+
+```text
+running: {"backend_id":"%72","event":"present","session":"…","state":null,"stopped":false}
+parked:  {"backend_id":"%72","event":"present","session":"…","state":null,"stopped":true}
+```
+
+The observable difference on the ordinary verbs is that a parked session's
+`session capture` fails:
+
+```text
+{"error":"capture_pane_text: tmux capture-pane exited with status exit status: 1: can't find window: tb-fm-park-probe2"}
+exit 1
+```
+
+### Native state for a Firstmate-launched agent
+
+thurbox's status hooks are launch arguments, appended from `agents.toml` only
+when thurbox builds the command line. Firstmate types the harness into a shell
+it created, so before 2.11.1 exposed `agent launch-args` there was no way to
+obtain them and every Firstmate-spawned session reported no state.
+
+Verified 2026-09-02 on a real `fm-spawn.sh --backend thurbox` task. The typed
+launch carried the arguments:
+
+```text
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  claude '--settings' '/home/<user>/.config/thurbox/hooks/claude.json' \
+  --dangerously-skip-permissions "$(... encode launch-brief < .../brief.md)"
+```
+
+and the session then reported hook state rather than a process guess:
+
+```text
+{"state":"done","state_source":"hook","hook_reported":true,"hook_state":"done"}
+```
+
+`fm_backend_thurbox_busy_state` answered `busy` during a turn and `idle` between
+turns, where it previously answered `unknown`, and `watch --session` pushed the
+matching `changed working` transition.
+
+Per-harness resolution against the installed `agents.toml`:
+
+| Harness | `agent launch-args` | Effect |
+| --- | --- | --- |
+| claude | `--settings <hooks>.json` | Passed through; native state works |
+| codex, opencode, pi | registered, empty `args` | Nothing to pass; thurbox installs their hooks by writing the agent's own config, and coverage stays as thurbox reports it |
+| grok, kimi, cursor, muse | not in `agents.toml` | No native state; one notice at spawn, and the pane read is used |
+
+### Metadata output shape
+
+`session meta get` prints the record, not the bare value, unless output is forced.
+
+```sh
+v=$(thurbox-cli session meta get <session> somekey)
+```
+
+```text
+id: <session uuid>
+key: somekey
+value: plain-value
+```
+
+An unset key prints `value: null` and exits 0.
+`--json` returns `{"id":...,"key":...,"value":...}`; `--text` prints the bare value and prints nothing for an unset key.
+
+### Regression coverage
+
+`tests/fm-backend-thurbox.test.sh` pins every contract above against a fake `thurbox-cli` with a real `jq`, so it runs everywhere CI does with no thurbox installation.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

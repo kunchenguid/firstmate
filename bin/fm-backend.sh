@@ -66,8 +66,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux thurbox"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux thurbox"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -140,6 +140,21 @@ FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 fm_backend_detect() {
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
+  # thurbox is the one arm that must precede tmux. thurbox runs its panes on
+  # its OWN tmux server, so every process inside one has both THURBOX_SESSION
+  # and $TMUX set and the tmux arm would otherwise always win. The check is not
+  # a bare marker read: it requires $TMUX's socket to be thurbox's own, so a
+  # NESTED plain tmux started inside a thurbox pane - which inherits
+  # THURBOX_SESSION but is genuinely a tmux runtime - correctly stays tmux.
+  # bin/backends/thurbox.sh owns that discriminator.
+  if [ -n "${THURBOX_SESSION:-}" ]; then
+    if fm_backend_source thurbox 2>/dev/null && fm_backend_thurbox_is_current_runtime; then
+      FM_BACKEND_DETECTED=thurbox
+      FM_BACKEND_DETECT_SIGNAL=THURBOX_SESSION
+      printf 'thurbox'
+      return 0
+    fi
+  fi
   if [ -n "${TMUX:-}" ]; then
     FM_BACKEND_DETECTED=tmux
     FM_BACKEND_DETECT_SIGNAL=TMUX
@@ -262,6 +277,9 @@ fm_backend_name() {
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
+    if [ "$detected" = thurbox ]; then
+      echo "NOTICE: auto-detected thurbox runtime (THURBOX_SESSION, on thurbox's own tmux socket) - spawning into the EXPERIMENTAL thurbox backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
         bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
@@ -299,13 +317,13 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
-#     spawn/liveness paths parse the backend's JSON output (see each adapter's
-#     tool check, e.g. fm_backend_herdr_tool_check);
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/thurbox);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux,
+#     thurbox) whose spawn/liveness paths parse the backend's JSON output (see
+#     each adapter's tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, thurbox); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -315,6 +333,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    thurbox) printf '%s' 'thurbox-cli jq treehouse' ;;
     *) return 1 ;;
   esac
 }
@@ -636,6 +655,17 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    thurbox)
+      if [ -z "${_FM_BACKEND_THURBOX_SOURCED:-}" ]; then
+        # bin/backends/thurbox.sh reuses fm_backend_tmux_classify_process_name
+        # for its foreground-identity reads (the shared owner of the
+        # agent/shell/other vocabulary), so the tmux adapter loads first.
+        fm_backend_source tmux || return 1
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/thurbox.sh" || return 1
+        _FM_BACKEND_THURBOX_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -707,6 +737,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    thurbox) fm_backend_thurbox_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -722,6 +753,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    thurbox) fm_backend_thurbox_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -739,6 +771,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    thurbox) fm_backend_thurbox_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -757,6 +790,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    thurbox) fm_backend_thurbox_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -794,6 +828,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    thurbox) fm_backend_thurbox_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -820,6 +855,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    thurbox) fm_backend_thurbox_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -869,6 +905,13 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    thurbox)
+      fm_backend_source thurbox || return 1
+      # A PARKED thurbox session (`session stop`) keeps its row, checkout and
+      # conversation but has no pane, so target_ready correctly reports it as
+      # not usable - which IS "does not exist" for this passive probe.
+      fm_backend_thurbox_target_ready "$target"
+      ;;
     *)
       return 1
       ;;
@@ -896,6 +939,7 @@ fm_backend_agent_state() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    thurbox) fm_backend_thurbox_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -917,16 +961,18 @@ fm_backend_agent_alive() {  # <backend> <target>
 # fm_backend_has_push whether a window's backend can push semantic state changes,
 # and for those backends replaces its blind `sleep POLL` with a bounded wait on
 # fm_backend_wait_transition. Every push-capable backend reuses the shared
-# normalized-transition shape and policy table (bin/fm-transition-lib.sh); today
-# only herdr implements the surface (docs/herdr-backend.md "Native
-# pane.agent_status_changed push escalation"). A backend with no native push
+# normalized-transition shape and policy table (bin/fm-transition-lib.sh). herdr
+# implements it over a raw protocol socket (docs/herdr-backend.md "Native
+# pane.agent_status_changed push escalation") and thurbox over its own
+# `thurbox-cli watch --json` stream, which needs no sidecar reader
+# (docs/thurbox-backend.md "Native event push"). A backend with no native push
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 
 # fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
 fm_backend_has_push() {  # <backend>
   case "$1" in
-    herdr) return 0 ;;
+    herdr|thurbox) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -942,6 +988,9 @@ fm_backend_events_capable() {  # <backend> <session>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_events_capable "$@" ;;
+    # thurbox has no session layer; the <session> argument is accepted for the
+    # shared dispatcher's shape and ignored.
+    thurbox) fm_backend_thurbox_events_capable ;;
     *) return 1 ;;
   esac
 }
@@ -959,6 +1008,10 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
+    # thurbox addresses sessions directly, so its wait takes
+    # <timeout_secs> <state_dir> <window...> and the leading <session> the
+    # shared signature carries for herdr is dropped here.
+    thurbox) shift; fm_backend_thurbox_wait_transition "$@" ;;
     *) return 2 ;;
   esac
 }
@@ -970,6 +1023,9 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_commit_transition "$@" ;;
+    # <state_dir> <session> <record> in, <state_dir> <record> through: thurbox
+    # reconstructs its marker key from the record's own session uuid.
+    thurbox) fm_backend_thurbox_commit_transition "$1" "$3" ;;
     *) return 1 ;;
   esac
 }
@@ -981,6 +1037,7 @@ fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_clear_transition "$@" ;;
+    thurbox) fm_backend_thurbox_clear_transition "$@" ;;
     *) return 0 ;;
   esac
 }

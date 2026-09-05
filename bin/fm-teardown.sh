@@ -2921,6 +2921,21 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+# A failed or partial thurbox close (both `session delete --force` and the
+# `session reap` fallback declining) must never erase a live task's durable
+# endpoint identity either: fm_backend_thurbox_kill's exit status above was
+# discarded, so this is the only remaining gate before record removal.
+if [ "$BACKEND" = thurbox ]; then
+  fm_backend_source thurbox || true
+  if ! declare -F fm_backend_thurbox_endpoint_confirmed_gone >/dev/null 2>&1; then
+    echo "error: thurbox endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
+    exit 1
+  fi
+  if ! fm_backend_thurbox_endpoint_confirmed_gone "$T"; then
+    echo "error: thurbox session $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the endpoint can be reaped" >&2
+    exit 1
+  fi
+fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then

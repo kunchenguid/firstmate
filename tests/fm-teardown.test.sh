@@ -1500,6 +1500,47 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+# A thurbox close that neither `session delete --force` nor the `session
+# reap` fallback can resolve, with the session still reported live: teardown
+# must retain every durable record instead of erasing them for a close it
+# never actually confirmed, exactly as the herdr gate below does for herdr.
+test_thurbox_teardown_retains_records_when_close_unconfirmed() {
+  local case_dir rc wt_head
+  case_dir=$(make_case thurbox-close-unconfirmed)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  sed -i.bak 's/^window=.*/window=thurbox:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=thurbox' \
+    'thurbox_session_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.status"
+  cat > "$case_dir/fakebin/thurbox-cli" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "session delete") exit 1 ;;
+  "session reap") exit 1 ;;
+  "session list") printf '[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","name":"x","stopped":false}]\n' ;;
+  *) printf '{}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/thurbox-cli"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "thurbox-close-unconfirmed: teardown succeeded despite a failed close and a still-live session"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "thurbox-close-unconfirmed: refusal erased the durable endpoint metadata"
+  [ -e "$case_dir/state/task-x1.status" ] || fail "thurbox-close-unconfirmed: refusal erased the task status record"
+  assert_grep "is not confirmed gone" "$case_dir/stderr" \
+    "thurbox-close-unconfirmed: the refusal was not explained visibly"
+  pass "thurbox teardown retains every durable record when the close fails and the session is not confirmed gone"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -3210,6 +3251,7 @@ test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
+test_thurbox_teardown_retains_records_when_close_unconfirmed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
