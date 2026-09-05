@@ -24,8 +24,14 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
-#                          applies does the log's last line decide:
+#                          human the wait is on. A crew whose last status event
+#                          is a terminal done: and whose pane is IDLE takes that
+#                          same declared-pause cadence (the merge wait belongs to
+#                          the PR poll), except that a new hash still lets an
+#                          active run-step override the log exactly as below;
+#                          a done: crew whose pane is busy again, and every other
+#                          terminal verb, keep the ordinary paths. Only when no
+#                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -806,8 +812,9 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
+# Absorb a stale pane under a declared external-wait pause (paused:), a
+# dead-agent captain-held transfer, or a finished crew's idle wait for merge
+# authority (done:), and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
@@ -836,6 +843,9 @@ handle_paused_stale() {  # <window> <task> <hash>
   if status_is_captain_held "$(last_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+  elif status_is_done "$(last_status_line "$statusf")"; then
+    detail="done, awaiting merge authority"
+    reason="done ${age}s, awaiting merge authority - finished worker idle on its reported result, rechecked on a long cadence not a wedge; the PR poll owns the merge outcome"
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
@@ -1398,8 +1408,17 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 WATCHER_RECOVERY_PENDING=0
+# A reclaimed stale lock is a watcher that died without cleanup, so its recovery
+# wake is delivered even to an empty drain; the routine marker-driven recovery
+# below is gated on presentable work instead (resurface_after_downtime). The
+# lock library reports its own dead-pid reclaim, and bin/fm-watch-arm.sh sets
+# FM_WATCH_LOCK_RECLAIMED for the child it starts after clearing a reused-pid lock.
+WATCHER_LOCK_RECOVERED=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
+  WATCHER_LOCK_RECOVERED=1
+elif [ "${FM_WATCH_LOCK_RECLAIMED:-0}" = 1 ]; then
+  WATCHER_LOCK_RECOVERED=1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
@@ -1529,6 +1548,16 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# 0 when the drain a recovery wake triggers has something to present: an
+# unacknowledged durable queue row, or a decision still open in a status log
+# (the buried-decision case docs/watcher-continuity.md's recovery episode
+# exists for). Both reads are pure; the open-decision fold is the whole-file
+# owner in fm-classify-lib.sh, so this never advances the drain's cursors.
+recovery_has_presentable_work() {
+  [ -s "$FM_WAKE_QUEUE" ] && return 0
+  [ -n "$(scan_open_decisions "$STATE")" ]
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -1543,7 +1572,15 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  if [ "$WATCHER_LOCK_RECOVERED" -eq 1 ] || recovery_has_presentable_work; then
+    wake "check: rearm-resurface"
+  fi
+  # Nothing to present: the marker was consumed above exactly as before (the
+  # generation is already announced), so the routine re-arm gap a Cursor or
+  # Claude primary opens at every turn end costs no supervision turn. A later
+  # append reuses that announced generation and its drain acknowledges it.
+  WATCHER_RECOVERY_PENDING=0
+  triage_log "absorbed rearm-resurface (queue empty, no open decisions)"
 }
 
 while :; do
@@ -1815,7 +1852,10 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    # A done: crew's idle wait rides the same pause bookkeeping (below), so its
+    # markers survive this reset too; the busy branch still clears them.
+    if ! status_is_paused_or_captain_held "$last" && ! status_is_done "$last" \
+      && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
@@ -1860,6 +1900,32 @@ EOF
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
+          fi
+        elif status_is_done "$last"; then
+          # A finished crew waiting on merge authority. Its done: event already
+          # woke firstmate through the signal path and the PR poll owns the
+          # merge outcome, so an idle pane here is expected, not a wedge: give
+          # it the declared-pause cadence, so a TUI that re-renders its idle
+          # footer cannot re-surface the same finished worker once per new
+          # hash. The one exception mirrors the terminal path below: on a NEW
+          # hash an actively running run-step (a validation firstmate started
+          # after the done: line) still outranks the log and keeps the wedge
+          # timer, because a frozen pipeline must still escalate. A busy pane
+          # never reaches this branch.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            if crew_is_provably_working "$task"; then
+              clear_pause_state "$key"
+              printf '%s' "$h" > "$sf"
+              date +%s > "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (provably working, overriding a done status): $w"
+            else
+              handle_paused_stale "$w" "$task" "$h"
+            fi
+          elif [ -e "$ssf" ]; then
+            wedge_timer_check "$w" "$ssf" "stale (overridden done status)" "$ewf" "$task"
+          else
+            handle_paused_stale "$w" "$task" "$h"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -1969,7 +2035,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || { ! status_is_paused_or_captain_held "$last" && ! status_is_done "$last"; }; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1998,6 +2064,12 @@ EOF
           none)   clear_stale_hash_tracking "$key" ;;
           *)      clear_pause_tracking "$key" ;;
         esac
+      elif ! afk_present && status_is_done "$last" && [ "$busy_now" -ne 0 ]; then
+        # A finished crew's idle pane re-rendered: keep its pause bookkeeping
+        # (and the re-surface throttle it carries) until the hash settles and
+        # the stale branch classifies it; clearing here would let a churny
+        # idle footer re-surface the same finished worker on every re-render.
+        :
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
         # declared-pause cadence recorded on this very poll.

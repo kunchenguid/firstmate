@@ -426,6 +426,10 @@ if [ "$mode" = restart ]; then
         echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
         exit 1
       fi
+      # The fresh child inherits this so its recovery wake is delivered even to
+      # an empty drain, exactly as when the watcher reclaims a dead-pid lock
+      # itself (bin/fm-watch.sh, WATCHER_LOCK_RECOVERED).
+      export FM_WATCH_LOCK_RECLAIMED=1
     fi
   fi
 fi
