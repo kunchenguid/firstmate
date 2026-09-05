@@ -73,9 +73,9 @@ An unclassified new request defaults to preempt in practice, because it is the t
 ### Frontier reset
 
 When the ready frontier lists only umbrellas or nothing while holds still exist, expand the umbrella that same turn into concrete items filed from the project's own open records: ROADMAP rows, openspec `tasks.md` boxes, or decision records.
-Evaluate every hold against those same records - the project's ROADMAP, its openspec `tasks.md`, and its `data/done-archive.md` - rather than against the hold's own remembered text.
+Evaluate every hold against those same records - the project's ROADMAP, its openspec `tasks.md`, and this home's `data/done-archive.md` - rather than against the hold's own remembered text.
 Release a hold that record shows has cleared, or re-hold it with a concrete event or date; never carry a hold's text forward unchanged past the condition it named.
-Resolve a dependency against the project's own `done-archive.md` and its other records, never against whether an id is still visible in `data/backlog.md`, whose retention rule (section 10) prunes closed entries regardless of whether the dependency they named actually closed.
+Resolve a dependency against this home's `data/done-archive.md` plus the project's ROADMAP and openspec `tasks.md`, never against whether an id is still visible in `data/backlog.md`, whose retention rule (section 10) prunes closed entries regardless of whether the dependency they named actually closed.
 
 ## Pre-staging: a blocker gates its step, not the task
 

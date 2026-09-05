@@ -180,7 +180,7 @@ fm_tasks_axi_backend_available() {
 # constant so bin/fm-teardown.sh's backlog_refresh_reminder and
 # bin/fm-merge-outcome-lib.sh's fm_merge_outcome_report - the two places a
 # lane closing or a PR merging opens the frontier - cannot drift apart.
-FM_READY_FRONTIER_SENTENCE='Live tasks are bounded by seams and by the concurrency cap, and every undispatched ready item carries a recorded rule, owner, and recheck event.'
+FM_READY_FRONTIER_SENTENCE='Live tasks are bounded by the concurrency cap and by serial integration onto an unstable seam; preparation is never seam-bounded, and every undispatched ready item carries a recorded rule, owner, and recheck event.'
 
 # fm_ready_frontier_text <backlog-file>
 # Captures `tasks-axi ready --file <backlog-file>` and appends
