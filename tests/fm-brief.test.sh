@@ -846,6 +846,35 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The fleet-wide research ban is owned by AGENTS.md and reinforced at the one
+# shared scaffold boundary so every newly launched worker receives the same
+# unambiguous prohibition and replacement without maintaining a second policy.
+test_every_scaffold_reinforces_parallel_research_ban() {
+  local home id args brief
+  home="$TMP_ROOT/parallel-research-ban-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r id args; do
+    [ -n "$id" ] || continue
+    # shellcheck disable=SC2086 # args is an intentional word-split argument list.
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='policy fixture' \
+      "$ROOT/bin/fm-brief.sh" "$id" $args >/dev/null 2>&1 \
+      || fail "$id: scaffold should succeed"
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016 # Backticks are literal Markdown asserted from the generated brief.
+    assert_grep 'Do not use Parallel, `parallel-cli`, the Parallel API, or any research skill or backend that routes queries through Parallel.' "$brief" \
+      "$id: scaffold did not prohibit every Parallel research route"
+    assert_grep 'Use ordinary web search for external research.' "$brief" \
+      "$id: scaffold did not name ordinary web search as the required replacement"
+  done <<'ROWS'
+policy-ship-no-mistakes|alpha --mode no-mistakes
+policy-ship-direct-pr|alpha --mode direct-PR
+policy-ship-local-only|alpha --mode local-only
+policy-scout|alpha --scout
+policy-secondmate|--secondmate --no-projects
+ROWS
+  pass "fm-brief.sh: every worker and secondmate scaffold reinforces the Parallel research ban"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -868,3 +897,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_every_scaffold_reinforces_parallel_research_ban
