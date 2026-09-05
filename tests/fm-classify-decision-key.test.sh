@@ -338,3 +338,66 @@ EOF
 
 test_closing_verb_separates_resolution_from_durable_transfer
 test_closing_verb_tracks_the_last_transition_in_both_positions
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth() {
+  local dir f want tag size i level small large
+  dir=$(case_dir closing-verb-processes)
+  f="$dir/task.status"
+  printf 'kind=secondmate\n' > "$dir/task.meta"
+  for want in route default; do
+    tag="[key=$want]"
+    [ "$want" != default ] || tag=''
+    for size in 1 1000; do
+      printf 'blocked corr=0123456789abcdef %s: waiting\n' "$tag" > "$f"
+      for ((i = 0; i < size; i++)); do
+        printf 'note: routine reply\nworking: mentions [key=%s] in prose\ndone: another task finished\nfailed: unrelated work\nPR ready https://example.com/pull/1\n\n' "$want" >> "$f"
+        if [ "$want" != default ]; then
+          printf 'blocked [key=other]: another question\nresolved [key=other]: answered\n' >> "$f"
+        fi
+      done
+      printf 'resolved corr=0123456789abcdef: %s answered\nnote: cleanup complete\n' "$tag" >> "$f"
+      : > "$dir/children-$size"
+      (
+        level=$BASH_SUBSHELL
+        set -T
+        trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$dir/children-$size"; fi' DEBUG
+        status_key_closing_verb "$f" "$want" > "$dir/output"
+      )
+      [ "$(cat "$dir/output")" = resolved ] || fail "$want lost its resolution behind unrelated history"
+    done
+    small=$(wc -c < "$dir/children-1")
+    large=$(wc -c < "$dir/children-1000")
+    [ "$large" -le "$((small + 20))" ] || fail "$want launches subprocess work for unrelated history ($small -> $large)"
+  done
+  pass "per-key reads retain resolutions without subprocess work growing with unrelated history"
+}
+
+test_closing_verb_filter_preserves_terminal_chronology() {
+  local dir f kind want tag terminal expected
+  dir=$(case_dir closing-verb-terminals)
+  f="$dir/task.status"
+  for kind in ship scout secondmate; do
+    printf 'kind=%s\n' "$kind" > "$dir/task.meta"
+    for want in access default; do
+      tag="[key=$want]"
+      [ "$want" != default ] || tag=''
+      for terminal in done failed; do
+        printf 'blocked %s: waiting\n' "$tag" > "$f"
+        case "$terminal" in
+          done) printf 'done: report saved\n' >> "$f" ;;
+          failed) printf 'failed corr=0123456789abcdef [key=other]: task failed\n' >> "$f" ;;
+        esac
+        printf 'note: cleanup complete\n' >> "$f"
+        expected=$terminal
+        [ "$kind" != secondmate ] || expected=blocked
+        [ "$(status_key_closing_verb "$f" "$want")" = "$expected" ] || fail "$kind/$want lost $terminal chronology"
+        printf 'needs-decision: [key=%s] reopened\nnote: more cleanup\n' "$want" >> "$f"
+        [ "$(status_key_closing_verb "$f" "$want")" = needs-decision ] || fail "$kind/$want lost a post-terminal reopening"
+      done
+    done
+  done
+  pass "per-key filtering retains ship/scout terminals, reopenings, and secondmate blockers"
+}
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth
+test_closing_verb_filter_preserves_terminal_chronology

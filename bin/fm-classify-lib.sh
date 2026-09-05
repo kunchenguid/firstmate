@@ -582,18 +582,31 @@ EOF
 # _fm_decision_fold_line rule the two folds use, and the reported verb is read
 # off the transitions that rule produces.
 status_key_closing_verb() {  # <status-file> <key>
-  local f=$1 want=$2 line resolve held open='' was verb='' kind
+  local f=$1 want=$2 line resolve held open='' was verb='' kind event
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   [ -n "$want" ] || return 0
   kind=$(_fm_status_kind "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" event
+    case "$event:$kind" in
+      done:ship|done:scout|failed:ship|failed:scout) ;;
+      *)
+        case "$event" in
+          needs-decision|blocked|"$resolve"|"$held") ;;
+          *) continue ;;
+        esac
+        if [ "$want" != default ]; then
+          case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
+        fi
+        ;;
+    esac
     was=0
     _fm_open_set_has "$open" "$want" && was=1
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
     if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
-      verb=$(status_line_verb "$line")
+      verb=$event
     fi
   done < "$f"
   if _fm_open_set_has "$open" "$want"; then
