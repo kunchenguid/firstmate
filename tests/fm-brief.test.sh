@@ -221,6 +221,43 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_remote_delivery_proof_is_required_only_for_pushed_modes() {
+  local home mode id brief
+  home="$TMP_ROOT/remote-proof-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-remote-proof-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
+      "$mode brief incorrectly requires a configured upstream"
+    # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
+    assert_grep 'local path or `file://` destination' "$brief" \
+      "$mode brief does not define the local repository identity boundary"
+    assert_grep 'proves only that a remote Git process advertised the branch' "$brief" \
+      "$mode brief overstates the identity guarantee for non-local remotes"
+    # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
+    assert_grep 'without `-u` is valid delivery' "$brief" \
+      "$mode brief does not permit a push without upstream configuration"
+    # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
+    assert_grep 'each configured push destination with a live, non-interactive, time-bounded `git ls-remote --heads`' "$brief" \
+      "$mode brief does not require bounded live advertisements from push destinations"
+    # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
+    assert_grep 'require an advertised tip to equal local `HEAD` or contain it' "$brief" \
+      "$mode brief does not require live remote containment of local HEAD"
+    # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
+    assert_grep 'remote-tracking ref such as `origin/<branch>` is not delivery evidence' "$brief" \
+      "$mode brief still permits stale local refs as push proof"
+  done
+
+  id='brief-remote-proof-local'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep 'git ls-remote --heads' "$brief" \
+    "local-only brief incorrectly requires a remote branch"
+  pass "fm-brief.sh: pushed modes require live remote proof while local-only does not"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -850,6 +887,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_remote_delivery_proof_is_required_only_for_pushed_modes
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

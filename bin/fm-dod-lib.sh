@@ -10,7 +10,10 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
+# This file is the one owner of remote delivery proof in generated ship
+# instructions: a worker asks every configured push destination for its branches
+# and proves one advertised head contains local HEAD before reporting delivery.
+# This file is also the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
@@ -174,6 +177,18 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_remote_delivery_proof_block() {
+  cat <<'EOF'
+Before reporting a pushed branch as delivered, require local `HEAD` to be contained by a branch currently advertised at a configured push destination.
+For a local path or `file://` destination, it counts only when Git resolves it to a different common directory, which proves the work is preserved outside this working copy.
+For SSH, HTTPS, and other non-local destinations, this proves only that a remote Git process advertised the branch; it cannot establish that the process reads a repository independent of this working copy.
+Do not require a configured upstream: `git push origin HEAD:refs/heads/<branch>` without `-u` is valid delivery.
+Query each configured push destination with a live, non-interactive, time-bounded `git ls-remote --heads`, fetch advertised branch tips that are missing locally, and require an advertised tip to equal local `HEAD` or contain it according to `git merge-base --is-ancestor`.
+A timeout, authentication failure, unreachable remote, or exhausted probe budget means delivery is unproven, so stop and report the failure instead of claiming completion.
+A local remote-tracking ref such as `origin/<branch>` is not delivery evidence because it can be stale after the remote branch disappears.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -183,7 +198,11 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+EOF
+      fm_remote_delivery_proof_block
+      cat <<'EOF'
+Only after that proof succeeds, append `done: PR {url}` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -223,7 +242,11 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run the remote delivery proof below.
+EOF
+      fm_remote_delivery_proof_block
+      cat <<'EOF'
+Only after that proof succeeds, append `done: PR {url} checks green` and stop. You are finished.
 EOF
       ;;
     *)

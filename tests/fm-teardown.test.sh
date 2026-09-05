@@ -2,7 +2,8 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
+# treehouse return hard-resets the worktree. "Landed" means local HEAD is contained
+# by a branch advertised at any configured push destination,
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
@@ -21,11 +22,11 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a live fork remote branch         -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
-#   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
+#   (d) no-mistakes + HEAD on live origin remote branch        -> ALLOW  (no regression)
+#   (e) no-mistakes + HEAD absent remotely, no PR/default copy -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
@@ -49,6 +50,9 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) pushed without upstream                               -> ALLOW
+#   (aa) local upstream only                                  -> REFUSE
+#   (ab) local-only + live remote + no default branch         -> ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -212,8 +216,8 @@ add_fork_with_pushed_branch() {
   git init -q --bare "$case_dir/fork.git"
   git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
   # Push the task branch from the worktree to the fork, then fetch into project
-  # so refs/remotes/fork/fm-task-x1 is visible from the worktree (shared object db).
-  git -C "$case_dir/wt" push -q fork fm/task-x1
+  # for the fixture's shared object database and remote-tracking state.
+  git -C "$case_dir/wt" push -q -u fork fm/task-x1
   git -C "$case_dir/project" fetch -q fork
 }
 
@@ -303,6 +307,32 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
 }
 
+append_equivalent_patch_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  tmp="$case_dir/_equiv-next"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b "$branch" "origin/$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
+  git -C "$case_dir/project" fetch -q origin "$branch"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
+add_git_ls_remote_counter() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" ls-remote "*) printf '%s\n' "$*" >> "${FM_TEST_GIT_LS_REMOTE_LOG:?}" ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Override gh-axi so every call fails, simulating an API/network error.
 add_gh_axi_error() {
   local case_dir=$1
@@ -347,6 +377,43 @@ if [ "${1:-}" = return ]; then
     exit 128
   fi
   exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+add_stale_lock_on_return_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -n "$lock" ]; then
+    marker="${lock}.created-for-test"
+    if [ ! -e "$marker" ]; then
+      mkdir -p "$(dirname "$lock")"
+      : > "$lock"
+      touch -t 200001010000 "$lock"
+      : > "$marker"
+    fi
+    if [ -e "$lock" ]; then
+      echo "fatal: Unable to create '$lock': File exists." >&2
+      exit 128
+    fi
+  fi
 fi
 exit 0
 SH
@@ -612,6 +679,27 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_local_only_live_remote_without_default_branch_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-without-default-allow)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" branch -m main trunk
+  git -C "$case_dir/project" remote set-head origin --delete
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "fork-without-default-allow: live remote proof should not require a default branch"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "fork-without-default-allow: teardown printed a REFUSED line"
+  pass "local-only work preserved on a live remote does not require a default branch"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -692,13 +780,22 @@ test_local_only_merged_to_local_main_allows() {
 }
 
 test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
+  local case_dir rc upstream remote_head
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
-  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+
+  upstream=$(git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}') \
+    || fail "nm-origin: fully pushed fixture has no upstream"
+  [ "$upstream" = origin/fm/task-x1 ] \
+    || fail "nm-origin: unexpected upstream $upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "nm-origin: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "nm-origin: live remote branch does not match local HEAD"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -712,6 +809,53 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+test_no_mistakes_pushed_without_upstream_allows() {
+  local case_dir rc remote_head
+  case_dir=$(make_case nm-no-upstream-pushed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt preserved "pushed without upstream"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "nm-no-upstream-pushed: fixture unexpectedly has an upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "nm-no-upstream-pushed: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "nm-no-upstream-pushed: live remote branch does not match local HEAD"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-no-upstream-pushed: teardown should accept work preserved on a live remote"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-no-upstream-pushed: teardown printed a REFUSED line"
+  pass "a live remote branch preserves pushed work without a configured upstream"
+}
+
+test_no_mistakes_local_upstream_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-local-upstream)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt local-only "local upstream is not delivery"
+  git -C "$case_dir/wt" branch --set-upstream-to=main fm/task-x1 >/dev/null
+
+  [ "$(git -C "$case_dir/wt" config --get branch.fm/task-x1.remote)" = . ] \
+    || fail "nm-local-upstream: fixture remote is not dot"
+  ! git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "nm-local-upstream: fixture branch unexpectedly exists on origin"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-local-upstream: teardown should reject a purely local upstream"
+  assert_grep "no live remote branch containing local HEAD" "$case_dir/stderr" \
+    "nm-local-upstream: refusal did not identify the missing live remote branch"
+  pass "a local upstream cannot prove remote preservation"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -719,6 +863,8 @@ test_no_mistakes_truly_unpushed_refuses() {
   # Real content that is not pushed, has no PR (default gh-axi mock), and never
   # landed on origin/main: genuinely unlanded work that must still refuse.
   wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "nm-unpushed: fixture unexpectedly has an upstream"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -728,6 +874,33 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_no_mistakes_stale_remote_tracking_ref_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-stale-remote-ref)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "locally disguised work"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/fm/task-x1
+
+  git -C "$case_dir/wt" rev-parse --verify refs/remotes/origin/fm/task-x1 >/dev/null \
+    || fail "nm-stale-remote-ref: fixture lost the stale remote-tracking ref"
+  git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null \
+    || fail "nm-stale-remote-ref: fixture lost its configured upstream"
+  ! git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "nm-stale-remote-ref: fixture branch still exists on the remote"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-stale-remote-ref: teardown should refuse a stale local tracking ref"
+  assert_grep "no live remote branch containing local HEAD" "$case_dir/stderr" \
+    "nm-stale-remote-ref: refusal did not identify the missing live branch"
+  pass "stale remote-tracking refs cannot disguise a branch deleted from the remote"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -809,7 +982,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
+  local case_dir rc parent_head pr_head probe_count
   case_dir=$(make_case squash-replayed-patch)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
@@ -817,17 +990,24 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
   git -C "$case_dir/project" fetch -q origin fm/task-x1
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_commit_file "$case_dir" second.txt world "add second feature"
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  pr_head=$(append_equivalent_patch_on_origin_branch "$case_dir" pr-head second.txt world "add second feature")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_git_ls_remote_counter "$case_dir"
+  : > "$case_dir/ls-remote.log"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEST_GIT_LS_REMOTE_LOG="$case_dir/ls-remote.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
+  probe_count=$(wc -l < "$case_dir/ls-remote.log" | tr -d '[:space:]')
+  expect_code 2 "$probe_count" "squash-replayed-patch: teardown should advertise remotes once at safety entry and once for the complete patch comparison"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
@@ -856,21 +1036,27 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   case_dir=$(make_case pr-check-stale)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null \
+    || fail "pr-check-stale: pushed initial HEAD should register"
 
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   new_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
+  set +e
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "pr-check-stale: unpushed later HEAD should refuse re-registration"
 
   count=$(grep -c '^pr_head=' "$case_dir/state/task-x1.meta" || true)
   expect_code 1 "$count" "pr-check-stale: stale rerun should not append a second pr_head"
@@ -893,6 +1079,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
@@ -993,20 +1180,23 @@ test_gh_error_and_content_absent_refuses() {
 }
 
 test_stale_index_lock_cleared_and_teardown_succeeds() {
-  local case_dir rc lock
+  local case_dir rc lock remote_head
   case_dir=$(make_case stale-index-lock)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt preserved "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "stale-index-lock: fixture unexpectedly has an upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "stale-index-lock: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "stale-index-lock: live remote branch does not match local HEAD"
 
-  add_lock_aware_treehouse "$case_dir"
+  add_stale_lock_on_return_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
-  mkdir -p "$(dirname "$lock")"
-  : > "$lock"
-  touch -t 200001010000 "$lock"
+  [ ! -e "$lock" ] || fail "stale-index-lock: fixture lock exists before branch cleanup"
 
   set +e
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
@@ -1018,7 +1208,9 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "stale-index-lock: teardown did not report clearing the stale lock"
   assert_absent "$lock" "stale-index-lock: stale lock file should have been removed"
-  pass "provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds"
+  ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "stale-index-lock: local task branch survived teardown"
+  pass "stale-lock recovery preserves a remotely pushed task after deleting its local branch"
 }
 
 test_live_index_lock_is_never_removed_and_teardown_refuses() {
@@ -1378,6 +1570,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
   channel="$case_dir/parent/state/mate-x.status"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
@@ -1398,6 +1591,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
   case_dir=$(make_case main-pr-ready)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
@@ -2248,7 +2442,7 @@ assert_head_absent_from_worktree() {  # <worktree> <short-sha> <label>
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 }
 
@@ -3200,12 +3394,16 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_local_only_live_remote_without_default_branch_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_no_mistakes_pushed_without_upstream_allows
+test_no_mistakes_local_upstream_refuses
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_stale_remote_tracking_ref_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses

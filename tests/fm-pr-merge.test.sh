@@ -110,9 +110,13 @@ make_case() {
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  mkdir -p "$case_dir/wt"
+  git init -q --bare "$case_dir/remote.git"
+  git -C "$case_dir/wt" init -q
+  git -C "$case_dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m baseline
+  git -C "$case_dir/wt" remote add origin "$case_dir/remote.git"
+  git -C "$case_dir/wt" push -q origin HEAD:refs/heads/main
   printf '%s\n' "$case_dir"
 }
 

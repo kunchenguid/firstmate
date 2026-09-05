@@ -89,6 +89,9 @@ open
 
 Three tasks were armed, two against the fixture and one against the placeholder host:
 
+This 2026-07-21 transcript predates the current ship-delivery precondition in `bin/fm-pr-check.sh`.
+A current ship-task rerun also needs task metadata naming its worktree and a live push destination with a branch containing that worktree's HEAD; `tests/fm-pr-check-security.test.sh` owns the current regression coverage for that precondition.
+
 ```
 $ fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 armed: state/e1.check.sh
