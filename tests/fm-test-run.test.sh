@@ -1309,7 +1309,7 @@ import sys
 
 def yaml_token(value):
     escaped = re.escape(value)
-    return rf'(?:{escaped}|"{escaped}"|\'{escaped}\')'
+    return rf"(?:{escaped}|\"{escaped}\"|'{escaped}')"
 
 
 def section(lines, indent, key, value=None, sequence=False):
