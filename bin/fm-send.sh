@@ -149,8 +149,9 @@
 # blocked: record in the target task's state/<id>.status. fm-send itself
 # appends the closing resolved line to that status file, so the captain-facing
 # OPEN DECISIONS record closes at answer time and never depends on the busy
-# worker writing a matching resolved line. Ordinary keys close with
-# "resolved [key=<key>]: answered: <capped excerpt>". A reserved key
+# worker writing a matching resolved line. For ordinary keys the payload is
+# "resolved [key=<key>]: answered: <capped excerpt>" before the emission-time
+# handling owned by bin/fm-classify-lib.sh. A reserved key
 # (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
 # closed with the owning library's vocabulary note
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so

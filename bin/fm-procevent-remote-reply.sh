@@ -310,8 +310,9 @@ normalize_payload() { # <source> <destination>
 
 # The one place a line enters the parent status stream. A captured generation can
 # be replayed, so every append - a mirrored line or an escalation this adapter
-# raises itself - is at most once. Relayed bytes keep their source time (or its
-# absence); new escalations use fm-classify-lib.sh's emission-time contract.
+# raises itself - is at most once. Mirrored lines compare exact bytes and keep
+# their source time (or its absence); new escalations use fm-classify-lib.sh's
+# retry and emission-time contracts.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line> [new]
   local line=$2

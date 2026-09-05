@@ -131,6 +131,9 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
+# Regex matching ignores numeric emission-time tags before the first colon so
+# existing FM_CAPTAIN_RE overrides keep matching; other metadata and note text
+# remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -229,9 +232,8 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
   fi
 }
 
-# Producer retry deduplication ignores only the optional numeric time tag;
+# Retry deduplication ignores only the optional numeric time tag;
 # all other bytes, including correlation metadata, still identify the event.
-# Relays instead compare exact source bytes to retain distinct source events.
 status_event_recorded() {  # <status-file> <new-status-line>
   [ -f "$1" ] || return 1
   FM_STATUS_COMPARE=$2 awk '

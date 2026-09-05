@@ -41,10 +41,9 @@
 # The parent watcher classifies lines there exactly as it classifies any
 # crewmate's status stream, so a captain-relevant line becomes a parent wake.
 #
-# Lines follow the charter's "<state> [key=<slug>]: <note>" shape and are
-# appended at most once by content excluding emission time, so a retried publication cannot
-# duplicate a delivered event. An existing destination must be a regular,
-# non-symlinked file; a missing one is created with its directory.
+# Line syntax and retry equivalence are owned by fm-classify-lib.sh.
+# An existing destination must be a regular, non-symlinked file; a missing one
+# is created with its directory.
 #
 # Return codes, shared by every entry point that resolves the channel:
 #   0  resolved, or appended / already present
@@ -132,6 +131,8 @@ fm_parent_channel_clean_note() {  # <text>
 }
 
 # Append <line> once, using fm-classify-lib.sh's retry contract.
+# Pass relay for historical copies to bypass stamping without changing retry
+# equivalence; omitting it declares a newly emitted event.
 fm_parent_channel_append_once() {  # <path> <line> [relay]
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then

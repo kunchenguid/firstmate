@@ -79,6 +79,9 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
+#     parent_event carries emitted_at_epoch and age_seconds from the task's
+#     paths.status_log.last_event above. An unreadable-home fallback also uses
+#     that event age for freshness.age_seconds, without asserting current state.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
