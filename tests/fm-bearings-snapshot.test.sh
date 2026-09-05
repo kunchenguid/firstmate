@@ -1616,9 +1616,10 @@ test_landed_includes_secondmate_home_merges() {
 # These retained rows reproduce the historical approval-time close: tasks-axi
 # preserves captain hold annotations on Done rows that also carry merged pull
 # requests. Without the shared artifact-aware selector, both approved deliveries
-# disappear. The no-artifact answered question is the negative boundary.
+# disappear. Answered captain questions are the negative boundary.
 test_captain_approved_deliveries_stay_in_landed() {
-  local home mate fakebin json main_pr mate_pr main_backlog mate_backlog
+  local home mate fakebin json main_pr mate_pr main_backlog mate_backlog report_path
+  local created_kind failures=''
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved-landed)
   write_fixture "$home"
@@ -1659,14 +1660,55 @@ test_captain_approved_deliveries_stay_in_landed() {
     --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the answered captain question"
 
+  run_captain "$home" "$fakebin" hold created-local-question \
+    --title "Choose local main" --reason "captain local route pending" >/dev/null \
+    || fail "could not create the local-only captain question"
+  created_kind=$("$TASKS_AXI_BIN" show created-local-question --full --file "$main_backlog" \
+    | sed -n 's/^  kind: *//p' | head -1)
+  run_captain "$home" "$fakebin" answer created-local-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the local-only captain question"
+
+  "$TASKS_AXI_BIN" add legacy-local-question "Choose local main" \
+    --repo firstmate --file "$main_backlog" >/dev/null \
+    || fail "could not create the legacy kindless captain question"
+  run_captain "$home" "$fakebin" hold legacy-local-question \
+    --reason "captain legacy local route pending" >/dev/null \
+    || fail "could not hold the legacy kindless captain question"
+  run_captain "$home" "$fakebin" answer legacy-local-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the legacy kindless captain question"
+
+  report_path="data/reported-scout/report.md"
+  mkdir -p "$home/data/reported-scout"
+  printf '# Reported scout\n' > "$home/$report_path"
+  cat >> "$main_backlog" <<EOF
+- [x] reported-scout - Report with https://github.com/o/r/pull/8 context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
+- [x] local-delivery - Local with https://github.com/o/r/pull/9 context local main (repo: firstmate) (kind: ship) (done 2026-07-12)
+EOF
+
   : > "$home/net.log"
   json=$(run "$home" "$fakebin" --json --all-landed) \
     || fail "Bearings failed for captain-approved deliveries"
+  [ "$created_kind" = captain ] \
+    || failures="${failures}wrapper-created call kind was ${created_kind:-absent}; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "answered-question") | not' >/dev/null \
+    || failures="${failures}PR-naming captain answer was listed; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "created-local-question") | not' >/dev/null \
+    || failures="${failures}wrapper-created local answer was listed; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "legacy-local-question") | not' >/dev/null \
+    || failures="${failures}legacy kindless local answer was listed; "
+  printf '%s' "$json" | jq -e --arg report_path "$report_path" \
+    '.landed | any(.id == "reported-scout" and .artifact == $report_path)' >/dev/null \
+    || failures="${failures}reported scout artifact was missing; "
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "local-delivery" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}local-only artifact was missing; "
   printf '%s' "$json" | jq -e --arg main_pr "$main_pr" --arg mate_pr "$mate_pr" '
     (.landed | any(.id == "approved-main" and .artifact == $main_pr))
       and (.landed | any(.id == "approved-mate" and .artifact == $mate_pr))
-      and (.landed | any(.id == "answered-question") | not)
-  ' >/dev/null || fail "captain-approved deliveries must stay in landed: $json"
+  ' >/dev/null || failures="${failures}captain-approved PR was missing; "
+  [ -z "$failures" ] || fail "$failures$json"
   [ ! -s "$home/net.log" ] \
     || fail "captain-approved landed selection made a network call: $(cat "$home/net.log")"
   pass "captain-approved deliveries stay landed while answered questions stay out"
