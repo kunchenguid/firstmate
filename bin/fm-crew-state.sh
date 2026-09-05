@@ -50,11 +50,20 @@
 #          crew is credited a run no OTHER task has bound. On the coarse `runs`
 #          ledger route (branch-level credit, no id column): a bound crew keeps
 #          the route, since its own id was asked for first; an unbound crew is
-#          withheld the credit entirely while another task binds a run from a
-#          worktree on this branch. With no binding anywhere on the branch the
+#          withheld the credit entirely while another task binds a run whose
+#          OWN branch, as `axi status --run <id>` reports it, is this branch -
+#          the sibling's worktree is never consulted, so a sibling that has
+#          since detached, moved, or been torn down still owns the run it
+#          bound, and a same-branch answer another task has bound settles the
+#          question by itself. With no binding anywhere on the branch the
 #          branch behaviour is unchanged, so existing homes do not regress.
-#          KNOWN LIMIT: two BOUND crews on one branch whose own runs the head
-#          rule rejects both fall to the ledger, which cannot tell them apart.
+#          KNOWN LIMITS: two BOUND crews on one branch whose own runs the head
+#          rule rejects both fall to the ledger, which cannot tell them apart;
+#          and a sibling left bound to an OLD terminal run on this branch
+#          withholds the ledger's credit from an unbound crew that genuinely
+#          owns the branch's current run, because the ledger cannot tell that
+#          row from the stale run - the withhold is deliberate, and the cure
+#          is the owning crew binding its run.
 #        - the DELIVERY-MODE gate: a direct-PR or local-only crew never drives a
 #          pipeline, so it is never credited a run at all.
 #      bin/fm-watch.sh's pause_state_class independently declines this proof for
@@ -524,10 +533,13 @@ nm_run_is_ours() {
 
 # 0 if THIS crew may take the coarse ledger's branch-level credit, which names
 # no run id: always for a bound crew (its own id was asked for first, below),
-# and for an unbound crew only while no other task binds a run from a worktree
-# on this branch. With no binding anywhere the branch behaviour is unchanged.
+# and for an unbound crew only while no other task binds a run whose own
+# branch, as no-mistakes reports it, is this branch. The run already in
+# $RUN_OUT is handed over so it is not fetched a second time. With no binding
+# anywhere on the branch the branch behaviour is unchanged.
 nm_branch_credit_is_ours() {
-  fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$CREW_BRANCH"
+  fm_nm_branch_credit_owned_by_task "$STATE" "$ID" "$NM_BOUND_RUN" "$CREW_BRANCH" \
+    "$WT" "$NM_TIMEOUT" "$(strip_quotes "$(nm_field id)")" "$(strip_quotes "$(nm_field branch)")"
 }
 
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -566,7 +578,7 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_is_ours \
       && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
-    elif nm_branch_credit_is_ours; then
+    elif { [ "$run_branch" != "$CREW_BRANCH" ] || nm_run_is_ours; } && nm_branch_credit_is_ours; then
       # The active-or-most-recent run is for another branch, or it names this
       # branch with a head this copy cannot verify (a pipeline-advanced fix
       # round, or a rewritten tip). Deliberately nested inside
@@ -574,8 +586,10 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
       # itself did not respond, so retrying it immediately with a second
       # bounded call would just double the wait for no better answer. The
       # ledger names no run id, so this branch-level credit is taken only when
-      # nm_branch_credit_is_ours says the branch's runs are not spoken for by
-      # a bound sibling.
+      # the branch's runs are not spoken for: a same-branch answer another
+      # task has bound is already proof that they are, and is never re-derived
+      # from anything weaker; otherwise nm_branch_credit_is_ours asks whether
+      # any bound sibling's run is on this branch.
       COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1

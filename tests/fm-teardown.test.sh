@@ -3095,6 +3095,7 @@ test_unbound_task_never_aborts_a_parked_run_on_a_branch_with_a_bound_sibling() {
 
   local rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01NOBODYSRUN00000000000002)" \
+  FM_FAKE_AXI_STATUS_RUN="$(running_axi_status_toon fm/task-x1 "$head" 01SIBLINGRUN00000000000002)" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
