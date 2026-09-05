@@ -457,8 +457,10 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
-  fm_current_pid mypid || return 1
+  local ownerdir=$1 mypid=${2:-} back
+  if [ -z "$mypid" ]; then
+    fm_current_pid mypid || return 1
+  fi
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -506,8 +508,11 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  fm_current_pid mypid || return 1
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid=${4:-} back
+  if [ -z "$mypid" ] && ! fm_current_pid mypid; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -532,19 +537,22 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} mypid=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  if [ -z "$mypid" ]; then
+    fm_current_pid mypid || return 1
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$mypid"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner" "$mypid"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
     fi
@@ -920,9 +928,10 @@ fm_lock_try_acquire() {
   # recorded owner could not be resolved is worse than no lock, because the
   # reclaim paths below compare against that recorded pid. Rc 2 is reserved for
   # that unresolvable identity so a waiting caller can refuse instead of
-  # spinning against a condition that will never clear.
+  # spinning against a condition that will never clear. It is then threaded
+  # through every helper below, so one acquisition resolves it exactly once.
   fm_current_pid current || return 2
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" "" "$current"; then
     return 0
   fi
 
@@ -937,7 +946,7 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
+    if fm_lock_try_create "$lockdir" "" "$current"; then
       return 0
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -1001,7 +1010,7 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$current"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
