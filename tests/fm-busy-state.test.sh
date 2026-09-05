@@ -439,6 +439,117 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+# --- approval gate ------------------------------------------------------------
+
+HOOK="$ROOT/bin/fm-claude-approval-hook.sh"
+
+# Claude's real Notification payload, captured live on Claude Code 2.1.261. Both
+# observed notification types are kept as fixtures because the whole value of
+# this hook is telling them apart: only the permission one is an operator gate,
+# while the idle one fires whenever a finished turn leaves the composer waiting.
+NOTIFY_PERMISSION='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}'
+NOTIFY_IDLE='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}'
+POST_TOOL_USE='{"session_id":"s1","cwd":"/tmp/wt","hook_event_name":"PostToolUse","tool_name":"Bash"}'
+
+test_approval_gate_opens_on_permission_notification() {
+  local state gen
+  state=$(new_state_dir gate-open)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  fm_busy_approval_wait "$state" t1 claude && fail "an ordinary turn must not read as an approval gate"
+  printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  fm_busy_approval_wait "$state" t1 claude || fail "the permission notification must open the gate"
+  [ "$(fm_busy_classify tmux w1 claude t1 "$state")" = "busy claude-hook" ] \
+    || fail "the gate must stay a busy record: the turn is open, just parked"
+  pass "Claude's permission notification opens the approval gate without changing the busy verdict"
+}
+
+test_approval_gate_ignores_idle_notification() {
+  local state gen
+  state=$(new_state_dir gate-idle-notify)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  printf '%s' "$NOTIFY_IDLE" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  fm_busy_approval_wait "$state" t1 claude \
+    && fail "an idle-prompt notification is not an operator gate"
+  pass "the idle-prompt notification never opens the approval gate"
+}
+
+test_approval_gate_closed_by_tool_that_ran() {
+  local state gen seq_before seq_after
+  state=$(new_state_dir gate-close)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  seq_before=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
+  printf '%s' "$POST_TOOL_USE" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  seq_after=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
+  [ "$seq_before" = "$seq_after" ] \
+    || fail "PostToolUse must not write while no gate is open, it fires on every tool call"
+  printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen "$gen"
+  fm_busy_approval_wait "$state" t1 claude || fail "gate did not open"
+  printf '%s' "$POST_TOOL_USE" | "$HOOK" "$state" t1 --gen "$gen" || fail "hook exited non-zero"
+  fm_busy_approval_wait "$state" t1 claude && fail "a tool that ran proves the gate was answered"
+  [ "$(fm_busy_classify tmux w1 claude t1 "$state")" = "busy claude-hook" ] \
+    || fail "clearing the gate must leave the turn busy, not idle"
+  pass "a tool that actually ran closes the gate, and PostToolUse is a no-op otherwise"
+}
+
+test_approval_gate_closed_by_turn_end() {
+  local state gen
+  state=$(new_state_dir gate-stop)
+  gen=$("$EV" arm "$state" t1)
+  printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen "$gen"
+  fm_busy_approval_wait "$state" t1 claude || fail "gate did not open"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  fm_busy_approval_wait "$state" t1 claude && fail "an ended turn cannot still be at a gate"
+  pass "the turn's own end closes the approval gate"
+}
+
+test_approval_gate_refuses_untrusted_and_stale_records() {
+  local state gen
+  state=$(new_state_dir gate-trust)
+  gen=$("$EV" arm "$state" t1)
+  printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen "$gen"
+  fm_busy_approval_wait "$state" t1 claude || fail "gate did not open"
+  fm_busy_approval_wait "$state" t1 opencode \
+    && fail "claude-hook must not open a gate on another adapter's task"
+  printf '%s' "g-other" > "$state/t1.busy-gen"
+  fm_busy_approval_wait "$state" t1 claude \
+    && fail "a record from an outlived incarnation must not claim a gate"
+  printf 'garbage\n' > "$state/t1.busy-state"
+  fm_busy_approval_wait "$state" t1 claude && fail "a malformed record must not claim a gate"
+  pass "the gate is claimed only from a trusted, current, well-formed record"
+}
+
+test_approval_hook_stale_gen_refused_silently() {
+  local state gen out
+  state=$(new_state_dir gate-stale-gen)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 --gen g-outlived 2>&1) \
+    || fail "the hook must exit 0 even when its event is refused"
+  [ -z "$out" ] || fail "the hook must stay silent so nothing feeds back into the turn, got '$out'"
+  fm_busy_approval_wait "$state" t1 claude \
+    && fail "an outlived incarnation must not open a gate"
+  pass "an outlived hook is refused silently and opens no gate"
+}
+
+test_approval_hook_tolerates_unusable_input() {
+  local state gen out
+  state=$(new_state_dir gate-bad-input)
+  gen=$("$EV" arm "$state" t1)
+  out=$(printf '' | "$HOOK" "$state" t1 --gen "$gen" 2>&1) || fail "empty payload must exit 0"
+  [ -z "$out" ] || fail "empty payload must stay silent, got '$out'"
+  out=$(printf 'not json at all' | "$HOOK" "$state" t1 --gen "$gen" 2>&1) \
+    || fail "unparseable payload must exit 0"
+  [ -z "$out" ] || fail "unparseable payload must stay silent, got '$out'"
+  out=$(printf '%s' "$NOTIFY_PERMISSION" | "$HOOK" "$state" t1 2>&1) \
+    || fail "a missing gen must exit 0"
+  fm_busy_approval_wait "$state" t1 claude \
+    && fail "no gate may be opened from an unusable invocation"
+  pass "an unusable payload or invocation leaves the record untouched and exits 0"
+}
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -461,5 +572,12 @@ test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
+test_approval_gate_opens_on_permission_notification
+test_approval_gate_ignores_idle_notification
+test_approval_gate_closed_by_tool_that_ran
+test_approval_gate_closed_by_turn_end
+test_approval_gate_refuses_untrusted_and_stale_records
+test_approval_hook_stale_gen_refused_silently
+test_approval_hook_tolerates_unusable_input
 
 echo "all fm-busy-state tests passed"

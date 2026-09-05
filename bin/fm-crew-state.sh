@@ -58,7 +58,10 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A busy pane whose turn is
+#      parked at an operator-only approval gate (fm_busy_approval_wait in
+#      bin/fm-busy-lib.sh) reports parked rather than working, because nothing
+#      advances there until a human answers the harness's own dialog.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -627,7 +630,19 @@ fi
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      # A turn parked at an operator-only approval gate is still an open turn,
+      # so the busy contract answers busy and is right to. It is not WORK
+      # though: nothing advances until a human answers a dialog firstmate's key
+      # plane cannot reach. Reporting it as parked - the same state a
+      # no-mistakes gate already uses - is what makes it visible, because
+      # bin/fm-classify-lib.sh reads this one line to decide whether a quiet
+      # pane may be absorbed as provably working, and only `working` may be.
+      if fm_busy_approval_wait "$STATE" "$ID" "$HARNESS"; then
+        emit parked pane "waiting on approval: the harness is holding at a permission prompt only an operator can answer"
+      fi
+      emit working pane "harness busy (${BUSY_VERDICT#* })"
+      ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac

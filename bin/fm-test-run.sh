@@ -273,6 +273,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-approval-notify-live-e2e.test.sh|\
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
@@ -566,6 +567,7 @@ tests/fm-calm-pi-extension.test.sh 256
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
+tests/fm-claude-approval-notify-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm.test.sh 60709
 tests/fm-cmux-claude-composer-live-e2e.test.sh 23
@@ -1354,6 +1356,13 @@ families_for_changed_path() {
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-claude-approval-hook.sh)
+      # Whether Claude still publishes its permission gate at all is a fact only
+      # a real session can answer, so the live guard is selected alongside the
+      # portable contract suites.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit

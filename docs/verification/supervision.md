@@ -222,13 +222,36 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+### Claude approval gate, 2026-09-05
+
+Claude's hook-owned busy source opens on `UserPromptSubmit` and closes on `Stop`, so a turn that stops at Claude's own tool-permission dialog fires no closing hook and keeps classifying `busy`.
+Reproduced on Claude Code 2.1.261 in an isolated tmux pane wired exactly as `fm-spawn` writes the hooks: with the dialog on screen, `state/<id>.busy-state` read `state=busy source=claude-hook event=user-prompt-submit` and `bin/fm-crew-state.sh` reported `state: working`, which is the verdict [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) reads to absorb a quiet pane as provably working.
+
+Claude publishes the gate itself as a structured `Notification` payload, which is what [`bin/fm-claude-approval-hook.sh`](../../bin/fm-claude-approval-hook.sh) consumes.
+Both observed notification types on 2.1.261, captured from a live pane:
+
+```
+{"hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}
+{"hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}
+```
+
+Only the first is an operator gate.
+Hook order for one permission-gated tool call was `PreToolUse` (1788631174), then `Notification` (1788631180), then `PostToolUse` (1788631207), so `PreToolUse` runs before the dialog and cannot close it, and `PostToolUse` is the earliest available proof that the gate was answered.
+With the adapter wired, the same pane read `state: parked · source: pane · waiting on approval` at the dialog and `state: working · source: pane · harness busy (claude-hook)` once the approved tool had run.
+
+The gate therefore closes at the end of the approved tool call rather than at the keystroke that answered it, because Claude emits no hook for the answer itself.
+That window is bounded by the tool's own duration and always closes, on `PostToolUse` or on the turn's own `Stop`, and it over-reports rather than under-reports.
+
 Deterministic entry points:
 
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+FM_CLAUDE_APPROVAL_DRIFT=1 tests/fm-claude-approval-notify-live-e2e.test.sh
 ```
+
+The last one is the opt-in guard that refreshes the vendor-payload claim above; run it after a Claude upgrade.
 
 ## Turn-end guard
 
