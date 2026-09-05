@@ -459,7 +459,7 @@ test_spawn_split_and_inherit() {
   printf '{"default":{"harness":"claude","model":"haiku","effort":"low"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
-  printf 'zellij\n' > "$w/home/config/backend"
+  printf 'herdr\n' > "$w/home/config/backend"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -472,8 +472,8 @@ test_spawn_split_and_inherit() {
     || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude","model":"haiku","effort":"low"}}' ] \
     || fail "split: home crew-dispatch.json not inherited"
-  [ "$(cat "$sm/config/backend" 2>/dev/null)" = zellij ] \
-    || fail "split: home backend not inherited as zellij"
+  [ "$(cat "$sm/config/backend" 2>/dev/null)" = herdr ] \
+    || fail "split: home backend not inherited as herdr"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"

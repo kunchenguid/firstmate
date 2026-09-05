@@ -114,7 +114,6 @@ init_changed_fixture_repo() {
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
-    fm-backend.test.sh \
     fm-control-herdr-smoke.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
