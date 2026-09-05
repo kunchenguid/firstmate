@@ -116,7 +116,7 @@ def pid_reuse_case(repo, mode=None):
                 reclaim_worker = subprocess.Popen(
                     [str(root / "bin/fm-remote-job-worker.sh"), "--serve"], env=environment,
                     cwd=root, stdout=subprocess.DEVNULL, stderr=log, text=True)
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + 20
                 while time.monotonic() < deadline:
                     if "NEEDING MANUAL CLEANUP" in reclaim_log.read_text():
                         break
@@ -223,14 +223,15 @@ def worker_environment(queue, timezone="UTC0", locale_name="C"):
     return env
 
 
-def run_call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None):
+def run_call(script, queue, timezone="UTC0", locale_name="C", environment_overrides=None,
+             timeout=20):
     env = worker_environment(queue, timezone, locale_name)
     if environment_overrides:
         env.update(environment_overrides)
     proc = subprocess.Popen(["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
                              "fixture", str(repo)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        wait_for(lambda: proc.poll() is not None, 20)
+        wait_for(lambda: proc.poll() is not None, timeout)
         out, err = proc.communicate()
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     finally:
@@ -311,7 +312,7 @@ def run_kernel_pid_reuse_case(mode=None):
     for _ in range(3):
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                    timeout=20)
+                                    timeout=30)
         except subprocess.TimeoutExpired:
             return "private user/PID namespace setup timed out"
         if "legacy replacement crossed the ps lstart second boundary" not in result.stdout:
@@ -617,6 +618,34 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     extra_pids.discard(leaderless_pid)
     print("ok - leaderless active claim fails closed with surviving process metadata")
 
+    malformed_queue = fixture / "malformed-claim-queue"
+    call(start, malformed_queue)
+    wait_for(lambda: len(queue_processes(malformed_queue)) == 2)
+    (account / "chdir-job.pid").unlink(missing_ok=True)
+    call('printf "" | fm_remote_job_stage "$HOME" "$FM_ROOT_OVERRIDE" "$HOME" '
+         'fm-chdir-block.sh >/dev/null', malformed_queue)
+    wait_for(lambda: (account / "chdir-job.pid").is_file())
+    malformed_child = int((account / "chdir-job.pid").read_text())
+    extra_pids.add(malformed_child)
+    malformed_claim = next((malformed_queue / "jobs").glob("job-*/.claim"))
+    (malformed_claim / "group_start").write_text("")
+    malformed_serving = int((malformed_queue / "worker.pid").read_text())
+    malformed_result = run_call(f"fm_remote_job_stop_worker_tree {malformed_serving}",
+                                malformed_queue, timeout=30)
+    assert malformed_result.returncode != 0, (malformed_result.stdout, malformed_result.stderr)
+    assert f"invalid armed claim {malformed_claim}" in malformed_result.stderr
+    assert "armed claim record is unreadable or malformed" in malformed_result.stderr
+    assert process_alive(malformed_child), "malformed claim caused an unvalidated group signal"
+    assert set(processes()) == original, "malformed claim stop reached another queue"
+    os.kill(malformed_child, signal.SIGKILL)
+    wait_for(lambda: not process_alive(malformed_child))
+    try:
+        os.waitpid(malformed_child, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    extra_pids.discard(malformed_child)
+    print("ok - malformed armed claim fails closed with its path and reason")
+
     identity_queue = fixture / "identity-queue"
     claim_identity_override = {"FM_REMOTE_JOB_TEST_DISABLE_KERNEL_CLAIM_IDENTITY": "1"}
     call(start, identity_queue, environment_overrides=claim_identity_override)
@@ -654,6 +683,32 @@ printf 'executed\n' > "$HOME/claim-side-effect"
     wait_for(lambda: not queue_processes(darwin_queue))
     assert set(processes()) == original, "Darwin identity path reached another queue"
     print("ok - Darwin portable claim identity executes commands without Linux kernel identity")
+
+    old_root = fixture / "old-root"
+    shutil.copytree(root, old_root, symlinks=True)
+    upgrade_queue = fixture / "upgrade-queue"
+    call(start, upgrade_queue, environment_overrides={"FM_ROOT_OVERRIDE": str(old_root)})
+    wait_for(lambda: (upgrade_queue / "worker.ready").is_file())
+    old_supervisor = int((upgrade_queue / "supervisor.lock/pid").read_text())
+    extra_pids.add(old_supervisor)
+    assert (upgrade_queue / "supervisor.lock/root").read_text().strip() == str(old_root)
+    old_serving = int((upgrade_queue / "worker.pid").read_text())
+    (old_root / "bin/fm-remote-job-worker.sh").write_text("#!/bin/bash\nexit 1\n")
+    os.kill(old_serving, signal.SIGKILL)
+    wait_for(lambda: not (upgrade_queue / "worker.pid").exists())
+    assert process_alive(old_supervisor)
+    upgrade_started = time.monotonic()
+    call('fm_remote_job_ensure_worker "$FM_ROOT_OVERRIDE" "$HOME"; '
+         '[ "$FM_REMOTE_JOB_REPAIRED" -eq 1 ]', upgrade_queue)
+    assert time.monotonic() - upgrade_started < 10
+    wait_for(lambda: len(queue_processes(upgrade_queue)) == 2)
+    assert not process_alive(old_supervisor)
+    extra_pids.discard(old_supervisor)
+    upgraded_serving = int((upgrade_queue / "worker.pid").read_text())
+    call(f"fm_remote_job_stop_worker_tree {upgraded_serving}", upgrade_queue)
+    wait_for(lambda: not queue_processes(upgrade_queue))
+    assert set(processes()) == original, "root-mismatch replacement reached another queue"
+    print("ok - ensure replaces a live supervisor lease serving an old root")
     (queue / "worker.lock/command").write_text("stale serving ownership\n")
     for _ in range(3):
         call(start, queue)

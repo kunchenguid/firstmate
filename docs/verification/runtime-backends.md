@@ -991,6 +991,7 @@ The same private-namespace race replaces a pre-change active-claim leader while 
 On Linux, only kernel start identities authorize active-claim group signals, including replacement-worker reclaim; legacy claims receive only individually scope-checked signals and manual-cleanup reporting, while worker locks retain legacy identity compatibility.
 Darwin continues to create and execute claims with the supported portable process identity when Linux kernel identity is unavailable.
 When a recorded active-claim leader is gone but its execution group survives, cleanup individually signals only fully scoped processes, reports every remaining group member with PID, kernel start identity, and working directory, and fails for manual cleanup.
+An armed running claim whose ownership record is unreadable or malformed is retained as unsafe state, restricts cleanup to individually scope-validated signals, and fails with the claim path and validation reason.
 New Linux claims require a kernel start identity before the waiting child is armed, so an identity inventory failure returns 125 without executing the staged command.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
@@ -999,6 +1000,7 @@ The legacy identity regression probes installed locales for two that render the 
 This host exposed only `C`, `C.utf8`, and `POSIX`, whose `ps lstart` renderings were identical, so only the locale-only case skipped here.
 The worker-stop regression runs a tracked job that changes its working directory to the account home, then proves its active claim PID and kernel start identity stop it without reaching another queue or an unrelated process.
 The regression asserts both termination and absence of respawns after isolated and same-group stops, and it verifies that a live supervisor lease cannot mask quarantined serving ownership.
+The Linux supervisor lease records its canonical code root before publishing its owner PID, and ensure replaces an exact live lease whose root is missing, unreadable, or different from the requested root.
 
 ```sh
 bin/fm-test-run.sh --jobs 1 tests/fm-remote-job-orphan-reap.test.sh tests/fm-on.test.sh tests/fm-remote-doctor.test.sh
@@ -1011,8 +1013,10 @@ ok - legacy active claim reports manual cleanup without signalling a recycled gr
 ok - replacement-worker reclaim preserves a legacy recycled group
 ok - active claim identity stops a job descendant after it changes directory outside the root
 ok - leaderless active claim fails closed with surviving process metadata
+ok - malformed armed claim fails closed with its path and reason
 ok - missing kernel claim identity prevents command side effects
 ok - Darwin portable claim identity executes commands without Linux kernel identity
+ok - ensure replaces a live supervisor lease serving an old root
 ok - zombie serving ownership recovers its scoped supervisor without respawn
 ```
 

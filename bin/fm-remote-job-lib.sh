@@ -1120,6 +1120,31 @@ fm_remote_job_active_claim_snapshot() { # <state>
   done
 }
 
+fm_remote_job_invalid_armed_claim_snapshot() { # <state>
+  local state=$1 job claim record
+  for job in "$state"/jobs/job-*; do
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    [ "$(fm_remote_job_read_state "$job" 2>/dev/null || true)" = running ] || continue
+    claim="$job/.claim"
+    [ -e "$claim/armed" ] || [ -L "$claim/armed" ] || continue
+    record=$(fm_remote_job_claim_record "$job" "$state" 2>/dev/null || true)
+    [ -z "$record" ] || continue
+    printf '%s\t%s\n' "$claim" 'armed claim record is unreadable or malformed'
+  done
+}
+
+fm_remote_job_invalid_claim_snapshot_merge() { # <existing> <additional>
+  printf '%s\n%s\n' "$1" "$2" | awk -F '\t' 'NF == 2 && !seen[$0]++'
+}
+
+fm_remote_job_report_invalid_claims() { # <snapshot>
+  local snapshot=$1 claim reason
+  while IFS=$'\t' read -r claim reason; do
+    [ -n "$claim" ] && [ -n "$reason" ] || continue
+    printf 'remote-job: NEEDING MANUAL CLEANUP: invalid armed claim %s: %s\n' "$claim" "$reason" >&2
+  done <<< "$snapshot"
+}
+
 fm_remote_job_claim_snapshot_merge() { # <existing> <additional>
   printf '%s\n%s\n' "$1" "$2" |
     awk -F '\t' 'NF == 5 && !seen[$1 FS $2]++'
@@ -1222,6 +1247,16 @@ fm_remote_job_snapshot_has_live_identity() { # <snapshot>
   return 1
 }
 
+fm_remote_job_snapshot_has_scoped_identity() { # <snapshot> <root> <state>
+  local snapshot=$1 root=$2 state=$3 pid recorded_start recorded_group identity
+  while IFS=$'\t' read -r pid recorded_start recorded_group; do
+    [ -n "$pid" ] && [ -n "$recorded_start" ] && [ -n "$recorded_group" ] || continue
+    identity=$(fm_remote_job_scoped_process_identity "$pid" "$root" "$state" 2>/dev/null || true)
+    [ "$identity" != "$recorded_start"$'\t'"$recorded_group" ] || return 0
+  done <<< "$snapshot"
+  return 1
+}
+
 fm_remote_job_snapshot_group_has_identity() { # <snapshot> <group> <root> <state>
   local snapshot=$1 group=$2 root=$3 state=$4 pid recorded_start recorded_group identity
   while IFS=$'\t' read -r pid recorded_start recorded_group; do
@@ -1292,7 +1327,8 @@ fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT
 }
 
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 root state signal current known='' claim_current claim_known='' legacy_groups i actual_start recorded_start
+  local pid=$1 root state signal current known='' claim_current claim_known='' legacy_groups
+  local invalid_current invalid_known='' current_groups i actual_start recorded_start
   local snapshot_waited=0 snapshot_fifo=${FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO:-}
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
@@ -1304,7 +1340,14 @@ fm_remote_job_stop_worker_tree() { # <pid>
       known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
       claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
       claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+      invalid_current=$(fm_remote_job_invalid_armed_claim_snapshot "$state") || return 1
+      invalid_known=$(fm_remote_job_invalid_claim_snapshot_merge "$invalid_known" "$invalid_current") || return 1
       legacy_groups=$(fm_remote_job_claim_snapshot_unsafe_groups "$claim_known") || return 1
+      if [ -n "$invalid_known" ]; then
+        current_groups=$(printf '%s\n' "$current" |
+          awk -F '\t' 'NF == 3 && !seen[$3]++ { groups = groups separator $3; separator = " " } END { print groups }')
+        legacy_groups="${legacy_groups:+$legacy_groups }$current_groups"
+      fi
       if [ "$snapshot_waited" -eq 0 ] && [ -n "$snapshot_fifo" ]; then
         case "$snapshot_fifo" in /*) ;; *) return 1 ;; esac
         [ -p "$snapshot_fifo" ] || return 1
@@ -1319,7 +1362,16 @@ fm_remote_job_stop_worker_tree() { # <pid>
         known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
         claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
         claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
-        if ! fm_remote_job_snapshot_has_live_identity "$known" &&
+        invalid_current=$(fm_remote_job_invalid_armed_claim_snapshot "$state") || return 1
+        invalid_known=$(fm_remote_job_invalid_claim_snapshot_merge "$invalid_known" "$invalid_current") || return 1
+        if [ -n "$invalid_known" ] &&
+          ! fm_remote_job_snapshot_has_scoped_identity "$current" "$root" "$state" &&
+          ! fm_remote_job_claim_snapshot_has_live_identity "$claim_known"; then
+          fm_remote_job_report_invalid_claims "$invalid_known"
+          return 1
+        fi
+        if [ -z "$invalid_known" ] &&
+          ! fm_remote_job_snapshot_has_live_identity "$known" &&
           ! fm_remote_job_claim_snapshot_has_live_identity "$claim_known"; then
           if fm_remote_job_report_unsafe_claim_survivors "$claim_known"; then
             return 1
@@ -1375,6 +1427,15 @@ fm_remote_job_lock_owner_matches_process() {
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
   FM_REMOTE_JOB_OWNER_PID=$pid
+}
+
+fm_remote_job_supervisor_lease_root_matches() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 lock recorded_root
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock="$FM_REMOTE_JOB_STATE/supervisor.lock"
+  fm_remote_job_lock_owner_matches_process "$account_home" "$lock" || return 1
+  recorded_root=$(fm_remote_job_read_single_line "$lock/root" 8192) || return 1
+  [ "$recorded_root" = "$root" ]
 }
 
 fm_remote_job_worker_owned_alive() {
@@ -1526,9 +1587,14 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
   elif fm_remote_job_lock_owner_matches_process "$account_home" "$FM_REMOTE_JOB_STATE/supervisor.lock"; then
-    # The supervisor can be between serving children or publishing readiness.
-    # ensure_worker waits for readiness separately; it must not launch a rival.
-    return 0
+    pid=$FM_REMOTE_JOB_OWNER_PID
+    if fm_remote_job_supervisor_lease_root_matches "$root" "$account_home"; then return 0; fi
+    fm_remote_job_stop_worker_tree "$pid" || {
+      FM_REMOTE_JOB_ERROR="stale remote job supervisor did not stop safely"
+      return 1
+    }
+    wait "$pid" 2>/dev/null || true
+    FM_REMOTE_JOB_REPAIRED=1
   fi
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own

@@ -109,20 +109,26 @@ worker_publish_identity() {
 }
 
 worker_publish_lock_owner() {
-  local pid start command pid_tmp start_tmp command_tmp
+  local pid start command pid_tmp start_tmp command_tmp root_tmp=
   pid=${BASHPID:-$$}
   start=$(fm_remote_job_process_start "$pid") || return 1
   command=$(fm_remote_job_process_command "$pid") || return 1
   pid_tmp=$(umask 077; mktemp "$WORKER_LOCK/.pid.XXXXXX") || return 1
   start_tmp=$(umask 077; mktemp "$WORKER_LOCK/.start.XXXXXX") || { rm -f -- "$pid_tmp"; return 1; }
   command_tmp=$(umask 077; mktemp "$WORKER_LOCK/.command.XXXXXX") || { rm -f -- "$pid_tmp" "$start_tmp"; return 1; }
-  printf '%s\n' "$pid" > "$pid_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
-  printf '%s\n' "$start" > "$start_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
-  printf '%s\n' "$command" > "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
-  chmod 600 "$pid_tmp" "$start_tmp" "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
-  mv -f -- "$command_tmp" "$WORKER_LOCK/command" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
-  mv -f -- "$start_tmp" "$WORKER_LOCK/start" || { rm -f -- "$pid_tmp" "$start_tmp" "$WORKER_LOCK/command"; return 1; }
-  mv -f -- "$pid_tmp" "$WORKER_LOCK/pid" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command"; return 1; }
+  case "$WORKER_LOCK" in
+    */supervisor.lock) root_tmp=$(umask 077; mktemp "$WORKER_LOCK/.root.XXXXXX") || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; } ;;
+  esac
+  printf '%s\n' "$pid" > "$pid_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  printf '%s\n' "$start" > "$start_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  printf '%s\n' "$command" > "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  [ -z "$root_tmp" ] || printf '%s\n' "$FM_ROOT" > "$root_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  chmod 600 "$pid_tmp" "$start_tmp" "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  [ -z "$root_tmp" ] || chmod 600 "$root_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  mv -f -- "$command_tmp" "$WORKER_LOCK/command" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp" "$root_tmp"; return 1; }
+  mv -f -- "$start_tmp" "$WORKER_LOCK/start" || { rm -f -- "$pid_tmp" "$start_tmp" "$WORKER_LOCK/command" "$root_tmp"; return 1; }
+  [ -z "$root_tmp" ] || mv -f -- "$root_tmp" "$WORKER_LOCK/root" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command" "$root_tmp"; return 1; }
+  mv -f -- "$pid_tmp" "$WORKER_LOCK/pid" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command" "$WORKER_LOCK/root"; return 1; }
 }
 
 worker_lock_recent() {
@@ -176,8 +182,9 @@ worker_acquire_lock() {
       sleep 0.1
       continue
     fi
-    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
-    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
+      [ ! -L "$WORKER_LOCK/root" ] || return 1
+    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" "$WORKER_LOCK/root" || return 1
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
@@ -1100,7 +1107,7 @@ worker_supervisor_cleanup() {
   owner=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
   [ "$owner" = "${BASHPID:-$$}" ] || return 0
   # This lease owns the supervisor, not the serving child's readiness files.
-  rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command"
+  rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" "$WORKER_LOCK/root"
   rmdir "$WORKER_LOCK"
 }
 
