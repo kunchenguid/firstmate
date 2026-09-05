@@ -387,8 +387,15 @@ The report is the only thing that survives, so anything worth keeping must be in
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   A drive-call error or a harness command timeout is NOT a daemon error. The daemon accepts
+   \`respond\` immediately and runs the round in the background, so a call that timed out or was
+   killed was only ever waiting for a read - the run is still working.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`; if the run is still running or fixing, reattach and keep going.
+   Append \`blocked: {the daemon error}\` and stop only when the daemon socket refuses connections
+   or the run record is failed with a daemon error.
 
 $INBOX_SECTION
 
@@ -469,8 +476,15 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   A drive-call error or a harness command timeout is NOT a daemon error. The daemon accepts
+   \`respond\` immediately and runs the round in the background, so a call that timed out or was
+   killed was only ever waiting for a read - the run is still working.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`; if the run is still running or fixing, reattach and keep going.
+   Append \`blocked: {the daemon error}\` and stop only when the daemon socket refuses connections
+   or the run record is failed with a daemon error.
 
 $INBOX_SECTION
 
