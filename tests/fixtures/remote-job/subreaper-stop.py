@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the shell worker lifecycle with a real Linux child subreaper."""
 import ctypes
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -11,25 +12,95 @@ import tempfile
 import threading
 import time
 
-if len(sys.argv) > 1 and sys.argv[1] == "--reuse-group":
-    parent_group = int(sys.argv[2])
-    owned_path = Path(sys.argv[3])
-    trigger_path = Path(sys.argv[4])
-    reused_path = Path(sys.argv[5])
-    outside_root = sys.argv[6]
-    os.setpgid(0, 0)
-    owned_path.write_text(f"{os.getpid()} {os.getpgrp()}\n")
-    while not trigger_path.exists():
-        time.sleep(0.01)
-    os.setpgid(0, parent_group)
-    os.chdir(outside_root)
-    os.execve(sys.executable, [sys.executable, __file__, "--reused-group", str(reused_path)], {})
+def process_start(pid):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return f"linux:{boot}:{fields[19]}"
 
-if len(sys.argv) > 1 and sys.argv[1] == "--reused-group":
-    os.setpgid(0, 0)
-    Path(sys.argv[2]).write_text(f"{os.getpid()} {os.getpgrp()}\n")
-    while True:
-        signal.pause()
+
+def stop_process(process):
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+
+def pid_reuse_case(repo):
+    if os.getpid() != 1:
+        print("private PID namespace did not make the fixture process PID 1")
+        return 77
+    last_pid = Path("/proc/sys/kernel/ns_last_pid")
+    if not last_pid.exists() or not os.access(last_pid, os.W_OK):
+        print("private PID namespace does not expose writable /proc/sys/kernel/ns_last_pid")
+        return 77
+    print("FM_PID_REUSE_READY", flush=True)
+    fixture = Path(tempfile.mkdtemp(prefix="fm-pid-reuse-"))
+    root = fixture / "root"
+    state = fixture / "state"
+    account = fixture / "account"
+    outside = fixture / "outside"
+    fifo = fixture / "snapshot.fifo"
+    for path in (root / "bin", state, account, outside):
+        path.mkdir(parents=True, exist_ok=True)
+    (root / "AGENTS.md").write_text("fixture\n")
+    (root / "bin/fm-remote-job-worker.sh").write_text("#!/bin/bash\n")
+    os.mkfifo(fifo)
+    environment = dict(os.environ, HOME=str(account), FM_ROOT_OVERRIDE=str(root),
+                       FM_REMOTE_JOB_STATE_ROOT=str(state),
+                       FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO=str(fifo))
+    leader = stop = unrelated = None
+    release_fd = None
+    try:
+        leader = subprocess.Popen(["sleep", "300"], env=environment, cwd=root,
+                                  start_new_session=True)
+        leader_start = process_start(leader.pid)
+        assert os.getpgid(leader.pid) == leader.pid
+        stop = subprocess.Popen(
+            ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"; fm_remote_job_stop_worker_tree "$2"',
+             "fixture", str(repo), str(leader.pid)],
+            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                release_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                break
+            except OSError as error:
+                if error.errno != errno.ENXIO:
+                    raise
+                if stop.poll() is not None:
+                    raise AssertionError(stop.communicate())
+                time.sleep(0.01)
+        assert release_fd is not None, "stop did not reach the snapshot boundary"
+        leader.terminate()
+        leader.wait(timeout=3)
+        time.sleep(0.05)
+        last_pid.write_text(str(leader.pid - 1))
+        unrelated = subprocess.Popen(["sleep", "300"], cwd=outside, start_new_session=True)
+        assert unrelated.pid == leader.pid
+        assert os.getpgid(unrelated.pid) == leader.pid
+        assert process_start(unrelated.pid) != leader_start
+        os.write(release_fd, b"release\n")
+        os.close(release_fd)
+        release_fd = None
+        stdout, stderr = stop.communicate(timeout=10)
+        assert stop.returncode == 0, (stdout, stderr)
+        assert unrelated.poll() is None, "stop signalled the unrelated recycled identity"
+        return 0
+    finally:
+        if release_fd is not None:
+            os.close(release_fd)
+        stop_process(stop)
+        stop_process(unrelated)
+        stop_process(leader)
+        shutil.rmtree(fixture)
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--pid-reuse-case":
+    sys.exit(pid_reuse_case(Path(sys.argv[2]).resolve()))
 
 repo = Path(sys.argv[1]).resolve()
 if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
@@ -138,6 +209,56 @@ def process_alive(pid):
         return process_state(pid) != "Z"
     except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+def identity_mismatch_unit_case(queue):
+    candidate = subprocess.Popen(["sleep", "300"], env=worker_environment(queue), cwd=root,
+                                 start_new_session=True)
+    extra_pids.add(candidate.pid)
+    signal_log = fixture / "identity-mismatch-signal"
+    try:
+        actual_start = process_start(candidate.pid)
+        prefix, boot, ticks = actual_start.split(":")
+        stale_start = f"{prefix}:{boot}:{max(0, int(ticks) - 1)}"
+        group = os.getpgid(candidate.pid)
+        snapshot = f"{candidate.pid}\t{stale_start}\t{group}"
+        script = '''
+actual=$(fm_remote_job_scoped_process_identity "$2" "$3" "$4") || exit 1
+[ "$actual" = "$5\t$6" ] || exit 1
+kill() { printf 'signal\n' > "$8"; }
+fm_remote_job_signal_scope_snapshot "$7" "$3" "$4" TERM
+[ ! -e "$8" ]
+'''
+        result = subprocess.run(
+            ["bash", "-c", '. "$1/bin/fm-remote-job-lib.sh"\n' + script,
+             "fixture", str(repo), str(candidate.pid), str(root), str(queue), actual_start,
+             str(group), snapshot, str(signal_log)],
+            env=worker_environment(queue), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=10)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert candidate.poll() is None
+    finally:
+        stop_process(candidate)
+        extra_pids.discard(candidate.pid)
+
+
+def run_kernel_pid_reuse_case():
+    unshare = shutil.which("unshare")
+    if not unshare:
+        return "unshare is unavailable"
+    command = [unshare, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc",
+               sys.executable, __file__, "--pid-reuse-case", str(repo)]
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                timeout=20)
+    except subprocess.TimeoutExpired:
+        return "private user/PID namespace setup timed out"
+    if result.returncode == 0:
+        return None
+    reason = (result.stdout.strip() or result.stderr.strip() or f"unshare exited {result.returncode}")
+    if result.returncode == 77 or "FM_PID_REUSE_READY" not in result.stdout.splitlines():
+        return reason
+    raise AssertionError((result.stdout, result.stderr))
 
 
 def queue_process_identity(pid, queue):
@@ -251,32 +372,13 @@ done
             direct.wait()
     print("ok - stop terminates a same-group supervisor without signalling the caller group")
 
-    call(start, queue)
-    wait_for(lambda: (queue / "worker.pid").is_file() and len(processes()) == 2)
-    anchor = int((queue / "worker.pid").read_text())
-    owned_path = fixture / "group-owned"
-    trigger_path = fixture / "group-reuse"
-    reused_path = fixture / "group-reused"
-    reuser = subprocess.Popen([sys.executable, __file__, "--reuse-group", str(os.getpgrp()),
-                               str(owned_path), str(trigger_path), str(reused_path), str(fixture)],
-                              env=worker_environment(queue), cwd=root)
-    try:
-        wait_for(owned_path.exists)
-        owned_pid, owned_group = map(int, owned_path.read_text().split())
-        assert owned_pid == reuser.pid and owned_group == reuser.pid
-        call(f'fm_remote_job_scoped_process_identity {reuser.pid} "$FM_ROOT_OVERRIDE" "$FM_REMOTE_JOB_STATE_ROOT" >/dev/null', queue)
-        trigger_path.touch()
-        wait_for(reused_path.exists)
-        reused_pid, reused_group = map(int, reused_path.read_text().split())
-        assert reused_pid == owned_pid and reused_group == owned_group
-        call(f"fm_remote_job_stop_worker_tree {anchor}", queue)
-        wait_for(lambda: not processes())
-        assert reuser.poll() is None, "stop signalled the unrelated reused group"
-    finally:
-        if reuser.poll() is None:
-            reuser.terminate()
-            reuser.wait()
-    print("ok - stop leaves a concretely dissolved and reused unrelated group untouched")
+    identity_mismatch_unit_case(queue)
+    print("ok - scope signalling skips a snapshot whose process start identity changed")
+    kernel_skip = run_kernel_pid_reuse_case()
+    if kernel_skip:
+        print(f"skip - kernel PID/PGID reuse race: {kernel_skip}")
+    else:
+        print("ok - stop leaves a kernel-recycled unrelated PID/PGID untouched")
 
     # The real supervisor lease must outlive damaged/stale serving ownership.
     for name in ("fm-remote-job-worker.sh", "fm-remote-job-lib.sh"):

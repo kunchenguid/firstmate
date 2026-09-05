@@ -985,7 +985,8 @@ Its long Nix-path case proves that the process inventory requests unlimited argu
 This is cleanup and host-portability evidence, not a repeat of every live backend scenario above.
 
 The Linux worker-stop regression uses an actual child subreaper, a leaderless worker process group, a directly backgrounded same-group supervisor, and independent restart supervisors from the same queue, plus a separate queue that must survive.
-It also dissolves a previously scoped process group, recreates the same numeric group with an unrelated process identity before stop, and verifies that cleanup leaves it untouched.
+It directly proves signalling skips a fully scoped snapshot whose recorded process start identity no longer matches.
+The exact kernel PID/PGID reuse race runs only when a private fixture user/PID namespace exposes writable `ns_last_pid`; it ran on this host and left the unrelated recycled identity alive.
 Stale serving-owner metadata reproduced multiple supervisors and a successful stop that left a sibling running before the fix.
 The supervisor now retains its own ownership lease across child restarts, and stop discovers verified process identities by executable or working directory, root, and queue rather than adoption parent or group number.
 The stop regression also freezes a validated supervisor, turns its recorded serving child into a zombie, resumes the supervisor during cleanup, and proves that lease-derived scope prevents both respawn and cross-queue signaling.

@@ -1230,6 +1230,7 @@ fm_remote_job_recorded_worker_scope() { # <pid>; sets FM_REMOTE_JOB_PROCESS_ROOT
 
 fm_remote_job_stop_worker_tree() { # <pid>
   local pid=$1 root state signal current known='' claim_current claim_known='' i actual_start recorded_start
+  local snapshot_waited=0 snapshot_fifo=${FM_REMOTE_JOB_TEST_STOP_SNAPSHOT_FIFO:-}
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   if fm_remote_job_process_scope "$pid" || fm_remote_job_recorded_worker_scope "$pid"; then
@@ -1240,6 +1241,12 @@ fm_remote_job_stop_worker_tree() { # <pid>
       known=$(fm_remote_job_snapshot_merge "$known" "$current") || return 1
       claim_current=$(fm_remote_job_active_claim_snapshot "$state") || return 1
       claim_known=$(fm_remote_job_claim_snapshot_merge "$claim_known" "$claim_current") || return 1
+      if [ "$snapshot_waited" -eq 0 ] && [ -n "$snapshot_fifo" ]; then
+        case "$snapshot_fifo" in /*) ;; *) return 1 ;; esac
+        [ -p "$snapshot_fifo" ] || return 1
+        IFS= read -r _ < "$snapshot_fifo" || return 1
+        snapshot_waited=1
+      fi
       [ -z "$current" ] || fm_remote_job_signal_scope_snapshot "$current" "$root" "$state" "$signal"
       [ -z "$claim_current" ] || fm_remote_job_signal_claim_snapshot "$claim_current" "$state" "$signal"
       i=0
