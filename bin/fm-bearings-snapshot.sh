@@ -394,7 +394,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
   | ([ .backlog.records[] | select(landed_record)
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+       | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
+          home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]

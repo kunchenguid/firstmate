@@ -1951,9 +1951,10 @@ test_teardown_never_closes_a_captain_held_task() {
 }
 
 test_retained_row_artifacts_survive_captain_answers() {
-  local home retained_id rejected_id rejected_local_id approved_id released_id local_id repo wt
+  local home retained_id precedence_id rejected_id rejected_local_id approved_id released_id local_id
+  local repo wt
   local local_repo local_wt
-  local rejected_pr approved_pr json show
+  local precedence_pr rejected_pr approved_pr json show
   home=$(make_home retained-row-artifacts)
   retained_id=sample-retained-report
   mkdir -p "$home/data/$retained_id"
@@ -1973,6 +1974,34 @@ test_retained_row_artifacts_survive_captain_answers() {
   printf 'Proceed with the report follow-up.\n' > "$home/report-answer.txt"
   run_captain "$home" answer "$retained_id" --decision-file "$home/report-answer.txt" >/dev/null \
     || fail "could not answer the retained report call"
+
+  precedence_id=sample-retained-report-pr-title
+  precedence_pr=https://github.com/sample/sample/pull/21
+  mkdir -p "$home/data/$precedence_id"
+  tasks_in "$home" add "$precedence_id" "Investigate $precedence_pr regression" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the report precedence fixture"
+  write_origin_meta "$home" "$precedence_id"
+  printf 'done: report complete\n' > "$home/state/$precedence_id.status"
+  printf '# Retained report with pull request context\n' \
+    > "$home/data/$precedence_id/report.md"
+  run_captain "$home" hold "$precedence_id" \
+    --reason "captain must choose the report follow-up" >/dev/null \
+    || fail "could not hold the report precedence fixture"
+  run_captain "$home" complete "$precedence_id" "$precedence_id" >/dev/null \
+    || fail "completion gate failed for the report precedence fixture"
+  run_teardown "$home" "$precedence_id" > "$home/precedence-teardown.out" \
+    2> "$home/precedence-teardown.err" \
+    || fail "report precedence cleanup failed: $(cat "$home/precedence-teardown.err")"
+  printf 'Proceed with the pull-request regression report.\n' \
+    > "$home/precedence-answer.txt"
+  run_captain "$home" answer "$precedence_id" \
+    --decision-file "$home/precedence-answer.txt" >/dev/null \
+    || fail "could not answer the report precedence call"
+  show=$(tasks_in "$home" show "$precedence_id" --full) \
+    || fail "the report precedence row disappeared"
+  assert_contains "$show" "state: done" "the report precedence answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the report precedence row lost its retained-scout evidence"
 
   rejected_id=sample-rejected-merge
   rejected_pr="https://github.com/sample/sample/pull/22"
@@ -2080,18 +2109,21 @@ test_retained_row_artifacts_survive_captain_answers() {
   json=$(run_bearings "$home") || fail "Bearings failed after retained delivery answers"
   printf '%s' "$json" | jq -e \
     --arg retained_id "$retained_id" --arg retained "data/$retained_id/report.md" \
+    --arg precedence_id "$precedence_id" \
+    --arg precedence "data/$precedence_id/report.md" \
     --arg rejected_id "$rejected_id" --arg rejected_local_id "$rejected_local_id" \
     --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
     --arg released "data/$released_id/report.md" '
       (.landed | any(.id == $retained_id and .artifact == $retained))
+        and (.landed | any(.id == $precedence_id and .artifact == $precedence))
         and (.landed | any(.id == $rejected_id) | not)
         and (.landed | any(.id == $rejected_local_id) | not)
         and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
         and (.landed | any(.id == $local_id))
         and (.landed | any(.id == $released_id and .artifact == $released))
     ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
-  pass "release and retention distinguish delivered work from rejected merge answers"
+  pass "release and scout report retention distinguish deliveries from rejected merge answers"
 }
 
 # Retention happens after destructive cleanup, through the same pending record

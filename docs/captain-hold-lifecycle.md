@@ -91,6 +91,7 @@ Recently Landed uses the shared selector in `bin/fm-landed-lib.sh`: a structured
 No legitimate merged pull request or local-only landing closes while it still carries `hold-kind: captain`, because merge approval releases the hold before cleanup records the landed artifact.
 A captain's rejection is therefore no longer recorded as if a merge had happened, even when the task title names a pull request or ends in `local main`.
 A completed report remains eligible when its row retains `hold-kind: captain`, because retained scout cleanup records the report before the captain answers its follow-up call.
+The recorded report remains the delivery for a still-held scout even when a pull-request URL in its title causes tasks-axi to label the close as merged, because a scout delivers its report rather than that linked pull request.
 Released pull requests, local-only landings, and reports remain eligible after cleanup closes them, while an answered captain question with no delivery artifact stays out.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 

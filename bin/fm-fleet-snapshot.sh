@@ -950,6 +950,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            kind:((.kind // null) | if . == null then null else trunc(40) end),
+            hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
@@ -1035,7 +1037,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
-        schema:"fm-secondmate-home-summary.v2",
+        schema:"fm-secondmate-home-summary.v3",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
         generated:$generated,
         generated_epoch:$generated_epoch,
@@ -1269,6 +1271,11 @@ summary_file_has_schema() {  # <file> <expected-home> <schema>
   rm -f -- "$captured"
 }
 
+summary_file_has_stale_schema() {  # <file> <expected-home>
+  summary_file_has_schema "$1" "$2" "fm-secondmate-home-summary.v1" \
+    || summary_file_has_schema "$1" "$2" "fm-secondmate-home-summary.v2"
+}
+
 summary_file_oversized() {  # <file>
   local bytes
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -1327,7 +1334,7 @@ prepare_remote_summary_collection() {  # <sampled-row-json-lines>
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
 length == 1 and (.[0] |
-  .schema == "fm-secondmate-home-summary.v2"
+  .schema == "fm-secondmate-home-summary.v3"
   and .hold_classifier_schema == "fm-captain-hold-buckets.v1"
   and .home == $home
   and (.generated | type) == "string"
@@ -1778,8 +1785,8 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
           summary_source='remote-ledger-cache'
           summary_freshness=cached
-        elif summary_file_has_schema "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" "fm-secondmate-home-summary.v1" \
-          || { [ -n "$cache_path" ] && summary_file_has_schema "$cache_path" "$home" "fm-secondmate-home-summary.v1"; }; then
+        elif summary_file_has_stale_schema "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" \
+          || { [ -n "$cache_path" ] && summary_file_has_stale_schema "$cache_path" "$home"; }; then
           summary_schema_stale=true
           reason="structured home ledger schema is stale; rerun the fleet update"
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
@@ -1791,7 +1798,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         fi
       elif summary_file_read "$home/state/home-summary.json" "$home" "$summary_file"; then
         summary_source='local-ledger'
-      elif summary_file_has_schema "$home/state/home-summary.json" "$home" "fm-secondmate-home-summary.v1"; then
+      elif summary_file_has_stale_schema "$home/state/home-summary.json" "$home"; then
         summary_schema_stale=true
         reason="structured home ledger schema is stale; rerun the fleet update"
       elif summary_file_oversized "$home/state/home-summary.json"; then

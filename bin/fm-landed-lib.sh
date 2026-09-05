@@ -20,21 +20,29 @@
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
 # whose artifact matches its merged, reported, or done completion verb is a
-# delivery whoever approved it. A captain question remains kind captain when it
-# closes, so it is never rendered as shipped work even when its text names an
-# artifact. Older kindless local-only completions cannot be distinguished from
-# answered calls and stay out; merged PRs and reported scouts remain distinct.
+# delivery whoever approved it. A retained scout is identified by its kind and
+# recorded report because its title links do not change what it delivers. A
+# captain question remains kind captain when it closes, so it is never rendered
+# as shipped work even when its text names an artifact. Older kindless local-only
+# completions cannot be distinguished from answered calls and stay out; merged
+# PRs and reported scouts remain distinct.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
+  def retained_scout_report:
+    .kind == "scout"
+    and .hold_kind == "captain"
+    and (.report_path // null) != null;
   def landed_artifact:
-    if .completion.verb == "merged" then (.pr_url // null)
+    if retained_scout_report then (.report_path // null)
+    elif .completion.verb == "merged" then (.pr_url // null)
     elif .completion.verb == "reported" then (.report_path // null)
     elif .completion.verb == "done" then (.local_note // null)
     else null
     end;
   def landed_delivery:
-    (.kind != "captain"
+    retained_scout_report
+    or (.kind != "captain"
       and .hold_kind != "captain"
       and .completion.verb == "merged"
       and (.pr_url // null) != null)
