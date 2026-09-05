@@ -892,8 +892,10 @@ fm_lock_try_acquire() {
 
   # Resolve this frame's identity BEFORE any lock can be created: a lock whose
   # recorded owner could not be resolved is worse than no lock, because the
-  # reclaim paths below compare against that recorded pid.
-  fm_current_pid current || return 1
+  # reclaim paths below compare against that recorded pid. Rc 2 is reserved for
+  # that unresolvable identity so a waiting caller can refuse instead of
+  # spinning against a condition that will never clear.
+  fm_current_pid current || return 2
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
@@ -988,8 +990,17 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 2 ]; then
+      printf 'error: lock owner identity is unavailable\n' >&2
+      exit 1
+    fi
     sleep 0.1
   done
 }

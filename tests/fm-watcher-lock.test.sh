@@ -1235,7 +1235,7 @@ test_frame_identity_is_per_subshell_and_stable() {
 }
 
 test_lock_acquisition_refuses_unobtainable_frame_identity() {
-  local dir state lockdir status owner_count
+  local dir state lockdir status owner_count bash_env grant_pid i blocked=0
   dir=$(make_case frame-identity-unavailable)
   state="$dir/state"
   lockdir="$state/.identity.lock"
@@ -1262,7 +1262,36 @@ test_lock_acquisition_refuses_unobtainable_frame_identity() {
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "identity failure created a lock"
   owner_count=$(find "$state" -maxdepth 1 -name '.identity.lock.owner.*' -print | wc -l | tr -d ' ')
   [ "$owner_count" -eq 0 ] || fail "identity failure left $owner_count owner directories"
-  pass "lock acquisition refuses an unavailable frame identity without reusing an inherited pid"
+
+  # The same identity failure, reached through a real executable rather than a
+  # sourced subshell: BASH_ENV applies the two conditions to the script and to
+  # every child bash it spawns, so the waiting path is exercised end to end.
+  bash_env="$dir/unset-bashpid"
+  printf 'unset BASHPID\nPATH=%s:$PATH\n' "$dir/stub" > "$bash_env"
+  printf 'sentinel\n' > "$state/.branch-eligible-rows"
+  BASH_ENV="$bash_env" FM_STATE_OVERRIDE="$state" \
+    bash "$ROOT/bin/fm-wake-grant.sh" activate "$$" identity-failure \
+    > "$dir/grant.out" 2>&1 &
+  grant_pid=$!
+  i=0
+  while [ "$i" -lt 30 ]; do
+    kill -0 "$grant_pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$grant_pid" 2>/dev/null && blocked=1
+  if [ "$blocked" -eq 1 ]; then
+    kill -TERM "$grant_pid" 2>/dev/null || true
+  fi
+  wait "$grant_pid" 2>/dev/null
+  status=$?
+  [ "$blocked" -eq 0 ] || fail "an executable lock caller hung when frame identity was unavailable"
+  [ "$status" -ne 0 ] || fail "an executable lock caller accepted an unavailable frame identity"
+  [ "$(cat "$state/.branch-eligible-rows")" = sentinel ] \
+    || fail "an executable lock caller entered its critical section after identity failure"
+  [ ! -e "$state/.branch-eligible-owner" ] \
+    || fail "an executable lock caller published state after identity failure"
+  pass "lock acquisition refuses unavailable frame identity through executable callers"
 }
 
 test_sibling_subshells_get_exclusive_lock_ownership() {
