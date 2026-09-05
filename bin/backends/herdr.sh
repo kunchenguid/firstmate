@@ -602,20 +602,6 @@ fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
   [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
 }
 
-fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
-  local session=$1 workspace_id=$2 out matches
-  out=$(fm_backend_herdr_cli "$session" workspace list 2>&1)
-  matches=$(printf '%s' "$out" | jq -r --arg workspace "$workspace_id" '
-    select((.result.workspaces | type) == "array")
-    | [.result.workspaces[] | select(.workspace_id == $workspace)] | length
-  ' 2>/dev/null) || matches=
-  case "$matches" in
-    0) printf 'dead' ;;
-    1) printf 'present' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>

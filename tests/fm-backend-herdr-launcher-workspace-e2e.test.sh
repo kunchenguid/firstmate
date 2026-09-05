@@ -151,8 +151,6 @@ LAB_SOCKET=$(lab session list --json 2>/dev/null \
 
 # --- scratch world ----------------------------------------------------------
 
-# Presentation spaces are on by default, so every home that asserts the FLAT
-# layout below opts out explicitly rather than depending on that default.
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/config"
 SM_ID="lwsm1"
