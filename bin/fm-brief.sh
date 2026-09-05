@@ -388,7 +388,8 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # owner, shared with bin/fm-promote.sh) so it survives with no other file
 # loaded. Firstmate fills the {PREP} placeholder at intake, on the same line
 # as delivery mode and test scope (AGENTS.md section 11); bin/fm-spawn.sh
-# refuses a ship spawn whose brief carries no "Prep:" line at all.
+# refuses a ship spawn whose brief carries no "Prep:" line, whose Prep line
+# is the unfilled "Tier 1" placeholder, or whose Prep line names no tier.
 PROOF_BAR_SECTION=$(fm_proof_bar_section)
 
 if [ "$KIND" = scout ]; then

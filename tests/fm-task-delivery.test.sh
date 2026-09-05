@@ -74,6 +74,16 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   printf '%s\n' "$content" > "$file"
 }
 
+# fm-brief.sh scaffolds an unfilled "Prep: {PREP}" placeholder; fill it with a
+# real tier for fixtures that spawn a ship brief but are not themselves
+# exercising Prep-line validation.
+fill_brief_prep() {  # <file>
+  local file=$1 content
+  content=$(cat "$file")
+  content=${content//'Prep: {PREP}'/'Prep: Tier 0 - test fixture, not a real change'}
+  printf '%s\n' "$content" > "$file"
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -111,6 +121,111 @@ unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
 conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
 ROWS
   pass "fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created"
+}
+
+# A ship spawn must not just require a "Prep:" line but validate what it says:
+# a missing line, the unfilled "Tier 1" scaffold placeholder, and a line naming
+# no recognized tier are all refused, while a real Tier 0/1/2 declaration -
+# bare or carrying reasoning/site-list text - passes.
+test_ship_spawn_validates_the_prep_line() {
+  local rec home proj fakebin id out status tier n
+  rec=$(make_home prep)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=prep-missing
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the Prep line check.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a ship brief with no Prep line should be refused"
+  assert_contains "$out" 'has no "Prep:" line' \
+    "a missing Prep line was not refused with the expected error"
+  assert_absent "$home/state/$id.meta" "missing-Prep spawn wrote task metadata"
+
+  id=prep-unfilled-placeholder
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the Prep line check.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+Prep: Tier 1
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the unfilled \"Prep: Tier 1\" placeholder should be refused"
+  assert_contains "$out" "unfilled placeholder" \
+    "the bare Tier 1 placeholder was not named as unfilled"
+  assert_absent "$home/state/$id.meta" "unfilled-placeholder spawn wrote task metadata"
+
+  id=prep-no-tier
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the Prep line check.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+Prep: see notes below
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Prep line naming no tier should be refused"
+  assert_contains "$out" "names no recognized tier" \
+    "a Prep line naming no tier was not refused with the expected error"
+  assert_absent "$home/state/$id.meta" "no-tier spawn wrote task metadata"
+
+  n=0
+  for tier in "Tier 0" "Tier 1 - swept every call site" "Tier 2"; do
+    n=$((n + 1))
+    id="prep-ok-$n"
+    mkdir -p "$home/data/$id"
+    cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise the Prep line check.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+Prep: $tier
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+    assert_not_contains "$out" 'has no "Prep:" line' \
+      "a real Prep line ($tier) was rejected as missing"
+    assert_not_contains "$out" "unfilled placeholder" \
+      "a real Prep line ($tier) was rejected as the unfilled placeholder"
+    assert_not_contains "$out" "names no recognized tier" \
+      "a real Prep line ($tier) was rejected as naming no tier"
+  done
+
+  pass "fm-spawn: the Prep line must name a real tier, not the unfilled Tier 1 placeholder or no tier at all"
 }
 
 # A scout has no merge to govern and a secondmate's posture is fixed, so the flags
@@ -447,6 +562,19 @@ STUB
   assert_grep "It is banned fleet-wide" "$payload" \
     "promoted no-mistakes worker did not receive the fleet-wide ban wording"
 
+  # A promoted worker never receives fm-spawn.sh's launch-time overlay (there is
+  # no re-spawn: the window and worktree already exist), so fm_dod_block's own
+  # base --intent text is the only guidance it gets. That base text and the
+  # Proof bar section's "copy into the Agreed proof contract part" instruction
+  # must already agree - the exact contradiction the overlay alone cannot fix
+  # (Codex advisor review 2026-09-04, finding A3).
+  assert_grep "pass \`--intent\` as two labeled parts in one string: \`Captain intent:\` and, when this brief carries a Proof bar section, \`Agreed proof contract:\`" "$payload" \
+    "promoted no-mistakes worker did not receive the two-part --intent contract"
+  assert_no_grep "pass \`--intent\` as only" "$payload" \
+    "promoted no-mistakes worker's DoD still claims --intent carries only the Captain intent part"
+  assert_grep "copy this entire Proof bar section verbatim into \`--intent\`'s \`Agreed proof contract:\` part" "$payload" \
+    "promoted no-mistakes worker's Proof bar section no longer points at the two-part --intent contract"
+
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
     "promoted worker retained the scout delivery contract"
@@ -609,6 +737,7 @@ EOF
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Fix replacement of \`{TASK}\` in Herdr briefs." \
     "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
+  fill_brief_prep "$home/data/$id/brief.md"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
     "a filled ship brief mentioning placeholder tokens was refused as unfilled"
@@ -659,9 +788,12 @@ EOF
     "legacy no-mistakes spawn rejected explicitly marked captain words"
   assert_present "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not render a current launch contract"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
+  assert_grep "supersedes every earlier brief instruction about how to build the \`Captain intent:\` part" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
+  assert_grep "not the Proof bar section's own instruction (elsewhere in this brief, when one exists) to also carry the \`Agreed proof contract:\` part" \
+    "$home/data/$id/launch-brief.md" \
+    "marked legacy launch contract's supersession dropped the Proof bar's proof-contract part"
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy launch contract excluded later captain clarifications"
@@ -695,15 +827,18 @@ EOF
     "migrated launch contract omitted Captain's intent"
   assert_not_contains "$authorized" "Preserve the existing compatibility path." \
     "migrated launch contract included Firstmate spec in intent"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
+  assert_grep "supersedes every earlier brief instruction about how to build the \`Captain intent:\` part" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
-  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
+  assert_grep "The Definition of done's rule that the \`Captain intent:\` part must be self-sufficient still governs" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract's overlay dropped the self-sufficiency pointer"
+  assert_grep "not the Proof bar section's own instruction (elsewhere in this brief, when one exists) to also carry the \`Agreed proof contract:\` part" \
+    "$home/data/$id/launch-brief.md" \
+    "migrated launch contract's overlay dropped the agreed-proof-contract cross-reference"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
@@ -907,6 +1042,7 @@ EOF
 }
 
 test_ship_spawn_requires_a_valid_delivery_contract
+test_ship_spawn_validates_the_prep_line
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry

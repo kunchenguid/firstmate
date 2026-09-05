@@ -1908,9 +1908,24 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && ! grep -q '^Prep: ' "$BRIEF"; then
-    echo "error: $BRIEF has no \"Prep:\" line; state the prep tier at intake (AGENTS.md section 11) before spawn" >&2
-    exit 1
+  if [ "$KIND" = ship ]; then
+    PREP_LINE=$(grep '^Prep: ' "$BRIEF" | head -n 1)
+    if [ -z "$PREP_LINE" ]; then
+      echo "error: $BRIEF has no \"Prep:\" line; state the prep tier at intake (AGENTS.md section 11) before spawn" >&2
+      exit 1
+    fi
+    PREP_BODY=${PREP_LINE#Prep: }
+    case "$PREP_BODY" in
+      "Tier 1")
+        echo "error: $BRIEF's Prep line is the unfilled placeholder \"Prep: Tier 1\"; state the actual prep tier plus its reasoning or swept site list (AGENTS.md section 11 / the Proof bar) before spawn" >&2
+        exit 1
+        ;;
+      "Tier 0"*|"Tier 1"*|"Tier 2"*) ;;
+      *)
+        echo "error: $BRIEF's Prep line names no recognized tier (Tier 0, 1, or 2); state the prep tier at intake (AGENTS.md section 11) before spawn" >&2
+        exit 1
+        ;;
+    esac
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then

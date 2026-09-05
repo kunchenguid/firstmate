@@ -17,12 +17,16 @@
 # failure, never the same result as no matches.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
-# The string passed must be self-sufficient - it plus the codebase reconstructs
-# roughly the same specification - so a report, decision, or PR the intent
-# refers to is written into it as substance, never left as a pointer.
+# This file is the one owner of the no-mistakes `--intent` contract: two labeled
+# parts in one string, `Captain intent:` (the brief's `## Captain's intent`
+# subsection plus later captain words, never `## Firstmate spec` and never the
+# worker's own tradeoffs) and, when the brief carries a Proof bar section,
+# `Agreed proof contract:` (that section, filled in, verbatim). Neither part
+# alone satisfies the contract when a Proof bar section exists; a brief with
+# none carries only the captain-intent part.
+# The captain-intent part must be self-sufficient - it plus the codebase
+# reconstructs roughly the same specification - so a report, decision, or PR
+# the intent refers to is written into it as substance, never left as a pointer.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # through the helpers below. Other mentions of `--intent` point here rather than
@@ -71,7 +75,7 @@ Prep: {PREP}
 Tier 0, none. The default: human-only prose, cosmetic changes, one-site fixes with no callers. State "Prep: Tier 0 - {one reason}". Honesty test: if you would need a search to state that reason, it is not Tier 0.
 Tier 1, mechanism sweep. The change fixes a pattern or mechanism at one site (a parser rule, a validation, a timestamp format, a malformed-input guard). Before your first run: search the whole repo for the same mechanism, not the same words (rg for the construct; Serena find_symbol for the function family), fix every site in one commit, list the sites.
 Tier 2, wiring trace. The change alters something other code depends on (a signature, a contract, a record shape, a return value, a route, a config key or value). Before your first run: Serena find_referencing_symbols on each changed symbol, PLUS rg for the literal names and values changed - tests and checkers that read source or config as text are invisible to symbol search. Confirm each site is handled, list them. If Serena is unavailable in your runtime, fall back to rg on the symbol name plus an import search, and name which tool produced the list.
-The cap: a Tier 1 or 2 prep that passes 20 minutes or 15 sites stops and reports to firstmate that the task is scoped wrong and gets split. Never prep harder.
+The cap: a Tier 1 or 2 prep that passes 20 minutes or 15 sites stops and reports to firstmate for a scope decision; never prep harder.
 You may raise the stated tier by one with a one-line reason; you may never lower it.
 The evidence contract: paste the prep output as a list, verbatim, under this Proof bar before your first run. One line per site: path and line or symbol, then exactly one disposition - fixed, confirmed unaffected with the reason, or out of scope with the reason and the item that owns it. A site with no disposition is not on the list. No list means no prep happened; "checked, all wired" is not evidence.
 A reviewer finding at a site NOT on your list is both a real finding to fix and a prep miss; record the prep miss in your report.
@@ -82,7 +86,7 @@ A finding inside this task's stated bar is yours to fix in this run. A finding a
 ## Class-sweep rule (rule B)
 The first finding of a family means sweep the whole repo for the mechanism, fix every site in one commit, and answer every finding in that family in one round with one fix command. Rule 8 under `# Rules` below is this same rule, extended to also apply before your first run whenever you already know the family in advance.
 
-When you run /no-mistakes, copy this entire Proof bar section verbatim into `--intent` alongside the captain intent contract below.
+When you run /no-mistakes, copy this entire Proof bar section verbatim into `--intent`'s `Agreed proof contract:` part, alongside the `Captain intent:` part described in the current intent contract section below.
 EOF
 }
 
@@ -213,16 +217,16 @@ fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+This section supersedes every earlier brief instruction about how to build the `Captain intent:` part of `--intent`, but not later clarifications actually supplied by the captain, and not the Proof bar section's own instruction (elsewhere in this brief, when one exists) to also carry the `Agreed proof contract:` part.
+Use the serialized captain intent below plus any later words the captain actually supplied as the `Captain intent:` part; never include Firstmate specification or other mixed Task content in it.
 
 ## Captain intent authorized for --intent
 EOF
   printf '%s\n' "$1"
   cat <<'EOF'
 
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
-The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent, and stay out of the `Captain intent:` part.
+The Definition of done's rule that the `Captain intent:` part must be self-sufficient still governs this part: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
 EOF
 }
 
@@ -290,21 +294,23 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+The branch is prepared when committed on your branch; being prepared is not the same as the task being done.
 Before you hand the branch to validation, pass this delivery preflight:
 EOF
       fm_dod_delivery_preflight_block "$id" "$task_record"
       cat <<EOF
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe it is prepared, append \`working: prepared - {summary}\` to the status file and stop (\`prepared:\` is not a recognized status verb in bin/fm-classify-lib.sh, so \`working:\` carries it here).
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
+When starting no-mistakes, pass \`--intent\` as two labeled parts in one string: \`Captain intent:\` and, when this brief carries a Proof bar section, \`Agreed proof contract:\`; neither part alone satisfies the contract then.
+Build the \`Captain intent:\` part from this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
-The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
+Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs in the \`Captain intent:\` part.
+Build the \`Agreed proof contract:\` part per the Proof bar section's own instruction, when this brief carries one: copy that entire Proof bar section, filled in as you completed it, verbatim. A brief with no Proof bar section carries only the \`Captain intent:\` part.
+The \`Captain intent:\` part must be self-sufficient: that part plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
+When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into the \`Captain intent:\` part in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
@@ -319,6 +325,7 @@ Rule F: your \`done: PR {url} checks green\` report requires check conclusions v
 If the branch moved after checks last ran, confirm CI reran and passed at the new head before reporting done; per rule 9, a red result at a stale head is never re-run as a shortcut past that.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+\`done:\` means checks green at the exact head; it is never used for the pre-validation \`working: prepared\` handoff above.
 EOF
       ;;
     *)

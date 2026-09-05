@@ -388,22 +388,33 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
+  # --intent carries two labeled parts (Codex advisor review 2026-09-04, finding
+  # A3): this base text is the one owner both fm-brief.sh and fm-promote.sh
+  # render, so it must never say the Captain intent part is the ONLY thing
+  # --intent carries - that word is exactly what contradicted the Proof bar
+  # section's own instruction to also carry an Agreed proof contract part.
+  assert_grep "pass \`--intent\` as two labeled parts in one string: \`Captain intent:\` and, when this brief carries a Proof bar section, \`Agreed proof contract:\`" "$brief" \
+    "no-mistakes DOD must define --intent as the two labeled parts, conditioned on a Proof bar section existing"
+  assert_no_grep "pass \`--intent\` as only" "$brief" \
+    "no-mistakes DOD must not claim --intent carries only the Captain intent part"
+  assert_grep "Build the \`Captain intent:\` part from this brief's \`## Captain's intent\`" "$brief" \
+    "no-mistakes DOD must require the Captain intent part to be the Captain's intent subsection"
   assert_grep "plus any later words the captain actually said" "$brief" \
     "no-mistakes DOD must allow later captain words in --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
     "no-mistakes DOD must keep Firstmate spec out of --intent"
-  assert_grep "or your own decisions and tradeoffs" "$brief" \
-    "no-mistakes DOD must keep worker tradeoffs out of --intent"
+  assert_grep "or your own decisions and tradeoffs in the \`Captain intent:\` part" "$brief" \
+    "no-mistakes DOD must keep worker tradeoffs out of the Captain intent part"
+  assert_grep "Build the \`Agreed proof contract:\` part per the Proof bar section's own instruction, when this brief carries one" "$brief" \
+    "no-mistakes DOD must describe building the Agreed proof contract part, conditioned on the brief carrying a Proof bar section"
   assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
     "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
   # A bare reference cannot preserve the captain's ask, so the rendered DOD states
   # the self-sufficiency rule and requires referenced material to be resolved into
   # its substance.
-  assert_grep "The \`--intent\` string you pass must be self-sufficient" "$brief" \
-    "no-mistakes DOD must require a self-sufficient --intent string"
-  assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
+  assert_grep "The \`Captain intent:\` part must be self-sufficient" "$brief" \
+    "no-mistakes DOD must require a self-sufficient Captain intent part"
+  assert_grep "write the substance of the referenced items into the \`Captain intent:\` part" "$brief" \
     "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
 
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
@@ -416,6 +427,20 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD still states the --yes ban as a preference"
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
+
+  # The pre-validation handoff must not call itself "complete" (that word belongs
+  # to the CI-green done: report), and the recognized status verb it actually
+  # uses (working:) must be named so the classifier semantics stay honest.
+  assert_grep "The branch is prepared when committed on your branch; being prepared is not the same as the task being done." "$brief" \
+    "no-mistakes DOD must distinguish being prepared from being done"
+  assert_grep "append \`working: prepared - {summary}\` to the status file" "$brief" \
+    "no-mistakes DOD must route the pre-validation handoff through the recognized working: verb"
+  assert_grep "\`prepared:\` is not a recognized status verb in bin/fm-classify-lib.sh" "$brief" \
+    "no-mistakes DOD must explain why working: carries the prepared handoff"
+  assert_grep "\`done:\` means checks green at the exact head; it is never used for the pre-validation \`working: prepared\` handoff above." "$brief" \
+    "no-mistakes DOD must state that done: means checks green, not merely committed"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "no-mistakes DOD must not call a mere commit task-complete"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
@@ -955,6 +980,24 @@ test_ship_briefs_batch_findings_before_resubmitting() {
     "the generated Rules section must retain the ask-user escalation rule"
   assert_grep "For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file" "$brief" \
     "the ask-user escalation must render the structured one-event-plus-snapshot contract"
+
+  # The prep-tier cap must route an over-budget prep to a firstmate scope
+  # decision, not unilaterally declare the task "scoped wrong" and pre-decide
+  # that it "gets split" - that call belongs to firstmate, not the worker.
+  assert_grep "The cap: a Tier 1 or 2 prep that passes 20 minutes or 15 sites stops and reports to firstmate for a scope decision; never prep harder." "$brief" \
+    "the Proof bar cap must route to a firstmate scope decision"
+  assert_no_grep "gets split" "$brief" \
+    "the Proof bar cap must not pre-decide that the task gets split"
+  assert_no_grep "the task is scoped wrong" "$brief" \
+    "the Proof bar cap must not unilaterally declare the task scoped wrong"
+
+  # The Proof bar's own instruction must point at the two-part --intent
+  # contract's labeled `Agreed proof contract:` part, not a bare "alongside
+  # the captain intent contract" reference that the overlay's rewritten
+  # supersession sentence could be read to exclude it from (Codex advisor
+  # review 2026-09-04, finding A3).
+  assert_grep "copy this entire Proof bar section verbatim into \`--intent\`'s \`Agreed proof contract:\` part" "$brief" \
+    "the Proof bar section must point at the two-part --intent contract's Agreed proof contract part"
   pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"
 }
 
