@@ -3132,24 +3132,45 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
-test_lsof_absent_reaps_tmux_process_group() {
-  local case_dir rc pid path_without_lsof
-  case_dir=$(make_case lsof-absent-process-group-reap)
+# Without lsof, teardown must keep the SAME cwd scoping by reading /proc, not
+# widen to the backend pane's process group. Both halves are asserted in one
+# run so neither can regress alone: the task-owned process under the worktree
+# is still reaped, and a process that merely shares the pane's process group
+# while working OUTSIDE the worktree is left alone.
+#
+# Until 2026-08-27 the lsof-absent path TERMed the pane's whole process group,
+# which killed an ApplyPilot dev server running from the primary clone (exit
+# 143) and still missed backgrounded processes, since a job backgrounded in the
+# pane gets a process group of its own.
+test_lsof_absent_scopes_reap_by_cwd_not_process_group() {
+  local case_dir rc inside_pid outside_pid path_without_lsof proc_root
+  case_dir=$(make_case lsof-absent-cwd-scoped-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   path_without_lsof=$(make_path_without_lsof "$case_dir")
   PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
-    && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes lsof"
+    && fail "lsof-absent-cwd-scoped-reap: fixture path unexpectedly exposes lsof"
 
-  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
-  pid=$!
+  mkdir -p "$case_dir/outside-the-worktree"
+  # A process group leader working OUTSIDE the worktree, standing in for the
+  # captain's own dev server running from the primary clone.
+  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/outside-the-worktree" &
+  outside_pid=$!
+  disown
+  # A genuinely task-owned leaked process, cwd under the task's worktree.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  inside_pid=$!
   disown
   sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "lsof-absent-process-group-reap: setup sleeper did not start"
+  kill -0 "$outside_pid" 2>/dev/null || fail "lsof-absent-cwd-scoped-reap: outside sleeper did not start"
+  kill -0 "$inside_pid" 2>/dev/null || fail "lsof-absent-cwd-scoped-reap: inside sleeper did not start"
+
+  # The pane reports the OUTSIDE process as its pane pid: if teardown ever goes
+  # back to signalling the pane's process group, this test kills that process.
   cat > "$case_dir/fakebin/tmux" <<EOF
 #!/usr/bin/env bash
 if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
-  printf '%s\n' '$pid'
+  printf '%s\n' '$outside_pid'
 fi
 exit 0
 EOF
@@ -3159,14 +3180,89 @@ EOF
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL "$pid" 2>/dev/null || true
-    fail "lsof-absent-process-group-reap: tmux process group survived teardown"
+  expect_code 0 "$rc" "lsof-absent-cwd-scoped-reap: teardown should succeed"
+
+  if kill -0 "$outside_pid" 2>/dev/null; then
+    kill -KILL "$outside_pid" 2>/dev/null || true
+  else
+    kill -KILL "$inside_pid" 2>/dev/null || true
+    fail "lsof-absent-cwd-scoped-reap: teardown killed a process working outside the worktree"
   fi
-  assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
-    "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
-  pass "missing lsof falls back to reaping the tmux pane process group"
+
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -e "$proc_root/self" ]; then
+    if kill -0 "$inside_pid" 2>/dev/null; then
+      kill -KILL "$inside_pid" 2>/dev/null || true
+      fail "lsof-absent-cwd-scoped-reap: task-owned worktree process survived teardown without lsof"
+    fi
+    assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+      "lsof-absent-cwd-scoped-reap: teardown did not report reaping the task-owned process"
+    pass "without lsof, teardown reaps by cwd via /proc and never signals the pane's process group"
+  else
+    kill -KILL "$inside_pid" 2>/dev/null || true
+    assert_grep "cannot identify leaked worktree processes" "$case_dir/stderr" \
+      "lsof-absent-cwd-scoped-reap: teardown did not report that it could not identify leaked processes"
+    pass "with neither lsof nor /proc, teardown reaps nothing and says so instead of signalling a process group"
+  fi
+}
+
+# Deterministic on any host: lsof is hidden from PATH and FM_PROC_ROOT_OVERRIDE
+# points at an existing readable directory that is NOT a mounted procfs (no
+# ./self), so no cwd scan source exists. Teardown must reap NOTHING - neither
+# the task-owned process inside the worktree nor the pane's outside process -
+# and say so, rather than treating the empty directory as a successful scan
+# that found no pids, or falling back to any cheaper signal.
+test_no_scan_source_reaps_nothing_and_warns() {
+  local case_dir rc inside_pid outside_pid path_without_lsof
+  case_dir=$(make_case no-scan-source-honest-warning)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
+    && fail "no-scan-source: fixture path unexpectedly exposes lsof"
+  mkdir -p "$case_dir/unmounted-proc" "$case_dir/outside-the-worktree"
+
+  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/outside-the-worktree" &
+  outside_pid=$!
+  disown
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  inside_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$outside_pid" 2>/dev/null || fail "no-scan-source: outside sleeper did not start"
+  kill -0 "$inside_pid" 2>/dev/null || fail "no-scan-source: inside sleeper did not start"
+
+  # The pane reports the OUTSIDE process as its pane pid: any regression back
+  # to process-group signalling kills that process and fails this test.
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$outside_pid'
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/unmounted-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "no-scan-source: teardown should still succeed without reaping"
+  if ! kill -0 "$outside_pid" 2>/dev/null; then
+    kill -KILL "$inside_pid" 2>/dev/null || true
+    fail "no-scan-source: teardown signalled a process working outside the worktree"
+  fi
+  if ! kill -0 "$inside_pid" 2>/dev/null; then
+    kill -KILL "$outside_pid" 2>/dev/null || true
+    fail "no-scan-source: teardown signalled a process it could not have identified by cwd"
+  fi
+  kill -KILL "$outside_pid" "$inside_pid" 2>/dev/null || true
+  assert_grep "cannot identify leaked worktree processes" "$case_dir/stderr" \
+    "no-scan-source: teardown did not report that it could not identify leaked processes"
+  assert_grep "so none are reaped" "$case_dir/stderr" \
+    "no-scan-source: teardown did not report that no processes were reaped"
+  pass "with no usable scan source, teardown reaps nothing, warns honestly, and still succeeds"
 }
 
 test_lsof_error_refuses_before_removal() {
@@ -3188,8 +3284,8 @@ EOF
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 1 "$rc" "lsof-error-refusal: teardown should refuse"
-  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
-    "lsof-error-refusal: teardown did not explain the lsof refusal"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (process scan failed)" "$case_dir/stderr" \
+    "lsof-error-refusal: teardown did not explain the failed-scan refusal"
   assert_present "$case_dir/wt" "lsof-error-refusal: teardown removed the worktree"
   assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
   assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
@@ -3286,7 +3382,16 @@ if [ "$count" -eq 2 ]; then
     i=$((i + 1))
   done
 fi
-exec "$REAL_LSOF_FOR_TEST" "$@"
+if [ -n "${REAL_LSOF_FOR_TEST:-}" ]; then
+  exec "$REAL_LSOF_FOR_TEST" "$@"
+fi
+# This host has no lsof, so emit the same `-Fpn` cwd records from /proc: this
+# stub exists to time-shift a REAL scan, not to fake its contents.
+for entry in /proc/[0-9]*; do
+  [ -d "$entry" ] || continue
+  cwd=$(readlink "$entry/cwd" 2>/dev/null) || continue
+  printf 'p%s\nfcwd\nn%s\n' "${entry##*/}" "$cwd"
+done
 SH
   chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
 
@@ -3536,7 +3641,8 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
-test_lsof_absent_reaps_tmux_process_group
+test_lsof_absent_scopes_reap_by_cwd_not_process_group
+test_no_scan_source_reaps_nothing_and_warns
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
