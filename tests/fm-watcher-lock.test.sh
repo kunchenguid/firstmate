@@ -211,7 +211,7 @@ test_foreign_home_watcher_pid_is_not_a_peer() {
   foreign_pid=$!
   mkdir "$state/.watch.lock"
   printf '%s\n' "$foreign_pid" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir/other-home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "watcher-that-is-gone" > "$state/.watch.lock/pid-identity"
   # A FRESH beacon, so the existing stale-heartbeat branch cannot be what lets
@@ -225,7 +225,7 @@ test_foreign_home_watcher_pid_is_not_a_peer() {
   [ "$(FM_PID_IDENTITY_PID=x bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$foreign_pid")" != "watcher-that-is-gone" ] \
     || fail "fixture's foreign pid must not carry the recorded identity"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
   live=0
