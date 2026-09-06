@@ -191,8 +191,33 @@ try {
   assertNoForeignReference(root);
 
   if (action === "install") {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    // The hook script agy executes on every Stop and the hooks.json holding the
+    // command string live under these directories, so a directory other
+    // accounts can write lets one of them replace either with arbitrary code.
+    // Refuse exactly as the trust pre-registration refuses its settings
+    // directory, naming the chmod that fixes it. Symlinks are judged at their
+    // target, since a dotfile manager legitimately symlinks .gemini.
+    for (const [dir, label] of [
+      [path.join(home, ".gemini"), ".gemini directory"],
+      [STATE_DIR, "agy state directory"],
+      [CONFIG_DIR, "agy config directory"],
+    ]) {
+      let st;
+      try { st = fs.statSync(dir); } catch (err) { continue; }
+      if (!st.isDirectory()) refuse(`${label} is not a directory at ${dir}.`);
+      if (st.mode & 0o022) {
+        refuse(`${label} is writable by other users at ${dir}; remove write access for others with: chmod go-w ${dir}`);
+      }
+    }
+    // Created 0755 regardless of the caller's umask, so an install under the
+    // umask-002 default does not create the loose directories it just refused.
+    const oldUmask = process.umask(0o022);
+    try {
+      fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o755 });
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o755 });
+    } finally {
+      process.umask(oldUmask);
+    }
     const registryInfo = lstatOrNull(REGISTRY);
     if (registryInfo !== null && (registryInfo.isSymbolicLink() || !registryInfo.isDirectory())) {
       refuse(`Firstmate registry is not a regular directory at ${REGISTRY}.`);

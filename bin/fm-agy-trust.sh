@@ -244,10 +244,15 @@ STORE="$CONFIG_DIR_REAL/settings.json"
 # group-writable, which is the price of a guard that cannot be wrong in the
 # unsafe direction.
 #
-# Ancestors ABOVE the settings directory are deliberately not walked. An account
-# that can write $HOME owns this user's login long before it reaches agy, and
-# refusing on a 0775 home would fail the umask-002 default closed over an exposure
-# this script cannot be the control for.
+# The ancestor chain ABOVE the settings directory is walked too, up to but
+# excluding $HOME: a ~/.gemini (or any other parent short of the home) that
+# other accounts can write lets them rename the settings directory aside and
+# plant their own, repointing the resolution exactly as a writable hop on the
+# link chain does - writing it does not own this user's login. $HOME itself is
+# the stop, because an account that can write the home owns this user's login
+# long before it reaches agy, and refusing on a 0775 home would fail the
+# umask-002 default closed over an exposure this script cannot be the control
+# for.
 #
 # node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
 # already required below as this script's JSON writer.
@@ -255,7 +260,19 @@ STORE_VERDICT=$(node -e '
   const fs = require("node:fs");
   const path = require("node:path");
   let p = process.argv[1];
+  const home = process.argv[2];
   let followed = 0;
+  try {
+    let anc = path.dirname(fs.realpathSync(path.dirname(p)));
+    for (;;) {
+      if (anc === home || anc === path.dirname(anc)) break;
+      if ((fs.statSync(anc).mode & 0o022) !== 0) {
+        process.stdout.write("loose:" + anc);
+        process.exit(0);
+      }
+      anc = path.dirname(anc);
+    }
+  } catch (err) { /* the walk below reports what it cannot resolve */ }
   for (;;) {
     // The REAL directory the current name lives in, so a symlinked parent is
     // judged where it actually resolves rather than where it is spelled.
@@ -279,7 +296,7 @@ STORE_VERDICT=$(node -e '
   // Nothing there yet: a store this run creates itself, unless a link pointed at
   // it, which is the dangling store the caller must fix rather than have rewritten.
   process.stdout.write(followed > 0 ? "dangling:" : "store:" + p);
-' "$STORE" 2>/dev/null) || STORE_VERDICT=
+' "$STORE" "$HOME_REAL" 2>/dev/null) || STORE_VERDICT=
 
 case $STORE_VERDICT in
   store:*) STORE=${STORE_VERDICT#store:} ;;
