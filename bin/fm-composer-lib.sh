@@ -290,7 +290,21 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok keeps the older
+# recorded "Ctrl+c:cancel" footer alone. grok 1.0.13 was measured rendering an
+# active-turn footer row carrying "Shift+Tab:mode" and "Esc:cancel"
+# (docs/verification/grok-queued-enter.md, 2026-09-06), but that shape is NOT
+# adopted here: the record was captured without "--always-approve", which
+# bin/fm-spawn.sh launches every real grok worker with and which renders its
+# own footer segment at an unmeasured position, and every pattern narrow enough
+# to keep ordinary output quoting those keys from classifying an idle pane busy
+# also missed a plausible production row. A footer this signature misses
+# classifies a working Grok pane idle, because this regex is Grok's ONLY busy
+# source (bin/fm-busy-lib.sh has no semantic writer for grok) - that is the
+# accepted cost of not guessing a production footer shape.
+# No further rendered-footer pattern belongs here. The next step for grok busy
+# state is a non-rendered signal, verified separately; the rendered pane is not
+# an authoritative source for it.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -305,13 +319,24 @@ fm_composer_strip_ghost() {
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-# The harness-less default is the UNION of the per-harness tokens below, used
-# when a caller has no recorded harness for the pane (the submit cores read the
-# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
-# part of that union for the same reason the others are: without it a cursor
-# submit could never be acknowledged, because cursor parks its terminal cursor
-# outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+# The harness-less default carries the per-harness tokens below that are safe
+# to act on WITHOUT a recorded harness, used when a caller has no recorded
+# harness for the pane (the submit cores read the baseline and the post-Enter
+# transition this way). cursor's `ctrl+c to stop` is part of it for the same
+# reason the others are: without it a cursor submit could never be
+# acknowledged, because cursor parks its terminal cursor outside its composer
+# and the composer verdict is therefore always `unknown`.
+# NEITHER Grok token is in this union. fm_tmux_submit_core (bin/fm-tmux-lib.sh)
+# reads the pane with NO harness, so a match here converts a structurally
+# proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to
+# `empty` (reported delivered). Grok 1.0.13 did queue and process three
+# mid-turn Enters, but that was measured through Grok's own visible queue
+# entry, not through this union or a composer verdict, and it pairs only with
+# the measured "Esc:cancel" footer - the legacy "Ctrl+c:cancel" build's
+# queueing behavior is unverified, so neither token may prove delivery on a
+# harness-less read. Both stay per-harness below; see
+# docs/verification/grok-queued-enter.md before widening this union.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'

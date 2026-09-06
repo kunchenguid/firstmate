@@ -828,8 +828,15 @@ fm_busy_cursor_turn_state() {  # <transcript>
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
-# Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
-# FM_BUSY_REGEX still globally overrides the signature, mirroring the
+# Consumes the tail on stdin; 0 when Grok's older recorded "Ctrl+c:cancel"
+# footer matches. grok 1.0.13's measured "Esc:cancel" footer row
+# (docs/verification/grok-queued-enter.md, 2026-09-06) is deliberately NOT
+# matched: its production shape under "--always-approve" was never captured, so
+# no pattern for it is authoritative, and a build rendering it reads idle here.
+# bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT is the
+# canonical owner; the literal below is a defensive duplicate for
+# callers that source this file without that one, and must be refreshed with
+# it. FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \

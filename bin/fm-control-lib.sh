@@ -109,7 +109,11 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C. One
+# ancillary single-trial Escape on grok 1.0.13 did cancel an active tool turn
+# (docs/verification/grok-queued-enter.md), contradicting that premise; one
+# trial is not a verification, so grok keeps Ctrl+C until a dedicated repeat
+# interrupt verification runs.
 # gemini names its own key in the running turn's status row
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,

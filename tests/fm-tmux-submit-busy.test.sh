@@ -302,11 +302,13 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'esc interrupt\n' > "$composer"
   pane_busy own opencode || fail "OpenCode's interrupt footer should be busy"
 
-  # No harness keeps the historical combined-pattern compatibility fallback.
+  # No harness keeps the historical combined-pattern compatibility fallback,
+  # minus Grok's tokens: a harness-less match there would report a steer
+  # delivered into a grok pane whose queueing this build never verified.
   printf 'Working...\n' > "$composer"
   pane_busy fallback || fail "no-harness fallback should retain Pi's shared signature"
   printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
+  pane_busy fallback && fail "no-harness fallback must not carry Grok's cancel footer"
 
   # A supplied harness must never use another harness's signature. This is
   # particularly important for Kimi: its idle key-tip rotation can include the
