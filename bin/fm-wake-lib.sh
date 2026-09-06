@@ -458,6 +458,44 @@ fm_lock_claim() {
   return 0
 }
 
+# The watcher's own path, set by bin/fm-watch.sh immediately before it claims the
+# watcher singleton lock and cleared as soon as that claim returns.
+#
+# DATA ONLY, never a command name: this is consulted on every lock acquisition in
+# the repo, so it must not become a way for an inherited environment to run code.
+# The assignment here also discards any inherited value, so only a caller that
+# sets it after sourcing this library can publish a watcher identity.
+FM_LOCK_WATCHER_PATH=
+
+# Publish the watcher's identity records INTO THE OWNER DIRECTORY, before the
+# symlink that makes the lock visible exists.
+#
+# Readers reach a lock only through that symlink, so everything written here
+# becomes visible in the same instant as the claim itself. Writing these records
+# after the claim instead leaves a window in which the lock names a live pid but
+# nothing verifiable, and a healthy holder is then indistinguishable from a stale
+# one for exactly as long as the claiming process takes to get back to them. That
+# window is what every reader of the lock previously had to tolerate, and no
+# tolerance can be made correct: the reader cannot tell the two cases apart.
+#
+# Refusing the claim when a record cannot be written is deliberate. A lock that
+# exists without its identity is precisely the state this removes, so it must
+# never be created; the caller sees an ordinary failed acquisition instead.
+_fm_lock_publish_watcher_identity() {  # <lockdir> <ownerdir>
+  local lockdir=$1 ownerdir=$2 pid identity
+  [ -n "${FM_LOCK_WATCHER_PATH:-}" ] || return 0
+  [ "$lockdir" = "${STATE:-}/.watch.lock" ] || return 0
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  # An unidentifiable process still publishes an (empty) record, matching the
+  # pre-existing behaviour on platforms where fm_pid_identity cannot answer: the
+  # health gate reads that as unhealthy, which is the honest verdict there.
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  printf '%s\n' "$FM_HOME" > "$ownerdir/fm-home" || return 1
+  printf '%s\n' "$FM_LOCK_WATCHER_PATH" > "$ownerdir/watcher-path" || return 1
+  printf '%s\n' "$identity" > "$ownerdir/pid-identity" || return 1
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -467,6 +505,10 @@ fm_lock_try_create() {
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  if ! _fm_lock_publish_watcher_identity "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
