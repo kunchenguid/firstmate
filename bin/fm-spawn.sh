@@ -1477,6 +1477,20 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
+    RAW_ASSIGNMENT_REST=${LAUNCH#"${LAUNCH%%[![:space:]]*}"}
+    while [[ "$RAW_ASSIGNMENT_REST" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; do
+      RAW_ASSIGNMENT_NAME=${BASH_REMATCH[1]}
+      RAW_ASSIGNMENT_TOKEN=${RAW_ASSIGNMENT_REST%%[[:space:]]*}
+      case "$RAW_ASSIGNMENT_TOKEN" in
+        *\'*|*\"*|*\\*|*\$*|*\`*)
+          echo "error: ambiguous leading raw assignment '$RAW_ASSIGNMENT_NAME=...'; use a managed harness or an unquoted literal assignment" >&2
+          exit 1
+          ;;
+      esac
+      [ "$RAW_ASSIGNMENT_TOKEN" != "$RAW_ASSIGNMENT_REST" ] || break
+      RAW_ASSIGNMENT_REST=${RAW_ASSIGNMENT_REST#"$RAW_ASSIGNMENT_TOKEN"}
+      RAW_ASSIGNMENT_REST=${RAW_ASSIGNMENT_REST#"${RAW_ASSIGNMENT_REST%%[![:space:]]*}"}
+    done
     for word in $LAUNCH; do
       case "$word" in
         PATH=*) RAW_HARNESS_PATH=${word#PATH=}; RAW_HARNESS_PATH_SET=1; continue ;;

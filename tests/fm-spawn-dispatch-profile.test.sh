@@ -519,6 +519,38 @@ SH
   pass "raw Claude preflight honors leading PATH assignments"
 }
 
+test_quoted_leading_assignment_refuses_raw_launch() {
+  local rec id out status raw
+  id="profile-raw-claude-quoted-assignment-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  raw="PATH='$CASE_DIR/Claude Code/bin:$PATH' claude --remote-control"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 1 "$status" "quoted leading assignment should be refused before raw launch"
+  assert_contains "$out" "ambiguous leading raw assignment 'PATH=...'" "quoted-assignment refusal did not name PATH"
+  assert_contains "$out" "managed harness or an unquoted literal assignment" "quoted-assignment refusal omitted the supported alternatives"
+  [ ! -s "$LAUNCH_LOG" ] || fail "quoted leading assignment reached the launch channel"
+  pass "quoted leading raw assignments are refused without shell parsing"
+}
+
+test_unquoted_leading_assignment_keeps_raw_claude_unchanged() {
+  local rec id out status raw launch
+  id="profile-raw-claude-unquoted-assignment-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  raw='FOO=bar claude --remote-control'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 0 "$status" "unquoted leading assignment should keep raw Claude classification: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "$raw" "unquoted simple assignment changed raw Claude command bytes"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  pass "unquoted leading assignment keeps raw Claude preflight and launch"
+}
+
 test_claude_spawn_refuses_missing_managed_policy() {
   local rec id out status
   id="profile-claude-policy-missing-${RANDOM}"
@@ -1328,6 +1360,8 @@ test_managed_default_allows_raw_claude_forms_unchanged
 test_raw_claude_refuses_backend_executable_divergence
 test_raw_claude_identical_backend_executable_launches_unchanged
 test_raw_claude_path_assignment_uses_assigned_executable
+test_quoted_leading_assignment_refuses_raw_launch
+test_unquoted_leading_assignment_keeps_raw_claude_unchanged
 test_claude_spawn_refuses_missing_managed_policy
 test_prefixed_raw_claude_refuses_missing_managed_policy
 test_claude_spawn_refuses_unsupported_version
