@@ -237,6 +237,28 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_fake_missing_tool <dir> <tool>
+# Echo the path of a BASH_ENV file that makes <tool> look absent to any bash the
+# case launches. Deleting a stub out of a fakebin is not enough on its own: a
+# tool like node or jq also ships in a system directory that the pinned BASE_PATH
+# still carries, so whether the case sees it missing would depend on the host
+# rather than on the case. Pass the returned path as BASH_ENV alongside PATH.
+fm_fake_missing_tool() {
+  local dir=$1 tool=$2 env_file="$1/no-$2.bash"
+  cat > "$env_file" <<SH
+command() {
+  if [ "\${1:-}" = -v ] && [ "\${2:-}" = $tool ]; then
+    return 1
+  fi
+  builtin command "\$@"
+}
+$tool() {
+  return 127
+}
+SH
+  printf '%s\n' "$env_file"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

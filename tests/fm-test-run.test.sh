@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -752,6 +752,41 @@ test_exclude_family() {
   pass "exclude-family drops the named primary family after selection"
 }
 
+# The coverage guard builds every list with `LC_ALL=C sort` and then compares
+# them, so the comparison has to use that collation too. Under a locale whose
+# collation ignores punctuation, `tests/fm-backend-herdr-workspace-...` and
+# `tests/fm-backend-herdr.test.sh` swap places, and a comparison left on the
+# ambient locale rejects its own correctly sorted input. CI runs in the C locale,
+# where the mismatch is invisible, so the verdict must be pinned here instead.
+test_coverage_guard_is_locale_independent() {
+  local probe candidate reorder locale_used out status
+  probe=$'a-w.t\na.t\n'
+  reorder=""
+  while IFS= read -r candidate; do
+    case "$candidate" in ''|C|C.*|POSIX) continue ;; esac
+    [ "$(printf '%s' "$probe" | LC_ALL="$candidate" sort 2>/dev/null)" \
+      != "$(printf '%s' "$probe" | LC_ALL=C sort)" ] || continue
+    reorder=$candidate
+    break
+  done < <(locale -a 2>/dev/null)
+  if [ -z "$reorder" ]; then
+    echo "skip: no installed locale collates differently from C"
+    return 0
+  fi
+  status=0
+  out=$(LC_ALL="$reorder" "$RUNNER" --check-coverage 2>&1) || status=$?
+  [ "$status" -eq 0 ] \
+    || fail "the coverage guard failed under LC_ALL=$reorder: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "the coverage guard lost its success marker under LC_ALL=$reorder"
+  case "$out" in
+    *"not in sorted order"*)
+      fail "the coverage guard compared its own C-sorted lists under LC_ALL=$reorder: $out" ;;
+  esac
+  locale_used=$reorder
+  pass "the coverage guard's verdict does not depend on the ambient locale (checked under $locale_used)"
+}
+
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out first
   s1=$("$RUNNER" --list --lane portable-parallel-1)
@@ -761,7 +796,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1387,6 +1422,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_is_locale_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals

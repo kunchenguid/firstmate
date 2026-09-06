@@ -602,8 +602,26 @@ fm_procevent_directory_owned_by_current_user() {
 fm_procevent_state_root_resolve() {  # <state-root>
   local state=$1 canonical
   canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
-  fm_procevent_private_directory_valid "$canonical" 0 || return 1
+  fm_procevent_private_directory_valid "$canonical" 0 \
+    || fm_procevent_state_root_establish_private "$canonical" || return 1
   printf '%s\n' "$canonical"
+}
+
+# The state root is shared with the rest of firstmate, and every other script
+# that may create it first does so with a plain mkdir under whatever umask the
+# host gives it, so on a umask-002 host it arrives group-writable and this
+# module's privacy contract was never established for the directory it actually
+# operates on. Establish it here, once, instead of depending on which script
+# happened to create the home; the module already creates its own root with
+# umask 077 when it gets there first. Clearing the group and other write bits is
+# only ever a tightening, and it converges on repeat. A root we do not own, or
+# one we cannot tighten, still fails closed through the same validation.
+fm_procevent_state_root_establish_private() {  # <canonical-state-root>
+  local directory=$1
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  fm_procevent_directory_owned_by_current_user "$directory" || return 1
+  chmod go-w "$directory" 2>/dev/null || return 1
+  fm_procevent_private_directory_valid "$directory" 0
 }
 
 fm_procevent_private_directory_valid() {

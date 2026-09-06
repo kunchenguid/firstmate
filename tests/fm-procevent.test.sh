@@ -60,7 +60,11 @@ procevent_teardown() {
   fm_test_cleanup
 }
 trap procevent_teardown EXIT
-new_home() { mkdir -p "$1/state"; }
+# Pin the fixture home's mode instead of inheriting the host umask, so no case
+# below silently depends on whether the host leaves the group write bit set. The
+# group-writable state root a umask-002 host produces is exercised deliberately,
+# by its own case, rather than leaking into every other verdict here.
+new_home() { (umask 077; mkdir -p "$1/state"); }
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 
 first_result() {  # <home> <source-id>: print the first captured result, if any
@@ -1765,5 +1769,44 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- a shared state root arrives with the host's umask, not this module's ----
+# Every other firstmate script creates $FM_HOME/state with a plain mkdir, so on
+# a umask-002 host the root this module operates on is group-writable and its
+# privacy contract was never established. The module has to establish it rather
+# than refuse the whole home, and the tightening has to be real and idempotent.
+file_mode() {  # <path>: the existing out-of-process spelling used above
+  PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+    '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$1"
+}
+HSHARED="$TMP_ROOT/hshared"
+(umask 002; mkdir -p "$HSHARED/state")
+shared_mode=$(file_mode "$HSHARED/state")
+[ "$shared_mode" = 775 ] || fail "fixture did not produce a group-writable state root, got: $shared_mode"
+shared_out=$(pe "$HSHARED" list 2>&1) || fail "a group-writable shared state root was refused: $shared_out"
+assert_contains "$shared_out" "no sources registered" "the module did not operate on the established root"
+shared_mode=$(file_mode "$HSHARED/state")
+[ $((8#$shared_mode & 8#022)) -eq 0 ] \
+  || fail "the state root was still group- or other-writable after use, mode: $shared_mode"
+pe "$HSHARED" list >/dev/null 2>&1 || fail "establishing the private state root is not idempotent"
+[ "$(file_mode "$HSHARED/state")" = "$shared_mode" ] \
+  || fail "a repeat run changed the established state-root mode again"
+
+# A root we cannot tighten still fails closed rather than being operated on.
+FAIL_CHMOD_ROOT_BIN="$TMP_ROOT/fail-chmod-root-bin"
+mkdir -p "$FAIL_CHMOD_ROOT_BIN"
+cat > "$FAIL_CHMOD_ROOT_BIN/chmod" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAIL_CHMOD_ROOT_BIN/chmod"
+HUNFIXABLE="$TMP_ROOT/hunfixable"
+(umask 002; mkdir -p "$HUNFIXABLE/state")
+unfixable_status=0
+unfixable_out=$(PATH="$FAIL_CHMOD_ROOT_BIN:$PATH" pe "$HUNFIXABLE" list 2>&1) || unfixable_status=$?
+[ "$unfixable_status" -ne 0 ] || fail "a state root that could not be tightened was operated on anyway"
+assert_contains "$unfixable_out" "not a private directory" \
+  "an unestablishable state root is not reported through the owned interface"
+pass "a shared group-writable state root is established privately, idempotently, or refused"
 
 printf '\nall procevent tests passed\n'
