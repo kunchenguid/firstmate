@@ -183,6 +183,8 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
     || fail "a second poll delivered the same ledger line again"
+  printf 'Report at /tmp/report.md\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
     || fail "the inactive path reported a child the ledger delivery already owned"
@@ -190,8 +192,11 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
-test_secondmate_multiline_terminal_fallback_is_delivered_once() {
-  local terminal timing
+# A terminal record written as a multi-line block belongs to the ledger path
+# whether the block lands before or during the state read: it is delivered once,
+# under the ledger's own outcome key, and the inactive fallback stays out of it.
+test_secondmate_multiline_terminal_outcome_is_delivered_once() {
+  local terminal timing key
   for terminal in 'done' failed; do
     for timing in before during; do
       make_world "multiline-$terminal-$timing"; bind_secondmate local
@@ -207,18 +212,39 @@ printf 'state: %s · source: fake\n' "$FM_FAKE_CREW_STATE"
 SH
       fi
       FM_FAKE_CREW_STATE="$terminal" run_reconcile "$MATE" --startup
-      grep -Fq "$terminal [key=inactive-outcome-mate-child-$terminal]: inactive terminal child=child" "$MAIN/state/mate.status" \
-        || fail "$terminal with trailing prose arriving $timing state read was lost"
       age "$MATE/state/child.status"
       FM_FAKE_CREW_STATE="$terminal" run_reconcile "$MATE" --startup
       run_report "$MATE" child
+      key=$(reported_outcome_key "$MATE" child "$terminal") \
+        || fail "$terminal with trailing prose arriving $timing state read was not owned by the ledger"
+      grep -Fq "$terminal [key=$key]: child child $terminal: validation finished" "$MAIN/state/mate.status" \
+        || fail "$terminal with trailing prose arriving $timing state read was lost: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
       [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
         || fail "$terminal with trailing prose arriving $timing state read was delivered twice"
       [ "$(outcome_count "$MATE" reported)" = 1 ] \
-        || fail "multiline $terminal fallback did not retain exactly one receipt"
+        || fail "multiline $terminal outcome did not retain exactly one receipt"
     done
   done
   pass "multiline terminal outcomes are reported once before or during a state read"
+}
+
+# A child that dies mid-prose cannot hide an outcome its run already proves: an
+# unterminated continuation line states no terminal event, so the inactive
+# fallback still reports the attributed failure upward.
+test_secondmate_unterminated_prose_reports_run_outcome() {
+  make_world unterminated-prose; bind_secondmate local
+  write_child "$MATE" child 'working: compiling'
+  printf 'Still going' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  grep -Fq "failed [key=inactive-outcome-mate-child-failed]: inactive terminal child=child" "$MAIN/state/mate.status" \
+    || fail "an unterminated prose line withheld a proven failure: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "the fallback report did not retain its receipt"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "the proven failure was reported twice"
+  pass "an unterminated continuation line does not withhold a proven child outcome"
 }
 
 # A busy child cannot keep later ledger outcomes from being visited, and is
@@ -823,7 +849,8 @@ test_reconciliation_never_calls_forge() {
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
-test_secondmate_multiline_terminal_fallback_is_delivered_once
+test_secondmate_multiline_terminal_outcome_is_delivered_once
+test_secondmate_unterminated_prose_reports_run_outcome
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

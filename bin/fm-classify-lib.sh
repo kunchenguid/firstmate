@@ -106,15 +106,39 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
-# Return the last recognized status event, ignoring continuation prose and blanks.
+# How many trailing lines the latest-event read parses before it widens to the
+# whole file. A status record and its continuation prose sit within a few lines
+# of the log's end, so this bounds the watcher's per-poll read on a long-lived
+# log while a log whose tail holds no event still gets a full pass.
+FM_CLASSIFY_EVENT_WINDOW_LINES=200
+
+# Return the last recognized status event, ignoring continuation prose and blanks
+# (empty if missing/blank), and with <previous-event-var> the event before it.
+# The optional previous event is what this reader returned before the latest one
+# was appended, so a consumer can name the head it is superseding; asking for it
+# always reads the whole file, since a bounded window cannot bound two events.
+# This is an event read; status_current_line below reconciles open decisions.
+last_status_line() {  # <status-file> [<previous-event-var>]
+  local f=$1 scan=''
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  if [ "$#" -gt 1 ]; then
+    scan=$(_fm_status_event_scan < "$f") || :
+  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan); then
+    scan=$(_fm_status_event_scan < "$f") || :
+  fi
+  [ "$#" -lt 2 ] || printf -v "$2" '%s' "${scan%%$'\n'*}"
+  printf '%s\n' "${scan##*$'\n'}"
+}
+
+# Print "<previous event>\n<latest event>" for the status lines on stdin, and
+# return 1 when the stream holds no recognized event at all, so a caller reading
+# a bounded window knows to widen it. A stream without events keeps its last
+# nonblank line as the latest, matching the read this replaced.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
-# A log with no recognized events retains its last nonblank line.
-# This is an event read; status_current_line below reconciles open decisions.
-last_status_line() {
-  local f=$1 line last='' fallback='' verb legacy_re
-  [ -f "$f" ] && [ -r "$f" ] || return 0
+_fm_status_event_scan() {
+  local line last='' prev='' fallback='' verb legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
@@ -123,11 +147,12 @@ last_status_line() {
       working|needs-decision|blocked|done|failed|note|\
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
-      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") last=$line ;;
-      *) _fm_classify_matches "$line" "$legacy_re" && last=$line ;;
+      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
+      *) _fm_classify_matches "$line" "$legacy_re" && { prev=$last; last=$line; } ;;
     esac
-  done < "$f"
-  printf '%s\n' "${last:-$fallback}"
+  done
+  printf '%s\n%s\n' "$prev" "${last:-$fallback}"
+  [ -n "$last" ]
 }
 
 # 0 when <line> matches the extended regex <pattern> case-insensitively, leaving

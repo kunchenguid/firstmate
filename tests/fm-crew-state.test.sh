@@ -1548,14 +1548,16 @@ test_latest_status_preserves_legacy_completions() {
 }
 
 test_latest_status_subshell_work_does_not_grow_with_history() {
-  local d size i level small large
+  local d size i level small large window
   d=$(new_case latest-processes)
-  for size in 1 100; do
-    : > "$d/state/task.status"
-    for ((i = 0; i < size; i++)); do
-      printf 'working corr=0123456789abcdef [key=phase]: progress\nMore detail: still working.\n' >> "$d/state/task.status"
-    done
-    printf 'PR ready https://example.com/pull/1\npaused corr=0123456789abcdef [key=release]: awaiting release\n\n' >> "$d/state/task.status"
+  window=${FM_CLASSIFY_EVENT_WINDOW_LINES:-200}
+  for size in "$window" "$((window * 10))"; do
+    {
+      for ((i = 0; i < size; i++)); do
+        printf 'working corr=0123456789abcdef [key=phase]: progress\nMore detail: still working.\n'
+      done
+      printf 'PR ready https://example.com/pull/1\npaused corr=0123456789abcdef [key=release]: awaiting release\n\n'
+    } > "$d/state/task.status"
     : > "$d/children-$size"
     (
       level=$BASH_SUBSHELL
@@ -1566,10 +1568,14 @@ test_latest_status_subshell_work_does_not_grow_with_history() {
     [ "$(cat "$d/output")" = 'paused corr=0123456789abcdef [key=release]: awaiting release' ] \
       || fail "latest status lost correlation-token parsing on a long log"
   done
-  small=$(wc -c < "$d/children-1")
-  large=$(wc -c < "$d/children-100")
-  [ "$large" -le "$((small + 20))" ] || fail "latest status launches shell work for every historical line ($small -> $large)"
-  pass "latest status subprocess work stays bounded as history grows"
+  small=$(wc -c < "$d/children-$window")
+  large=$(wc -c < "$d/children-$((window * 10))")
+  [ "$large" -le "$((small + 20))" ] || fail "latest status shell work grows with history ($small -> $large)"
+  printf 'paused: awaiting a long quiet tail\n' > "$d/state/task.status"
+  for ((i = 0; i < 500; i++)); do printf 'continuation prose %s\n' "$i" >> "$d/state/task.status"; done
+  [ "$(last_status_line "$d/state/task.status")" = 'paused: awaiting a long quiet tail' ] \
+    || fail "a declared pause buried under a long prose tail was hidden"
+  pass "latest status subprocess work stays bounded and still reads past a long prose tail"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
