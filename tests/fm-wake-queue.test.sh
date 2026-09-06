@@ -1184,7 +1184,7 @@ test_self_announced_append_guards() {
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: closed by this home' \
     || fail "self-announced append on an announced file was not suppressed (rc=$?)"
-  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fq 'resolved [key=k1]: answered: closed by this home' \
     || fail "the suppressed close was not appended"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     || fail "the self-announced close left unannounced bytes behind"
@@ -1200,7 +1200,7 @@ test_self_announced_append_guards() {
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: second close' || rc=$?
   [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
-  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fq 'resolved [key=k1]: answered: second close' \
     || fail "the fail-toward-waking close was not appended"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a close over pending foreign bytes swallowed the pending wake"
@@ -1568,6 +1568,7 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_self_announced_append_guards
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
@@ -1577,7 +1578,6 @@ test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
-test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

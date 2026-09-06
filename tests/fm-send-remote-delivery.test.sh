@@ -507,7 +507,7 @@ test_remote_resolve_key_closes_at_enqueue() {
   send_env "$fb" "$home" "$ssh_log" \
     "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "a durably recorded remote answer must exit 0"
-  grep -F 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' "$home/state/rsm.status" >/dev/null \
+  status_event_recorded "$home/state/rsm.status" 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
     || fail "a recorded remote answer must close the decision at enqueue: $(cat "$home/state/rsm.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then

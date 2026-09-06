@@ -369,6 +369,8 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
     .secondmate_current.records[] | select(.id == "domain-alpha")
     | .provenance.selected == "structured-home"
       and .freshness.status == "fresh"
+      and .parent_event.emitted_at_epoch == null
+      and .parent_event.age_seconds == null
       and .terminal_evidence.provenance == "parent-direct-report-terminal"
       and .terminal_evidence.trust == "untrusted-supplement"
       and .terminal_evidence.captured == true
@@ -418,7 +420,10 @@ SH
       and .parent_event.activity_scan.available == true
   ' >/dev/null || fail "GNU stat fixture corrupted the authoritative secondmate summary: $canonical"
   assert_contains "$(cat "$stat_log")" '-c %a' "GNU registry mode must use stat -c"
-  assert_contains "$(cat "$stat_log")" '-c %Y' "GNU parent-event mtime must use stat -c"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .parent_event.emitted_at_epoch == null and .parent_event.age_seconds == null
+  ' >/dev/null || fail "legacy event acquired an age from GNU stat"
   assert_contains "$(cat "$stat_log")" '-c %s' "GNU parent-event size must use stat -c"
   if grep -q '^-f ' "$stat_log"; then
     fail "GNU snapshot invoked BSD stat -f before its GNU file reads: $(cat "$stat_log")"

@@ -761,7 +761,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief append before after epoch
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -782,6 +782,22 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
+    # Execute the scaffold's generated status-append interface. The shell must
+    # evaluate the stamp when appending, not while generating instructions.
+    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
+    append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    append=${append//\{state\}/done}
+    append=${append//\{one short line\}/test event}
+    # shellcheck disable=SC2016 # The generated command must retain substitution.
+    assert_contains "$append" '$(date +%s)' "scaffold froze its event timestamp"
+    mkdir -p "$home/state"
+    before=$(date +%s)
+    bash -c "$append" || fail "generated status command failed"
+    after=$(date +%s)
+    epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+    [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+      || fail "$kind scaffold emitted no append-time timestamp"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
