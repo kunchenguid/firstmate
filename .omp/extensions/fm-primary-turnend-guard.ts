@@ -1,16 +1,50 @@
+// Firstmate turn-end guard, pre-tool seatbelts, and native session-start
+// delivery for the omp (Oh My Pi) primary.
+//
+// A port of .pi/extensions/fm-primary-turnend-guard.ts with the turn-end
+// mechanism replaced. Pi could only ASK for a follow-up after agent_settled;
+// omp's session_stop hook is awaited before the session settles and can COMPEL
+// a continuation, so "no turn ends blind" (docs/turnend-guard.md) is
+// structurally enforced here rather than requested. Verified on omp 18.1.11:
+// a { continue: true, additionalContext } return started a fresh agent loop,
+// and the continuation's own session_stop carried stop_hook_active=true, which
+// bin/fm-turnend-guard.sh reads exactly as it reads Claude's payload, bounding
+// the guard to one forced continuation per turn (omp's own cap of 8
+// consecutive continuations is the second backstop). session_stop does not
+// fire for an interrupted turn or for task/subagent sessions, so a
+// supervisor-initiated interrupt is deliberately unguarded (bin/fm-control.sh
+// owns that postcondition).
+//
+// Session-start delivery: omp's session_start payload carries no reason field
+// (verified: keys are `type` only), so the source is derived here, following
+// the Cursor precedent in docs/sessionstart-nudge.md. The first session_start
+// of the process is `startup` (or `resume` when the launch line named
+// --continue/-c or --resume/-r); a later session_start in the same process is
+// an in-process replacement (/new, /resume, /fork) and maps to `clear`, whose
+// wrapper contract re-emits the digest only when this lock owner already
+// completed a full startup; session_compact maps to `compact`.
+// before_agent_start returning { message } was verified to reach model context
+// on omp 18.1.11 (the model quoted an injected marker back), so omp qualifies
+// for the Run tier.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// Shared with the Pi extensions; the owner resolves bin/fm-operational-input.sh
+// relative to its own location, which is this same repository root.
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
-  firstmateShellInvocation,
-} from "./lib/fm-operational-input.ts";
+} from "../../.pi/extensions/lib/fm-operational-input.ts";
 
-let guardFollowupActive = false;
+// The omp extension API surface this file uses, declared locally: omp ships no
+// separately installable type package and is a Pi fork whose event names match
+// where they are used here.
+type ExtensionAPI = {
+  on?: (event: string, handler: (event: any, ctx: any) => unknown) => void;
+  sendMessage?: (message: unknown) => void;
+};
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -19,7 +53,7 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-const marker = `${state}/.pi-turnend-extension-loaded`;
+const marker = `${state}/.omp-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 function parentPid(pid: string): string {
@@ -59,46 +93,28 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
-// Pi's session_start reasons are startup | reload | new | resume | fork, and a
-// separate session_compact event fires after a compaction. "new" is Pi's /new
-// while reload, resume, and fork all keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
 
 type SessionStartContext = {
   sessionManager?: {
-    getHeader?: () => { timestamp?: unknown } | null | undefined;
     getSessionId?: () => unknown;
   };
 };
 
-function restoredSessionEvidence(ctx: SessionStartContext): boolean {
-  try {
-    const timestamp = ctx.sessionManager?.getHeader?.()?.timestamp;
-    const createdAt = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
-    return Number.isFinite(createdAt) && createdAt < performance.timeOrigin;
-  } catch {
-    return false;
-  }
-}
-
-function startupRebuildSource(ctx: SessionStartContext): "resume" | "fork" | undefined {
+// The launch line is the only resume evidence omp offers an extension: its
+// session_start payload has no reason and no header timestamp is guaranteed.
+function launchResumeSource(): "resume" | undefined {
   const args = process.argv.slice(2);
-  const restored = restoredSessionEvidence(ctx);
   for (const arg of args) {
-    if (arg === "--fork" || arg.startsWith("--fork=")) return "fork";
     if (
-      restored && (
-        arg === "-c" || arg === "--continue" ||
-        arg === "-r" || arg === "--resume" ||
-        arg === "--session" || arg.startsWith("--session=") ||
-        arg === "--session-id" || arg.startsWith("--session-id=")
-      )
+      arg === "-c" || arg === "--continue" ||
+      arg === "-r" || arg === "--resume" || arg.startsWith("--resume=")
     ) return "resume";
   }
   return undefined;
 }
 const sessionstartTruncatedMarker =
-  "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
+  "\n\nOMP SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
   "Treat omitted context as unread and inspect the named files directly before acting on it.";
 const sessionstartManualFallback =
   "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.";
@@ -137,7 +153,7 @@ let activeSessionstartGeneration: SessionstartGeneration | null = null;
 
 function sessionIdFromContext(ctx: SessionStartContext): string {
   try {
-    return String(ctx.sessionManager?.getSessionId?.() ?? "");
+    return String(ctx?.sessionManager?.getSessionId?.() ?? "");
   } catch {
     return "";
   }
@@ -253,26 +269,21 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     };
     const supervised = process.platform !== "win32";
     const runner = `${root}/bin/fm-sessionstart-run.sh`;
-    const invocation = supervised
-      ? {
-          command: "node",
-          args: [
-            `${extensionDir}/lib/fm-sessionstart-supervisor.mjs`,
-            runner,
-            "--source",
-            generation.source,
-            "--pi-prerequisite",
-          ],
-        }
-      : firstmateShellInvocation(
-          runner,
-          ["--source", generation.source, "--pi-prerequisite"],
-        );
+    // The internal --pi-prerequisite mode is shared: it is the wrapper's
+    // "silent exit 3 on an intentional stand-down" contract, not a Pi-only path.
     let child: ChildProcess;
     try {
       child = spawn(
-        invocation.command,
-        invocation.args,
+        supervised ? "node" : runner,
+        supervised
+          ? [
+              `${root}/.pi/extensions/lib/fm-sessionstart-supervisor.mjs`,
+              runner,
+              "--source",
+              generation.source,
+              "--pi-prerequisite",
+            ]
+          : ["--source", generation.source, "--pi-prerequisite"],
         {
           detached: supervised,
           stdio: supervised
@@ -446,53 +457,38 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
-function runGuard(): Promise<{ code: number; stderr: string }> {
+// The shared guard reads stop_hook_active exactly as it does from Claude's
+// payload: a true value allows the stop, which is what bounds omp to one
+// forced continuation per turn.
+function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const invocation = firstmateShellInvocation(`${root}/bin/fm-turnend-guard.sh`, []);
-    let child: ChildProcess;
-    try {
-      child = spawn(invocation.command, invocation.args, {
-        stdio: ["pipe", "ignore", "pipe"],
-      });
-    } catch {
-      resolveResult({ code: 0, stderr: "" });
-      return;
-    }
+    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+      stdio: ["pipe", "ignore", "pipe"],
+    });
     let stderr = "";
-    child.stderr?.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
-    child.stdin?.on("error", () => {});
-    child.stdin?.end('{"stop_hook_active":false}');
+    child.stdin.end(JSON.stringify({ stop_hook_active: stopHookActive }));
   });
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
 // bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
-// extension file rather than separate ones so no extra Pi -e flag is needed at
-// launch - the primary already loads this file for the turn-end guard, and
-// pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
-// returning {block: true} prevents the bash command from running). Each owner
-// script owns its own decision and is inert outside the real primary checkout.
+// extension file so no extra -e flag is needed: omp auto-discovers this file
+// for the turn-end guard, and pi.on("tool_call", ...) can block (verified on
+// omp 18.1.2: returning {block: true, reason} refused the bash command and
+// surfaced the reason verbatim to the model). Each owner script owns its own
+// decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const invocation = firstmateShellInvocation(
-      `${root}/bin/${script}`,
-      ["--command", command],
-    );
-    let child: ChildProcess;
-    try {
-      child = spawn(invocation.command, invocation.args, {
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-    } catch {
-      resolveResult({ code: 0, stderr: "" });
-      return;
-    }
+    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
     let stderr = "";
-    child.stderr?.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
@@ -511,6 +507,7 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
+  let sessionStarts = 0;
   const cleanupSessionstartOnProcessExit = (): void => {
     const generation = sessionstartGeneration;
     if (!generation) return;
@@ -540,30 +537,26 @@ export default function (pi: ExtensionAPI) {
   };
   registerSessionstartExitListener();
 
-  pi.on?.("session_start", (event, ctx) => {
-    const reason = String((event as { reason?: unknown }).reason ?? "");
-    const source = reason === "startup"
-      ? startupRebuildSource(ctx) ?? "startup"
-      : { new: "clear", resume: "resume", fork: "fork" }[reason];
+  pi.on?.("session_start", (_event, ctx) => {
+    sessionStarts += 1;
+    const source: SessionstartSource = sessionStarts === 1
+      ? (launchResumeSource() ?? "startup")
+      : "clear";
     markLoaded();
-    if (!source) return;
     registerSessionstartExitListener();
-    sessionstartGeneration = createSessionstartGeneration(
-      source as SessionstartSource,
-      sessionIdFromContext(ctx),
-    );
+    sessionstartGeneration = createSessionstartGeneration(source, sessionIdFromContext(ctx));
   });
 
   pi.on?.("before_agent_start", async (_event, ctx) => {
     const generation = sessionstartGeneration;
-    if (!generation) return;
+    if (!generation) return undefined;
     const message = await claimSessionstartMessage(generation, ctx);
     return message ? { message } : undefined;
   });
 
-  // Pi's compaction equivalent. Manual compaction is idle and auto-compaction
-  // may retry without another before_agent_start, so the event keeps its
-  // existing delivery path while sharing generation ownership and cancellation.
+  // omp's compaction equivalent, delivered the way Pi's is: manual compaction
+  // is idle and auto-compaction may retry without another before_agent_start,
+  // so the message is sent directly while sharing generation ownership.
   pi.on?.("session_compact", async (_event, ctx) => {
     registerSessionstartExitListener();
     const generation = createSessionstartGeneration("compact", sessionIdFromContext(ctx));
@@ -571,7 +564,7 @@ export default function (pi: ExtensionAPI) {
     const message = await claimSessionstartMessage(generation, ctx);
     if (!message || !sessionstartGenerationIsLive(generation)) return;
     try {
-      pi.sendMessage(message);
+      pi.sendMessage?.(message);
     } catch {
       generation.delivered = false;
     }
@@ -587,8 +580,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("tool_call", async (event) => {
-    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+  pi.on?.("tool_call", async (event) => {
+    if (!event || event.type !== "tool_call" || event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);
@@ -600,27 +593,27 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
-    if (guardFollowupActive) {
-      guardFollowupActive = false;
-      return;
-    }
-
-    const result = await runGuard();
-    if (result.code !== 2) return;
-
-    guardFollowupActive = true;
+  // The blocking turn boundary. Returning undefined lets the session settle;
+  // returning { continue: true, additionalContext } compels one more agent
+  // loop with the guard text attached (verified on omp 18.1.2 and 18.1.11).
+  pi.on?.("session_stop", async (event) => {
+    const stopHookActive = Boolean(event && (event as { stop_hook_active?: unknown }).stop_hook_active === true);
+    const result = await runGuard(stopHookActive);
+    if (result.code !== 2) return undefined;
+    let content: string;
     try {
-      const content = encodeFirstmateOperationalInput(
+      content = encodeFirstmateOperationalInput(
         "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
       );
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
-      guardFollowupActive = false;
+      content = "TURN WOULD END BLIND - supervision is off. " +
+        "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+        result.stderr;
     }
+    return { continue: true, additionalContext: content };
   });
 
   markLoaded();

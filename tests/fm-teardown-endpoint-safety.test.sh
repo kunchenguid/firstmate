@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for cleanup endpoint identity validation.
+# Regression tests for cleanup endpoint and worktree-slot identity validation.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,6 +14,7 @@ make_case() {  # <name>
   mkdir -p "$TMP_ROOT/$dir/home/state" "$TMP_ROOT/$dir/home/data" \
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
+  git init -q "$TMP_ROOT/$dir/project"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -32,6 +33,19 @@ exit 0
 SH
   chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
   printf '%s\n' "$TMP_ROOT/$dir"
+}
+
+mark_case_as_treehouse_pool() {  # <case>
+  local dir=$1
+  rm -rf "$dir/worktree"
+  mkdir -p "$dir/pool/1"
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm pool-fixture
+  git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project"
+  ln -s "pool/1/project" "$dir/worktree"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
+    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+  : > "$dir/worktree/sentinel"
 }
 
 run_case() {  # <case> <id>
@@ -135,6 +149,42 @@ test_control_lock_contention_refuses_before_mutation() {
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "fm-teardown: a concurrent lifecycle action refuses before mutation"
+}
+
+test_non_pool_teardown_ignores_task_set_lock() {
+  local dir id=non-pool-task lock ready holder i=0
+  dir=$(make_case non-pool-task-set-lock)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/missing-worktree" "project=$dir/project" "kind=scout"
+  lock="$dir/home/state/.task-set.lock"
+  ready="$dir/task-set-lock-ready"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    trap 'fm_lock_release "$lock"' EXIT
+    : > "$ready"
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage an in-progress task publication"
+  }
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "non-pool teardown was blocked by an unrelated task publication: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "non-pool teardown left task metadata"
+  assert_present "$lock" "non-pool teardown removed the publisher's lock"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-teardown: non-pool cleanup ignores unrelated task publication locks"
 }
 
 test_metadata_lock_serializes_destructive_cleanup() {
@@ -365,10 +415,199 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+test_bare_relative_origin_shares_project_lock_with_clone() {
+  local dir second_project primary_lock clone_lock
+  dir=$(make_case bare-relative-origin-lock)
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm lock-fixture
+  mkdir -p "$dir/project/remotes"
+  git clone -q --bare "$dir/project" "$dir/project/remotes/origin.git"
+  git -C "$dir/project" remote add origin remotes/origin.git
+  second_project="$dir/second-project"
+  git clone -q "$dir/project/remotes/origin.git" "$second_project"
+
+  primary_lock=$(FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/project") \
+    || fail "could not resolve the primary project's bare-origin lock"
+  clone_lock=$(FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$second_project") \
+    || fail "could not resolve the clone project's absolute-origin lock"
+  [ "$primary_lock" = "$clone_lock" ] \
+    || fail "bare and absolute forms of the same local origin resolved different project locks"
+
+  pass "Treehouse locking resolves a bare local origin against its source project, matching the provisioned clone"
+}
+
+test_reused_pool_slot_refuses_before_touching_the_other_task() {
+  local dir id=stale-task other=live-task worker rc
+
+  dir=$(make_case slot-reuse)
+  mark_case_as_treehouse_pool "$dir"
+  # The reuse collision: the pool slot recorded for a finished task has already
+  # been handed to another task, whose worker is live in it right now.
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a second task record still holds"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reused pool slot"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a second task record still holds"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the live task's record"
+  assert_present "$dir/home/state/$id.meta" "teardown removed the stale task's record before refusing"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "refusal should name the other task holding the slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The same collision recorded on a secondmate home field rather than a task
+  # worktree is the same slot, and refuses the same way.
+  dir=$(make_case slot-reuse-home)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "home=$dir/worktree" \
+    "project=$dir/project" "kind=secondmate"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a secondmate home record still holds"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a secondmate home record still holds"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the secondmate record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
+}
+
+test_cross_home_pool_slot_collision_refuses() {
+  local dir id=stale-task other=secondmate-task second_home second_project rc
+  dir=$(make_case slot-reuse-cross-home)
+  mark_case_as_treehouse_pool "$dir"
+  printf 'fixture\n' > "$dir/project/tracked"
+  git -C "$dir/project" add tracked
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  second_home="$dir/secondmate-home"
+  second_project="$second_home/projects/project"
+  mkdir -p "$second_home/projects" "$second_home/state" "$second_home/data"
+  git clone -q "$dir/project" "$second_project"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$second_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$second_project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot held by another firstmate home"
+  assert_present "$dir/home/state/$id.meta" "cross-home collision removed stale metadata"
+  assert_present "$second_home/state/$other.meta" "cross-home collision removed live metadata"
+  assert_present "$dir/worktree/sentinel" "cross-home collision reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "cross-home collision reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "cross-home refusal should name the task holding the slot"
+  pass "fm-teardown: a pool slot held by another firstmate home is never returned"
+}
+
+test_sole_slot_record_still_tears_down() {
+  local dir id=sole-task worker
+
+  dir=$(make_case slot-sole)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # A neighbouring task on its OWN slot must not look like a collision.
+  mkdir -p "$dir/other-worktree"
+  fm_write_meta "$dir/home/state/neighbour.meta" \
+    "window=firstmate:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$dir/other-worktree" "project=$dir/project" "kind=scout"
+  ( cd "$dir/other-worktree" && exec sleep 30 ) &
+  worker=$!
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of a task that solely holds its slot failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "uncontested teardown left the task record"
+  assert_present "$dir/home/state/neighbour.meta" "uncontested teardown removed the neighbour's record"
+  kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a task that solely holds its slot still returns it"
+}
+
+test_recorded_endpoint_that_changed_directory_still_tears_down() {
+  local dir id=moved-task
+
+  dir=$(make_case slot-endpoint-moved)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/other-directory"
+  # The exact recorded worker may legitimately cd outside its worktree. Its
+  # endpoint identity still owns the lifecycle; cwd alone must not brick it.
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  printf '%s\n' '$dir/other-directory'
+  exit 0
+fi
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown refused its recorded endpoint after it changed directory: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "moved-endpoint teardown left the task record"
+  grep -Fq "tmux <kill-window> <-t> <=firstmate:=fm-$id>" "$dir/runtime.log" \
+    || fail "moved-endpoint teardown did not stop the exact recorded worker: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "moved-endpoint teardown did not return its uncontested pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: an exact recorded endpoint still tears down after changing cwd outside its worktree"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
+test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_bare_relative_origin_shares_project_lock_with_clone
+test_reused_pool_slot_refuses_before_touching_the_other_task
+test_cross_home_pool_slot_collision_refuses
+test_sole_slot_record_still_tears_down
+test_recorded_endpoint_that_changed_directory_still_tears_down

@@ -189,7 +189,7 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
+    pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
@@ -238,14 +238,39 @@ fm_pi_extension_loaded() {
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
 fm_pi_extension_owns_supervision() {
-  local state=$1 root=$2 lock session_pid pair source marker version
-  lock="$state/.lock"
-  for pair in \
+  fm_extension_pair_owns_supervision "$1" "$2/.pi/extensions" \
     "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
-    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
+}
+
+# fm_omp_extension_owns_supervision <state> <root>
+# The omp (Oh My Pi) primary's proof, keyed on its own two tracked extensions
+# under .omp/extensions/ and their own state markers. It is a separate proof on
+# purpose: omp must never inherit the Pi tolerance by accident, and a Pi home
+# never satisfies the omp markers. Both proofs bind to the pid in state/.lock,
+# so a session on one harness cannot vouch for a home held by the other.
+fm_omp_extension_owns_supervision() {
+  fm_extension_pair_owns_supervision "$1" "$2/.omp/extensions" \
+    "fm-primary-omp-watch.ts:.omp-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
+}
+
+# fm_extension_owns_supervision <state> <root>
+# The extension-model proof the verdict below consults: whichever extension
+# family's markers the lock-owning session recorded. Exactly one family can
+# match because both bind to the same lock pid.
+fm_extension_owns_supervision() {
+  fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2"
+}
+
+fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker>...
+  local state=$1 dir=$2 lock session_pid pair source marker version
+  shift 2
+  lock="$state/.lock"
+  for pair in "$@"; do
     source=${pair%%:*}
     marker=${pair#*:}
-    version=$(fm_pi_extension_version "$root/.pi/extensions/$source") || return 1
+    version=$(fm_pi_extension_version "$dir/$source") || return 1
     fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
@@ -295,7 +320,8 @@ fm_afk_daemon_owns_supervision() {
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
+# session provably owns continuity (fm_extension_owns_supervision: the Pi or the
+# omp extension pair, whichever the lock-owning session recorded) - that is the
 # extension's own tear-down-and-respawn hand-off, which it retries and escalates
 # itself. A lock with any recorded pid remains down if the strict health check fails.
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
@@ -329,7 +355,7 @@ fm_watcher_supervision_verdict() {
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
+      && fm_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else
@@ -1086,6 +1112,49 @@ fm_task_set_lock_path() {  # <state-dir>
   [ -n "$state" ] || return 1
   case "$state" in *[$'\n\r\t']*) return 1 ;; esac
   printf '%s/.task-set.lock\n' "$state"
+}
+
+fm_firstmate_root_home() {
+  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
+    marker="$home/.fm-secondmate-parent"
+    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-parent-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fi
+    fm_secondmate_parent_record_parse "$marker" || return 1
+    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    case "$seen" in *"|$parent|"*) return 1 ;; esac
+    seen="$seen$home|"
+    home=$parent
+    depth=$((depth + 1))
+    [ "$depth" -le 64 ] || return 1
+  done
+  printf '%s\n' "$home"
+}
+
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 root origin identity hash top
+  [ -d "$project" ] || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  if [ -n "$origin" ]; then
+    case "$origin" in
+      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *://*|*:* ) ;;
+      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+    esac
+    identity=$origin
+  else
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+    identity=$top
+  fi
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -d "$root/state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
 fm_failure_episode_reset() {

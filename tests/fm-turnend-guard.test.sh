@@ -99,6 +99,73 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+# Register a custom check the way an operator does, through the real
+# bin/fm-check-register.sh, so these cases bind to the shipped registration
+# artifacts rather than to a hand-written imitation of them.
+register_custom_check() {
+  local state=$1 id=$2
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$id.check.sh"
+  chmod 700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "fm-check-register.sh could not register $id"
+}
+
+test_predicate_registered_check_needs_supervision() {
+  local state="$TMP_ROOT/pred-check/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a registered custom check must not count as an in-flight task"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check, got $FM_SUP_CHECKS"
+  fm_supervision_unhealthy "$state" 300 || fail "a registered custom check with no beacon must be unhealthy"
+  pass "fm_supervision_needed: a registered custom check needs supervision with no task in flight"
+}
+
+test_predicate_registered_check_survives_rebinding_drift() {
+  local state="$TMP_ROOT/pred-check-drift/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"
+  fm_supervision_needed "$state" 300 \
+    || fail "an edited registered check must keep supervision on so the sweep can report the rejection"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected the edited check to stay counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: a registered check whose bytes drifted still needs supervision"
+}
+
+test_predicate_unregistered_check_needs_nothing() {
+  local state="$TMP_ROOT/pred-check-unregistered/state"
+  mkdir -p "$state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/rogue.check.sh"
+  chmod 700 "$state/rogue.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "a check with no trust binding must not arm supervision"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: false for a check.sh with no registration binding"
+}
+
+test_predicate_task_pr_poll_is_not_a_custom_check() {
+  local state="$TMP_ROOT/pred-pr-poll/state"
+  mkdir -p "$state"
+  : > "$state/task1.meta"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/task1.check.sh"
+  chmod 700 "$state/task1.check.sh"
+  : > "$state/task1.pr-poll"
+  fm_supervision_needed "$state" 300 || fail "the in-flight task itself must need supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected the task to be the one in-flight need, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a task PR poll must not count as a registered custom check"
+  pass "fm_supervision_needed: a task PR poll without a trust binding is not a registered custom check"
+}
+
+test_predicate_relay_shim_is_not_a_custom_check() {
+  local state="$TMP_ROOT/pred-relay-not-custom/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "the relay poll must still need supervision"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the relay shim keeps its own trust path and must not be counted as a custom check"
+  pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -324,6 +391,7 @@ Codex|{"cwd":"$dir","stop_hook_active":false}
 OpenCode|{"stop_hook_active":false}
 Pi|{"stop_hook_active":false}
 pi-signed|{"stop_hook_active":false}
+omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
 EOF
@@ -397,6 +465,17 @@ test_hook_x_mode_only_blocks_in_default_mode() {
   expect_code 2 "$status" "default hook mode must block an X-mode-only blind turn"
   assert_contains "$out" "X-mode relay polling needs supervision" "X-mode-only blind stop must identify its supervision need"
   pass "fm-turnend-guard: X-mode-only supervision remains guarded in default mode"
+}
+
+test_hook_registered_check_only_blocks_with_check_banner() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-check-only")
+  register_custom_check "$dir/state" issue-comments
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "default hook mode must block a registered-check-only blind turn"
+  assert_contains "$out" "1 registered custom check(s), but no live watcher" "check-only blind stop must identify its supervision need"
+  assert_not_contains "$out" "X-mode relay polling needs supervision" "check-only blind stop must not be misreported as relay polling"
+  pass "fm-turnend-guard: registered-check-only supervision is named in the block banner"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -1908,6 +1987,11 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_registered_check_needs_supervision
+test_predicate_registered_check_survives_rebinding_drift
+test_predicate_unregistered_check_needs_nothing
+test_predicate_task_pr_poll_is_not_a_custom_check
+test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -1919,6 +2003,7 @@ test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
+test_hook_registered_check_only_blocks_with_check_banner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
