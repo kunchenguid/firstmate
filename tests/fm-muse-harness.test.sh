@@ -64,6 +64,51 @@ write_session_log() {
   printf '%s\n' "$path"
 }
 
+# --- real renamed processes -------------------------------------------------
+
+# The detection cases need a REAL running process carrying the name under
+# test, because bin/fm-harness.sh reads `ps -o comm=` off the live parent
+# chain. A copy of the system bash supplied that until macOS stopped executing
+# one: a copy of an Apple platform binary keeps Apple's signature at a
+# non-system path, the exec is refused, and the process is SIGKILLed before it
+# runs (verified macOS 26.5.1, arm64: `cp /bin/bash x; x -c 'echo ran'` exits
+# 137, while the same copy re-signed ad hoc with `codesign -f -s -` runs).
+#
+# A symlink execs the real interpreter while the kernel takes the process name
+# from the path used to launch it, so it presents exactly the name under test:
+# macOS reports the symlink path from `ps -o comm=`, and Linux reports its
+# basename in /proc/<pid>/comm, truncated to the kernel's 15-byte limit exactly
+# as a copy was. Ad-hoc re-signing was rejected as the repair because it would
+# make a portable test depend on a macOS-only signing toolchain.
+named_executable() {  # <dir> <name>
+  ln -sf "$(command -v bash)" "$1/$2"
+}
+
+# The command substitution around the probe is load-bearing for the same
+# reason it is in test_detects_versioned_process_ancestor below.
+presented_process_name() {  # <executable> -> basename of the name its process presents
+  local out
+  # The probe must stay single-quoted: $$ has to expand in the launched shell,
+  # not in this one.
+  # shellcheck disable=SC2016
+  out=$("$1" -c 'r=$(ps -o comm= -p $$); printf "%s" "$r"' 2>/dev/null) || return 1
+  basename -- "$out"
+}
+
+# Guard against a silently vacuous case: if the construction above ever stops
+# naming the process, a negative assertion would pass while checking nothing.
+# Linux truncates the name to 15 bytes, so a prefix is the honest match.
+assert_process_presents_name() {  # <executable> <intended-name>
+  local observed
+  observed=$(presented_process_name "$1") \
+    || fail "could not launch the renamed executable '$2' to read its process name"
+  [ -n "$observed" ] || fail "renamed executable '$2' presented an empty process name"
+  case "$2" in
+    "$observed"*) ;;
+    *) fail "renamed executable '$2' presented process name '$observed'; the construction no longer names the process, so every case built on it is vacuous" ;;
+  esac
+}
+
 # --- spawn scaffolding ------------------------------------------------------
 
 make_spawn_fakebin() {
@@ -104,7 +149,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  named_executable "$fakebin" muse-bin-test-version
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -181,7 +226,8 @@ test_detects_versioned_process_ancestor() {
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
+    named_executable "$dir" "$bin"
+    assert_process_presents_name "$dir/$bin" "$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -197,7 +243,8 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
+    named_executable "$dir" "$bin"
+    assert_process_presents_name "$dir/$bin" "$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
