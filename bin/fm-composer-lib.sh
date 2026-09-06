@@ -530,6 +530,17 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
       plain_body=${plain_body#*"$plain_glyph"}
     fi
     fm_composer_normalize_trim_var plain_body
+    # A harness may right-align a status hint on the composer row itself,
+    # separated from the input by a run of spaces: cursor-agent draws
+    # `ctrl+c to stop` there for as long as it is working. That furniture is not
+    # input, and leaving it on the row defeats the anchored placeholder match
+    # below, so a busy cursor pane's idle composer read `pending` and every
+    # steer sent while it worked skipped its doorbell. Keep the row's FIRST
+    # column only: with no gap this is the whole row, so every gapless verdict
+    # is unchanged, and the length guard still compares against that column, so
+    # text typed to exactly match the placeholder stays `pending`.
+    plain_body=${plain_body%%"  "*}
+    fm_composer_normalize_trim_var plain_body
     if [ "${#content}" -lt "${#plain_body}" ] \
        && fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
       case "$plain_body" in
