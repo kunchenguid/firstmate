@@ -444,7 +444,6 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      INCOMPLETE_REPORTED=1
       emit "$name check failed: the time budget ran out before every copy answered"
       break
     fi
@@ -480,7 +479,6 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        INCOMPLETE_REPORTED=1
         emit "$name check failed: the time budget ran out before the update announcement was checked"
         announce_out=
       else
@@ -605,7 +603,6 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
-      INCOMPLETE_REPORTED=1
       emit "$name check failed: the time budget ran out before $subject was asked $question"
       return 1
       ;;
@@ -818,12 +815,7 @@ action_check() {
   if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  # Only skipped work makes the sweep incomplete. The last issued probe can
-  # finish after the deadline without leaving anything unchecked; keep that
-  # complete result and cadence epoch so its finding is not reported again.
-  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
-    record_write "$FINDINGS" || true
-  fi
+  record_write "$FINDINGS" || true
   return 0
 }
 

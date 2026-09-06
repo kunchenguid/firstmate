@@ -347,7 +347,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
-  assert_absent "$home/state/.tool-updates" "an unchecked announcement produced a complete record"
+  assert_grep 'reported=' "$home/state/.tool-updates" "an unchecked announcement did not record its finding"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -711,8 +711,8 @@ test_published_failures_do_not_blind_other_tools() {
   pass "unreachable and unparseable published sources fail for their own tool and the sweep continues"
 }
 
-test_published_probe_bounds_and_incomplete_record() {
-  local home dir out start elapsed record real_jq
+test_published_probe_bounds_and_report_record() {
+  local home dir out start elapsed real_jq
   home=$(make_home release-bounds)
   dir="$home/bin"
   out="$home/out.txt"
@@ -725,16 +725,15 @@ test_published_probe_bounds_and_incomplete_record() {
   elapsed=$(($(date +%s) - start))
   [ "$elapsed" -lt 10 ] || fail "published probe escaped its bound: ${elapsed}s"
   assert_contains "$(cat "$out")" 'could not be reached or read (exit 124)' "hung HTTP source was not a check failure"
-  record=$(cat "$home/state/.tool-updates")
   # Spend the whole sweep budget, leaving a later tool unchecked.
   jq '.tools += [{name:"unreached",command:"fm-absent-release-fixture"}]' "$home/config/watched-tools.json" > "$home/config-next"
   mv "$home/config-next" "$home/config/watched-tools.json"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_SLEEP=20 FM_TOOL_UPDATE_PROBE_SECS=5 FM_TOOL_UPDATE_BUDGET_SECS=2
   assert_contains "$(cat "$out")" 'check incomplete:' "incomplete sweep was silent"
-  [ "$(cat "$home/state/.tool-updates")" = "$record" ] || fail "incomplete sweep replaced the complete report record"
+  assert_grep 'check incomplete:' "$home/state/.tool-updates" "incomplete sweep did not record its finding"
   rm "$home/state/.tool-updates"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_SLEEP=20 FM_TOOL_UPDATE_PROBE_SECS=5 FM_TOOL_UPDATE_BUDGET_SECS=2
-  assert_absent "$home/state/.tool-updates" "incomplete sweep created a report record"
+  assert_grep 'reported=' "$home/state/.tool-updates" "incomplete sweep did not create a report record"
   # A stalled parser must have the same bound as the HTTP read. Registry parsing
   # still goes through the real jq, so this only stalls response parsing.
   real_jq=$(command -v jq)
@@ -749,7 +748,7 @@ SH
   elapsed=$(($(date +%s) - start))
   [ "$elapsed" -lt 10 ] || fail "response parser escaped the probe bound: ${elapsed}s"
   assert_contains "$(cat "$out")" 'could not be reached or read (exit 124)' "stalled parser was not bounded"
-  pass "published probes obey their bound and incomplete sweeps leave no record"
+  pass "published probes obey their bound and incomplete sweeps record their findings"
 }
 
 # Advance the check's clock only when a fixture probe finishes. This pins the
@@ -800,19 +799,27 @@ test_completed_late_sweep_records_and_deduplicates() {
   [ "$(wc -l < "$home/http.log")" = "$queries" ] || fail "late sweep cadence epoch did not suppress probes"
 
   # Counterfactual: the same late probe with another configured tool after it
-  # leaves work unchecked. That partial sweep must preserve the previous record.
-  cp "$home/state/.tool-updates" "$home/previous-record"
+  # leaves work unchecked.
   jq '.tools += [{name:"unreached",command:"fm-unreached-budget-fixture"}]' "$home/config/watched-tools.json" > "$home/next-config"
   mv "$home/next-config" "$home/config/watched-tools.json"
   printf '100\n' > "$clock"
   run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700001000
   assert_contains "$(cat "$out")" 'check incomplete: the time budget ran out before unreached' "an unreached tool was treated as checked"
-  cmp -s "$home/previous-record" "$home/state/.tool-updates" || fail "partial sweep replaced the complete record"
+  assert_grep 'epoch=1700001000' "$home/state/.tool-updates" "partial sweep discarded its cadence epoch"
+  assert_grep 'check incomplete:' "$home/state/.tool-updates" "partial sweep discarded its finding"
+  queries=$(wc -l < "$home/http.log")
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW=1700001300 \
+    FM_TOOL_UPDATE_BUDGET_SECS=5 FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" \
+    "$CHECK" > "$out" 2>&1 || status=$?
+  expect_code 0 "$status" "partial sweep cadence poll"
+  [ ! -s "$out" ] || fail "partial sweep cadence poll reported again"
+  [ "$(wc -l < "$home/http.log")" = "$queries" ] || fail "partial sweep cadence epoch did not suppress probes"
   rm "$home/state/.tool-updates"
   printf '100\n' > "$clock"
   run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5
-  assert_absent "$home/state/.tool-updates" "partial sweep created a record"
-  pass "a last probe that finishes late records once, while an unreached later tool prevents recording"
+  assert_grep 'reported=' "$home/state/.tool-updates" "partial sweep did not create a record"
+  pass "complete and partial late sweeps record findings and retain cadence"
 }
 
 test_unstarted_published_probe_reports_budget_once() {
@@ -834,7 +841,7 @@ SH
   [ "$(cat "$out")" = 'tool updates: check incomplete: the time budget ran out before herdr published source' ] \
     || fail "an unstarted published probe reported its budget failure more than once: $(cat "$out")"
   assert_absent "$home/http.log" "published source was asked after its budget was gone"
-  assert_absent "$home/state/.tool-updates" "unstarted published probe produced a complete record"
+  assert_grep 'reported=' "$home/state/.tool-updates" "unstarted published probe did not record its finding"
 
   # A skipped PATH copy is also unfinished work, even within the last tool.
   fresh="$home/fresh"
@@ -843,8 +850,8 @@ SH
   printf '100\n' > "$clock"
   run_check "$home" "$(fixture_path "$dir:$fresh")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=5
   assert_contains "$(cat "$out")" 'the time budget ran out before every copy answered' "skipped PATH copy was treated as checked"
-  assert_absent "$home/state/.tool-updates" "skipped PATH copy produced a complete record"
-  pass "a skipped published probe reports its budget failure once and skipped probes leave no record"
+  assert_grep 'reported=' "$home/state/.tool-updates" "skipped PATH copy did not record its finding"
+  pass "a skipped published probe reports its budget failure once and skipped probes record their findings"
 }
 
 test_malformed_published_config_refuses_whole_registry() {
@@ -1341,7 +1348,7 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 
 test_published_versions_for_the_three_motivating_tools
 test_published_failures_do_not_blind_other_tools
-test_published_probe_bounds_and_incomplete_record
+test_published_probe_bounds_and_report_record
 test_completed_late_sweep_records_and_deduplicates
 test_unstarted_published_probe_reports_budget_once
 test_malformed_published_config_refuses_whole_registry
