@@ -193,9 +193,13 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
-# provably-working stale past the threshold, or anything unknown) is written to
-# the durable queue and exits. That wakes the LLM through the background-task
-# completion. The same classifier
+# TERMINAL-status stale pane whose agent the backend confidently reports dead,
+# regardless of any run credited to it by branch, a provably-working stale past
+# the threshold, or anything unknown) is written to the durable queue and exits.
+# That dead-agent entry is the terminal-status branch alone: under a declared
+# wait a confidently dead agent is classified paused instead and ABSORBED on the
+# bounded pause cadence, so it belongs to the absorbed list rather than here. That wakes the
+# LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
@@ -953,10 +957,43 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
+# crew_agent_alive: the backend's liveness verdict for an ordinary crew's agent -
+# `alive`, `dead`, or `unknown` when the backend cannot say or the read fails. A
+# secondmate answers the empty string, because a mate's endpoint liveness is
+# deliberately never read (pause_state_class owns why). This is the ONE read every
+# stale-path gate that weighs a dead agent above the run-based working proof goes
+# through, so the terminal-line branch and pause_state_class cannot drift apart on
+# how a verdict is obtained or what counts as confidently dead.
+crew_agent_alive() {  # <window> <kind>
+  local win=$1 kind=$2 verdict
+  [ "$kind" != secondmate ] || return 0
+  verdict=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || verdict=unknown
+  printf '%s' "$verdict"
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
+#
+# Liveness is read BEFORE the run-based working class, and a confidently dead
+# ordinary crew under a declared wait is paused without consulting that class at
+# all. The working class comes from crew_absorb_class, whose no-mistakes run
+# attribution binds a run by BRANCH for a crew that has not bound its own run id
+# (bin/fm-crew-state.sh), so once the captain's one-PR-per-repo posture puts
+# several crews' worktrees on one long-lived feature branch, a crew that has exited
+# still inherits a co-branch crew's active run and reads `working` forever: the
+# stale path then absorbs its empty pane as provably working on every poll while
+# the wedge timer escalates it as a possible wedge every STALE_ESCALATE_SECS,
+# indefinitely. A dead agent cannot ANSWER that pipeline's gates or act on its
+# result - the run itself is a background daemon run and may well still be
+# executing, whoever owns it - so the crew's own declaration is the better
+# evidence about the crew. The order is reversed ONLY for a dead agent:
+# a live or ambiguous agent still consults the working class first, so a crew that
+# declared a wait and then genuinely started a run is never silenced. The
+# stale path's terminal-line branch applies the same dead-agent precedence
+# through the shared crew_agent_alive read, so a `done:` leftover on a closed
+# crew is surfaced as terminal rather than absorbed on a sibling's run.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
@@ -967,19 +1004,25 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
+  # Read once past the declared-wait gate and reused by every liveness gate below,
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
+  agent_alive=$(crew_agent_alive "$win" "$kind")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+    if [ "$kind" != secondmate ] && [ "$agent_alive" != dead ]; then
+      rm -f "$recheck_file"
+      printf 'none'
+      return
     fi
+    printf 'paused'
+    return
+  fi
+  # The declared wait wins outright once the agent is confidently dead: no live
+  # gate can be silenced, and skipping crew_absorb_class here is what keeps a
+  # co-branch crew's run from being credited to this closed crew.
+  if [ "$kind" != secondmate ] && [ "$agent_alive" = dead ]; then
+    date +%s > "$recheck_file"
     printf 'paused'
     return
   fi
@@ -990,21 +1033,18 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
+    # agent_alive was read above and is not dead here, so a declared wait on a
+    # still-live or ambiguous agent stays inconclusive and surfaces for inspection.
+    rm -f "$recheck_file"
+    printf 'none'
+    return
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # could not name. Only a secondmate reaches here, and its endpoint liveness is
+  # deliberately never read and so can never supply the dead confirmation above.
+  # Without this case a mate's captain hold - which has no current-state mapping and
+  # so arrives as `none` - would be silenced by every caller rather than taking the
+  # bounded re-surface cadence, and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
@@ -1931,8 +1971,20 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
+          # The override is offered only while the crew's agent is not
+          # confidently dead. The run half of that proof is attributed by
+          # BRANCH for a crew that never bound its own run id, so on a shared
+          # feature branch a closed crew's `done:` leftover would otherwise
+          # inherit a co-branch sibling's active run, be absorbed as provably
+          # working, and then wedge-escalate every STALE_ESCALATE_SECS until
+          # torn down. A dead agent cannot ANSWER that pipeline's gates or act
+          # on its result - the run is a background daemon run and may still be
+          # executing, whoever owns it - so the pane is surfaced once as the
+          # genuinely terminal stale it is, with no wedge timer; a live or
+          # ambiguous agent keeps the override.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if [ "$(crew_agent_alive "$w" "$kind")" != dead ] \
+              && crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"

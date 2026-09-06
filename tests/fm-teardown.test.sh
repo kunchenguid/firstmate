@@ -112,7 +112,9 @@ SH
   # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
   # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
   # step is then a no-op), `axi abort` appends one line to
-  # FM_FAKE_NM_ABORT_LOG when set, the top-level `runs` listing answers
+  # FM_FAKE_NM_ABORT_LOG when set, `axi status --run <id>` answers
+  # FM_FAKE_AXI_STATUS_RUN when set (before an abort of that id), so a task's
+  # own run can differ from the repo's current one, the top-level `runs` listing answers
   # FM_FAKE_NM_RUNS_LIST verbatim (the real `no-mistakes runs --limit N` is
   # plain text with no run id and no quoting - see the ledger fixtures below),
   # and `runs` appends its own invocation to FM_FAKE_NM_RUNS_LOG when set, so
@@ -145,6 +147,8 @@ case "${1:-}" in
           else
             printf 'run:\n  id: "%s"\n  outcome: cancelled\n' "$run_id"
           fi
+        elif [ -n "$run_id" ] && [ -n "${FM_FAKE_AXI_STATUS_RUN:-}" ]; then
+          printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN"
         else
           printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
         fi
@@ -3034,6 +3038,178 @@ EOF
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
 }
 
+# A second crew's worktree on the SAME branch and head as task-x1 (the shape a
+# one-PR-per-repo posture produces), whose task record binds run <run-id>.
+# Branch-and-head identity cannot tell the two apart; only the binding can.
+add_bound_sibling_on_task_branch() {  # <case-dir> <run-id>
+  local case_dir=$1 run_id=$2
+  git -C "$case_dir/project" worktree add -q --force "$case_dir/wt-sibling" fm/task-x1
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=firstmate:fm-task-x2" \
+    "endpoint_task_id=task-x2" \
+    "worktree=$case_dir/wt-sibling" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "nm_run=$run_id"
+}
+
+# Closed crew A (task-x1, unbound) and running crew B (task-x2, bound) share one
+# branch and one HEAD; B's pipeline is parked at a gate when the captain tears
+# down A. Before the ownership rule, teardown attributed B's parked run to A by
+# branch plus head and aborted it, destroying B's in-flight validation.
+test_sibling_bound_parked_run_is_never_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-sibling-bound)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bound_sibling_on_task_branch "$case_dir" 01SIBLINGRUN00000000000001
+
+  local rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01SIBLINGRUN00000000000001)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-sibling-bound: teardown of the unbound crew should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-sibling-bound: teardown aborted a parked run another task has bound"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-sibling-bound: teardown reported aborting a run it does not own"
+  assert_grep "run 01SIBLINGRUN00000000000001 is bound to task task-x2" "$case_dir/stderr" \
+    "parked-run-sibling-bound: teardown did not name the task that owns the run it left alone"
+  pass "an unbound crew's teardown never aborts a co-branch sibling's bound parked run, and names the owner"
+}
+
+# Same shape, but the repo's current parked run is one nobody has bound. An
+# unbound task on a branch where a sibling binds a run cannot prove that run is
+# its own rather than the sibling's next round, so branch credit is withheld
+# and the run is left alone. The sibling is recognised by its recorded
+# worktree's branch alone: no `axi status --run` answer is staged for it.
+test_unbound_task_never_aborts_a_parked_run_on_a_branch_with_a_bound_sibling() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-bound-sibling-branch)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bound_sibling_on_task_branch "$case_dir" 01SIBLINGRUN00000000000002
+
+  local rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01NOBODYSRUN00000000000002)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-bound-sibling-branch: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-bound-sibling-branch: an unbound task aborted a run on a branch a bound sibling shares"
+  assert_grep "may belong to task task-x2" "$case_dir/stderr" \
+    "parked-run-bound-sibling-branch: teardown did not name the bound sibling it deferred to"
+  pass "an unbound task never aborts a parked run on a branch where a sibling binds one"
+}
+
+# The mirror case: task-x1 IS bound, and its own run is parked while the repo's
+# current run is its sibling's autonomous run. Teardown must find task-x1's own
+# run by id and conclude it, rather than orphaning it because a sibling's run
+# happened to be the current one.
+test_bound_task_concludes_its_own_parked_run_by_id() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-own-by-id)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'nm_run=01OWNRUN000000000000000003\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bound_sibling_on_task_branch "$case_dir" 01SIBLINGRUN00000000000003
+
+  local rc=0
+  FM_FAKE_AXI_STATUS="$(running_axi_status_toon fm/task-x1 "$head" 01SIBLINGRUN00000000000003)" \
+  FM_FAKE_AXI_STATUS_RUN="$(parked_axi_status_toon fm/task-x1 "$head" 01OWNRUN000000000000000003)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-own-by-id: teardown should succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-own-by-id: teardown never aborted the task's own parked run found by id"
+  assert_grep "abort --run 01OWNRUN000000000000000003" "$case_dir/nm-abort.log" \
+    "parked-run-own-by-id: the abort did not target the task's own bound run"
+  assert_no_grep "abort --run 01SIBLINGRUN00000000000003" "$case_dir/nm-abort.log" \
+    "parked-run-own-by-id: teardown touched the sibling's current run"
+  pass "a bound task's own parked run is concluded by id even when a sibling's run is the current one"
+}
+
+# A run TOON named by id that has already ENDED, as `axi status --run <id>`
+# answers for a binding whose run is finished history.
+terminal_axi_status_toon() {  # <branch> <head> <run-id> <outcome>
+  cat <<EOF
+run:
+  id: "$3"
+  branch: $1
+  status: completed
+  head: "$2"
+  pr: ""
+  findings: none
+outcome: $4
+EOF
+}
+
+# The stale-binding decline on the ABORT path. Task-x1 bound run A, A was
+# cancelled, and task-x1 restarted validation as run B at the same head on the
+# same branch without re-binding. Trusting the binding reads task-x1's own
+# terminal row, concludes it has no parked run, and removes the worktree while B
+# stays parked at a gate awaiting the very agent being removed - the orphaned
+# run this whole step exists to prevent. Declining a TERMINAL binding whose
+# branch is still current returns task-x1 to the unbound path, where B, which no
+# other task binds, is its own run and is concluded.
+test_stale_terminal_binding_aborts_the_tasks_real_current_run() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-stale-binding)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'nm_run=01STALEOWNRUN00000000000A\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01RESTARTEDRUN0000000000A)" \
+  FM_FAKE_AXI_STATUS_RUN="$(terminal_axi_status_toon fm/task-x1 "$head" 01STALEOWNRUN00000000000A cancelled)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-stale-binding: teardown should succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-stale-binding: a stale binding left the task's own live run orphaned at its gate"
+  assert_grep "abort --run 01RESTARTEDRUN0000000000A" "$case_dir/nm-abort.log" \
+    "parked-run-stale-binding: the abort did not target the run the task is really validating"
+  assert_no_grep "abort --run 01STALEOWNRUN00000000000A" "$case_dir/nm-abort.log" \
+    "parked-run-stale-binding: teardown aborted the already-terminal bound run"
+  pass "a stale terminal binding is declined so teardown still concludes the task's real parked run"
+}
+
+# Declining a stale binding drops this task to the UNBOUND path - it does not
+# hand it the branch. A bound sibling's worktree on the same branch still
+# withholds the run entirely, so a declined binding can never become a licence
+# to abort a neighbour's pipeline.
+test_stale_terminal_binding_still_defers_to_a_bound_sibling() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-stale-binding-sibling)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'nm_run=01STALEOWNRUN00000000000B\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bound_sibling_on_task_branch "$case_dir" 01SIBLINGRUN0000000000000B
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01NOBODYSRUN000000000000B)" \
+  FM_FAKE_AXI_STATUS_RUN="$(terminal_axi_status_toon fm/task-x1 "$head" 01STALEOWNRUN00000000000B cancelled)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-stale-binding-sibling: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-stale-binding-sibling: a declined binding let teardown abort a run on a branch a bound sibling shares"
+  assert_grep "may belong to task task-x2" "$case_dir/stderr" \
+    "parked-run-stale-binding-sibling: teardown did not name the bound sibling it deferred to"
+  pass "a declined binding drops to the unbound path and still defers to a bound sibling"
+}
+
 test_another_branchs_parked_run_is_never_touched() {
   local case_dir rc
   case_dir=$(make_case parked-run-not-ours)
@@ -3532,6 +3708,11 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
+test_sibling_bound_parked_run_is_never_aborted
+test_unbound_task_never_aborts_a_parked_run_on_a_branch_with_a_bound_sibling
+test_bound_task_concludes_its_own_parked_run_by_id
+test_stale_terminal_binding_aborts_the_tasks_real_current_run
+test_stale_terminal_binding_still_defers_to_a_bound_sibling
 test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped

@@ -8,9 +8,14 @@
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
 # crew-state for an ACTIVE run, so a fix round never reads as an older failed
 # run, and teardown for a run PARKED at a gate, so cleanup concludes it
-# instead of orphaning it. Getting this wrong in either
-# direction is unsafe: a false negative hides a genuinely parked run, and a
-# false positive lets teardown act on a run it does not own.
+# instead of orphaning it. Both then apply the ONE run-ownership rule at the
+# end of this file (fm_nm_binding_is_declined for the stale-binding decline both
+# make at their by-id refetch, then fm_nm_run_owned_by_task and
+# fm_nm_branch_credit_owned_by_task), which separates concurrent crews whose
+# worktrees sit on one branch through the run binding each crew records with
+# bin/fm-run-bind.sh. Getting this wrong in either direction is unsafe: a false
+# negative hides a genuinely parked run, and a false positive lets teardown act
+# on a run it does not own.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -213,4 +218,171 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     pending_st=$st
   done <<< "$list"
   return 0
+}
+
+# --- run ownership across concurrent crews on ONE branch ---------------------
+#
+# Branch plus head identity cannot tell apart concurrent crews whose worktrees
+# sit on one long-lived feature branch: no-mistakes exposes nothing that names
+# the worktree a run was invoked from (`axi status` is repo-scoped and answers
+# the identical run from any worktree of the repo, the `runs` listing carries no
+# such column, and the private runs.worktree_dir record holds the pipeline's own
+# internal checkout - verified 2026-09-04 against two live worktrees of one
+# branch on v1.57.0). The one unambiguous identifier is the run id, and only
+# the crew that started a run knows which id is its own, so it records it as
+# `nm_run=<run-id>` in its task record through bin/fm-run-bind.sh. These
+# predicates are the ONE ownership rule both consumers apply on top of the
+# branch-and-head rules above: fm-crew-state.sh before crediting a run as a
+# crew's working proof, fm-teardown.sh before aborting a parked run. Every
+# record read here is the home's own state/<id>.meta, and the only per-record
+# lookup is one local `git symbolic-ref` read of a BOUND sibling's recorded
+# worktree. No no-mistakes CLI call is ever issued for a sibling: crew-state
+# runs on bin/fm-watch.sh's per-poll path and bin/fm-fleet-snapshot.sh runs it
+# for every task, so a bounded CLI call per bound sibling would multiply to
+# tasks x bound siblings x timeout per poll and stall supervision. The known
+# limit this buys: a bound sibling whose worktree has since detached, moved to
+# another branch, or been torn down is no longer seen as holding this branch,
+# so it withholds nothing on the branch-level route (it still owns the run it
+# bound on the id route, whatever its worktree does).
+
+# The last value of key $2 in task record $1; empty when the record is absent
+# or never wrote the key.
+fm_nm_task_meta_value() {  # <meta-file> <key>
+  local line value=''
+  [ -f "$1" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$2="*) value=${line#"$2="} ;; esac
+  done < "$1" 2>/dev/null || true
+  printf '%s' "$value"
+}
+
+# The run binding of task record $1 (its last `nm_run=` key); empty when the
+# record is absent or unbound.
+fm_nm_task_bound_run() {  # <meta-file>
+  fm_nm_task_meta_value "$1" nm_run
+}
+
+# The DECLINE rule for a stale binding, applied by BOTH consumers at the point
+# where they refetch their own run by id, so the read path and the abort path
+# never diverge about which answer a binding is worth. A crew that restarts
+# validation and does not re-bind would otherwise be pinned to its own finished
+# run: fm-crew-state.sh reports `state: failed - run cancelled` for a crew that
+# is actively validating, and fm-teardown.sh finds no parked run of its own and
+# removes the worktree while that crew's genuinely live run stays parked at a
+# gate, orphaned - the exact outcome its "Fix 1" exists to prevent. So the
+# binding is declined, and the caller falls through to the unbound path (the
+# branch guess this whole contract exists to improve on, which is what makes a
+# missed re-bind self-healing rather than a confident wrong answer), when ALL of:
+#   - the bound run's own answer (TOON $1) reached a terminal outcome
+#   - the repo's CURRENT run (TOON $2) is a DIFFERENT id
+#   - that current run is on the crew's own branch $3
+# An ACTIVE bound run always keeps precedence, so a genuinely running own run is
+# never given up for a sibling's, and a current run on ANOTHER branch says
+# nothing about this crew and never declines its binding. An empty or malformed
+# bound answer reads as active here and is likewise never declined: a CLI that
+# did not respond is not evidence that a binding is stale.
+fm_nm_binding_is_declined() {  # <bound-run-toon> <current-run-toon> <crew-branch>
+  local bound=$1 current=$2 branch=$3 bound_id current_id
+  [ -n "$bound" ] && [ -n "$current" ] && [ -n "$branch" ] || return 1
+  bound_id=$(fm_nm_strip_quotes "$(fm_nm_field "$bound" id)")
+  current_id=$(fm_nm_strip_quotes "$(fm_nm_field "$current" id)")
+  [ -n "$current_id" ] && [ "$current_id" != "$bound_id" ] || return 1
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$current" branch)")" = "$branch" ] || return 1
+  ! fm_nm_run_is_active "$bound"
+}
+
+# Prints the id of the task OTHER than $2 whose record in state dir $1 binds run
+# id $3, and returns 0; returns 1 (printing nothing) when no other task binds it.
+# Self is excluded by task id rather than by record path, because a supervisor
+# may read this task's record through a captured copy (bin/fm-fleet-snapshot.sh)
+# while the live record under $1 is the same task, not a rival claimant.
+fm_nm_run_bound_by_other_task() {  # <state-dir> <task-id> <run-id>
+  local state=$1 self=$2 run_id=$3 meta
+  [ -n "$run_id" ] || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "${meta##*/}" != "$self.meta" ] || continue
+    if [ "$(fm_nm_task_bound_run "$meta")" = "$run_id" ]; then
+      printf '%s' "${meta##*/}" | sed 's/\.meta$//'
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Branch the recorded worktree of task record $1 currently sits on, read
+# locally from its git ref; empty when the record names no worktree, the
+# worktree is gone, or it is at detached HEAD.
+fm_nm_task_worktree_branch() {  # <meta-file>
+  local wt
+  wt=$(fm_nm_task_meta_value "$1" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true
+}
+
+# Prints the id of a task OTHER than $2 whose record in state dir $1 binds a run
+# AND whose recorded worktree currently sits on branch $3, and returns 0;
+# returns 1 (printing nothing) when no bound sibling holds the branch. Only
+# records carrying an `nm_run=` binding are examined, and when both this task's
+# `project=` root ($4, optional) and the sibling's are recorded, a sibling of
+# another project is skipped: a run of another repo can never be this branch's.
+# The sibling's branch is one local git ref read, never a CLI call (see the
+# section header for the cost argument and the detached-worktree limit).
+fm_nm_branch_bound_sibling() {  # <state-dir> <task-id> <branch> [project]
+  local state=$1 self=$2 branch=$3 project=${4:-} meta sibling_project
+  [ -n "$branch" ] || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "${meta##*/}" != "$self.meta" ] || continue
+    [ -n "$(fm_nm_task_bound_run "$meta")" ] || continue
+    if [ -n "$project" ]; then
+      sibling_project=$(fm_nm_task_meta_value "$meta" project)
+      [ -z "$sibling_project" ] || [ "$sibling_project" = "$project" ] || continue
+    fi
+    if [ "$(fm_nm_task_worktree_branch "$meta")" = "$branch" ]; then
+      printf '%s' "${meta##*/}" | sed 's/\.meta$//'
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The ownership rule for a run named by id. 0 if run $4 may be credited to, or
+# acted on for, task $2 whose own binding is $3 (empty when unbound), given the
+# home's records in state dir $1:
+#   - bound, ids equal: ours, whatever the branch says
+#   - bound, ids differ: not ours - the run is someone else's
+#   - unbound, another task binds this id: not ours - it is spoken for
+#   - unbound, nobody binds this id: ours by the legacy branch rule, so a home
+#     whose crews predate bindings regresses in no way
+fm_nm_run_owned_by_task() {  # <state-dir> <task-id> <own-binding> <run-id>
+  local state=$1 self=$2 own=$3 run_id=$4
+  if [ -n "$own" ]; then
+    [ -n "$run_id" ] && [ "$run_id" = "$own" ]
+    return
+  fi
+  ! fm_nm_run_bound_by_other_task "$state" "$self" "$run_id" >/dev/null
+}
+
+# The ownership rule for branch-level credit, where no run id is available (the
+# `runs` ledger carries none). 0 if task $2 with own binding $3 may take credit
+# for whatever the ledger reports as branch $4's current run:
+#   - bound: yes, but ONLY because a bound caller never reaches this rule with
+#     an unidentified row. fm-crew-state.sh admits a bound crew to the ledger
+#     solely to confirm its OWN run (fetched by id, on this branch) is the
+#     branch's current row, matching that run's head against the row before
+#     parsing the run; fm-teardown.sh has already passed the run through the id
+#     rule above. A bound crew is never handed a row that is not its own run
+#   - unbound, some other task binds a run and its worktree sits on this
+#     branch: no - the branch's runs are spoken for, and branch credit would
+#     hand the sibling's run to a crew that never started one. This holds even
+#     when the sibling's binding is stale (its run already terminal): the
+#     ledger cannot tell the branch's current row from that run, so credit is
+#     withheld rather than guessed, and the cure is the owning crew binding
+#   - unbound, no bound sibling holds the branch: the legacy branch rule
+# $5 is fm_nm_branch_bound_sibling's optional project root for scoping.
+fm_nm_branch_credit_owned_by_task() {  # <state-dir> <task-id> <own-binding> <branch> [project]
+  local state=$1 self=$2 own=$3 branch=$4 project=${5:-}
+  [ -z "$own" ] || return 0
+  ! fm_nm_branch_bound_sibling "$state" "$self" "$branch" "$project" >/dev/null
 }
