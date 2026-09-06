@@ -508,6 +508,98 @@ fm_backlog_record_publish() {
   return 0
 }
 
+# fm_meta_set: set one or more `key=value` lines in a task record, replacing
+# every prior line for those keys and preserving every other line, then publish
+# the result through the atomic path above. The write counterpart to
+# bin/fm-backend.sh's fm_meta_get, and it lives here because publishing a task
+# record safely is what this library owns.
+#
+# Reach for this rather than appending to a record with `>>`. A bare append is
+# not atomic even under the record's lock, so an interrupted write leaves a
+# truncated key line behind, and it grows the record without bound each time the
+# same key is set again, leaving every reader to disambiguate the duplicates
+# with `tail -1`.
+#
+# The caller must already hold the record's meta lock, exactly as the paired
+# backlog transitions above require. Keys and values are refused rather than
+# escaped: a key outside `[A-Za-z0-9._-]`, or a value carrying a line break,
+# would write a line the record's readers cannot attribute to the key it was
+# set under. The same key passed twice in one call is refused for the same
+# reason: the caller has stated no single value for it, and writing both would
+# reintroduce the duplicate line this helper exists to remove.
+#
+# Usage: fm_meta_set <meta> <state-root> <key> <value> [<key> <value>...]
+fm_meta_set() {
+  local meta=$1 root=$2 tmp dir base line mkey mvalue drop i rc=0
+  local -a mkeys=() mvalues=()
+  shift 2
+  if [ "$#" -eq 0 ] || [ $(( $# % 2 )) -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="task record update needs whole key/value pairs"
+    return 1
+  fi
+  while [ "$#" -gt 0 ]; do
+    mkey=$1
+    mvalue=$2
+    shift 2
+    case "$mkey" in
+      ''|*[!A-Za-z0-9._-]*)
+        FM_BACKLOG_TRANSITION_ERROR="task record key is not a bare identifier: $mkey"
+        return 1
+        ;;
+    esac
+    case "$mvalue" in
+      *$'\n'*|*$'\r'*)
+        FM_BACKLOG_TRANSITION_ERROR="task record value for $mkey carries a line break"
+        return 1
+        ;;
+    esac
+    for ((i = 0; i < ${#mkeys[@]}; i++)); do
+      if [ "${mkeys[$i]}" = "$mkey" ]; then
+        FM_BACKLOG_TRANSITION_ERROR="task record key is set twice in one update: $mkey"
+        return 1
+      fi
+    done
+    mkeys+=("$mkey")
+    mvalues+=("$mvalue")
+  done
+  fm_backlog_record_present "$meta" "task record" "$root" || return 1
+  # Staged beside the record so the publication below is a same-directory
+  # rename, and named by parameter expansion rather than basename because this
+  # library runs under the curated PATH the lifecycle scripts pin.
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  tmp=$(mktemp "$dir/.$base.set.XXXXXX" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="task record update could not be staged beside $meta"
+    return 1
+  }
+  chmod 0600 "$tmp" 2>/dev/null || rc=1
+  if [ "$rc" -eq 0 ]; then
+    {
+      while IFS= read -r line || [ -n "$line" ]; do
+        drop=0
+        for mkey in "${mkeys[@]}"; do
+          case "$line" in "$mkey="*) drop=1; break ;; esac
+        done
+        [ "$drop" -eq 1 ] || printf '%s\n' "$line"
+      done < "$meta"
+      for ((i = 0; i < ${#mkeys[@]}; i++)); do
+        printf '%s=%s\n' "${mkeys[$i]}" "${mvalues[$i]}"
+      done
+    } > "$tmp" || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    rm -f -- "$tmp"
+    FM_BACKLOG_TRANSITION_ERROR="task record update could not be written for $meta"
+    return 1
+  fi
+  if ! fm_backlog_record_publish "$tmp" "$meta" "task record" "$root"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  return 0
+}
+
 fm_backlog_meta_spawn_gen() {
   local meta=$1 state=$2 count value
   FM_BACKLOG_META_SPAWN_GEN=

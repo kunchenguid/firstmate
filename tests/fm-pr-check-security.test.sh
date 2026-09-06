@@ -2121,7 +2121,155 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# The task record's PR identity binds to the pr=/pr_head= pair, not to where
+# those lines sit. The reader used to treat any unrecognised line after `pr=` as
+# tampering, which is not a property a shared record can hold: several
+# legitimate writers rewrite or add their own keys at the end of a record, and
+# the first one to run after a poll was armed silently disarmed it.
+#
+# Position-independence is a relaxation in one direction and a tightening in
+# two: a head written before `pr=` used to escape validation entirely while
+# every consumer reads it back with `tail -1`, and two valid but differing heads
+# used to be accepted with no way to say which one the record meant.
+test_pr_identity_binds_to_the_pr_pair_not_line_order() {
+  local dir state meta
+
+  dir=$(make_case identity-line-order)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+
+  # Accepted: unrelated keys after the PR pair. This is the shape the ordinary
+  # lifecycle produces, and the shape live records were repaired into by hand.
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'decisions_reviewed=1' \
+    'decision_keys=some-call'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "a record with unrelated keys after the PR pair was refused"
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/1 ] \
+    || fail "trailing keys changed the parsed PR identity"
+
+  # Accepted: the same keys before the PR pair, which must read identically.
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'decisions_reviewed=1' \
+    'decision_keys=some-call' \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "a record with unrelated keys before the PR pair was refused"
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/1 ] \
+    || fail "leading keys changed the parsed PR identity"
+
+  # Accepted: a valid head recorded before its URL.
+  fm_write_meta "$meta" \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'pr=https://github.com/o/r/pull/1'
+  fm_pr_metadata_identity_parse "$meta" || fail "a valid head before its URL was refused"
+
+  # Refused: a malformed head, whichever side of the URL it sits on. Consumers
+  # read the head with `tail -1` from either side, so validating only one side
+  # left the other reachable and unchecked.
+  fm_write_meta "$meta" \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr_head=not-a-commit'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "a malformed head after the URL was accepted"
+  fm_write_meta "$meta" \
+    'pr_head=not-a-commit' \
+    'pr=https://github.com/o/r/pull/1'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "a malformed head before the URL was accepted"
+
+  # Refused: two heads, even when both are well formed, because the record then
+  # states no single head.
+  fm_write_meta "$meta" \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'pr_head=89abcdef0123456789abcdef0123456789abcdef'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "two recorded heads were accepted"
+
+  # Refused, unchanged: two URLs, no URL, and an unparseable URL.
+  fm_write_meta "$meta" \
+    'pr=https://github.com/o/r/pull/1' \
+    'pr=https://github.com/o/r/pull/2'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "two recorded PRs were accepted"
+  fm_write_meta "$meta" 'window=fm-task-a'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "a record with no PR was accepted"
+  fm_write_meta "$meta" 'pr=https://github.com/o/r/issues/1'
+  ! fm_pr_metadata_identity_parse "$meta" || fail "an unparseable PR URL was accepted"
+
+  pass "PR identity binds to the pr=/pr_head= pair from either side and refuses an ambiguous head"
+}
+
+# The whole chain, through the real arming script and the real watcher: the
+# record's trailing region belongs to whoever writes there, and an armed poll
+# survives a later writer. A poll refused here is refused as an unauthenticated
+# state check, which reports a security problem the record does not have and
+# loses the merge the poll was armed to catch.
+test_armed_poll_survives_a_later_record_writer() {
+  local dir state rc
+  dir=$(make_case poll-survives-later-writer)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
+    || fail "could not arm the merge poll"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "the freshly armed poll did not authenticate"
+
+  # Exactly what bin/fm-captain-hold.sh's completion attestation records.
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a later record writer invalidated the armed poll's artifacts"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "a later record writer disarmed the poll the watcher reads"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher cycle failed: $(cat "$dir/watch.err")"
+  assert_no_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "the armed poll was reported as an unauthenticated check"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "the merge was never reported: $(cat "$dir/watch.out")" ;;
+  esac
+  pass "an armed merge poll survives a later writer appending to the task record"
+}
+
+# bin/fm-pr-check.sh is the only writer of pr= and pr_head=, so it owns the
+# refusal of a value carrying an embedded line break. Without that refusal a
+# forge-supplied head could smuggle a second, attacker-chosen key into the task
+# record, where keys name worktrees and backend endpoints.
+test_recorded_pr_values_refuse_embedded_line_breaks() {
+  local dir before
+  dir=$(make_case pr-value-line-breaks)
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=$'0123456789abcdef0123456789abcdef01234567\nwindow=unexpected' \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
+    || fail "a valid check with a malformed remote head failed"
+  assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" \
+    "a newline in the forge head injected a second record key"
+  assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" \
+    "a multiline head reached the record"
+  before=$(shasum -a 256 "$dir/home/state/task-a.meta" | awk '{print $1}')
+  [ -n "$before" ] || fail "could not fingerprint the record"
+  if run_check_entry "$dir" task-a $'https://github.com/o/r/pull/3\nwindow=unexpected' \
+    >/dev/null 2>/dev/null; then
+    fail "a PR URL carrying a line break was accepted"
+  fi
+  assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" \
+    "a newline in the PR URL injected a second record key"
+  [ "$(shasum -a 256 "$dir/home/state/task-a.meta" | awk '{print $1}')" = "$before" ] \
+    || fail "a refused PR URL altered the record"
+  pass "recorded PR values refuse an embedded line break at the writer"
+}
+
 test_parser_matrix
+test_pr_identity_binds_to_the_pr_pair_not_line_order
+test_armed_poll_survives_a_later_record_writer
+test_recorded_pr_values_refuse_embedded_line_breaks
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

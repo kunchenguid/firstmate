@@ -8,6 +8,10 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The merge-poll identity predicates the watcher itself calls, so the
+# attestation's effect on a live poll is asserted through the real reader.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -2111,8 +2115,86 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+# The two steps AGENTS.md section 7 requires of every no-mistakes ship task -
+# arm the merge poll when the PR opens, then attest the captain-call inventory -
+# must compose in either order and leave the merge poll working.
+#
+# They did not. The attestation wrote its two keys into the task record after
+# the PR line the poll had already recorded, and the poll's identity reader
+# treated any unexpected line in that trailing region as tampering. The armed,
+# legitimate poll was then refused as an unauthenticated check for the rest of
+# the task's life: the merge was never detected, and the operator got a
+# security-shaped notice naming the wrong problem instead of the merged PR.
+#
+# The watcher assertion is the whole point. The leaf predicate can be pinned
+# cheaply, but only the real watcher proves the merge still reaches the operator.
+test_completion_attestation_keeps_the_merge_poll_armed() {
+  local home id state fake_root fakebin rc
+  home=$(make_home poll-survives-attestation)
+  id=sample-shipped-work
+  state="$home/state"
+  fake_root="$home/fake-root"
+  fakebin="$home/fakebin"
+  mkdir -p "$fake_root/bin" "$home/wt"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_root/bin/fm-guard.sh"
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  # The forge stub answers the two fields this lifecycle reads: the head commit
+  # the arming step records, and the merge state the poll observes.
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+  *" state "*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship sample work" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the ship backlog fixture"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/wt" \
+    "project=$home/projects/sample" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=fixture-$id"
+  printf 'working: implementation committed\n' > "$state/$id.status"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" https://github.com/o/r/pull/7 > "$home/arm.out" 2> "$home/arm.err" \
+    || fail "could not arm the merge poll: $(cat "$home/arm.err")"
+  fm_pr_poll_snapshot_capture "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the freshly armed merge poll did not authenticate"
+
+  run_captain "$home" complete "$id" --none > "$home/complete.out" 2> "$home/complete.err" \
+    || fail "completion attestation failed: $(cat "$home/complete.err")"
+  assert_grep "decisions_reviewed=1" "$state/$id.meta" "completion attestation missing"
+  assert_grep "pr=https://github.com/o/r/pull/7" "$state/$id.meta" \
+    "attestation dropped the recorded PR"
+
+  # The exact call bin/fm-watch.sh makes to decide whether a check is authentic.
+  fm_pr_poll_snapshot_capture "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the captain-call attestation disarmed the armed merge poll"
+
+  set +e
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 20; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=0 FM_CHECK_TIMEOUT=5 \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_GH_STATE=MERGED \
+      PATH="$fakebin:$PATH" "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the supervision cycle did not complete: $(cat "$home/watch.err")"
+  assert_no_grep "rejected unauthenticated state checks" "$home/watch.out" \
+    "the armed merge poll was reported as an unauthenticated check"
+  assert_grep "$state/$id.check.sh: merged" "$home/watch.out" \
+    "the merge was never reported: $(cat "$home/watch.out")"
+  pass "arming a merge poll and attesting the captain-call inventory compose without losing the merge"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
+test_completion_attestation_keeps_the_merge_poll_armed
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

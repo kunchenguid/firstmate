@@ -2427,7 +2427,78 @@ test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
+# fm_meta_set is the library's answer to the bare `>>` that used to write keys
+# into a task record: it replaces every prior line for the keys it sets,
+# preserves the rest, publishes through the same atomic path a record change
+# already uses, and refuses a key or value that would write a line the record's
+# readers cannot attribute back to the key it was set under.
+test_meta_set_replaces_keys_and_refuses_unattributable_lines() {
+  local case_dir state meta rc
+  case_dir="$TMP_ROOT/meta-set"
+  state="$case_dir/state"
+  meta="$state/task-a.meta"
+  mkdir -p "$state"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+
+    fm_write_meta "$meta" 'window=fm-task-a' 'kind=ship' 'pr=https://github.com/o/r/pull/1'
+
+    fm_meta_set "$meta" "$state" decisions_reviewed 1 decision_keys some-call \
+      || { echo "setting two keys failed: $FM_BACKLOG_TRANSITION_ERROR" >&2; exit 1; }
+    grep -qxF 'window=fm-task-a' "$meta" || { echo "an unrelated key was dropped" >&2; exit 1; }
+    grep -qxF 'pr=https://github.com/o/r/pull/1' "$meta" || { echo "the PR line was dropped" >&2; exit 1; }
+    grep -qxF 'decisions_reviewed=1' "$meta" || { echo "the key was not set" >&2; exit 1; }
+    grep -qxF 'decision_keys=some-call' "$meta" || { echo "the second key was not set" >&2; exit 1; }
+
+    # Setting the same key again replaces its line rather than growing the record.
+    fm_meta_set "$meta" "$state" decision_keys other-call \
+      || { echo "resetting a key failed: $FM_BACKLOG_TRANSITION_ERROR" >&2; exit 1; }
+    [ "$(grep -c '^decision_keys=' "$meta")" = 1 ] \
+      || { echo "resetting a key duplicated its line" >&2; exit 1; }
+    grep -qxF 'decision_keys=other-call' "$meta" || { echo "the reset value did not land" >&2; exit 1; }
+    [ "$(grep -c '^decisions_reviewed=' "$meta")" = 1 ] \
+      || { echo "an untouched key was disturbed" >&2; exit 1; }
+
+    # An empty value is a legitimate setting, not an omission.
+    fm_meta_set "$meta" "$state" decision_keys '' \
+      || { echo "setting an empty value failed: $FM_BACKLOG_TRANSITION_ERROR" >&2; exit 1; }
+    grep -qxF 'decision_keys=' "$meta" || { echo "an empty value did not land" >&2; exit 1; }
+
+    # The record must be unchanged after each refusal.
+    before=$(shasum -a 256 "$meta" | awk '{print $1}')
+    ! fm_meta_set "$meta" "$state" decision_keys || { echo "an odd argument list was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" 'bad key' value || { echo "a key with a space was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" 'a=b' value || { echo "a key containing = was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" note "$(printf 'one\ntwo=three')" \
+      || { echo "a value carrying a line break was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" note "$(printf 'one\rtwo')" \
+      || { echo "a value carrying a carriage return was accepted" >&2; exit 1; }
+    ! fm_meta_set "$meta" "$state" decision_keys a decision_keys b \
+      || { echo "the same key twice in one update was accepted" >&2; exit 1; }
+    case "$FM_BACKLOG_TRANSITION_ERROR" in
+      *decision_keys*) ;;
+      *) echo "the repeated key refusal did not name the key" >&2; exit 1 ;;
+    esac
+    [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before" ] \
+      || { echo "a refused update changed the record" >&2; exit 1; }
+    [ "$(find "$state" -name '.task-a.meta.set.*' | wc -l)" -eq 0 ] \
+      || { echo "a refused update left a staged record behind" >&2; exit 1; }
+
+    # An absent record is refused rather than created.
+    ! fm_meta_set "$state/absent.meta" "$state" kind ship \
+      || { echo "an absent record was written" >&2; exit 1; }
+    [ ! -e "$state/absent.meta" ] || { echo "an absent record was created" >&2; exit 1; }
+  )
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the shared task-record writer did not hold its contract"
+  pass "the shared task-record writer replaces keys in place and refuses unattributable lines"
+}
+
 test_recovery_retry_preserves_incomplete_cleanup_warning
+test_meta_set_replaces_keys_and_refuses_unattributable_lines
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata
 test_recovery_preserves_both_records_when_meta_removal_fails
