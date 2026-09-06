@@ -26,11 +26,12 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis. P6 REGISTERS paseo as an
-# EXPERIMENTAL spawn-capable backend name and lands its safety boundary -
-# detection ordering, the --secondmate refusal, and endpoint-record validation -
-# BEFORE any lifecycle code exists. There is deliberately no bin/backends/paseo.sh
-# yet, so every runtime operation refuses through the unimplemented-backend arms
-# below rather than degrading.
+# EXPERIMENTAL backend NAME and lands its safety boundary - detection ordering
+# and endpoint-record validation - BEFORE any lifecycle code exists. paseo is
+# deliberately NOT spawn-capable: there is no bin/backends/paseo.sh yet, so
+# fm_backend_validate_spawn refuses it at the single boundary every spawn caller
+# already shares, and every other runtime operation refuses through the
+# unimplemented-backend arms below rather than degrading.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -70,12 +71,13 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
-# paseo is EXPERIMENTAL and REGISTERED-ONLY for now: the name, its detection
-# ordering, its refusal, and its endpoint-record validation exist, but the
-# lifecycle adapter does not, so a paseo spawn refuses at endpoint creation.
+# paseo is EXPERIMENTAL and KNOWN-ONLY for now: the name, its detection
+# ordering, and its endpoint-record validation exist, but the lifecycle adapter
+# does not, so paseo is absent from FM_BACKEND_SPAWN and every spawn refuses at
+# fm_backend_validate_spawn. It joins the spawn set when that adapter lands.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-backend-paseo.test.sh - portable regressions for the paseo backend's
-# SAFETY BOUNDARY, which lands before any lifecycle code exists: registration,
-# runtime-detection ordering, the --secondmate refusal, and endpoint-record
-# validation.
+# SAFETY BOUNDARY, which lands before any lifecycle code exists: registration
+# as a known-but-not-spawn-capable name, runtime-detection ordering, the spawn
+# refusal, and endpoint-record validation.
 #
 # Nothing here runs a real `paseo`, and nothing here can. That is the point of
 # doing this stage first: every behavior below is decided from environment
@@ -19,16 +19,11 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-paseo-tests)
-
-# A claude spawn writes workspace trust into the launching user's own store, so
-# pin HOME to a throwaway and CLAUDE_CONFIG_DIR empty (see tests/fm-backend.test.sh).
-SPAWN_HOME=$(mktemp -d "$TMP_ROOT/user-home.XXXXXX")
 
 # uname pinned to Linux makes the cmux bundle-id/ancestry fallback inert, so an
 # assertion about paseo detection never depends on which terminal app this suite
@@ -46,12 +41,22 @@ PASEO_TERM=11111111-2222-3333-4444-555555555555
 
 # --- registration ------------------------------------------------------------
 
-test_paseo_is_registered_and_spawn_capable() {
+test_paseo_is_known_but_not_spawn_capable() {
+  local out rc
   fm_backend_validate paseo 2>/dev/null \
     || fail "fm_backend_validate should accept paseo (it is in FM_BACKEND_KNOWN)"
-  fm_backend_validate_spawn paseo 2>/dev/null \
-    || fail "fm_backend_validate_spawn should accept paseo (it is in FM_BACKEND_SPAWN)"
-  pass "backend registry: paseo is a known, spawn-capable backend name"
+  set +e
+  out=$(fm_backend_validate_spawn paseo 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "fm_backend_validate_spawn must refuse paseo while it has no lifecycle adapter"
+  assert_contains "$out" "backend 'paseo' does not support task spawning yet" \
+    "the spawn refusal should say paseo cannot spawn yet"
+  if fm_backend_list_contains "$FM_BACKEND_SPAWN" paseo; then
+    fail "paseo must not advertise itself as spawn-supported, got '$FM_BACKEND_SPAWN'"
+  fi
+  pass "backend registry: paseo is a known backend name that is refused for spawning until its adapter lands"
 }
 
 test_unknown_backend_still_refuses_and_names_paseo() {
@@ -217,66 +222,39 @@ test_paseo_autodetect_notice_and_explicit_override() {
 
 # --- spawn refusals ----------------------------------------------------------
 
-test_spawn_refuses_paseo_secondmate() {
-  local dir state data config projects out status
-  dir=$(mktemp -d "$TMP_ROOT/secondmate-refuse.XXXXXX")
+# spawn_refuses_paseo <label> <extra fm-spawn args...>: run a real fm-spawn.sh
+# invocation and require it to refuse at the shared backend boundary.
+spawn_refuses_paseo() {  # <label> <args...>
+  local label=$1 dir state data config projects out status
+  shift
+  dir=$(mktemp -d "$TMP_ROOT/spawn-refuse.XXXXXX")
   state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
   mkdir -p "$state" "$data" "$config" "$projects"
   set +e
   out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$projects" \
-    "$ROOT/bin/fm-spawn.sh" sm-paseo-test --secondmate --backend paseo 2>&1 )
+    FM_PROJECTS_OVERRIDE="$projects" "$ROOT/bin/fm-spawn.sh" "$@" 2>&1 )
   status=$?
   set -e
-  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend paseo"
-  assert_contains "$out" "backend=paseo does not support --secondmate spawns yet" \
-    "fm-spawn.sh did not report the paseo secondmate refusal"
-  pass "fm-spawn.sh: refuses backend=paseo for --secondmate spawns (no recovery-grade agent-state classifier exists for it)"
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a $label spawn with --backend paseo"
+  assert_contains "$out" "backend 'paseo' does not support task spawning yet" \
+    "the $label refusal should come from the shared fm_backend_validate_spawn boundary"
+  [ ! -e "$state/$SPAWN_REFUSE_ID.meta" ] \
+    || fail "a refused paseo $label spawn must not leave a task record behind"
 }
 
-test_spawn_refuses_paseo_endpoint_creation_without_leaving_a_record() {
-  local dir proj wt state data config fb id out status
-  id=paseonoendpoint
-  dir=$(mktemp -d "$TMP_ROOT/no-endpoint.XXXXXX")
-  proj="$dir/project"; wt="$dir/worktree"
-  state="$dir/state"; data="$dir/data"; config="$dir/config"; fb="$dir/fakebin"
-  mkdir -p "$state" "$data" "$config" "$fb" "$data/$id"
-  fm_git_worktree "$proj" "$wt" "fm/$id"
-  cat > "$fb/tmux" <<TMUXSH
-#!/usr/bin/env bash
-set -u
-case "\${1:-}" in
-  display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\n' "$wt"; exit 0 ;; esac; done
-    printf 'firstmate\n'; exit 0 ;;
-esac
-exit 0
-TMUXSH
-  chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
-  cat > "$data/$id/brief.md" <<'BRIEF'
-# Task
-## Captain's intent
-Exercise the paseo endpoint-creation boundary.
+test_spawn_refuses_paseo_at_the_shared_boundary() {
+  # Every spawn kind refuses at the SAME boundary - fm_backend_validate_spawn,
+  # which every spawn caller already crosses - because paseo has no lifecycle
+  # adapter. That is well before the project lock is taken or any task record
+  # is written, so no kind needs its own late refusal.
+  SPAWN_REFUSE_ID=sm-paseo-test
+  spawn_refuses_paseo secondmate "$SPAWN_REFUSE_ID" --secondmate --backend paseo
 
-## Firstmate spec
-Verify the refusal without changing task intent.
-BRIEF
+  SPAWN_REFUSE_ID=ship-paseo-test
+  spawn_refuses_paseo ship "$SPAWN_REFUSE_ID" "$TMP_ROOT/unused-project" claude \
+    --mode no-mistakes --yolo off --backend paseo
 
-  set +e
-  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$dir/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
-    FM_TMUX_LOG="$dir/tmux.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend paseo 2>&1)
-  status=$?
-  set -e
-  [ "$status" -ne 0 ] || fail "a paseo spawn must refuse while no lifecycle adapter exists"
-  assert_contains "$out" "backend=paseo cannot create a task endpoint yet" \
-    "the endpoint-creation refusal should say the lifecycle adapter is missing"
-  [ ! -e "$state/$id.meta" ] \
-    || fail "a refused paseo spawn must not leave a task record behind"
-  pass "fm-spawn.sh: a paseo spawn refuses at endpoint creation and writes no task record"
+  pass "fm-spawn.sh: every paseo spawn kind refuses at the shared fm_backend_validate_spawn boundary, before any task record"
 }
 
 # --- endpoint-record validation ---------------------------------------------
@@ -400,15 +378,14 @@ TRIPWIRE
   pass "paseo endpoint validation: decides entirely from durable metadata, never invoking Paseo"
 }
 
-test_paseo_is_registered_and_spawn_capable
+test_paseo_is_known_but_not_spawn_capable
 test_unknown_backend_still_refuses_and_names_paseo
 test_paseo_required_tools_are_transport_independent
 test_paseo_detect_markers
 test_paseo_cli_is_not_a_detection_marker
 test_paseo_detect_is_ordered_last
 test_paseo_autodetect_notice_and_explicit_override
-test_spawn_refuses_paseo_secondmate
-test_spawn_refuses_paseo_endpoint_creation_without_leaving_a_record
+test_spawn_refuses_paseo_at_the_shared_boundary
 test_paseo_endpoint_validation_accepts_a_consistent_record
 test_paseo_endpoint_validation_refuses_malformed_records
 test_paseo_endpoint_validation_refuses_before_any_runtime_call
