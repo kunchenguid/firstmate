@@ -1202,15 +1202,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  # Same reason as cmux and Orca: fm_backend_agent_state has no paseo arm, so a
-  # paseo endpoint reports `unverified`. The session-start secondmate liveness
-  # sweep only relaunches from a recovery-grade dead/missing verdict, so
-  # standing up a paseo secondmate would leave that sweep guessing whether to
-  # relaunch or preserve it.
-  if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=paseo does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
   fi
@@ -2782,15 +2773,6 @@ EOF
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
     T="$ORCA_TERMINAL"
-    ;;
-  paseo)
-    # paseo is registered, detectable, and validated, but has no lifecycle
-    # adapter yet, so there is nothing that can create an endpoint. Refuse here
-    # rather than falling out of this case with no target, which would surface
-    # as an unbound-variable abort further down: this is the last honest stop
-    # before a task record would be written.
-    echo "error: backend=paseo cannot create a task endpoint yet; its lifecycle adapter is not implemented. Spawn this task on another backend." >&2
-    exit 1
     ;;
 esac
 fi
