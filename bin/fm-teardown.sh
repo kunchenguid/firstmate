@@ -794,7 +794,7 @@ remote_pending_entry_is_safe() {  # <entry-path>
 }
 
 remote_pending_reply_belongs_to_retiring_task() {  # <correlation-id>
-  local corr=$1 hot archived staged rec task owner= found=0
+  local corr=$1 hot archived staged rec task owner='' found=0
   hot="$STATE/pending-replies/$corr"
   archived="$STATE/pending-replies/archive/$corr"
   staged="$STATE/pending-replies/archive/.$corr.resolving"

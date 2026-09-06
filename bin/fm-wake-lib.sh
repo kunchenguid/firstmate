@@ -133,6 +133,53 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# Reclaim a watcher lock only when its live pid has provably been reused by an
+# unrelated process. The watcher-specific metadata and identity are rechecked
+# under the lock's steal mutex before durable recovery evidence precedes removal.
+# No process is signalled: the live pid is demonstrably not the recorded watcher.
+fm_watcher_reclaim_reused_pid_lock() {  # <state-dir> <watch-path> [home]
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir steal pid recorded current lock_home lock_path owner steal_owner rc=1
+  lockdir="$state/.watch.lock"
+  steal="$lockdir.steal"
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  [ "$lock_home" = "$home" ] && [ "$lock_path" = "$watch_path" ] || return 1
+  [ -n "$recorded" ] && fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] && [ "$current" != "$recorded" ] || return 1
+
+  owner=
+  [ ! -L "$lockdir" ] || owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
+  fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  if fm_lock_points_to_owner "$steal" "$steal_owner"; then
+    if [ -n "$owner" ]; then
+      fm_lock_points_to_owner "$lockdir" "$owner" || {
+        fm_lock_release "$steal"
+        return 1
+      }
+    elif [ ! -d "$lockdir" ] || [ -L "$lockdir" ]; then
+      fm_lock_release "$steal"
+      return 1
+    fi
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+    lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+    lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+    current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ "$lock_home" = "$home" ] && [ "$lock_path" = "$watch_path" ] \
+      && [ -n "$recorded" ] && fm_pid_alive "$pid" \
+      && [ -n "$current" ] && [ "$current" != "$recorded" ] \
+      && fm_recovery_transition "$state/.watcher-down" clear-stale-lock "$lockdir" downtime; then
+      rc=0
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
@@ -370,6 +417,7 @@ fm_watcher_busy_holder() {  # <state-dir> <watch-path> [grace] [home]
   else
     age=$(fm_path_age "$lockdir")
     source=lock
+    [ "$age" -ge "$grace" ] || return 1
   fi
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_busy_holder returns.
   FM_WATCHER_BUSY_PID=$pid

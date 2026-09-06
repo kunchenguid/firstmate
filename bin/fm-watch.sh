@@ -1512,6 +1512,11 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# A live pid whose recorded process identity no longer matches is a reused-pid
+# stale lock, not a live watcher. Reclaim that watcher-specific shape without
+# signalling the unrelated process, then let the ordinary acquisition classify
+# the resulting free or concurrently replaced lock.
+fm_watcher_reclaim_reused_pid_lock "$STATE" "$WATCH_PATH" "$FM_HOME" || true
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
