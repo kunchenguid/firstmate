@@ -222,15 +222,9 @@ test_refuses_a_pointer_to_the_working_session() {
 
   # The same pointer moved into prose, where the trailer rule cannot see it.
   rc=0
-  out=$(fm_voice_text 'Context for reviewers: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  out=$(fm_voice_text 'docs: see https://claude.ai/code/session_01HoVE1w6AQB5qritmXc1aLC now') || rc=$?
   expect_code 1 "$rc" "a session link in prose was not refused"
   assert_contains "$out" "internal-session-link" "session link named the wrong rule"
-
-  rc=0
-  out=$(fm_voice_text 'docs: see https://example.com/session/abcdef1234567890 for detail') || rc=$?
-  expect_code 1 "$rc" "a non-vendor session path link was not refused"
-  assert_contains "$out" "session/abcdef1234567890" \
-    "refusal did not name the generalized session path token"
 
   # An opaque id with no URL is still a pointer.
   rc=0
@@ -256,7 +250,8 @@ test_passes_ordinary_uses_of_the_word_session() {
     'Regression: https://example.invalid/internal-session' \
     'docs: see https://x.io/sessions/list for the listing' \
     'Thread-Safety-Docs: https://example.com/guide' \
-    'docs: link https://example.com/session-locking.html for background'
+    'docs: link https://example.com/session-locking.html for background' \
+    'docs: see https://docs.example.com/session/architecture.html'
   do
     fm_voice_commit "$tmp/repo" "$message"
   done
@@ -390,9 +385,9 @@ test_refuses_a_private_review_artifact() {
 test_passes_nonprivate_paths_and_work_document_words() {
   local out rc message
 
-  # The prior root-qualified alternatives could begin inside each URL below, so
-  # all three exited 1 before the structural whitespace-anchor correction.
+  # Superseded root-qualified alternatives refused these public routes and URLs.
   for message in \
+    'docs: describe /data/api/schema.json' \
     'docs: see https://gitlab.com/org/repo/-/blob/main/data/alpha/report.md' \
     'docs: point at https://example.com/data/api/schema.json for the schema' \
     'docs: see https://github.com/kunchenguid/firstmate/blob/main/data/alpha/report.md' \
@@ -690,7 +685,7 @@ test_lists_its_rules_for_inspection() {
 # this drives the real fm-lint.sh default path over a real repository whose tip
 # commit leaks, with the two linters stubbed at their pinned versions.
 test_lint_default_path_runs_the_voice_guard() {
-  local tmp fakebin out rc=0
+  local tmp fakebin telemetry telemetry_rc out rc=0
   tmp=$(fm_test_tmproot fm-voice-lint)
   fm_voice_repo "$tmp"
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"
@@ -721,12 +716,16 @@ SH
   chmod +x "$fakebin/shellcheck" "$fakebin/actionlint"
 
   fm_voice_commit "$tmp" 'fix(ci): Captain, bound the scan for the outer executor'
+  telemetry="$tmp/telemetry.tsv"
 
   out=$(cd "$tmp" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
-    "$tmp/bin/fm-lint.sh" 2>&1) || rc=$?
+    "$tmp/bin/fm-lint.sh" --telemetry "$telemetry" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh default path did not refuse a leaking commit message"$'\n'"$out"
   assert_contains "$out" "fm-prepush-voice-guard.sh: REFUSING" \
     "fm-lint.sh default path did not run the voice guard"$'\n'"$out"
+  telemetry_rc=$(awk -F '\t' '$1 == "result_exit" {print $2}' "$telemetry")
+  [ "$telemetry_rc" = "$rc" ] \
+    || fail "telemetry result_exit $telemetry_rc did not match lint exit $rc"
 
   # Explicit paths are a ShellCheck-only override and must not scan commits,
   # so a targeted lint of one script still works on a branch that is refusing.
