@@ -716,6 +716,7 @@ fm_backend_capture_bounded() {  # <seconds> <backend> <target> <lines> [expected
   shift
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
     FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
     '. "$1"; shift; fm_backend_capture "$@"' _ \
@@ -814,6 +815,7 @@ fm_backend_busy_state_bounded() {  # <seconds> <backend> <target>
   shift
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
     FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
     '. "$1"; shift; fm_backend_busy_state "$@"' _ \
@@ -938,6 +940,7 @@ fm_backend_agent_alive_bounded() {  # <seconds> <backend> <target>
   shift
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
     FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
     '. "$1"; shift; fm_backend_agent_alive "$@"' _ \
@@ -984,6 +987,7 @@ fm_backend_events_capable_bounded() {  # <seconds> <backend> <session>
   shift
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
     FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
     '. "$1"; shift; fm_backend_events_capable "$@"' _ \

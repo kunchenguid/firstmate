@@ -863,6 +863,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
 fm_pending_reply_backend_observation_bounded() {  # <seconds> <backend> <target> [expected-label] [harness]
   local timeout=$1
   shift
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_HOME="${FM_HOME:-}" bash -c \
     '. "$1"; shift; fm_pending_reply_backend_observation "$@"' _ \
@@ -1047,6 +1048,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
 fm_pending_reply_send_recovery_bounded() {  # <seconds> <state-dir> <corr_id>
   local timeout=$1
   shift
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_HOME="${FM_HOME:-}" bash -c \
     '. "$1"; fm_pending_reply_send_recovery "$2" "$3"' _ \
