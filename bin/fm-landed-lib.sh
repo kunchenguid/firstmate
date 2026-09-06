@@ -29,8 +29,8 @@
 #
 # The sole compatibility fallback keeps a structured Done row whose three
 # parsed artifact fields are absent when it does not retain hold-kind captain.
-# That preserves rows closed before artifact-aware selection without admitting
-# answered captain calls.
+# That preserves kindless rows closed before artifact-aware selection without
+# admitting answered captain calls or explicit reportless scouts.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
@@ -60,7 +60,8 @@ FM_LANDED_JQ_DEFS='
   def landed_record:
     .state == "done" and .structured
     and (landed_delivery
-      or (.kind != "captain"
+      or (.kind != "scout"
+        and .kind != "captain"
         and .hold_kind != "captain"
         and (.pr_url // null) == null
         and (.report_path // null) == null
