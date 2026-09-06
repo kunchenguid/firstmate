@@ -1613,42 +1613,16 @@ test_landed_includes_secondmate_home_merges() {
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 
-# Approved rows pass through the release contract before their merged pull
-# requests are recorded. Answered captain questions are the negative boundary.
-test_captain_approved_deliveries_stay_in_landed() {
-  local home mate fakebin json main_pr mate_pr main_backlog mate_backlog report_path
+# Recently Landed accepts only the artifact owned by a row's task kind and
+# completion path. Answered captain questions are the negative boundary.
+test_landed_accepts_only_kind_owned_delivery_artifacts() {
+  local home fakebin json main_backlog report_path report_pr
   local keyword_report shipping_report fleet_json created_kind failures=''
-  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
-  home=$(make_home captain-approved-landed)
+  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the landed-selector regression"
+  home=$(make_home kind-owned-landed)
   write_fixture "$home"
-  mate=$(fixture_mate_home "$home")
   fakebin=$(make_fakebin "$home")
   main_backlog="$home/data/backlog.md"
-  mate_backlog="$mate/data/backlog.md"
-  main_pr="https://github.com/kunchenguid/firstmate/pull/1365"
-  mate_pr="https://github.com/kunchenguid/firstmate/pull/1361"
-
-  "$TASKS_AXI_BIN" add approved-main "Ship the approved main change" --kind ship \
-    --repo firstmate --start --file "$main_backlog" >/dev/null \
-    || fail "could not create the main approved delivery"
-  "$TASKS_AXI_BIN" hold approved-main --reason "captain merge approval pending" \
-    --kind captain --file "$main_backlog" >/dev/null \
-    || fail "could not hold the main approved delivery"
-  "$TASKS_AXI_BIN" unhold approved-main --file "$main_backlog" >/dev/null \
-    || fail "could not release the main approved delivery"
-  "$TASKS_AXI_BIN" 'done' approved-main --pr "$main_pr" --file "$main_backlog" >/dev/null \
-    || fail "could not close the released main delivery"
-
-  "$TASKS_AXI_BIN" add approved-mate "Ship the approved secondmate change" --kind ship \
-    --repo firstmate --start --file "$mate_backlog" >/dev/null \
-    || fail "could not create the secondmate approved delivery"
-  "$TASKS_AXI_BIN" hold approved-mate --reason "captain secondmate merge approval pending" \
-    --kind captain --file "$mate_backlog" >/dev/null \
-    || fail "could not hold the secondmate approved delivery"
-  "$TASKS_AXI_BIN" unhold approved-mate --file "$mate_backlog" >/dev/null \
-    || fail "could not release the secondmate approved delivery"
-  "$TASKS_AXI_BIN" 'done' approved-mate --pr "$mate_pr" --file "$mate_backlog" >/dev/null \
-    || fail "could not close the released secondmate delivery"
 
   "$TASKS_AXI_BIN" add answered-question \
     "Decide whether https://github.com/o/r/pull/7 may merge" --kind ship \
@@ -1706,10 +1680,14 @@ test_captain_approved_deliveries_stay_in_landed() {
     || fail "could not complete the longer-word scout"
 
   report_path="data/reported-scout/report.md"
+  report_pr="https://github.com/o/r/pull/8"
   mkdir -p "$home/data/reported-scout"
   printf '# Reported scout\n' > "$home/$report_path"
   cat >> "$main_backlog" <<EOF
-- [x] reported-scout - Report with https://github.com/o/r/pull/8 context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
+- [x] done-pr-nondelivery - Closed without merge https://github.com/o/r/pull/5 (repo: firstmate) (kind: ship) (done 2026-07-12)
+- [x] scout-pr-no-report - Scout without report https://github.com/o/r/pull/6 (repo: firstmate) (kind: scout) (merged 2026-07-12)
+- [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
+- [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
 - [x] local-delivery - Local with https://github.com/o/r/pull/9 context local main (repo: firstmate) (kind: ship) (done 2026-07-12)
 EOF
 
@@ -1733,6 +1711,20 @@ EOF
     || failures="${failures}wrapper-created local answer was listed; "
   printf '%s' "$json" | jq -e '.landed | any(.id == "legacy-local-question") | not' >/dev/null \
     || failures="${failures}legacy kindless local answer was listed; "
+  # At the base commit the generic Done-row selector publishes this PR-naming
+  # row, so this exclusion assertion fails when the selector fix is absent.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "done-pr-nondelivery") | not' >/dev/null \
+    || failures="${failures}non-merged PR row was listed; "
+  # At the base commit a scout can fall through to its pull request, so this
+  # exclusion assertion fails when report ownership is not enforced.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report") | not' >/dev/null \
+    || failures="${failures}reportless scout PR was listed; "
+  # At the base commit a ship can fall through to a report path, so this
+  # exclusion assertion fails when artifact-kind ownership is not enforced.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "ship-reported-path") | not' >/dev/null \
+    || failures="${failures}reported ship row was listed; "
+  # At the base commit pull-request links render ahead of report links, so this
+  # artifact assertion fails by receiving report_pr instead of report_path.
   printf '%s' "$json" | jq -e --arg report_path "$report_path" \
     '.landed | any(.id == "reported-scout" and .artifact == $report_path)' >/dev/null \
     || failures="${failures}reported scout artifact was missing; "
@@ -1748,14 +1740,10 @@ EOF
   printf '%s' "$json" | jq -e --arg report "$shipping_report" \
     '.landed | any(.id == "shipping-scout" and .artifact == $report)' >/dev/null \
     || failures="${failures}longer-word explicit scout kind was lost; "
-  printf '%s' "$json" | jq -e --arg main_pr "$main_pr" --arg mate_pr "$mate_pr" '
-    (.landed | any(.id == "approved-main" and .artifact == $main_pr))
-      and (.landed | any(.id == "approved-mate" and .artifact == $mate_pr))
-  ' >/dev/null || failures="${failures}captain-approved PR was missing; "
   [ -z "$failures" ] || fail "$failures$json"
   [ ! -s "$home/net.log" ] \
-    || fail "captain-approved landed selection made a network call: $(cat "$home/net.log")"
-  pass "captain-approved deliveries stay landed while answered questions stay out"
+    || fail "kind-owned landed selection made a network call: $(cat "$home/net.log")"
+  pass "landed accepts only kind-owned delivery artifacts while answered questions stay out"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -3132,7 +3120,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
-test_captain_approved_deliveries_stay_in_landed
+test_landed_accepts_only_kind_owned_delivery_artifacts
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
