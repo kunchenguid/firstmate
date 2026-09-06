@@ -226,6 +226,28 @@ test_slow_poll_times_out_and_is_reported() {
   pass "fm-mail-check: a slow poll times out into a one-line report"
 }
 
+test_fail_closed_poll_after_wake_reports_the_failure() {
+  # A poll can publish a wake and then fail closed (stale retry still on disk
+  # and unwritable). The standing check must report that failure, not the
+  # earlier success-wake line, or the news key hides the real condition.
+  local home out
+  home=$(make_home fail-closed-after-wake)
+  write_env "$home"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t90009\\n"
+printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tok\\n"'
+  printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
+  printf '77\n' > "$home/state/.mail-retry"
+  chmod 0000 "$home/state/.mail-retry"
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  chmod 0600 "$home/state/.mail-retry"
+  assert_contains "$(cat "$out")" "mail: could not clear stale retry for 77" "a fail-closed poll after a wake reports the failure"
+  assert_not_contains "$(cat "$out")" "woke for 77" "the standing check must not treat the success-wake line as the failure"
+  assert_contains "$(cat "$home/state/.mail-check")" "reported=could not clear stale retry for 77" "the news key is the failure, not the wake"
+  pass "fm-mail-check: a fail-closed poll after a wake reports the failure, not the wake"
+}
+
 test_missing_mail_plane_is_reported() {
   local tmpbin home out check_bin
   tmpbin="$TMP_ROOT/plane2/bin"
@@ -251,4 +273,5 @@ test_successful_poll_is_silent_and_new_mail_still_surfaces
 test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
+test_fail_closed_poll_after_wake_reports_the_failure
 test_missing_mail_plane_is_reported

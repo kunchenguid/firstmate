@@ -115,14 +115,15 @@ fi
 
 # One poll summary, built only from the poll's own combined output. The
 # poll's own "fm-mail: ..." diagnostics name the missing setup value, the
-# missing python3, or the wake condition precisely, so they are preferred to a
-# raw python backtrace; anything else is summarized rather than dropped, and
-# an empty failure gets a truth-stating fallback.
+# missing python3, or the failure precisely, so they are preferred to a raw
+# python backtrace; success-wake lines are skipped because a fail-closed poll
+# may already have printed them; anything else is summarized rather than
+# dropped, and an empty failure gets a truth-stating fallback.
 poll_summary() {
   local rc=$1 out=$2 line
-  line=$(printf '%s\n' "$out" | sed -n 's/^fm-mail: //p' | head -n 1)
+  line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; s/^fm-mail: //p' | head -n 1)
   if [ -z "$line" ]; then
-    line=$(printf '%s\n' "$out" | sed -n '/^$/!p' | head -n 1)
+    line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; /^$/d; p' | head -n 1)
   fi
   if [ -z "$line" ]; then
     line="poll failed (rc=$rc)"
