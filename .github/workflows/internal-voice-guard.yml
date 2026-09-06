@@ -14,19 +14,18 @@ run-name: "PR #${{ github.event.pull_request.number }} text - ${{ github.event.a
 # "edited" is in the trigger list on purpose: a description rewritten after the
 # checks first passed is the one vector the pre-push refusal cannot see.
 #
-# THE SCANNER IT RUNS IS THE BASE BRANCH'S, NEVER THE PULL REQUEST'S. A
-# pull_request checkout is the pull request's own code, so running the scanner
-# from it would let a pull request rewrite the scanner to succeed and ship a
-# leaking title and body: the check would approve itself and show green. Only
-# the base branch is checked out here, and nothing from the pull request's tree
-# is ever executed.
+# SCANNER SELECTION. The separate base-branch checkout prevents this job from
+# executing a scanner the pull request rewrote. It does not make the job a trust
+# boundary because this workflow file still travels with the pull request; the
+# "Internal-voice refusal before the first push" section of docs/architecture.md
+# owns the complete scope and trust limit.
 #
 # BOOTSTRAP GAP. While bin/fm-prepush-voice-guard.sh is absent from the base
 # branch, this check does not scan anything, including on the pull request that
-# introduces the scanner. It reports that skip as a warning annotation and a job
-# summary line rather than passing silently, and it does NOT fall back to the
-# pull request's copy, because that fallback is the same vulnerability with
-# extra steps. The condition ends as soon as the file is on the base branch.
+# introduces the scanner. It reports that skip as a warning annotation and job
+# summary line as a courtesy notice that the scan did not run, and it does NOT
+# fall back to the pull request's copy. The condition ends as soon as the file is
+# on the base branch.
 # The residual that follows: if the scanner were ever deleted from the default
 # branch, this check would skip again until it is restored.
 on:
