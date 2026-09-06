@@ -69,6 +69,20 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+hold_status=0
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?
+case "$hold_status" in
+  0)
+    echo "error: task $ID is still held for the captain; release it before merging" >&2
+    exit 1
+    ;;
+  1) ;;
+  *)
+    echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
+    exit 1
+    ;;
+esac
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
