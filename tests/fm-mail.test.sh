@@ -711,6 +711,79 @@ PYEOF
   pass "fm-mail: a single contended slot alternates between new mail and retry recovery"
 }
 
+test_poll_cap_one_does_not_advance_unexamined_retry_window() {
+  local harness out1 out2 pos1 pos2 rc1=0 rc2=0
+  harness="$TMP_ROOT/cap-one-retry-pos-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_TURN': sys.argv[3],
+    'FM_MAIL_RETRY_POS': sys.argv[4],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'71 72 73 74 75 76 77 78 79 80 81 82 100'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[5])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # 12 retry uids plus one new uid, cap=1. The first contended poll spends the
+  # slot on new mail (retry_budget=0) and must leave the retry-scan position
+  # unchanged so the next poll still examines retries 71-81 instead of wrapping
+  # to 82.
+  {
+    printf 'uidvalidity=90009\n'
+    for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
+      printf '%s\n' "$u"
+    done
+  } > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.mail-retry"
+  for u in 71 72 73 74 75 76 77 78 79 80 81 82; do
+    printf '%s\n' "$u" >> "$HOME_DIR/state/.mail-retry"
+  done
+  : > "$HOME_DIR/state/.mail-turn"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first contended poll must succeed"
+  assert_contains "$out1" $'100\t\ta@b.c\tgood\tok' "the first contended slot surfaces new mail"
+  assert_not_contains "$out1" $'71\t' "retry recovery waits its turn"
+  pos1=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "" "$pos1" "retry_budget 0 must not advance the retry-scan position"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second contended poll must succeed"
+  assert_contains "$out2" $'71\t\ta@b.c\tgood\tretry' "the unexamined retry window is scanned from the start"
+  assert_not_contains "$out2" $'82\t' "the scan must not wrap over the unexamined window"
+  pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "11" "$pos2" "the retry-scan position advances only after a retry budget is spent"
+  pass "fm-mail: a zero retry budget leaves the retry-scan position unchanged"
+}
+
 test_poll_cap_one_never_suppresses_new_mail() {
   local harness out
   harness="$TMP_ROOT/cap-one-harness.py"
@@ -880,9 +953,8 @@ SH
 test_poll_fails_closed_when_retry_clear_fails() {
   # The retry record is now cleared inside wake_for, AFTER the wake is durably
   # published. A failed clear therefore leaves the wake in the queue while the
-  # poll fails closed; the retry entry stays eligible so the next poll can try
-  # the recovery again (a bounded duplicate, never a lost mail).
-  local fakebin homedir_bin out rc=0 test_home
+  # poll fails closed; later polls retry the clear without appending another wake.
+  local fakebin homedir_bin out rc=0 test_home wakeq
   fakebin=$(fm_fakebin "$TMP_ROOT")
   test_home="$TMP_ROOT/retry-clear-fail-home"
   homedir_bin="$test_home/bin"
@@ -904,8 +976,30 @@ SH
   expect_code 1 "$rc" "poll must fail when the retry record cannot be cleared"
   assert_contains "$out" "could not clear retry for recovered 77 after publish" "failure names the post-publish retry cleanup"
   assert_grep "check: mail 77" "$test_home/state/.wake-queue" "the recovery wake was already published before the cleanup failed"
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "exactly one recovery wake is queued after the failed clear"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$test_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "a later poll must still fail closed while the retry record cannot be cleared"
+  assert_not_contains "$out" "woke for 77" "a later poll must not re-append a recovery wake"
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "the queued recovery wake is not duplicated while the retry clear keeps failing"
+
   chmod 0600 "$test_home/state/.mail-retry"
   assert_grep "77" "$test_home/state/.mail-retry" "the retry entry remains for the next poll to clear"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$test_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed once the retry record can be cleared"
+  assert_not_contains "$out" "woke for 77" "clearing the retry record must not re-wake the uid"
+  assert_not_contains "$(cat "$test_home/state/.mail-retry" 2>/dev/null || true)" "77" \
+    "the retry entry is cleared without a duplicate wake"
+  wakeq=$(grep -c "check: mail 77" "$test_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "exactly one recovery wake remains after a successful retry clear"
   pass "fm-mail: a failed retry clear fails the poll; the published wake stays and the retry entry remains"
 }
 
@@ -1912,6 +2006,7 @@ test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
+test_poll_cap_one_does_not_advance_unexamined_retry_window
 test_poll_fails_closed_when_retry_unwritable
 test_poll_fails_closed_when_retry_clear_fails
 test_poll_fails_closed_when_stale_retry_clear_fails
