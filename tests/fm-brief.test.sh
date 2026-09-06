@@ -372,6 +372,66 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# The gate must never be the change's first review, so the no-mistakes DOD orders
+# a review pass then a simplification pass ahead of the /no-mistakes handoff. The
+# negative cases pin today's deliberate scope: the passes belong to the mode that
+# has a gate, and a scout's deliverable is a report rather than a change.
+test_pre_gate_review_passes() {
+  local home id brief mode other_id other_brief review_line simplify_line gate_line
+  home="$TMP_ROOT/pre-gate-home"
+  mkdir -p "$home/data"
+  id="brief-pre-gate-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "after both passes below have run and you have resolved what they find" "$brief" \
+    "no-mistakes DOD must make the two passes part of being complete, not an aside"
+  # /code-review and /simplify are Claude built-ins with no equivalent on other
+  # harnesses, unlike the installed /no-mistakes skill (bin/fm-dod-lib.sh header
+  # owns why), so the contract requires the pass and names the command as one way
+  # to run it. Without the fallback a non-Claude worker cannot satisfy this DOD.
+  assert_grep "or by hand where your harness has no such command" "$brief" \
+    "no-mistakes DOD must stay satisfiable on a harness without the named commands"
+  assert_grep "Run a review pass over your change first (/code-review)" "$brief" \
+    "no-mistakes DOD lost its pre-gate review pass"
+  assert_grep "so the gate spends its rounds on real defects rather than on ones an ordinary review would have caught" "$brief" \
+    "no-mistakes DOD states the review pass without its reason"
+  assert_grep "Then a simplification pass over the same change (/simplify)" "$brief" \
+    "no-mistakes DOD lost its pre-gate simplification pass"
+  assert_grep "so what ships is the smallest correct version of it rather than the first one that worked" "$brief" \
+    "no-mistakes DOD states the simplification pass without its reason"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD lost the gate handoff the passes run ahead of"
+
+  # Order is the contract: review, then simplify, then the gate. The three greps
+  # reuse patterns the assertions above already proved present, so each yields a line.
+  review_line=$(grep -n -F -m1 "Run a review pass over your change first (/code-review)" "$brief" | cut -d: -f1)
+  simplify_line=$(grep -n -F -m1 "Then a simplification pass over the same change (/simplify)" "$brief" | cut -d: -f1)
+  gate_line=$(grep -n -F -m1 "Firstmate will then instruct you to run /no-mistakes" "$brief" | cut -d: -f1)
+  [ "$review_line" -lt "$simplify_line" ] \
+    || fail "no-mistakes DOD must place the review pass before the simplification pass (lines $review_line, $simplify_line)"
+  [ "$simplify_line" -lt "$gate_line" ] \
+    || fail "no-mistakes DOD must place both passes before the /no-mistakes handoff (lines $simplify_line, $gate_line)"
+
+  # A scout's deliverable is a report and it never runs the gate.
+  other_id="brief-pre-gate-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
+  other_brief="$home/data/$other_id/brief.md"
+  assert_no_grep "/code-review" "$other_brief" "scout brief received a pre-gate review pass"
+  assert_no_grep "/simplify" "$other_brief" "scout brief received a pre-gate simplification pass"
+
+  # The faster delivery paths never reach the gate these passes run ahead of.
+  for mode in direct-PR local-only; do
+    other_id="brief-pre-gate-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
+    other_brief="$home/data/$other_id/brief.md"
+    assert_no_grep "/code-review" "$other_brief" "$mode brief received a pre-gate review pass"
+    assert_no_grep "/simplify" "$other_brief" "$mode brief received a pre-gate simplification pass"
+  done
+  pass "fm-brief.sh: no-mistakes DOD orders the two pre-gate passes ahead of the gate"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -878,6 +938,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pre_gate_review_passes
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

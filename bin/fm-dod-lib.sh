@@ -10,6 +10,11 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# The no-mistakes block also owns the two pre-gate passes (a review pass, then a
+# simplification pass). They name Claude's /code-review and /simplify but require
+# the pass, not the command: this block renders with no knowledge of the launch
+# harness, and unlike the installed /no-mistakes skill those two have no
+# equivalent elsewhere.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -218,7 +223,9 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch, after both passes below have run and you have resolved what they find; run each with the named command, or by hand where your harness has no such command.
+Run a review pass over your change first (/code-review), so the gate spends its rounds on real defects rather than on ones an ordinary review would have caught.
+Then a simplification pass over the same change (/simplify), so what ships is the smallest correct version of it rather than the first one that worked.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
