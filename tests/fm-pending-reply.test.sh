@@ -984,6 +984,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
+      fm_backend_capture_bounded() { shift; fm_backend_capture "$@"; }
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
       # shellcheck disable=SC2329
       recovery_hook() { :; }
@@ -1028,6 +1029,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
   fm_backend_busy_state() { printf 'unknown'; }
   fm_backend_capture() { printf '%s' "$FM_PENDING_KIMI_CAPTURE"; }
+  fm_backend_capture_bounded() { shift; fm_backend_capture "$@"; }
   export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
 
   [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit fm-hibit codex)" = fallback-idle ] \
@@ -1769,6 +1771,28 @@ test_legacy_settled_record_in_hot_set_is_archived_by_the_tick() {
   pass "a legacy settled record in the hot set is archived by the tick"
 }
 
+test_resolution_reports_archive_failure() {
+  local home state corr hot original_archive first_rc=0
+  home=$(setup_parent retention-archive-failure)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7472
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "require archival")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  printf 'done [corr=%s]: complete\n' "$corr" > "$state/hibit.status"
+  original_archive=$(declare -f _fm_pending_reply_archive_locked)
+  _fm_pending_reply_archive_locked() { return 1; }
+  fm_pending_reply_try_resolve "$state" "$corr" || first_rc=$?
+  unset -f _fm_pending_reply_archive_locked
+  eval "$original_archive"
+  [ "$first_rc" -ne 0 ] || fail "resolution reported success after archival failed"
+  [ -f "$hot" ] || fail "failed archival lost the resolved record"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "resolution retry should archive"
+  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
+    || fail "resolution retry did not archive"
+  pass "successful resolution guarantees resolve-time archival"
+}
+
 test_partial_resolution_is_not_published_or_archived() {
   local home state corr hot original_set first_rc=0
   home=$(setup_parent retention-partial-resolution)
@@ -1866,6 +1890,7 @@ test_archived_record_is_still_found_by_correlation_id
 test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
+test_resolution_reports_archive_failure
 test_partial_resolution_is_not_published_or_archived
 test_resolved_escalation_retry_archives_immediately
 test_archived_wrong_home_lookup_is_inert

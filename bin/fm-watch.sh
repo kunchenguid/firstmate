@@ -139,6 +139,11 @@ WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+WATCHER_EXTERNAL_TIMEOUT=$WATCHER_STALE_GRACE
+case "$WATCHER_EXTERNAL_TIMEOUT" in ''|*[!0-9]*|0) WATCHER_EXTERNAL_TIMEOUT=300 ;; esac
+WATCHER_EXTERNAL_TIMEOUT=$((WATCHER_EXTERNAL_TIMEOUT / 2))
+[ "$WATCHER_EXTERNAL_TIMEOUT" -ge 1 ] || WATCHER_EXTERNAL_TIMEOUT=1
+[ "$WATCHER_EXTERNAL_TIMEOUT" -le 30 ] || WATCHER_EXTERNAL_TIMEOUT=30
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -408,7 +413,8 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  tail40=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+    "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
     return 0
   fi
@@ -600,7 +606,8 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
+    now=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+      "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
@@ -1701,7 +1708,8 @@ while :; do
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    fm_run_timed "$WATCHER_EXTERNAL_TIMEOUT" env FM_HOME="$FM_HOME" \
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
@@ -1960,10 +1968,11 @@ EOF
     fi
     # One beat per window: the stale scan reads every recorded window's pane, and
     # on a large fleet that is the longest phase of the poll. Beating per window
-    # keeps the beacon measuring progress through the scan; a read that never
-    # returns still stops the beats, which is the point.
+    # keeps the beacon measuring progress through the scan; each read is bounded
+    # below the stale grace.
     beat
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    tail40=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+      "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
