@@ -1815,6 +1815,188 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- a crew parked on a captain-relevant status: one wake per episode ---------
+# The reported supervision-noise bug. A crewmate appended `blocked:` because it
+# needed the captain to open a GUI plugin panel, and from then on the primary
+# session got the SAME `stale: <window>` wake on essentially every watch cycle,
+# dozens of times, each costing a whole handling turn and carrying nothing the
+# supervisor had not already learned on the first one. An idle pane still renders
+# a clock or a token counter, so every tick was a new stale hash, and every new
+# hash re-entered the terminal-status first-sight path with nothing bounding it -
+# the same shape the declared-wait paths were already fixed for, on the one stale
+# branch that had no such bound. The contract pinned here: the FIRST wake still
+# fires promptly, further sights of the SAME episode are absorbed however much the
+# pane churns, a genuine change (a new status line, an agent that exited) breaks
+# the absorb at once, and the window's end still re-surfaces - from a churning and
+# from a perfectly static pane alike - so a blocked crew can never go invisible.
+#
+# Count queued stale wakes for <window> that carry the end-of-window RECHECK
+# reason rather than the episode's plain first-sight identity. The age is read
+# from the status file's own mtime, so the seconds are matched as a pattern.
+count_recheck_wakes() {  # <state> <window> <expected-verb>
+  awk -F '\t' -v w="$2" -v v="$3" '
+    $3 == "stale" && $4 == w &&
+    $5 ~ ("^stale: " w " \\(" v " [0-9]+s, already reported, rechecked on a long cadence not a wedge\\)$") { n++ }
+    END { print n + 0 }' "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+test_terminal_stale_episode_absorbs_pane_churn() {
+  local dir state fakebin out capture_file statusf window key sig throttle
+  local round wakes bare recheck text stopped
+  dir=$(make_case blocked-episode-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/blocked.status"
+  window="test:fm-blocked"
+  stopped='state: stopped · source: pane · idle at a prompt'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/blocked.meta"
+  printf 'blocked: need the captain to open the GUI plugin panel\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-blocked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.terminal-resurfaced-$key"
+
+  # 1. The blocker itself must still reach firstmate promptly, exactly as before.
+  text='blocked, elapsed 1s'
+  printf '%s' "$text" > "$capture_file"
+  printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "first sight of a blocked crew did not surface"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "first sight of a blocked crew produced $wakes wakes instead of one"
+  [ "$bare" -eq 1 ] \
+    || fail "first sight of a blocked crew did not carry the plain identity: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the blocker's first surface"
+  [ -e "$throttle" ] || fail "the first surface recorded no episode marker"
+
+  # 2. The pane keeps ticking while the SAME blocker stands. Every one of these
+  #    used to re-alarm, and every one of them tells the supervisor nothing new.
+  round=2
+  while [ "$round" -le 4 ]; do
+    printf 'blocked, elapsed %ss' "$round" > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$stopped" \
+      || fail "watcher exited during blocked churn round $round instead of supervising through it"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] \
+      || fail "pane churn re-alarmed a blocked crew $wakes time(s) inside its own window"
+    [ -e "$throttle" ] || fail "pane churn cleared the episode marker"
+    round=$((round + 1))
+  done
+
+  # 3. A NEW status line is a new episode: the absorb must break at once, however
+  #    little of the window has elapsed.
+  printf 'blocked: the panel is open but the plugin list is empty\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-blocked_status"
+  printf 'blocked, elapsed 5s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "a new blocked status line was absorbed as the previous episode"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "a new blocked status line produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the new episode's surface"
+
+  # 4. And the new episode absorbs its own churn, so the fix is not a one-shot.
+  printf 'blocked, elapsed 6s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$stopped" \
+    || fail "the replacement blocker re-alarmed inside its own window"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "the replacement blocker re-alarmed $wakes time(s) inside its own window"
+
+  # 5. A perfectly STATIC pane must still resurface once the window elapses: a
+  #    crew waiting on firstmate cannot be allowed to rot, and a pane that stops
+  #    churning is exactly the case no first-sight path would ever revisit.
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "a static blocked pane never resurfaced once its window elapsed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  recheck=$(count_recheck_wakes "$state" "$window" blocked)
+  [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one"
+  [ "$recheck" -eq 1 ] \
+    || fail "the elapsed window did not name itself a recheck: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-window resurface"
+
+  # 6. Same again from a CHURNING pane, which reaches the resurface through the
+  #    first-sight path rather than the repeat-hash one.
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  printf 'blocked, elapsed 7s' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "a churning blocked pane never resurfaced once its window elapsed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  recheck=$(count_recheck_wakes "$state" "$window" blocked)
+  [ "$wakes" -eq 1 ] || fail "the elapsed window produced $wakes wakes instead of one from a churning pane"
+  [ "$recheck" -eq 1 ] \
+    || fail "the churning resurface did not name itself a recheck: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the churning resurface"
+
+  # 7. The agent exits under the unchanged blocker. Its pane necessarily changes
+  #    too, and step 2 already proved a changed pane alone absorbs - so a wake
+  #    here is the liveness verdict breaking the episode, not the pane.
+  printf 'blocked-crew$ ' > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" zsh \
+    || fail "an agent that exited under an unchanged blocker stayed absorbed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "an exited agent produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the exited agent's surface"
+  pass "a blocked crew surfaces once, absorbs pane churn for its whole window, and resurfaces on a real change or the window's end"
+}
+
+# --- the recheck's verb slot on a status line that declares no verb ------------
+# The captain-relevant set admits the legacy colonless prose forms (`PR ready`,
+# `checks green`, `ready in branch`, `merged`) as well as the declared terminal
+# verbs, so the terminal-episode recheck must word itself correctly for both. The
+# leading words of a prose line are not a declaration, and a payload of its own -
+# a PR URL - carries a colon that truncates any naive parse mid-scheme, which is
+# how `PR ready https://example.test/x/pull/2` once rechecked as
+# `(PR ready https 4001s, ...)`. Such a line must take the neutral wording rather
+# than present a truncated pseudo-verb as the crew's declaration.
+test_terminal_recheck_verb_on_a_prose_status_line() {
+  local dir state fakebin out capture_file statusf window key sig throttle
+  local wakes recheck neutral text stopped
+  dir=$(make_case prose-episode-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/prose.status"
+  window="test:fm-prose"
+  stopped='state: stopped · source: pane · idle at a prompt'
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/prose.meta"
+  printf 'PR ready https://example.test/x/pull/2\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-prose_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.terminal-resurfaced-$key"
+
+  text='pr ready, elapsed 1s'
+  printf '%s' "$text" > "$capture_file"
+  printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "first sight of a prose captain-relevant status did not surface"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "first sight of a prose status produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prose status's first surface"
+  [ -e "$throttle" ] || fail "the prose status's first surface recorded no episode marker"
+
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$stopped" \
+    || fail "a prose captain-relevant status never resurfaced once its window elapsed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  neutral=$(count_recheck_wakes "$state" "$window" "terminal status")
+  recheck=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /https / { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "the prose status's elapsed window produced $wakes wakes instead of one"
+  [ "$recheck" -eq 0 ] \
+    || fail "the recheck presented a URL-truncated pseudo-verb: $(cat "$state/.wake-queue")"
+  [ "$neutral" -eq 1 ] \
+    || fail "the recheck of a prose status did not take the neutral wording: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prose status's resurface"
+  pass "a captain-relevant status line that declares no verb rechecks with the neutral wording"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2235,11 +2417,15 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
 # <mode> `exit` requires the watcher to surface and exit; `absorb` requires it to
 # survive whole poll cycles - enough to see the new hash, count it stable, and
 # reach the stale path. Returns 1 when the watcher does the other thing.
-parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
+# <crew-state> and <pane-command> default to the parked-on-a-declared-wait
+# fixture; the terminal-status cases below reuse the same round with a stopped
+# crew, and drive the pane command to retire the agent.
+parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb> [crew-state] [pane-command]
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
+  local crew=${7:-'state: paused · source: status-log · parked'} comm=${8:-grok}
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-    FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
+    FM_FAKE_TMUX_CURRENT_COMMAND="$comm" \
+    FM_FAKE_CREW_STATE="$crew" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4155,6 +4341,8 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_terminal_stale_episode_absorbs_pane_churn
+test_terminal_recheck_verb_on_a_prose_status_line
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
