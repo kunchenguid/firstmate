@@ -1135,7 +1135,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
-test_bounded_backend_capture_uses_requested_deadline() {
+test_bounded_backend_reads_use_requested_deadline() {
   local dir fakebin log status=0
   dir="$TMP_ROOT/capture-timeout"
   fakebin="$dir/fakebin"
@@ -1152,7 +1152,14 @@ SH
   [ "$status" -eq 124 ] || fail "bounded backend capture returned $status instead of timeout"
   [ "$(cat "$log" 2>/dev/null)" = 5 ] \
     || fail "backend capture did not use its requested five-second deadline"
-  pass "bounded backend captures use the caller's requested deadline"
+  status=0
+  rm -f "$log"
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$log" \
+    fm_backend_busy_state_bounded 4 herdr pane-1 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded backend state returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 4 ] \
+    || fail "backend state did not use its requested four-second deadline"
+  pass "bounded backend reads use the caller's requested deadline"
 }
 
 test_backend_name_precedence
@@ -1168,7 +1175,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
-test_bounded_backend_capture_uses_requested_deadline
+test_bounded_backend_reads_use_requested_deadline
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

@@ -849,20 +849,23 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
-  if [ -n "${FM_PENDING_REPLY_CAPTURE_TIMEOUT:-}" ]; then
-    tail40=$(fm_backend_capture_bounded "$FM_PENDING_REPLY_CAPTURE_TIMEOUT" \
-      "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
-      || { printf 'unknown'; return 0; }
-  else
-    tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
-      || { printf 'unknown'; return 0; }
-  fi
+  tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else
     printf 'fallback-idle'
   fi
+}
+
+fm_pending_reply_backend_observation_bounded() {  # <seconds> <backend> <target> [expected-label] [harness]
+  local timeout=$1
+  shift
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+    FM_HOME="${FM_HOME:-}" bash -c \
+    '. "$1"; shift; fm_pending_reply_backend_observation "$@"' _ \
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-lib.sh" "$@"
 }
 
 fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
@@ -1038,6 +1041,15 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   fi
   fm_pending_reply_finish_recovery "$state" "$corr" failed || return 1
   return 1
+}
+
+fm_pending_reply_send_recovery_bounded() {  # <seconds> <state-dir> <corr_id>
+  local timeout=$1
+  shift
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
+    FM_HOME="${FM_HOME:-}" bash -c \
+    '. "$1"; fm_pending_reply_send_recovery "$2" "$3"' _ \
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-lib.sh" "$1" "$2"
 }
 
 fm_pending_reply_pid_identity() {  # <pid>
@@ -1489,7 +1501,12 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   fi
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = awaiting_report ]; then
-    fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null || true
+    if [ -n "${FM_PENDING_REPLY_TICK_TIMEOUT:-}" ]; then
+      fm_pending_reply_send_recovery_bounded \
+        "$FM_PENDING_REPLY_TICK_TIMEOUT" "$state" "$corr" 2>/dev/null || true
+    else
+      fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null || true
+    fi
   fi
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
@@ -1633,8 +1650,14 @@ fm_pending_reply_tick() {  # <state-dir>
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            observation=$(FM_PENDING_REPLY_CAPTURE_TIMEOUT="$observation_timeout" \
-              fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+            if [ -n "${FM_PENDING_REPLY_TICK_TIMEOUT:-}" ]; then
+              observation=$(fm_pending_reply_backend_observation_bounded \
+                "$FM_PENDING_REPLY_TICK_TIMEOUT" "$backend" "$target" "$label" "$harness" \
+                2>/dev/null || printf 'unknown')
+            else
+              observation=$(fm_pending_reply_backend_observation \
+                "$backend" "$target" "$label" "$harness")
+            fi
           fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")
