@@ -211,10 +211,12 @@ The pre-existing `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'` never ma
 This measurement therefore refreshes that per-harness signature to `Esc:cancel|Ctrl\+c:cancel`, keeping the older recorded token so a Grok build that still renders it does not read idle, and refreshes the defensive duplicate of that literal in `bin/fm-busy-lib.sh` with it.
 The refresh is pinned by `test_grok_regex_active_turn_busy` in `tests/fm-busy-state.test.sh`, which fails against the single-token regex, and by `test_grok_busy_signature_uses_measured_footer` in `tests/fm-tmux-submit-busy.test.sh`.
 
-The shared union `FM_DELIVERY_BUSY_REGEX_DEFAULT` deliberately does NOT gain `Esc:cancel`.
-`fm_tmux_submit_core` reads the pane with no harness, so widening the union would also convert a proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to `empty` (reported delivered).
-The queueing result above was observed through Grok's own visible queue entry, not through that union or a composer verdict, and the composer-classification matrix is separately recorded as stale for grok, so the delivery plane is left unchanged.
-The existing shared union already contains `esc (to )?interrupt` for other harnesses; this measurement establishes that Grok does not emit that alternative, so Grok gains nothing from it.
+The shared union `FM_DELIVERY_BUSY_REGEX_DEFAULT` carries NEITHER Grok token: it does not gain `Esc:cancel`, and the legacy `Ctrl+c:cancel` is removed from it.
+`fm_tmux_submit_core` reads the pane with no harness, so a union match converts a proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to `empty` (reported delivered).
+This session moved the queued text OUT of the composer, so for Grok a composer still reading `pending` after the Enter budget is a genuine swallow, and converting it to `empty` would report a lost steer as delivered.
+The queueing result above was observed through Grok's own visible queue entry, not through that union or a composer verdict, and it pairs only with the measured `Esc:cancel` footer; the legacy `Ctrl+c:cancel` build's queueing behavior is unverified, so neither token may prove delivery on a harness-less read.
+Both stay per-harness in `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT`, where a match only means "busy", never "delivered".
+The union keeps `esc (to )?interrupt` for other harnesses; this measurement establishes that Grok does not emit that alternative, so Grok gains nothing from it.
 
 ## Ancillary Escape observation
 

@@ -313,22 +313,24 @@ fm_composer_strip_ghost() {
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-# The harness-less default is the UNION of the per-harness tokens below, used
-# when a caller has no recorded harness for the pane (the submit cores read the
-# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
-# part of that union for the same reason the others are: without it a cursor
-# submit could never be acknowledged, because cursor parks its terminal cursor
-# outside its composer and the composer verdict is therefore always `unknown`.
-# Grok's "Esc:cancel" is DELIBERATELY absent from this union even though the
-# per-harness signature below carries it. fm_tmux_submit_core (bin/fm-tmux-lib.sh)
-# reads the pane with NO harness, so adding it here would also convert a
-# structurally proven-pending grok composer from the safe `pending` (exit 3,
-# unconfirmed) to `empty` (reported delivered). Grok 1.0.13 did queue and
-# process three mid-turn Enters, but that was measured through Grok's own
-# visible queue entry, not through this union or a composer verdict, and the
-# composer-classification matrix is separately recorded as stale for grok; see
+# The harness-less default carries the per-harness tokens below that are safe
+# to act on WITHOUT a recorded harness, used when a caller has no recorded
+# harness for the pane (the submit cores read the baseline and the post-Enter
+# transition this way). cursor's `ctrl+c to stop` is part of it for the same
+# reason the others are: without it a cursor submit could never be
+# acknowledged, because cursor parks its terminal cursor outside its composer
+# and the composer verdict is therefore always `unknown`.
+# NEITHER Grok token is in this union. fm_tmux_submit_core (bin/fm-tmux-lib.sh)
+# reads the pane with NO harness, so a match here converts a structurally
+# proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to
+# `empty` (reported delivered). Grok 1.0.13 did queue and process three
+# mid-turn Enters, but that was measured through Grok's own visible queue
+# entry, not through this union or a composer verdict, and it pairs only with
+# the measured "Esc:cancel" footer - the legacy "Ctrl+c:cancel" build's
+# queueing behavior is unverified, so neither token may prove delivery on a
+# harness-less read. Both stay per-harness below; see
 # docs/verification/grok-queued-enter.md before widening this union.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'

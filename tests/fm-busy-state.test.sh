@@ -315,7 +315,7 @@ Ctrl+c:cancel')
 test_grok_regex_active_turn_busy() {
   local state out busy_tail idle_tail legacy_tail
   state=$(new_state_dir grok-active-turn)
-  busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s
+  busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s                                                                      11s ⇣36.2k [↓][stop]
   Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts'
   legacy_tail='Ctrl+c:cancel'
   idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'

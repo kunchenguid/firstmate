@@ -302,11 +302,13 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'esc interrupt\n' > "$composer"
   pane_busy own opencode || fail "OpenCode's interrupt footer should be busy"
 
-  # No harness keeps the historical combined-pattern compatibility fallback.
+  # No harness keeps the historical combined-pattern compatibility fallback,
+  # minus Grok's tokens: a harness-less match there would report a steer
+  # delivered into a grok pane whose queueing this build never verified.
   printf 'Working...\n' > "$composer"
   pane_busy fallback || fail "no-harness fallback should retain Pi's shared signature"
   printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
+  pane_busy fallback && fail "no-harness fallback must not carry Grok's cancel footer"
 
   # A supplied harness must never use another harness's signature. This is
   # particularly important for Kimi: its idle key-tip rotation can include the
@@ -347,7 +349,7 @@ test_grok_busy_signature_uses_measured_footer() {
   printf '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts\n' > "$composer"
   pane_busy live grok || fail "Grok's measured active-turn footer should be busy"
 
-  # The union stays unwidened: no harness must not match that footer.
+  # The union carries no Grok token: a harness-less read must not match it.
   pane_busy union && fail "Grok's Esc:cancel must not widen the harness-less union"
 
   # No other harness borrows it.
@@ -359,11 +361,11 @@ test_grok_busy_signature_uses_measured_footer() {
   printf '  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
   pane_busy idle grok && fail "Grok's measured idle footer must not be busy"
 
-  # The older recorded footer stays busy for grok and inside the union.
+  # The older recorded footer stays busy for grok, and stays out of the union.
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy old grok || fail "Grok's older cancel footer should still be busy"
-  pane_busy old || fail "the harness-less union should retain Grok's shared cancel footer"
-  pass "fm_pane_is_busy: Grok's measured Esc:cancel footer is busy per-harness only"
+  pane_busy old && fail "Grok's older cancel footer must not match the harness-less union"
+  pass "fm_pane_is_busy: both Grok busy footers are per-harness only, never the union"
 }
 
 test_busy_pane_pending_returns_empty
