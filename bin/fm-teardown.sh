@@ -722,6 +722,30 @@ remote_pending_entry_is_safe() {  # <entry-path>
     || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
 }
 
+remote_pending_reply_belongs_to_retiring_task() {  # <correlation-id>
+  local corr=$1 hot archived staged rec task owner= found=0
+  hot="$STATE/pending-replies/$corr"
+  archived="$STATE/pending-replies/archive/$corr"
+  staged="$STATE/pending-replies/archive/.$corr.resolving"
+  for rec in "$hot" "$archived" "$staged"; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    case "$rec" in
+      "$staged") remote_pending_resolution_stage_is_safe "$rec" || return 2 ;;
+      *)
+        [ -f "$rec" ] && [ ! -L "$rec" ] \
+          && [ "$(fm_meta_get "$rec" corr_id)" = "$corr" ] || return 2
+        ;;
+    esac
+    task=$(fm_meta_get "$rec" task_id)
+    [ -n "$task" ] || return 2
+    [ -z "$owner" ] || [ "$owner" = "$task" ] || return 2
+    owner=$task
+    found=1
+  done
+  [ "$found" -eq 1 ] || return 1
+  [ "$owner" = "$ID" ]
+}
+
 remote_pending_reply_cleanup_corr() {  # <correlation-id>
   local corr=$1 lock hot archived staged rec task rc=0
   lock="$STATE/.pending-reply-$corr.lock"
@@ -751,7 +775,7 @@ remote_pending_reply_cleanup_corr() {  # <correlation-id>
 }
 
 remote_pending_replies_cleanup() {
-  local rec base corr
+  local rec base corr rc
   [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
   (
     CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
@@ -766,7 +790,12 @@ remote_pending_replies_cleanup() {
       esac
       [ "${#corr}" -eq 16 ] || exit 1
       case "$corr" in *[!0-9a-f]*) exit 1 ;; esac
-      remote_pending_reply_cleanup_corr "$corr" || exit 1
+      if remote_pending_reply_belongs_to_retiring_task "$corr"; then
+        remote_pending_reply_cleanup_corr "$corr" || exit 1
+      else
+        rc=$?
+        [ "$rc" -eq 1 ] || exit 1
+      fi
     done
   )
 }

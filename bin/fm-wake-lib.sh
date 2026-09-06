@@ -616,13 +616,27 @@ _fm_recovery_marker_write_locked() {
 # already-announced generation announced so it cannot be re-presented until a
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
+FM_RECOVERY_MARKER_ACTIVE_LOCK=
+
+fm_recovery_marker_interrupt_release() {
+  local lock=${FM_RECOVERY_MARKER_ACTIVE_LOCK:-}
+  [ -n "$lock" ] || return 0
+  fm_lock_release "$lock" || true
+  FM_RECOVERY_MARKER_ACTIVE_LOCK=
+}
+
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  FM_RECOVERY_MARKER_ACTIVE_LOCK=$lock
+  if ! fm_lock_acquire_wait "$lock"; then
+    FM_RECOVERY_MARKER_ACTIVE_LOCK=
+    return 1
+  fi
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
+    FM_RECOVERY_MARKER_ACTIVE_LOCK=
     return 1
   fi
   if [ "$kind" = downtime ]; then
@@ -646,9 +660,11 @@ _fm_recovery_marker_publish() {
   fi
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
+    FM_RECOVERY_MARKER_ACTIVE_LOCK=
     return 1
   fi
   fm_lock_release "$lock"
+  FM_RECOVERY_MARKER_ACTIVE_LOCK=
 }
 
 _fm_recovery_marker_begin_handling() {
@@ -880,7 +896,7 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -889,24 +905,7 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
-    # The recorded holder is THIS very process. Single-threaded bash can only
-    # observe that when an interrupting trap abandoned the frame that held the
-    # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
-    # with the EXIT path then re-acquiring the same lock), and every
-    # lock-taking trap path in this repo exits rather than resuming the
-    # interrupted frame. Spinning here deadlocks the exit path against itself
-    # - the hang reproduced by the self-held reclaim regression in
-    # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
-    fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
-      return 0
-    fi
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    return 1
-  fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
