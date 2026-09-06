@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -65,6 +65,14 @@ detect_own() {
   # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
   # an inherited launcher marker, not a Gemini identity.
   [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
+  # rovo (Atlassian Rovo CLI) sets ATLASSIAN_AGENT_TYPE=rovo, ROVODEV_CLI=1, and
+  # AGENT=rovodev_cli on its tool subprocesses (verified, rovo 202609.1.2). It does
+  # NOT scrub an inherited CLAUDECODE, so a rovo worker launched from a claude
+  # session carries both markers - this must be tested BEFORE the CLAUDECODE line,
+  # the same ordering hazard cursor documents above (see issue #3517). bin/fm-spawn.sh
+  # additionally clears foreign markers at rovo's launch boundary as defense in depth.
+  [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
+  [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -119,6 +127,7 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
+      rovo) echo rovo; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable

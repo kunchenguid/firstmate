@@ -258,6 +258,7 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   local rec out status meta mtp itp gl tl ll
   rec=$(make_spawn_case tc-on)
   read_case_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
   : > "$HOME_DIR/config/trace-context"   # enable via the real config path
   start_trace_session "$HOME_DIR"
 
