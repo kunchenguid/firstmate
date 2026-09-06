@@ -359,6 +359,50 @@ outcome: failed
 EOF
 }
 
+# A run that was CANCELLED after its work had already succeeded: every step
+# completed through `pr`, a PR exists, and only the CI monitor was torn down by
+# the abort. Copied from a real aborted run's `axi status` (both `status:` and
+# `outcome:` read cancelled, with an `error:` naming the abort). Nothing here
+# failed review, tests, lint or docs - the run was stopped, not failed.
+run_cancelled_after_green() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,4
+    rebase,completed,0,5241
+    review,completed,0,779029
+    test,completed,0,481032
+    document,completed,0,425469
+    lint,completed,0,8
+    push,completed,0,8235
+    pr,completed,0,39266
+    ci,failed,0,317773
+outcome: cancelled
+error: "cancelled: aborted by user"
+EOF
+}
+
+# The same cancellation seen before an `outcome:` line is written: only the
+# top-level `status:` says cancelled. This is the reader's other cancelled
+# branch and must map the same way.
+run_cancelled_status_only() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -862,6 +906,86 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# A CANCELLED run is not a failed run. `no-mistakes axi abort` exists so an
+# orphaned CI monitor can be reaped after its worker is gone, and doing exactly
+# that on work whose checks were already green used to make this reader answer
+# `state: failed`. That is not a cosmetic mislabel: bin/fm-inactive-reconcile.sh
+# only records a durable terminal outcome and wakes the supervisor for a `done`
+# or `failed` state, so a deliberate abort of finished work manufactured a
+# failure escalation for a green, open, mergeable PR.
+#
+# `done` would be the opposite error - a cancelled run genuinely did not
+# complete - so the honest answer is a distinct terminal state, `stopped`,
+# whose detail says the run was cancelled.
+test_terminal_cancelled_after_green_is_stopped_not_failed() {
+  reset_fakes
+  local d; d=$(new_case cancelled-after-green)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-a
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-a.meta" "window=fm:fm-feat-cancel-a" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled_after_green fm/feat-cancel-a)"
+  local out; out=$(run_crew_state "$d" feat-cancel-a)
+  assert_not_contains "$out" "state: failed" "a cancelled run must not be reported as a failure"
+  assert_not_contains "$out" "state: done" "a cancelled run must not be reported as a success either"
+  assert_contains "$out" "state: stopped" "cancelled outcome -> stopped"
+  assert_contains "$out" "run cancelled" "the detail names the cancellation"
+  assert_contains "$out" "source: run-step" "cancelled -> run-step source"
+  pass "a cancelled run whose work had already passed is stopped, not failed"
+}
+
+# The other cancelled branch: top-level `status: cancelled` with no `outcome:`
+# line yet.
+test_terminal_cancelled_status_without_outcome_is_stopped() {
+  reset_fakes
+  local d; d=$(new_case cancelled-status-only)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-b
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-b.meta" "window=fm:fm-feat-cancel-b" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled_status_only fm/feat-cancel-b)"
+  local out; out=$(run_crew_state "$d" feat-cancel-b)
+  assert_not_contains "$out" "state: failed" "a cancelled status must not be reported as a failure"
+  assert_contains "$out" "state: stopped" "cancelled status -> stopped"
+  assert_contains "$out" "run cancelled" "the detail names the cancellation"
+  pass "a cancelled status without an outcome line is stopped, not failed"
+}
+
+# The coarse runs-list path maps the same way: `no-mistakes runs` prints a
+# `cancelled` row for the same run.
+test_coarse_cancelled_row_is_stopped_not_failed() {
+  reset_fakes
+  local d short; d=$(new_case cancelled-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-c
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-c.meta" "window=fm:fm-feat-cancel-c" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-cancel-c ${short}  2026-09-02 11:42  https://github.com/o/r/pull/3"
+  local out; out=$(run_crew_state "$d" feat-cancel-c)
+  assert_not_contains "$out" "state: failed" "a coarse cancelled row must not be reported as a failure"
+  assert_contains "$out" "state: stopped" "coarse cancelled row -> stopped"
+  assert_contains "$out" "run cancelled" "the detail names the cancellation"
+  pass "a coarse cancelled row is stopped, not failed"
+}
+
+# Negative control for the pair above: the distinction only means something if a
+# genuine FAILURE still reports `failed` on the same coarse path. If this ever
+# drifted to `stopped` too, the split would be cosmetic and a real failed run
+# would stop reaching the supervisor.
+test_coarse_failed_row_still_reports_failed() {
+  reset_fakes
+  local d short; d=$(new_case failed-coarse-control)
+  make_repo_on_branch "$d/wt" fm/feat-cancel-d
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cancel-d.meta" "window=fm:fm-feat-cancel-d" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-cancel-d ${short}  2026-09-02 11:42"
+  local out; out=$(run_crew_state "$d" feat-cancel-d)
+  assert_not_contains "$out" "state: stopped" "a failed run must not be softened into stopped"
+  assert_contains "$out" "state: failed" "a genuinely failed run still reports failed"
+  pass "a genuine coarse failure still reports failed"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -2068,6 +2192,10 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_terminal_cancelled_after_green_is_stopped_not_failed
+test_terminal_cancelled_status_without_outcome_is_stopped
+test_coarse_cancelled_row_is_stopped_not_failed
+test_coarse_failed_row_still_reports_failed
 test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_cross_branch_attribution_picks_most_recent_row

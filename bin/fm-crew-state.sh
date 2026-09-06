@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|stopped|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -46,11 +46,14 @@
 #      fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      passed/checks-passed -> done, failed -> failed, and cancelled -> stopped
+#      (a cancellation is somebody stopping the run, not the work failing; the
+#      cancelled mapping below owns why that is its own terminal word).
+#      EXCEPT: while the active step is ci, `axi status` alone cannot tell
+#      "still waiting on checks" from "checks green, waiting on merge" (see
+#      nm_ci_checks_state) - a ci-step log-tail check overrides working ->
+#      done once checks read green, so a green PR is never silently read as
+#      still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -515,8 +518,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
+    # true/working, done, stopped, or failed. A crew genuinely parked at a gate
+    # still gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced by each supervisor's span classification (fm-classify-lib.sh's
@@ -526,7 +529,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      # cancelled -> stopped, not failed; the outcome mapping below owns why.
+      cancelled) RUN_STATE=stopped; RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -538,12 +542,32 @@ if [ "$HAVE_RUN" = 1 ]; then
     has_gate=0
     nm_has_gate && has_gate=1
 
+    # `cancelled` -> `stopped`, deliberately NOT `failed`. A failure means the
+    # work did not pass; a cancellation means somebody stopped the run, and
+    # `no-mistakes axi abort` exists precisely so an orphaned CI monitor can be
+    # reaped after its worker is gone. Collapsing the two asserted a failure the
+    # evidence did not support - and not only as a label: the one consumer that
+    # keys on this word as a captain-facing terminal outcome
+    # (bin/fm-inactive-reconcile.sh) records a durable outcome and wakes the
+    # supervisor for `done` or `failed` alone, so reaping the monitor of work
+    # whose checks were already green raised a failure escalation for an open,
+    # mergeable PR. `done` would be the opposite error - a cancelled run
+    # genuinely did not complete - so a stopped run gets its own terminal word.
+    # Nothing else narrows: fm-classify-lib.sh's crew_absorb_class absorbs a
+    # wake only for `working`/`paused`, which a cancelled run was not before
+    # this and is not now, and bin/fm-fleet-snapshot.sh's in-flight inventory
+    # check counts `stopped` as terminal alongside `done`/`failed`; every other
+    # reader renders the word verbatim. Accepted consequence: a cancelled run
+    # that is then abandoned gets no durable outcome record and no captain
+    # presentation from bin/fm-inactive-reconcile.sh, and shows only in the
+    # fleet table as stopped / run-step - the deliberate price of not asserting
+    # a failure that did not happen.
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        cancelled)     RUN_STATE=stopped; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -567,7 +591,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        cancelled)      RUN_STATE=stopped; RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
