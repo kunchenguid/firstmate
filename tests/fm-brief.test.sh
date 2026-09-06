@@ -373,9 +373,7 @@ test_no_mistakes_dod_wording() {
 }
 
 # The gate must never be the change's first review, so the no-mistakes DOD orders
-# a review pass then a simplification pass ahead of the /no-mistakes handoff. The
-# negative cases pin today's deliberate scope: the passes belong to the mode that
-# has a gate, and a scout's deliverable is a report rather than a change.
+# a review pass then a simplification pass ahead of the /no-mistakes handoff.
 test_pre_gate_review_passes() {
   local home id brief mode other_id other_brief review_line simplify_line gate_line
   home="$TMP_ROOT/pre-gate-home"
@@ -387,27 +385,29 @@ test_pre_gate_review_passes() {
 
   assert_grep "after both passes below have run and you have resolved what they find" "$brief" \
     "no-mistakes DOD must make the two passes part of being complete, not an aside"
-  # /code-review and /simplify are Claude built-ins with no equivalent on other
-  # harnesses, unlike the installed /no-mistakes skill (bin/fm-dod-lib.sh header
-  # owns why), so the contract requires the pass and names the command as one way
-  # to run it. Without the fallback a non-Claude worker cannot satisfy this DOD.
+  # Without this fallback a non-Claude worker cannot satisfy the DOD;
+  # bin/fm-dod-lib.sh's header owns why the commands are named at all.
   assert_grep "or by hand where your harness has no such command" "$brief" \
     "no-mistakes DOD must stay satisfiable on a harness without the named commands"
-  assert_grep "Run a review pass over your change first (/code-review)" "$brief" \
+  assert_grep "Run a review pass over your branch's full change first (/code-review)" "$brief" \
     "no-mistakes DOD lost its pre-gate review pass"
   assert_grep "so the gate spends its rounds on real defects rather than on ones an ordinary review would have caught" "$brief" \
     "no-mistakes DOD states the review pass without its reason"
-  assert_grep "Then a simplification pass over the same change (/simplify)" "$brief" \
+  assert_grep "Then a simplification pass over that same change (/simplify)" "$brief" \
     "no-mistakes DOD lost its pre-gate simplification pass"
   assert_grep "so what ships is the smallest correct version of it rather than the first one that worked" "$brief" \
     "no-mistakes DOD states the simplification pass without its reason"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "no-mistakes DOD lost the gate handoff the passes run ahead of"
+  # A pass leaves no artifact, so the completion line is the only place a skipped
+  # one becomes visible to firstmate before the gate burns the rounds it saves.
+  assert_grep "with the summary saying both passes ran and what they changed" "$brief" \
+    "no-mistakes DOD must surface the passes on the completion line"
 
   # Order is the contract: review, then simplify, then the gate. The three greps
   # reuse patterns the assertions above already proved present, so each yields a line.
-  review_line=$(grep -n -F -m1 "Run a review pass over your change first (/code-review)" "$brief" | cut -d: -f1)
-  simplify_line=$(grep -n -F -m1 "Then a simplification pass over the same change (/simplify)" "$brief" | cut -d: -f1)
+  review_line=$(grep -n -F -m1 "Run a review pass over your branch's full change first (/code-review)" "$brief" | cut -d: -f1)
+  simplify_line=$(grep -n -F -m1 "Then a simplification pass over that same change (/simplify)" "$brief" | cut -d: -f1)
   gate_line=$(grep -n -F -m1 "Firstmate will then instruct you to run /no-mistakes" "$brief" | cut -d: -f1)
   [ "$review_line" -lt "$simplify_line" ] \
     || fail "no-mistakes DOD must place the review pass before the simplification pass (lines $review_line, $simplify_line)"
@@ -418,6 +418,9 @@ test_pre_gate_review_passes() {
   other_id="brief-pre-gate-scout"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
   other_brief="$home/data/$other_id/brief.md"
+  # assert_no_grep passes vacuously on a missing file (grep exits 2, the leading
+  # `!` inverts it), so prove the brief exists before asserting what it lacks.
+  assert_present "$other_brief" "scout brief was not scaffolded"
   assert_no_grep "/code-review" "$other_brief" "scout brief received a pre-gate review pass"
   assert_no_grep "/simplify" "$other_brief" "scout brief received a pre-gate simplification pass"
 
@@ -426,6 +429,7 @@ test_pre_gate_review_passes() {
     other_id="brief-pre-gate-$mode"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
     other_brief="$home/data/$other_id/brief.md"
+    assert_present "$other_brief" "$mode brief was not scaffolded"
     assert_no_grep "/code-review" "$other_brief" "$mode brief received a pre-gate review pass"
     assert_no_grep "/simplify" "$other_brief" "$mode brief received a pre-gate simplification pass"
   done
