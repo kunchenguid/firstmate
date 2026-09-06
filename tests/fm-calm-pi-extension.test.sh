@@ -28,6 +28,19 @@ record_pi_version_evidence() {
   [ -n "$version" ] || fail "$context could not determine the installed Pi version"
 }
 
+# Names the tools that are actually absent so a skipped E2E can never read as a
+# passing one. The three E2E cases below are the only coverage of Calm's real
+# terminal behavior, and tmux is commonly installed outside a trimmed PATH while
+# pi is not, so reporting "pi or tmux" for either case hid which one was missing.
+# A run that silently skipped all three then looked like a clean pass, which is
+# exactly how a Calm export defect was once misread as a bash-version regression.
+missing_e2e_tools() {
+  local missing=""
+  command -v pi >/dev/null 2>&1 || missing="pi"
+  command -v tmux >/dev/null 2>&1 || missing="${missing:+$missing and }tmux"
+  printf '%s\n' "$missing"
+}
+
 cleanup() {
   if command -v tmux >/dev/null 2>&1; then
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -44,6 +57,22 @@ wait_for_text() {
     # editor remain visible.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Pane variant of wait_for_text: leaves the last capture in the caller's `pane`
+# so the assertions right after a wait read the very screen the wait settled on,
+# and returns non-zero once the deadline passes without <needle> appearing. The
+# caller supplies its own failure message, so each wait names the state it was
+# waiting for instead of letting a later, unrelated assertion misreport it.
+wait_for_pane_text() {
+  local needle=$1 i=0
+  while [ "$i" -lt 120 ]; do
+    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    printf '%s\n' "$pane" | grep -Fq "$needle" && return 0
     sleep 0.05
     i=$((i + 1))
   done
@@ -1621,7 +1650,7 @@ JS
 test_operational_followup_turn_e2e() {
   local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi operational follow-up E2E"
+    echo "skip: $(missing_e2e_tools) not found for Pi operational follow-up E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
@@ -1793,14 +1822,7 @@ TS
 
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-    i=0
-    while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' && break
-      sleep 0.05
-      i=$((i + 1))
-    done
-    printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' \
+    wait_for_pane_text 'followup-e2e.ts' \
       || fail "Pi follow-up $case_name case ($label) did not reach the ready composer"
 
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/followup-e2e $label $shape"
@@ -1818,11 +1840,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    # Pi writes the session file before it paints the transcript, so capturing the
+    # pane the moment that file settles can catch the screen still on its start-up
+    # state and read as zero captain answers rather than one. Wait for the follow-up
+    # answer, which Pi renders after the captain answer, so every assertion below
+    # sees a fully painted transcript. Failing here first keeps an unpainted screen
+    # from being reported as a duplicate: the count below is taken only once this
+    # anchor holds, and is never satisfied by it, so a genuine duplicate still fails.
+    wait_for_pane_text "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case never painted the follow-up answer on screen before the wait expired"
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
       if [ "$label" = exact_watcher ]; then
@@ -1921,15 +1950,9 @@ JS
     printf '%s\n' on >"$home/config/calm"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
-    i=0
-    while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'MONITOR_HANDLED_exact_watcher_ONE' && break
-      sleep 0.05
-      i=$((i + 1))
-    done
+    wait_for_pane_text 'MONITOR_HANDLED_exact_watcher_ONE' \
+      || fail "Pi restart lost the operational processing response"
     assert_contains "$pane" "CAPTAIN_PROMPT_exact_watcher" "Pi restart lost the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_exact_watcher_ONE" "Pi restart lost the operational processing response"
     assert_not_contains "$pane" "FIRSTMATE WATCHER WAKE: signal: /home/fixture/github/kunchenguid/firstmate/state/oss-triage-t4.status" \
       "Pi restart replayed the Calm-hidden exact watcher row"
     captain_line=$(printf '%s\n' "$pane" | grep -Fn 'CAPTAIN_ANSWER_exact_watcher' | tail -1 | cut -d: -f1)
@@ -1975,7 +1998,7 @@ test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
   local version skill_line final_line gap i
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
+    echo "skip: $(missing_e2e_tools) not found for Pi Calm hidden-block geometry E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
@@ -3083,7 +3106,7 @@ JS
 test_interactive_terminal_e2e() {
   local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi calm interactive E2E"
+    echo "skip: $(missing_e2e_tools) not found for Pi calm interactive E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
