@@ -38,7 +38,12 @@ SH
 cat >"$project/bin/fm-operational-input.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'operational:%s\n' "$*" >> "$FM_WINDOWS_SHELL_LOG"
-printf 'not-operational\n'
+input=$(cat)
+if [ "$1" = encode ]; then
+  printf 'encoded:%s:%s\n' "$2" "$input"
+else
+  printf 'not-operational\n'
+fi
 SH
 chmod +x "$project/bin/"*.sh
 
@@ -47,6 +52,7 @@ out=$(EXT="$project/.pi/extensions/fm-primary-turnend-guard.ts" \
   FM_HOME="$project" FM_ROOT_OVERRIDE="$project" FM_WINDOWS_SHELL_LOG="$log" \
   FM_OPERATIONAL_INPUT_SCRIPT="$project/bin/fm-operational-input.sh" \
   node --input-type=module 2>&1 <<'JS'
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -64,6 +70,36 @@ await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input: { 
 await handlers.get("agent_settled")({}, ctx);
 const operational = await import(`${new URL("./lib/fm-operational-input.ts", pathToFileURL(process.env.EXT)).href}?windows=${Date.now()}`);
 operational.classifyFirstmateOperationalText("probe");
+let asyncInvocation;
+const encoded = await operational.encodeFirstmateOperationalInputWith(
+  (command, args, { input }) => {
+    asyncInvocation = { command, args: [...args], input };
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"] });
+      let stdout = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.on("error", reject);
+      child.on("close", (status) => resolve({ status, stdout }));
+      child.stdin.end(input);
+    });
+  },
+  "branch-outcome",
+  "branch result",
+);
+if (encoded !== "encoded:branch-outcome:branch result\n") {
+  throw new Error(`unexpected encoded branch outcome: ${encoded}`);
+}
+if (
+  asyncInvocation.command !== "bash" ||
+  asyncInvocation.args.join("\0") !== [
+    process.env.FM_OPERATIONAL_INPUT_SCRIPT,
+    "encode",
+    "branch-outcome",
+  ].join("\0") ||
+  asyncInvocation.input !== "branch result"
+) {
+  throw new Error(`unexpected async invocation: ${JSON.stringify(asyncInvocation)}`);
+}
 const calls = readFileSync(process.env.FM_WINDOWS_SHELL_LOG, "utf8");
 for (const expected of [
   "sessionstart:--source startup --pi-prerequisite",
@@ -71,6 +107,7 @@ for (const expected of [
   "arm:--command printf test",
   "turnend:",
   "operational:classify",
+  "operational:encode branch-outcome",
 ]) {
   if (!calls.includes(expected)) throw new Error(`missing ${expected} in:\n${calls}`);
 }
