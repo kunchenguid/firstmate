@@ -84,9 +84,11 @@
 # test scope (AGENTS.md section 11). bin/fm-spawn.sh refuses a ship spawn whose
 # brief has no "Prep:" line at all. bin/fm-dod-lib.sh's fm_ship_batch_rule_block
 # renders the matching rule 8 (pre-run mechanism sweep, batch-findings
-# response) and rule 9 (never re-run a failed CI job) into every ship brief's
-# # Rules list; that same rule 9 sentence is the single owner
-# (FM_CI_NO_RERUN_LINE) also carried into bin/fm-control.sh's relaunch note.
+# response), rule 9 (never re-run a failed CI job), and rule 10 (test quality:
+# name the behavior a new/changed test proves, justify any deletion or
+# weakening) into every ship brief's # Rules list; that same rule 9 sentence is
+# the single owner (FM_CI_NO_RERUN_LINE) also carried into bin/fm-control.sh's
+# relaunch note.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -469,7 +471,7 @@ case "$MODE" in
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID" "$STATE/$ID.meta") || exit 1
-BATCH_RULE_BLOCK=$(fm_ship_batch_rule_block 8 9)
+BATCH_RULE_BLOCK=$(fm_ship_batch_rule_block 8 9 10)
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

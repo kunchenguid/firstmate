@@ -1027,6 +1027,19 @@ test_ship_briefs_batch_findings_before_resubmitting() {
     "ship brief must forbid one-at-a-time stop-fix-rereview loops"
   assert_grep "9. Never re-run a failed CI job or workflow" "$brief" \
     "ship brief must keep the CI-no-rerun standing rule as rule 9"
+  # Test-quality clause (verification scout finding V08, firstmate half): a
+  # new/changed test must name what it independently proves and be
+  # failure-capable, and a test deletion/weakening needs a stated reason.
+  # Rendered once, immediately after rule 9, keeping the numbering contiguous.
+  grep -c '^10\. A new or changed test must name, in its own name or docstring, the behavior it independently proves' "$brief" \
+    | grep -qx 1 \
+    || fail "ship brief must render the test-quality clause exactly once as rule 10"
+  assert_grep "must be shown failure-capable: red before the change, green after, or an equivalent neuter" "$brief" \
+    "ship brief must require a new or changed test to be shown failure-capable"
+  assert_grep "A test deletion, skip, or weakened assertion in the same diff must carry a stated reason naming the approved contract change" "$brief" \
+    "ship brief must require a stated approved-contract-change reason for any test deletion, skip, or weakened assertion"
+  assert_grep "it must never exist only to obtain green" "$brief" \
+    "ship brief must forbid a test change that exists only to obtain green"
   # The name-and-origin pointer must resolve to the generated brief's ask-user rule without depending on its number.
   assert_grep "If a decision belongs above the implementation worker (product choices, destructive actions)," "$brief" \
     "the generated Rules section must retain the ask-user escalation rule"

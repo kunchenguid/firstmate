@@ -207,7 +207,7 @@ EOF
 $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
-  fm_ship_batch_rule_block 8 9
+  fm_ship_batch_rule_block 8 9 10
   printf '\n'
   fm_proof_bar_section
   printf '\n'

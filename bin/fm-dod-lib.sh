@@ -90,13 +90,19 @@ When you run /no-mistakes, copy this entire Proof bar section verbatim into `--i
 EOF
 }
 
-# fm_ship_batch_rule_block <rule-8-number> <rule-9-number> prints rule 8 (the
-# pre-run mechanism sweep plus the post-review batch-findings response) and
-# rule 9 (FM_CI_NO_RERUN_LINE) for a ship brief's # Rules list. The pre-run
-# sweep is the Proof bar's Tier 1 prep (data/firstmate-proof-bar-in-intent/prep-tiers.md,
-# rule B) done proactively instead of only after a review surfaces it.
-fm_ship_batch_rule_block() {  # <n8> <n9>
-  local n8=$1 n9=$2
+# fm_ship_batch_rule_block <rule-8-number> <rule-9-number> <rule-10-number>
+# prints rule 8 (the pre-run mechanism sweep plus the post-review
+# batch-findings response), rule 9 (FM_CI_NO_RERUN_LINE), and rule 10 (test
+# quality: a new/changed test must name the behavior it independently proves
+# and be shown failure-capable, and a test deletion/weakening in the same diff
+# must carry a stated approved-contract-change reason) for a ship brief's
+# # Rules list. The pre-run sweep is the Proof bar's Tier 1 prep
+# (data/firstmate-proof-bar-in-intent/prep-tiers.md, rule B) done proactively
+# instead of only after a review surfaces it. Rule 10 mirrors XAUUSD's
+# AGENTS.md "Change method" red-first/failure-capable rule, scoped to
+# firstmate's own DoD text (verification scout finding V08, firstmate half).
+fm_ship_batch_rule_block() {  # <n8> <n9> <n10>
+  local n8=$1 n9=$2 n10=$3
   cat <<EOF
 $n8. Before your first run, if you already know a fix pattern applies to more than the one site you were asked to change (a parser rule, a validation, a timestamp format, a malformed-input guard), sweep the whole repo for that mechanism, fix every site in one commit, and paste the site list into the Proof bar's Prep line before starting (rule B in the Proof bar above; this is Tier 1 prep done before the run instead of only after a review finds it).
    When a review, verification run, or test pass fails anyway, never fix and resubmit the first defect you find.
@@ -104,6 +110,8 @@ $n8. Before your first run, if you already know a fix pattern applies to more th
    same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
    so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
 $n9. $FM_CI_NO_RERUN_LINE
+$n10. A new or changed test must name, in its own name or docstring, the behavior it independently proves, and must be shown failure-capable: red before the change, green after, or an equivalent neuter.
+   A test deletion, skip, or weakened assertion in the same diff must carry a stated reason naming the approved contract change that makes the old expectation wrong; it must never exist only to obtain green.
 EOF
 }
 
