@@ -634,7 +634,11 @@ test_crew_run_step_advanced_classifier() {
   # The other half of the pairing: a gap between log writes that outlasts the
   # window is survivable because the step agent's own CPU time still advances.
   age_progress_sample "$sample" 400
-  nm_status_fixture "$toon" running test "$$"
+  # A pid whose ps read is deterministic: a nonexistent pid yields no CPU time
+  # every time, whereas the test shell's own pid can cross a whole-second CPU
+  # boundary between two adjacent probes and flake the unchanged-agent assertion
+  # below. The appearing assertion above only needs the pid field to be non-empty.
+  nm_status_fixture "$toon" running test 44121
   crew_run_step_advanced probe "$state" "$sample" >/dev/null \
     || fail "the active step's agent process appearing was not reported as progress"
   age_progress_sample "$sample" 400
