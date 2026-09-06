@@ -2132,9 +2132,16 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '1\n' > "$state/.count-$key"
 
   # A worker that declared a pause and then stopped at a live external-decision
-  # gate reports that PARK as its authoritative current state - the declaration it
-  # left behind no longer names where it actually is. First sight must surface
-  # promptly so that gate is not hidden behind the pause cadence.
+  # gate its own authoritative current state reports as a PARK - the declaration
+  # it left behind no longer names where it actually is, so crew_absorb_class
+  # answers `none`. First sight must surface promptly so that gate is not hidden
+  # behind the pause cadence.
+  # At this commit the real `parked` verdict comes from the crew's own no-mistakes
+  # run (`source: run-step`, a run stopped at a gate) or a `needs-decision:` log
+  # line; `parked · source: pane` below is the shape open PR 3820 would add for a
+  # worker read as parked at a harness prompt. The assertions hold under either
+  # source, because crew_absorb_class maps every state that is neither `paused`
+  # nor `working` to `none`.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: parked · source: pane · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2265,8 +2272,9 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # CAPTAIN (captain-held, five consecutive alarms) and one parked on the PIPELINE
 # (paused:, dozens across one day). Both fixtures below carry a live agent whose
 # AUTHORITATIVE current state cannot name the declared wait: a captain hold has no
-# current-state mapping at all, and a worker standing at a harness approval gate
-# reports that park, not the pause it declared before reaching it. pause_state_class
+# current-state mapping at all (its verb falls through to `unknown`), and a crew
+# whose own no-mistakes run has since parked at a gate reports that park, not the
+# pause it declared before the run reached it. pause_state_class
 # returns `none` for that unnamed case while the agent is still ALIVE, so a worker
 # genuinely waiting on a decision is never silenced by a declaration it left behind;
 # first sight of each distinct stale hash therefore reaches surface_nonterminal_stale.
@@ -2279,6 +2287,14 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # so a forgotten wait cannot rot invisibly.
 # The complementary case - a live worker whose current state DOES name the wait -
 # is pinned by test_live_named_declared_wait_takes_the_bounded_pause_cadence below.
+# On the pipeline fixture's `parked · source: pane` stub: that is the shape open
+# PR 3820 would add for a worker read as parked at a harness prompt. At this commit
+# such a worker's idle pane instead leaves current state falling back to its own
+# declaration, which NAMES the pause and takes that complementary bounded cadence -
+# the documented latency trade-off. The stub still exercises the unnamed bucket
+# these assertions are about, and they hold under the run-step source too, because
+# crew_absorb_class maps every state that is neither `paused` nor `working` to
+# `none`.
 test_live_unnamed_declared_wait_churn_honors_the_resurface_throttle() {
   local spec name status_line crew dir state fakebin out capture_file statusf window key
   local sig round wakes bare text throttle replacement
