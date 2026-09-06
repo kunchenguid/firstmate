@@ -79,19 +79,24 @@ def body_preview(msg):
     """First non-empty text/plain line, else first non-empty text/html line,
     else empty. An empty plain-text alternative falls through to html so a
     valid message never loses its promised preview."""
-    for part in msg.walk():
-        if part.get_content_type() == 'text/plain':
-            text = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace').strip()
-            if text:
-                return text
-    for part in msg.walk():
-        if part.get_content_type() == 'text/html':
-            raw = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
-            raw = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', raw)
-            preview = re.sub(r'<[^>]+>', ' ', raw)
-            preview = ' '.join(preview.split())
-            if preview:
-                return preview
+    try:
+        if msg is None:
+            return ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                text = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace').strip()
+                if text:
+                    return text
+        for part in msg.walk():
+            if part.get_content_type() == 'text/html':
+                raw = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
+                raw = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', raw)
+                preview = re.sub(r'<[^>]+>', ' ', raw)
+                preview = ' '.join(preview.split())
+                if preview:
+                    return preview
+    except Exception:
+        return ''
     return ''
 
 
@@ -124,6 +129,8 @@ def cmd_read():
             if preview:
                 first = preview.splitlines()[0] if preview else preview
                 print('Body:', (first[:MAX_PREVIEW] if first else ''))
+            else:
+                print('Body: (body unavailable)')
         m.logout()
         return 0
     except Exception as e:
@@ -372,7 +379,10 @@ def cmd_poll_list():
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
-        m.logout()
+        try:
+            m.logout()
+        except Exception:
+            pass
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures
