@@ -42,12 +42,18 @@ make_home() {  # <name> [<registry-line>...]
   printf '%s\n' "$home|$projects/proj|$fakebin"
 }
 
-write_brief() {  # <home> <id> [<recorded-mode>]
-  local home=$1 id=$2 mode=${3:-}
+write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-base>]
+  local home=$1 id=$2 mode=${3:-} base=${4:-}
   mkdir -p "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
-    [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
+    if [ -n "$mode" ]; then
+      if [ -n "$base" ]; then
+        printf 'Delivery contract: mode=%s base=%s\n' "$mode" "$base"
+      else
+        printf 'Delivery contract: mode=%s\n' "$mode"
+      fi
+    fi
   } > "$home/data/$id/brief.md"
 }
 
@@ -118,11 +124,74 @@ EOF
   [ "$status" -ne 0 ] || fail "a scout spawn carrying --yolo should exit non-zero"
   assert_contains "$out" "--yolo applies only to ship spawns" "scout spawn did not refuse --yolo"
 
+  out=$(run_spawn "$home" "$fakebin" delivery-scout-a1 "$proj" claude --scout --base feat/stack)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn carrying --base should exit non-zero"
+  assert_contains "$out" "--base applies only to ship spawns" "scout spawn did not refuse --base"
+
   out=$(run_spawn "$home" "$fakebin" delivery-sm-a2 "$home" --secondmate --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate spawn carrying delivery flags should exit non-zero"
   assert_contains "$out" "applies only to ship spawns" "secondmate spawn did not refuse the delivery flags"
   pass "fm-spawn: scout and secondmate spawns refuse ship delivery flags"
+}
+
+# The delivery target branch drifts exactly the way the mode does: the brief tells
+# the worker which branch to build on, the task record tells cleanup and the
+# guarded landing which branch to measure. A spawn whose --base disagrees would
+# split those two, so it refuses in BOTH directions - a base the brief does not
+# carry, and a base the brief carries that the spawn omits. A brief with a
+# contract line and no base= says "the repo default branch", which is a real
+# answer, not a missing record.
+test_spawn_refuses_a_brief_base_mismatch() {
+  local rec home proj fakebin out status
+  rec=$(make_home base-agreement)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" delivery-base-e1 no-mistakes feat/stack
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e1 "$proj" claude --mode no-mistakes --yolo off --base feat/other)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a brief/spawn base mismatch should exit non-zero"
+  assert_contains "$out" "delivery mismatch for delivery-base-e1" "base mismatch refusal did not name the task"
+  assert_contains "$out" "the brief says base=feat/stack but this spawn passed base=feat/other" \
+    "base mismatch refusal did not show both sides of the disagreement"
+  assert_absent "$home/state/delivery-base-e1.meta" "mismatched base spawn wrote task metadata"
+
+  # The brief records a base the spawn omits: the worker would build on the feature
+  # branch while the record measured the default branch.
+  write_brief "$home" delivery-base-e2 no-mistakes feat/stack
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e2 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn omitting the brief's recorded base should exit non-zero"
+  assert_contains "$out" "the brief says base=feat/stack but this spawn passed base=<the repo default branch>" \
+    "an omitted --base against a brief that records one was not reported as a disagreement"
+
+  # And the inverse: the brief says the default branch, the spawn names a branch.
+  write_brief "$home" delivery-base-e3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e3 "$proj" claude --mode no-mistakes --yolo off --base feat/stack)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a --base against a brief recording none should exit non-zero"
+  assert_contains "$out" "the brief says base=<the repo default branch> but this spawn passed base=feat/stack" \
+    "a --base against a default-branch brief was not reported as a disagreement"
+
+  # Agreement on both axes clears the check and only fails later, at the refusing tmux.
+  write_brief "$home" delivery-base-e4 no-mistakes feat/stack
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e4 "$proj" claude --mode no-mistakes --yolo off --base feat/stack)
+  assert_not_contains "$out" "delivery mismatch" "an agreeing base was reported as a mismatch"
+
+  # Both sides silent is the common case and must stay quiet.
+  write_brief "$home" delivery-base-e5 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e5 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "delivery mismatch" "a task with no delivery target branch was reported as a mismatch"
+
+  # An unusable branch name never reaches the record.
+  out=$(run_spawn "$home" "$fakebin" delivery-base-e6 "$proj" claude --mode no-mistakes --yolo off --base 'feat/..x')
+  status=$?
+  [ "$status" -ne 0 ] || fail "an invalid --base should exit non-zero"
+  assert_contains "$out" "is not a valid git branch name" "an invalid --base was not refused for its syntax"
+  pass "fm-spawn: the brief's recorded delivery target branch and the spawn's --base must agree"
 }
 
 # The brief is what the worker actually follows, so a spawn whose explicit mode
@@ -154,6 +223,75 @@ EOF
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
+}
+
+# The recorded delivery target branch is only useful if it reaches the durable task
+# record: bin/fm-teardown.sh and bin/fm-merge-local.sh read `base=` from there, so
+# this runs a spawn all the way through to the record it writes. A spawn without
+# --base must write no base= key at all, because an absent key is what those two
+# scripts read as "the repo default branch".
+make_launching_home() {  # <name>
+  local name=$1 home proj wt fakebin
+  home="$TMP_ROOT/$name/home"
+  proj="$TMP_ROOT/$name/project"
+  wt="$TMP_ROOT/$name/wt"
+  fakebin="$TMP_ROOT/$name/bin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/treehouse"
+  chmod +x "$fakebin/treehouse"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$home|$proj|$wt|$fakebin"
+}
+
+test_spawn_records_the_delivery_target_branch_in_the_task_record() {
+  local rec home proj wt fakebin out status meta
+  rec=$(make_launching_home base-record)
+  IFS='|' read -r home proj wt fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" delivery-base-f1 no-mistakes feat/stack
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" delivery-base-f1 "$proj" codex --mode no-mistakes --yolo off --base feat/stack 2>&1)
+  status=$?
+  expect_code 0 "$status" "a spawn carrying an agreeing --base should succeed"
+  assert_contains "$out" "base=feat/stack" "the success line did not report the delivery target branch"
+  meta="$home/state/delivery-base-f1.meta"
+  assert_grep "base=feat/stack" "$meta" "the task record did not keep the delivery target branch"
+
+  # No --base: no base= key, so cleanup and the guarded landing keep measuring the
+  # repo default branch exactly as they did before the flag existed.
+  write_brief "$home" delivery-base-f2 no-mistakes
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux TMUX="fake,1,0" FM_FAKE_PANE_PATH="$wt" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" delivery-base-f2 "$proj" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "a spawn without --base should still succeed"
+  assert_not_contains "$out" "base=" "the success line invented a delivery target branch"
+  assert_no_grep "base=" "$home/state/delivery-base-f2.meta" \
+    "a spawn without --base still recorded a delivery target branch"
+  pass "fm-spawn: the delivery target branch reaches the task record, and its absence stays absent"
 }
 
 # The registry is the captain's standing posture, so dropping below its rigor is
@@ -794,6 +932,8 @@ test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_spawn_refuses_a_brief_base_mismatch
+test_spawn_records_the_delivery_target_branch_in_the_task_record
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

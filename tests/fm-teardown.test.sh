@@ -43,6 +43,16 @@
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
+# Also covers the recorded DELIVERY TARGET BRANCH (`base=` in state/<id>.meta),
+# which a project shipping onto a long-lived feature branch carries. Measuring
+# against the repo default branch alone refused every such completed task, so the
+# only way through was the same --force that discards genuinely unlanded work.
+#   (z1) base= + commits on that branch                        -> ALLOW
+#   (z2) base= + commits not on that branch                    -> REFUSE, naming it
+#   (z3) no base= + unlanded work                              -> REFUSE against the default branch
+#   (z4) base= + content squash-landed on that branch          -> ALLOW  (content fallback)
+#   (z5) base= + content landed only on the default branch     -> REFUSE, naming the base
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -188,9 +198,11 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [delivery-base-branch]
+# An omitted base writes no base= key, which is the "lands on the repo default
+# branch" record every pre-base task carries.
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3
+  local case_dir=$1 mode=$2 kind=$3 base=${4:-}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
@@ -199,6 +211,32 @@ write_meta() {
     "kind=$kind" \
     "mode=$mode" \
     "spawn_gen=teardown-test-task-x1"
+  [ -z "$base" ] || printf 'base=%s\n' "$base" >> "$case_dir/state/task-x1.meta"
+}
+
+# Create <branch> on origin at origin/main's tip and fetch it into the project, so
+# the worktree can see refs/remotes/origin/<branch>. This stands in for the
+# long-lived feature branch a stacking project actually delivers onto.
+# Args: case_dir branch
+add_origin_branch() {
+  local case_dir=$1 branch=$2
+  git -C "$case_dir/project" push -q origin "refs/remotes/origin/main:refs/heads/$branch"
+  git -C "$case_dir/project" fetch -q origin "$branch"
+}
+
+# Land <file>=<content> as a single commit on an existing origin branch, the
+# non-default-branch counterpart of land_on_origin_main.
+# Args: case_dir branch file content
+land_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land_branch"
+  git clone -q --branch "$branch" "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash onto $branch"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" fetch -q origin "$branch"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -781,6 +819,120 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+# A project that ships onto a long-lived feature branch records that branch at
+# intake. Its completed work IS landed, so teardown must clean up without --force:
+# measuring against the repo default branch would refuse every such task and train
+# the operator to reach for the flag that discards real work.
+test_recorded_base_allows_work_landed_on_that_branch() {
+  local case_dir rc wt_head
+  case_dir=$(make_case base-landed)
+  write_meta "$case_dir" local-only ship feat/stack
+  wt_commit "$case_dir" "work for the feature branch"
+  # The task branch is landed on feat/stack, and deliberately NOT on main: the
+  # default branch alone would still call this unlanded.
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/feat/stack "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "base-landed: teardown should succeed when the work is on the recorded delivery target branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "base-landed: teardown refused work that is on its recorded target branch"
+  pass "a task recording a non-default delivery target branch tears down once its work is on that branch"
+}
+
+# The refusal must stay accurate, and it must say which branch it measured, so a
+# future false positive explains itself instead of looking like every other one.
+test_recorded_base_refuses_unlanded_work_and_names_the_branch() {
+  local case_dir rc
+  case_dir=$(make_case base-unlanded)
+  write_meta "$case_dir" local-only ship feat/stack
+  wt_commit "$case_dir" "work not on the feature branch"
+  # feat/stack exists but does not contain the work.
+  git -C "$case_dir/project" update-ref refs/heads/feat/stack \
+    "$(git -C "$case_dir/project" rev-parse main)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-unlanded: teardown should refuse work that is not on the recorded target branch"
+  assert_grep "not yet merged into feat/stack" "$case_dir/stderr" \
+    "base-unlanded: refusal did not name the branch it measured against"
+  assert_grep "Measured against feat/stack - this task's recorded delivery target branch." "$case_dir/stderr" \
+    "base-unlanded: refusal did not explain where the measured branch came from"
+  pass "a recorded delivery target branch still refuses genuinely unlanded work, naming that branch"
+}
+
+# The default-branch path is the common case and must be untouched, including its
+# refusal now stating which branch it measured.
+test_absent_base_still_measures_the_default_branch() {
+  local case_dir rc
+  case_dir=$(make_case no-base-default)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-base-default: teardown should refuse unlanded work"
+  assert_grep "not yet merged into main" "$case_dir/stderr" \
+    "no-base-default: refusal stopped measuring against the repo default branch"
+  assert_grep "because the task records no delivery target branch" "$case_dir/stderr" \
+    "no-base-default: refusal did not say the default branch was the fallback"
+  pass "a task with no recorded delivery target branch still measures the repo default branch"
+}
+
+# The squash-merge content fallback must follow the recorded branch too: content
+# that landed on the target branch is landed, even when the branch's own commits
+# live nowhere on a remote.
+test_recorded_base_content_fallback_allows() {
+  local case_dir rc
+  case_dir=$(make_case base-content)
+  write_meta "$case_dir" no-mistakes ship feat/stack
+  add_origin_branch "$case_dir" feat/stack
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" feat/stack feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "base-content: teardown should succeed when the content landed on the recorded target branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "base-content: teardown refused content already on its target branch"
+  pass "the content fallback recognizes work squash-landed on the recorded delivery target branch"
+}
+
+# The inverse proves the target branch is really what is measured: the same content
+# landed on the DEFAULT branch is not landed for a task that targets a feature
+# branch, and the refusal names the branch it checked.
+test_content_on_the_default_branch_is_not_landed_for_a_base_task() {
+  local case_dir rc
+  case_dir=$(make_case base-wrong-branch)
+  write_meta "$case_dir" no-mistakes ship feat/stack
+  add_origin_branch "$case_dir" feat/stack
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-wrong-branch: content on main must not count as landed for a task targeting feat/stack"
+  assert_grep "not landed on feat/stack" "$case_dir/stderr" \
+    "base-wrong-branch: refusal did not name the delivery target branch it measured"
+  assert_grep "Measured against feat/stack - this task's recorded delivery target branch." "$case_dir/stderr" \
+    "base-wrong-branch: refusal did not explain where the measured branch came from"
+  pass "content landed only on the default branch is still unlanded for a task targeting a feature branch"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -3673,6 +3825,11 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_recorded_base_allows_work_landed_on_that_branch
+test_recorded_base_refuses_unlanded_work_and_names_the_branch
+test_absent_base_still_measures_the_default_branch
+test_recorded_base_content_fallback_allows
+test_content_on_the_default_branch_is_not_landed_for_a_base_task
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses

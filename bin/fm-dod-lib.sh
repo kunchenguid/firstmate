@@ -5,11 +5,19 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<base-branch>]
+# prints the block on stdout with no trailing blank line. The caller validates
+# the mode; an unknown mode is refused rather than silently rendered as the
+# pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# An optional third argument is the task's DELIVERY TARGET BRANCH: the branch this
+# work lands on when it is not the repo default branch. It extends that same
+# contract line to "Delivery contract: mode=<mode> base=<branch>", which
+# bin/fm-spawn.sh checks the same way, and it names that branch in the block's
+# fast-forward and merge-target wording. Omitting it renders today's
+# default-branch wording byte-for-byte, so a task that genuinely lands on the
+# default branch is unchanged.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -190,14 +198,58 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+# fm_delivery_base_validate <branch>: is <branch> usable as a task's DELIVERY
+# TARGET BRANCH? Syntax only. A base is never resolved, fetched, or inferred
+# here, so a branch that does not exist locally yet still validates; inference is
+# what would make the downstream landed-work refusal untrustworthy. Refuses an
+# empty value, any name carrying whitespace (the contract line is
+# whitespace-delimited, so a space would silently truncate the recorded base),
+# and any name git itself rejects as a ref.
+fm_delivery_base_validate() {  # <branch>
+  local base=$1
+  if [ -z "$base" ]; then
+    echo "error: --base requires a non-empty branch name" >&2
+    return 1
+  fi
+  case "$base" in
+    *[[:space:]]*)
+      echo "error: --base branch name must not contain whitespace (got '$base')" >&2
+      return 1 ;;
+  esac
+  if ! command -v git >/dev/null 2>&1; then
+    echo "error: --base '$base' cannot be validated because git is not on PATH" >&2
+    return 1
+  fi
+  if ! git check-ref-format "refs/heads/$base" >/dev/null 2>&1; then
+    echo "error: --base '$base' is not a valid git branch name" >&2
+    return 1
+  fi
+  return 0
+}
+
+fm_dod_block() {  # <mode> <task-id> [<base-branch>]
+  local mode=$1 id=$2 base=${3:-}
+  # The recorded base rides the contract line as a second `key=value` token, and
+  # every mode-specific target phrase below resolves from it. Each optional
+  # sentence carries its own leading newline so an absent base collapses the
+  # whole line away rather than leaving a blank one.
+  local contract_suffix='' pr_base_note='' ff_target merge_target
+  if [ -n "$base" ]; then
+    contract_suffix=" base=$base"
+    pr_base_note="
+This task delivers onto \`$base\`, not the repo default branch: keep your branch a clean fast-forward onto \`$base\` and make sure the PR targets \`$base\`."
+    ff_target="\`$base\`, this task's delivery target branch - if \`$base\` has advanced"
+    merge_target="\`$base\`"
+  else
+    ff_target="the current default branch - if \`main\` has advanced"
+    merge_target="\`main\`"
+  fi
   case "$mode" in
     direct-PR)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+Delivery contract: mode=direct-PR$contract_suffix
+This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.$pr_base_note
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -206,19 +258,19 @@ EOF
     local-only)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=local-only
+Delivery contract: mode=local-only$contract_suffix
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto $ff_target, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into local $merge_target through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+Delivery contract: mode=no-mistakes$contract_suffix
+The task is complete only when committed on your branch.$pr_base_note
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 

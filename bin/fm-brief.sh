@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--base <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -49,9 +49,19 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# --base <branch> is that task's DELIVERY TARGET BRANCH, for work that lands on a
+# long-lived feature branch rather than the repo default branch. It shapes the
+# brief's branch-creation step and its fast-forward wording, and extends the same
+# contract line to "Delivery contract: mode=<mode> base=<branch>", which
+# bin/fm-spawn.sh checks against its own --base exactly as it checks the mode.
+# --base is OPTIONAL: omitting it means the repo default branch and renders today's
+# wording unchanged. The branch name is validated for git ref syntax only - this
+# script never resolves, fetches, or infers it. bin/fm-dod-lib.sh owns the
+# contract line and the mode-specific target wording.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
-# --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
-# report rather than a merge, and a charter is not a delivery contract.
+# --mode and --base are refused on scout and secondmate scaffolds: a scout's
+# deliverable is a report rather than a merge, and a charter is not a delivery
+# contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -123,6 +133,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BASE=
+BASE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -132,6 +144,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      base) BASE=$a; BASE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +157,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -170,6 +185,18 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# The delivery target branch is optional everywhere: an absent --base means the
+# repo default branch, which is what every scaffold said before this flag
+# existed. Only a ship brief carries one, and only a syntactically valid branch
+# name reaches the generated contract line.
+if [ "$BASE_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || {
+    echo "error: --base applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+    exit 1
+  }
+  fm_delivery_base_validate "$BASE" || exit 1
 fi
 ID=${POS[0]}
 
@@ -445,7 +472,16 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BASE") || exit 1
+
+# The branch step names this task's delivery target branch when it has one, so
+# the worker branches from the base it will land on instead of the default
+# branch the disposable worktree happens to sit on.
+if [ -n "$BASE" ]; then
+  BRANCH_STEP="create your branch from this task's delivery target branch \`$BASE\`: \`git fetch origin $BASE && git checkout -b fm/$ID origin/$BASE\` (if the project has no remote, use \`git checkout -b fm/$ID $BASE\`)"
+else
+  BRANCH_STEP="create your branch: \`git checkout -b fm/$ID\`"
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -461,7 +497,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: $BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1
@@ -513,4 +549,6 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+SCAFFOLD_BASE=
+[ -z "$BASE" ] || SCAFFOLD_BASE=", base=$BASE"
+echo "scaffolded: $BRIEF (ship, mode=$MODE$SCAFFOLD_BASE; replace {TASK} and {FIRSTMATE_SPEC})"

@@ -290,8 +290,78 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+base on a scout brief|brief-refused-b5 some-proj --scout --base feat/x|--base applies only to ship briefs
+base on a secondmate charter|brief-refused-b6 --secondmate --no-projects --base feat/x|--base applies only to ship briefs
+empty base on a ship brief|brief-refused-b7 some-proj --mode direct-PR --base=|--base requires a non-empty branch name
+base that git rejects as a ref|brief-refused-b8 some-proj --mode direct-PR --base=feat/..x|is not a valid git branch name
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  # A base carrying a space cannot ride the whitespace-delimited contract line, so
+  # it is refused rather than silently truncated. It needs a quoted argument, which
+  # the word-split table above cannot express.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-refused-b9 some-proj --mode direct-PR --base 'feat x' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch name containing a space should exit non-zero"
+  assert_contains "$out" "--base branch name must not contain whitespace" \
+    "a base carrying a space was not refused for its whitespace"
+  assert_absent "$home/data/brief-refused-b9/brief.md" "a refused base still wrote a brief"
+  pass "fm-brief.sh: --yolo and scout/secondmate --mode/--base are refused, never silently dropped"
+}
+
+# The delivery target branch is a first-class part of the ship contract: it shapes
+# the branch the worker starts from, the branch it keeps a fast-forward onto, and
+# the machine-readable contract line bin/fm-spawn.sh checks its own --base against.
+test_ship_base_branch_shapes_the_whole_contract() {
+  local home id mode brief id_mode base
+  home="$TMP_ROOT/ship-base-home"
+  base='feat/odi-4440-hlag-edi'
+  write_registry "$home"
+
+  for id_mode in "brief-base-nm-c1:no-mistakes" "brief-base-dpr-c2:direct-PR" "brief-base-lo-c3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --base "$base" >/dev/null 2>&1 \
+      || fail "$id: --base $base should scaffold cleanly for mode=$mode"
+    brief="$home/data/$id/brief.md"
+    grep -qx "Delivery contract: mode=$mode base=$base" "$brief" \
+      || fail "$id: contract line did not record the delivery target branch"
+    assert_grep "create your branch from this task's delivery target branch \`$base\`" "$brief" \
+      "$id: branch step did not start the worker from the delivery target branch"
+    assert_grep "git checkout -b fm/$id origin/$base" "$brief" \
+      "$id: branch step did not name the base in its command"
+    assert_grep "fast-forward onto \`$base\`" "$brief" \
+      "$id: brief never told the worker which branch to stay a fast-forward onto"
+    assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker"
+  done
+
+  # local-only additionally lands through the guarded merge, so its closing line
+  # must name the same branch rather than main.
+  assert_grep "merges it into local \`$base\`" "$home/data/brief-base-lo-c3/brief.md" \
+    "local-only brief still promised a merge into main while targeting $base"
+  pass "fm-brief.sh: --base shapes the branch step, the fast-forward rule, and the contract line"
+}
+
+# Omitting --base must leave every scaffold exactly as it was before the flag
+# existed: an absent base means the repo default branch, which is the common case.
+test_omitted_base_keeps_the_default_branch_wording() {
+  local home brief
+  home="$TMP_ROOT/no-base-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nobase-d1 some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "a ship brief without --base should still scaffold"
+  brief="$home/data/brief-nobase-d1/brief.md"
+  grep -qx "Delivery contract: mode=local-only" "$brief" \
+    || fail "an omitted --base changed the contract line"
+  assert_no_grep "base=" "$brief" "an omitted --base still recorded a delivery target branch"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep '1. First action: create your branch: `git checkout -b fm/brief-nobase-d1`' "$brief" \
+    "an omitted --base changed the branch step"
+  assert_grep 'fast-forward onto the current default branch' "$brief" \
+    "an omitted --base changed the fast-forward wording"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep 'merges it into local `main`' "$brief" \
+    "an omitted --base changed the local merge target"
+  pass "fm-brief.sh: an omitted --base keeps today's default-branch wording"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -909,6 +979,8 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_ship_base_branch_shapes_the_whole_contract
+test_omitted_base_keeps_the_default_branch_wording
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
