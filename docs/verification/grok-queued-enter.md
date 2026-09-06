@@ -208,18 +208,18 @@ This manual real-CLI experiment establishes the vendor behavior those synthetic 
 The measured busy footer is **`Esc:cancel`**, not `esc interrupt`, `esc to interrupt`, or `Ctrl+c:cancel`.
 Every capture above shows it during a running tool turn, so this record establishes the token for an active tool turn; no thinking-only frame was captured and none is claimed.
 The pre-existing `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'` never matched that footer, and it is Grok's only busy source, so a Grok 1.0.13 worker rendering the captures above classified `idle grok-regex` while demonstrably mid-turn.
-This measurement therefore refreshes that per-harness signature to the captured footer-row shape - `Shift+Tab:mode` followed on the same row by `Esc:cancel`, the layout common to both captured busy rows above - alternated with the older recorded `Ctrl+c:cancel` token so a Grok build that still renders it does not read idle, and refreshes the defensive duplicate of that literal in `bin/fm-busy-lib.sh` with it.
-The row shape rather than the bare token is matched because the token also appears in ordinary rendered output (this record itself quotes it), and Grok's regex is its only busy source, so a bare match would classify an idle pane busy and suppress its stale escalation.
-One intervening footer segment is tolerated between the two keys: this session ran without `--always-approve`, which `bin/fm-spawn.sh` launches every real grok worker with and which renders its own footer segment at a position this record never captured.
-The measured `│` separator is still required between them, because prose that names both keys - including this record and the adapter's own comments - otherwise reads as a busy footer on grok's only busy source.
-That regex shape is a Firstmate-internal adapter decision downstream of the measurement, not part of the queued-Enter result proven above, and it is the last incremental refinement of this rendered-footer pattern: a further miss should be recorded as a limitation of rendered-pane classification and answered by looking for a non-rendered Grok busy signal.
-The refresh is pinned by `test_grok_regex_active_turn_busy` in `tests/fm-busy-state.test.sh`, which fails against the single-token regex, and by `test_grok_busy_signature_uses_measured_footer` in `tests/fm-tmux-submit-busy.test.sh`.
+That footer is nevertheless **not adopted** as a busy signature: `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT` keeps `Ctrl\+c:cancel` alone, and so does its defensive duplicate in `bin/fm-busy-lib.sh`.
+This session ran without `--always-approve`, which `bin/fm-spawn.sh` launches every real grok worker with and which renders its own footer segment at a position this record never captured, so the production row shape is unknown.
+A pattern loose enough to tolerate that unmeasured segment matches ordinary prose naming the two keys - this record and the adapter's own comments included - and classifies an idle pane busy on grok's only busy source; every pattern tight enough to reject that prose rejected a plausible production row.
+The measured footer is therefore recorded as real but too unstable to be authoritative in production, and Grok 1.0.13 mid-turn panes keep classifying `idle grok-regex` until a busy signal is available.
+This is a Firstmate-internal adapter decision downstream of the measurement, not part of the queued-Enter result proven above, and it closes the rendered-footer line of work: no further pattern should be added here.
+The next step is to establish whether Grok exposes a NON-rendered busy signal - a hook, an event, or a state file - which needs its own verification, not another regex.
 
 The shared union `FM_DELIVERY_BUSY_REGEX_DEFAULT` carries NEITHER Grok token: it does not gain `Esc:cancel`, and the legacy `Ctrl+c:cancel` is removed from it.
 `fm_tmux_submit_core` reads the pane with no harness, so a union match converts a proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to `empty` (reported delivered).
 This session moved the queued text OUT of the composer, so for Grok a composer still reading `pending` after the Enter budget is a genuine swallow, and converting it to `empty` would report a lost steer as delivered.
-The queueing result above was observed through Grok's own visible queue entry, not through that union or a composer verdict, and it pairs only with the measured `Esc:cancel` footer; the legacy `Ctrl+c:cancel` build's queueing behavior is unverified, so neither token may prove delivery on a harness-less read.
-Both stay per-harness in `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT`, where a match only means "busy", never "delivered".
+The queueing result above was observed through Grok's own visible queue entry, not through that union or a composer verdict, and the legacy `Ctrl+c:cancel` build's queueing behavior is unverified, so that token may not prove delivery on a harness-less read.
+It stays per-harness in `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT`, where a match only means "busy", never "delivered".
 The union keeps `esc (to )?interrupt` for other harnesses; this measurement establishes that Grok does not emit that alternative, so Grok gains nothing from it.
 
 ## Ancillary Escape observation

@@ -329,53 +329,6 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
-# Grok's delivery signature after the 2026-09-06 live measurement
-# (docs/verification/grok-queued-enter.md, grok 1.0.13): the active-turn footer
-# row carries `Shift+Tab:mode` and then `Esc:cancel`, and it stays
-# per-harness. The harness-less union must NOT match it, because
-# fm_tmux_submit_core reads the pane with no harness and would convert a
-# proven-pending grok composer to `empty` (reported delivered). The legacy
-# `Ctrl+c:cancel` token is owned by
-# test_claude_busy_signature_uses_real_capture_shapes above.
-test_grok_busy_signature_uses_measured_footer() {
-  local dir fakebin composer
-  dir="$TMP_ROOT/grok-signature"
-  fakebin=$(make_submit_mock "$dir")
-  composer="$dir/composer"
-  pane_busy() {
-    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
-      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
-      _ "$ROOT" "$1" "${2:-}"
-  }
-
-  # Live grok 1.0.13 active-turn capture.
-  printf '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts\n' > "$composer"
-  pane_busy live grok || fail "Grok's measured active-turn footer should be busy"
-
-  # The union carries no Grok token: a harness-less read must not match it.
-  pane_busy union && fail "Grok's Esc:cancel must not widen the harness-less union"
-
-  # No other harness borrows it.
-  pane_busy cross claude && fail "Claude must ignore Grok's Esc:cancel footer"
-  pane_busy cross opencode && fail "OpenCode must ignore Grok's Esc:cancel footer"
-  pane_busy cross kimi && fail "Kimi must ignore Grok's Esc:cancel footer"
-
-  # Live grok 1.0.13 idle footer.
-  printf '  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
-  pane_busy idle grok && fail "Grok's measured idle footer must not be busy"
-
-  # Production panes launch with --always-approve, whose footer segment was
-  # never captured in position, so an intervening segment must stay busy.
-  printf '  Shift+Tab:mode  ·  always-approve  │  Esc:cancel  │  Ctrl+x:shortcuts\n' > "$composer"
-  pane_busy approve grok || fail "an intervening footer segment must stay busy for Grok"
-
-  # An idle pane whose finished turn quoted both keys on one row is still idle:
-  # the signature matches the separated footer row, not the keys alone.
-  printf 'The busy row carries Shift+Tab:mode and then Esc:cancel, unlike the idle bar.\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
-  pane_busy quoted grok && fail "prose quoting both measured keys must not make an idle Grok pane busy"
-  pass "fm_pane_is_busy: Grok's measured footer row is busy, per-harness, and not a bare token"
-}
-
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_wrapped_continuation_retries_swallowed_enter
@@ -387,4 +340,3 @@ test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
-test_grok_busy_signature_uses_measured_footer

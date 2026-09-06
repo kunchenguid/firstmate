@@ -828,15 +828,11 @@ fm_busy_cursor_turn_state() {  # <transcript>
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
-# Consumes the tail on stdin; 0 when Grok's verified busy signature matches:
-# the active-turn footer row carrying "Shift+Tab:mode" and then "Esc:cancel"
-# (measured live on grok 1.0.13, 2026-09-06:
-# docs/verification/grok-queued-enter.md; no thinking-only frame was captured,
-# so that sub-state is still owed a measurement) or the older recorded
-# "Ctrl+c:cancel". Both measured keys are required on one row either side of
-# the measured separator glyph, rather than the bare token, so that rendered
-# output quoting those keys cannot classify an idle pane busy; one intervening
-# segment such as the unmeasured "always-approve" one is tolerated.
+# Consumes the tail on stdin; 0 when Grok's older recorded "Ctrl+c:cancel"
+# footer matches. grok 1.0.13's measured "Esc:cancel" footer row
+# (docs/verification/grok-queued-enter.md, 2026-09-06) is deliberately NOT
+# matched: its production shape under "--always-approve" was never captured, so
+# no pattern for it is authoritative, and a build rendering it reads idle here.
 # bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT is the
 # canonical owner; the literal below is a defensive duplicate for
 # callers that source this file without that one, and must be refreshed with
@@ -844,7 +840,7 @@ fm_busy_cursor_turn_state() {  # <transcript>
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Shift\\+Tab:mode[^│]*│[^│]*Esc:cancel|Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

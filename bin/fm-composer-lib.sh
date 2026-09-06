@@ -290,30 +290,21 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok renders an
-# active-turn footer ROW carrying both "Shift+Tab:mode" and "Esc:cancel", in
-# that order (measured live on grok 1.0.13, 2026-09-06:
-# docs/verification/grok-queued-enter.md, which captured no thinking-only frame
-# and claims none, so that sub-state is still owed a measurement). The
-# alternative requires both measured keys on ONE ROW, separated by the measured
-# separator glyph, rather than the bare token: ordinary output quoting either
-# key - including this file's own comments and the verification record - must
-# not classify an idle pane busy, the same reason the Kimi signature below is
-# anchored. One intervening segment is tolerated because the record was
-# captured without "--always-approve", which bin/fm-spawn.sh launches every
-# real grok worker with and which renders its own "always-approve" footer
-# segment at an unmeasured position.
-# This is the LAST incremental refinement of this rendered-footer regex. If a
-# further false-busy or false-idle case appears, do not add another pattern:
-# record the limitation of classifying grok from a rendered pane and
-# investigate whether Grok exposes a non-rendered busy signal, since it has no
-# semantic writer today.
-# "Ctrl+c:cancel" is the older recorded Grok footer and is
-# kept so a build that still renders it does not read idle mid-turn. Neither
-# footer appears in Grok's idle bar ("Shift+Tab:mode  |  Ctrl+x:shortcuts"),
-# and this regex is Grok's ONLY busy source (bin/fm-busy-lib.sh has no semantic
-# writer for grok), so a footer this signature misses classifies a working Grok
-# pane idle.
+# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok keeps the older
+# recorded "Ctrl+c:cancel" footer alone. grok 1.0.13 was measured rendering an
+# active-turn footer row carrying "Shift+Tab:mode" and "Esc:cancel"
+# (docs/verification/grok-queued-enter.md, 2026-09-06), but that shape is NOT
+# adopted here: the record was captured without "--always-approve", which
+# bin/fm-spawn.sh launches every real grok worker with and which renders its
+# own footer segment at an unmeasured position, and every pattern narrow enough
+# to keep ordinary output quoting those keys from classifying an idle pane busy
+# also missed a plausible production row. A footer this signature misses
+# classifies a working Grok pane idle, because this regex is Grok's ONLY busy
+# source (bin/fm-busy-lib.sh has no semantic writer for grok) - that is the
+# accepted cost of not guessing a production footer shape.
+# No further rendered-footer pattern belongs here. The next step for grok busy
+# state is a non-rendered signal, verified separately; the rendered pane is not
+# an authoritative source for it.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -350,7 +341,7 @@ FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Shift\+Tab:mode[^│]*│[^│]*Esc:cancel|Ctrl\+c:cancel'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole
