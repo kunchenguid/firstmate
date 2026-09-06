@@ -339,6 +339,29 @@ EOF
 test_closing_verb_separates_resolution_from_durable_transfer
 test_closing_verb_tracks_the_last_transition_in_both_positions
 
+# The per-key read pre-selects candidate lines by their leading verb before the
+# bash fold sees them, and the resolve/durable-transfer verbs are overridable, so
+# an overridden verb buried behind unrelated history must still close its key.
+test_closing_verb_honors_overridden_transition_verbs() {
+  local dir f i
+  dir=$(case_dir closing-verb-overrides)
+  f="$dir/task.status"
+  printf 'kind=ship\n' > "$dir/task.meta"
+  printf 'blocked [key=route]: waiting\n' > "$f"
+  for ((i = 0; i < 200; i++)); do
+    printf 'note: routine reply\nworking: still going\nContinuation prose here.\n' >> "$f"
+  done
+  printf 'answered [key=route]: settled\n' >> "$f"
+  [ "$(FM_CLASSIFY_RESOLVE_VERB=answered status_key_closing_verb "$f" route)" = answered ] \
+    || fail "an overridden resolve verb stopped closing its key"
+  [ "$(status_key_closing_verb "$f" route)" = blocked ] \
+    || fail "without the override the same line must leave the key open"
+  printf 'blocked [key=access]: waiting\nawaiting-captain [key=access]: handed off\n' >> "$f"
+  [ "$(FM_CLASSIFY_CAPTAIN_HELD_VERB=awaiting-captain status_key_closing_verb "$f" access)" = awaiting-captain ] \
+    || fail "an overridden durable-transfer verb stopped closing its key"
+  pass "overridden resolve and durable-transfer verbs still close keys behind unrelated history"
+}
+
 test_closing_verb_filters_unrelated_history_without_subshell_growth() {
   local dir f want tag size i level small large
   dir=$(case_dir closing-verb-processes)
@@ -400,6 +423,7 @@ test_closing_verb_filter_preserves_terminal_chronology() {
 }
 
 test_closing_verb_filters_unrelated_history_without_subshell_growth
+test_closing_verb_honors_overridden_transition_verbs
 test_closing_verb_filter_preserves_terminal_chronology
 
 test_bare_prose_cannot_impersonate_a_terminal_declaration() {
