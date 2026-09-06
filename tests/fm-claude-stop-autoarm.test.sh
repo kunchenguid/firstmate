@@ -122,8 +122,7 @@ SH
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 1
 holder=$(cat "$FM_HOME/state/.watch.lock/pid")
-printf 'watcher: busy holder pid=%s lock=0s (grace 4s)\n' "$holder"
-printf 'watcher: busy holder pid=%s still running after 1s; left alone\n' "$holder"
+printf 'watcher: busy holder pid=%s lock=0s still running after 1s; left alone\n' "$holder"
 exit 0
 SH
       ;;

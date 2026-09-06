@@ -244,10 +244,10 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # Consume that outcome before checking current health so a beat arriving after
   # expiry cannot turn a detached arm close into a healthy attachment.
   if [ -n "$OUT" ] \
-    && grep -Eq '^watcher: busy holder pid=[0-9]+ still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
-    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) [a-z][a-z]*=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
-    BUSY_HOLDER_AGE_SOURCE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* \([a-z][a-z]*\)=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
-    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* [a-z][a-z]*=\([0-9][0-9]*\)s .*$/\1/p' "$OUT" | head -1)
+    && grep -Eq '^watcher: busy holder pid=[0-9]+ (beacon|lock)=[0-9]+s still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
+    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) [a-z][a-z]*=[0-9][0-9]*s still running after [0-9][0-9]*s; left alone$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE_SOURCE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* \([a-z][a-z]*\)=[0-9][0-9]*s still running after [0-9][0-9]*s; left alone$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* [a-z][a-z]*=\([0-9][0-9]*\)s still running after [0-9][0-9]*s; left alone$/\1/p' "$OUT" | head -1)
     case "$BUSY_HOLDER_AGE_SOURCE" in beacon|lock) ;; *) BUSY_HOLDER_AGE_SOURCE= ;; esac
     if [ -n "$BUSY_HOLDER_PID" ] && [ -n "$BUSY_HOLDER_AGE_SOURCE" ] && [ -n "$BUSY_HOLDER_AGE" ]; then
       BUSY_HOLDER=1

@@ -272,7 +272,7 @@ wait_for_healthy_successor() {
 # evidence is exactly what the captain ruled out on 2026-09-05. The next turn
 # end arms again through the ordinary path.
 wait_for_busy_holder() {
-  local holder=$1 deadline budget
+  local holder=$1 deadline budget age source
   case "$holder" in ''|*[!0-9]*) return 2 ;; esac
   budget=$(( GRACE / 2 ))
   [ "$budget" -ge 1 ] || budget=1
@@ -284,10 +284,12 @@ wait_for_busy_holder() {
     fi
     fm_watcher_busy_holder "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 2
     [ "$FM_WATCHER_BUSY_PID" = "$holder" ] || return 2
+    age=$FM_WATCHER_BUSY_AGE
+    source=$FM_WATCHER_BUSY_AGE_SOURCE
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 1
   done
-  echo "watcher: busy holder pid=$holder still running after ${budget}s; left alone"
+  echo "watcher: busy holder pid=$holder $source=${age}s still running after ${budget}s; left alone"
   return 1
 }
 
