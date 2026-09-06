@@ -1280,6 +1280,46 @@ SH
   pass "watcher interruption releases only its recovery-marker lock"
 }
 
+test_watcher_interrupt_releases_arm_check_marker_lock() {
+  local dir state fakebin out real_mv pid i rc=0
+  dir=$(make_case arm-check-interrupt)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_INTERRUPT_MARKER" ] && [ ! -e "$FM_INTERRUPT_ONCE" ]; then
+  : > "$FM_INTERRUPT_ONCE"
+  kill -TERM "$PPID"
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+  PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
+    FM_INTERRUPT_MARKER="$state/.watcher-down" FM_INTERRUPT_ONCE="$dir/interrupted" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not reach its polling loop before the arm-check fixture"
+  printf '1700000000\t1\tcheck\tfixture\tcheck: arm check interrupt\n' > "$state/.wake-queue"
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "watcher interrupted during recovery arm-check wedged in EXIT cleanup"
+  [ -e "$dir/interrupted" ] || fail "watcher never entered recovery-marker arm-check"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "interrupted recovery arm-check retained its marker lock"
+  pass "watcher interruption releases the recovery arm-check marker lock"
+}
+
 test_subshell_lock_ownership_without_bashpid() {
   local dir state rc
   dir=$(make_case subshell-lock-ownership)
@@ -1601,6 +1641,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_watcher_interrupt_releases_recovery_marker_lock
+test_watcher_interrupt_releases_arm_check_marker_lock
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack

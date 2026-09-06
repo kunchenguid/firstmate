@@ -208,6 +208,7 @@ HEALTHY=0
 BUSY_HOLDER=0
 BUSY_HOLDER_PID=
 BUSY_HOLDER_AGE=
+BUSY_HOLDER_AGE_SOURCE=
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -244,9 +245,11 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # expiry cannot turn a detached arm close into a healthy attachment.
   if [ -n "$OUT" ] \
     && grep -Eq '^watcher: busy holder pid=[0-9]+ still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
-    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) beacon=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
-    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* beacon=\([0-9][0-9]*\)s .*$/\1/p' "$OUT" | head -1)
-    if [ -n "$BUSY_HOLDER_PID" ] && [ -n "$BUSY_HOLDER_AGE" ]; then
+    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) [a-z][a-z]*=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE_SOURCE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* \([a-z][a-z]*\)=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* [a-z][a-z]*=\([0-9][0-9]*\)s .*$/\1/p' "$OUT" | head -1)
+    case "$BUSY_HOLDER_AGE_SOURCE" in beacon|lock) ;; *) BUSY_HOLDER_AGE_SOURCE= ;; esac
+    if [ -n "$BUSY_HOLDER_PID" ] && [ -n "$BUSY_HOLDER_AGE_SOURCE" ] && [ -n "$BUSY_HOLDER_AGE" ]; then
       BUSY_HOLDER=1
       break
     fi
@@ -279,7 +282,7 @@ fi
 # Nothing here signals, kills or replaces the holder.
 if [ "$BUSY_HOLDER" -eq 1 ]; then
   fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
-  autoarm_record busy-holder "holder_pid=$BUSY_HOLDER_PID beacon_age=${BUSY_HOLDER_AGE}s"
+  autoarm_record busy-holder "holder_pid=$BUSY_HOLDER_PID ${BUSY_HOLDER_AGE_SOURCE}_age=${BUSY_HOLDER_AGE}s"
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

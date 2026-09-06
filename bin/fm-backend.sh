@@ -714,6 +714,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 fm_backend_capture_bounded() {  # <seconds> <backend> <target> <lines> [expected-label]
   local timeout=$1 backend=$2
   shift
+  [ "$backend" = herdr ] || return 1
   fm_backend_source "$backend" || return 1
   if ! command -v fm_run_function_timed >/dev/null 2>&1; then
     # shellcheck source=bin/fm-timeout-lib.sh
@@ -812,10 +813,7 @@ fm_backend_busy_state() {  # <backend> <target>
 fm_backend_busy_state_bounded() {  # <seconds> <backend> <target>
   local timeout=$1 backend=$2
   shift
-  case "$backend" in
-    herdr) ;;
-    *) fm_backend_busy_state "$@"; return $? ;;
-  esac
+  [ "$backend" = herdr ] || { printf 'unknown'; return 0; }
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if ! command -v fm_run_function_timed >/dev/null 2>&1; then
     # shellcheck source=bin/fm-timeout-lib.sh
@@ -940,10 +938,7 @@ fm_backend_agent_alive() {  # <backend> <target>
 fm_backend_agent_alive_bounded() {  # <seconds> <backend> <target>
   local timeout=$1 backend=$2
   shift
-  case "$backend" in
-    tmux|herdr) ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
+  [ "$backend" = herdr ] || { printf 'unknown'; return 0; }
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   if ! command -v fm_run_function_timed >/dev/null 2>&1; then
     # shellcheck source=bin/fm-timeout-lib.sh
