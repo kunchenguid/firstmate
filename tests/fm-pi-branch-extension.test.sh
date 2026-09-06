@@ -3856,6 +3856,21 @@ if (openDecisionMixed.needsDecisionKeys.join(",") !== "fm-window") {
   throw new Error(`the open-decision stale key was not marked main-owned: ${JSON.stringify(openDecisionMixed)}`);
 }
 
+// A single status line naming two decision keys opens both independently, the
+// same as if they had been raised on two separate lines. Resolving only one
+// of them must leave the other open, so the stale row stays main-owned.
+writeFileSync(
+  `${state}/task-a.status`,
+  "needs-decision [key=alpha] [key=beta]: choose an approach and a rollout window\nresolved [key=alpha]: went with approach a\n",
+);
+const twoKeyLineMixed = scopeForUnreadWake(state, false);
+if (!twoKeyLineMixed.eligible || twoKeyLineMixed.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`a still-open second key from a two-key line was offered to the branch: ${JSON.stringify(twoKeyLineMixed)}`);
+}
+if (twoKeyLineMixed.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`the two-key line's still-open decision was not marked main-owned: ${JSON.stringify(twoKeyLineMixed)}`);
+}
+
 process.env.FM_CLASSIFY_RESOLVE_VERB = "answered";
 writeFileSync(
   `${state}/task-a.status`,
@@ -3984,6 +3999,28 @@ const heartbeatUnresolvable = scopeForUnreadWake(state, true);
 if (heartbeatUnresolvable.eligible || !heartbeatUnresolvable.corrupted) {
   throw new Error(`an unresolvable row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvable)}`);
 }
+
+// A needs-decision signal row is excluded rather than vetoing routine
+// dispatch (tested above), but a heartbeat cannot certify its all-or-nothing
+// claim while that row's own task cannot be resolved either - the same veto
+// an ordinary unresolvable row gets, just reached through the needs-decision
+// short-circuit instead of skipping it.
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\theartbeat\theartbeat\theartbeat",
+    "1\t2\tsignal\tno-such-task.status\tneeds-decision: no-such-task.status",
+  ].join("\n"),
+);
+const heartbeatUnresolvableDecision = scopeForUnreadWake(state, true);
+if (heartbeatUnresolvableDecision.eligible || !heartbeatUnresolvableDecision.corrupted) {
+  throw new Error(`an unresolvable needs-decision row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvableDecision)}`);
+}
+const routineUnresolvableDecision = scopeForUnreadWake(state, false);
+if (routineUnresolvableDecision.corrupted || routineUnresolvableDecision.eligible) {
+  throw new Error(`an unresolvable needs-decision row must not veto routine dispatch: ${JSON.stringify(routineUnresolvableDecision)}`);
+}
+
 writeFileSync(
   `${state}/.wake-queue`,
   [
