@@ -829,11 +829,16 @@ fm_busy_cursor_turn_state() {  # <transcript>
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
-# FM_BUSY_REGEX still globally overrides the signature, mirroring the
-# historical operator escape hatch.
+# Matches 0.2-series "Ctrl+c:cancel" and 1.0.13 "Esc:cancel" (the mid-turn
+# footer is "Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts", with no
+# "Ctrl+c:cancel"; "Shift+Tab:mode" is present while thinking and is not
+# idle-only). FM_BUSY_REGEX still globally overrides the signature, mirroring
+# the historical operator escape hatch. The fallback default must stay in
+# lockstep with FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in bin/fm-composer-lib.sh
+# for callers that have not sourced that owner.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel|Esc:cancel}}"
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

@@ -623,6 +623,10 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "Grok's exact busy token leaked into Kimi's harness-scoped matcher"
   fi
+  printf 'Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "Grok 1.0.13 Esc:cancel leaked into Kimi's harness-scoped matcher"
+  fi
   printf 'auto  K2.7 Coding thinking  /some/path\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "Kimi's idle thinking-effort status label was misread as busy"
@@ -661,6 +665,8 @@ test_watcher_never_classifies_kimi_from_its_spinner() (
   fi
   window_is_busy fake 'Ctrl+c:cancel' \
     || fail "Grok's own verified token must still classify a recorded Grok task busy"
+  window_is_busy fake 'Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts' \
+    || fail "Grok 1.0.13 Esc:cancel must still classify a recorded Grok task busy"
   pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 

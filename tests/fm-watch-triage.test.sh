@@ -2165,6 +2165,48 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# A live worker whose busy state cannot be resolved (Codex is unverified, so
+# classification is unknown) still has a well-formed declared pause. That
+# declaration is status-log evidence and must take handle_paused_stale rather
+# than the live-decision-gate inspect path, which would re-alarm for as long as
+# the pane cannot be read.
+test_declared_pause_absorbed_when_busy_unresolvable() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case unresolvable-busy-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"
+  printf 'idle composer, no busy footer' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle composer, no busy footer")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a declared pause with unresolvable busy state (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "declared pause with unresolvable busy printed a wake reason during absorb: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "declared pause with unresolvable busy enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "stale suppressor not advanced on unresolvable-busy pause absorb"
+  [ -e "$state/.paused-$key" ] || fail "paused flag not recorded on unresolvable-busy absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an unresolvable-busy pause absorb must not start the wedge timer"
+  grep -F "absorbed stale (paused" "$state/.watch-triage.log" >/dev/null \
+    || fail "unresolvable-busy pause did not take the paused-absorb path: $(cat "$state/.watch-triage.log" 2>/dev/null || true)"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared pause is absorbed when the pane busy state is unresolvable"
+}
+
 # A dead worker reaches handle_paused_stale rather than the live fallback above.
 # When one declared wait directly replaces another, the existing
 # throttle belongs to the old declaration and must not suppress the new wait's
@@ -4171,6 +4213,7 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_declared_pause_absorbed_when_busy_unresolvable
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_secondmate_paused_resurfaces_in_normal_mode

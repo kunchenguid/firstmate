@@ -304,6 +304,24 @@ Ctrl+c:cancel')
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
 }
 
+test_grok_1_0_13_footer_classification() {
+  local state out
+  state=$(new_state_dir grok-1-0-13)
+  # Observed Grok Build 1.0.13 mid-turn footer: Shift+Tab:mode is present while
+  # thinking, Ctrl+c:cancel is absent, and Esc:cancel is the cancel hint.
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'thinking
+Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] \
+    || fail "grok 1.0.13 mid-turn footer must classify 'busy grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode | Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] \
+    || fail "grok 1.0.13 idle footer without Esc:cancel must classify idle, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode │ Ctrl+.:shortcuts')
+  [ "$out" = "idle grok-regex" ] \
+    || fail "legacy grok idle footer must still classify idle, got '$out'"
+  pass "grok 1.0.13 footer classifies busy on Esc:cancel, not on Shift+Tab:mode"
+}
+
 # --- kimi verification gate -----------------------------------------------------
 
 test_codex_unverified_gate() {
@@ -454,6 +472,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_grok_1_0_13_footer_classification
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals

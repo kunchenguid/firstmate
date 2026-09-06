@@ -290,7 +290,11 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
+# (0.2-series) or "Esc:cancel" (1.0.13 mid-turn footer
+# "Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts", which has no
+# "Ctrl+c:cancel"). Grok 1.0.13 also draws "Shift+Tab:mode" while thinking,
+# so that token is not an idle-only signal.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -311,12 +315,12 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Esc:cancel|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel|Esc:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole
