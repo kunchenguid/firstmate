@@ -226,6 +226,9 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 The same identity that the authority boundary above contains also leaks in the other direction, as text rather than as capability.
 An agent working inside this repo reads `AGENTS.md`'s "address the user as captain" rule as an ordinary repo file and applies it to commit messages, which it treats as responses; the messages that leaked came from the gate's own review, test, and document agents, so no crewmate brief could have prevented them.
 `bin/fm-prepush-voice-guard.sh` is deterministic commit-message prevention, paired with the scoping sentence at that instruction in `AGENTS.md`.
+It prevents the accidental pipeline-agent leak this change targets, but it is not a security boundary against a determined branch author.
+Both the lint call and scanner are branch-controlled, so such an author can remove the call or neuter the scanner.
+Closing that gap requires a trusted scan in no-mistakes or its trusted configuration and is tracked upstream as `nm-pr-body-scan-before-api` rather than attempted here.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
 The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.

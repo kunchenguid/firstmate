@@ -91,6 +91,27 @@ test_passes_the_real_legitimate_message() {
   pass "passes the real legitimate message"
 }
 
+test_passes_required_repository_vocabulary() {
+  local tmp out rc=0 message
+  tmp=$(fm_test_tmproot fm-voice-required-vocab)
+  fm_voice_repo "$tmp/repo"
+
+  # All four messages exited 0 against the pre-fix expressions. This is the
+  # required guard against future widening, not a regression demonstration.
+  for message in \
+    'fix(holds): keep captain-held tasks pending' \
+    'fix(holds): preserve hold-kind in status records' \
+    'fix(spawn): retain crewmate metadata' \
+    'fix(gate): preserve the worktree after refusal'
+  do
+    fm_voice_commit "$tmp/repo" "$message"
+  done
+
+  out=$(fm_voice_scan "$tmp/repo") || rc=$?
+  expect_code 0 "$rc" "required repository vocabulary was refused"$'\n'"$out"
+  pass "passes captain-held, hold-kind, crewmate, and worktree vocabulary"
+}
+
 # --- the precision boundary: this repo's own vocabulary must keep shipping ---
 
 test_passes_legitimate_captain_and_house_vocabulary() {
@@ -185,9 +206,7 @@ test_refuses_a_pointer_to_the_working_session() {
 
   # The exact trailer shape already in merged history three times.
   rc=0
-  out=$(fm_voice_text 'fix(bin): bound the scan
-
-Claude-Session: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  out=$(fm_voice_text 'Claude-Session: https://claude.ai/code/session_01HoVE1w6AQB5qritmXc1aLC') || rc=$?
   expect_code 1 "$rc" "a session trailer was not refused"
   assert_contains "$out" "internal-session-pointer" "session trailer named the wrong rule"
 
@@ -198,7 +217,7 @@ Claude-Session: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=
     "refusal did not name the generalized trailer key"
 
   rc=0
-  out=$(fm_voice_text 'Session-Link: https://example.invalid/internal-session') || rc=$?
+  out=$(fm_voice_text 'Session-Link: https://example.com/x') || rc=$?
   expect_code 1 "$rc" "a suffixed session trailer was not refused"
 
   # The same pointer moved into prose, where the trailer rule cannot see it.
@@ -208,9 +227,9 @@ Claude-Session: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=
   assert_contains "$out" "internal-session-link" "session link named the wrong rule"
 
   rc=0
-  out=$(fm_voice_text 'Context for reviewers: https://example.invalid/session-01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  out=$(fm_voice_text 'docs: see https://example.com/session/abcdef1234567890 for detail') || rc=$?
   expect_code 1 "$rc" "a non-vendor session path link was not refused"
-  assert_contains "$out" "session-01AJfonRT1YLcHJCJ2UYwc3J" \
+  assert_contains "$out" "session/abcdef1234567890" \
     "refusal did not name the generalized session path token"
 
   # An opaque id with no URL is still a pointer.
@@ -235,7 +254,9 @@ test_passes_ordinary_uses_of_the_word_session() {
     'fix(bin): rename create_session_id to match its record' \
     'Discussion: https://example.invalid/internal-session' \
     'Regression: https://example.invalid/internal-session' \
-    'refs https://example.invalid/docs?topic=session'
+    'docs: see https://x.io/sessions/list for the listing' \
+    'Thread-Safety-Docs: https://example.com/guide' \
+    'docs: link https://example.com/session-locking.html for background'
   do
     fm_voice_commit "$tmp/repo" "$message"
   done
@@ -328,11 +349,11 @@ test_refuses_a_root_qualified_work_document_path() {
 
   # Home-rooted and parent-relative spellings of the same private document.
   rc=0
-  out=$(fm_voice_text 'docs: retire ~/firstmate/data/alpha/report.md after completion') || rc=$?
+  out=$(fm_voice_text 'docs: retire ~/firstmate/data/alpha/report.md') || rc=$?
   expect_code 1 "$rc" "a home-rooted private work-document path was not refused"
 
   rc=0
-  out=$(fm_voice_text 'docs: retire ../data/alpha/report.md after completion') || rc=$?
+  out=$(fm_voice_text 'docs: retire ../data/alpha/report.md') || rc=$?
   expect_code 1 "$rc" "a parent-relative private work-document path was not refused"
 
   # The bound that makes the above safe: a relative path whose own directory is
@@ -369,9 +390,10 @@ test_refuses_a_private_review_artifact() {
 test_passes_nonprivate_paths_and_work_document_words() {
   local out rc message
 
-  # The prior root-qualified alternative could begin at the first slash in each
-  # URL below, so both exited 1 before the scheme-safe delimiter correction.
+  # The prior root-qualified alternatives could begin inside each URL below, so
+  # all three exited 1 before the structural whitespace-anchor correction.
   for message in \
+    'docs: see https://gitlab.com/org/repo/-/blob/main/data/alpha/report.md' \
     'docs: point at https://example.com/data/api/schema.json for the schema' \
     'docs: see https://github.com/kunchenguid/firstmate/blob/main/data/alpha/report.md' \
     'docs: update data/backlog.md' \
@@ -718,6 +740,7 @@ SH
 
 test_refuses_the_real_leaked_commit
 test_passes_the_real_legitimate_message
+test_passes_required_repository_vocabulary
 test_passes_legitimate_captain_and_house_vocabulary
 test_refuses_each_address_shape
 test_refuses_a_pointer_to_the_working_session
