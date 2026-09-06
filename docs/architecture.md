@@ -364,6 +364,7 @@ Ship briefs prompt crewmates to create or update those files through the normal 
 Each project `AGENTS.md` carries self-governance guidance; [`bin/fm-ensure-agents-md.sh`](../bin/fm-ensure-agents-md.sh) owns the canonical wording and idempotent insertion, while its header and help document the explicit mark for equivalent project-owned guidance.
 It refuses a case-variant real memory file such as a lowercase `agents.md`, so the pointer's `@AGENTS.md` import resolves to a real `AGENTS.md` on a case-sensitive filesystem, and surfaces the mismatch for manual reconciliation.
 The full ownership rule - what is project-intrinsic versus fleet-private, and how firstmate keeps the two apart without writing into project clones - is owned by [`AGENTS.md`](../AGENTS.md) (project and knowledge management).
+A project may also declare a mandatory bootstrap contract - a required read order and any evidence-first incident rule - in its own `AGENTS.md`, so every generated ship or scout brief for that repo carries it rather than depending on firstmate remembering it at intake; [`bin/fm-bootstrap-contract-lib.sh`](../bin/fm-bootstrap-contract-lib.sh) owns the marker format, discovery, and its fail-closed behavior on a malformed declaration.
 
 ## Operational memory routing
 

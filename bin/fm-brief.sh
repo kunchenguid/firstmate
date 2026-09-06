@@ -67,6 +67,10 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# Every ship/scout scaffold also injects the target repo's declared bootstrap
+# contract, if any, discovered from <PROJECTS>/<repo-name>/AGENTS.md; see
+# bin/fm-bootstrap-contract-lib.sh for the marker format and its fail-closed
+# behavior on a malformed declaration.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -90,6 +94,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-bootstrap-contract-lib.sh
+. "$SCRIPT_DIR/fm-bootstrap-contract-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -311,6 +317,22 @@ fi
 
 REPO=${POS[1]}
 
+# PROJECTS is resolved only here, never above alongside DATA/STATE: a
+# secondmate charter (already scaffolded and returned above) never reads it,
+# so validating it unconditionally for every invocation would fail a
+# secondmate scaffold over a directory it never uses.
+if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
+  PROJECTS=$(resolve_directory_input FM_PROJECTS_OVERRIDE "$FM_PROJECTS_OVERRIDE") || exit 1
+else
+  PROJECTS="$FM_HOME/projects"
+fi
+
+# Fail closed rather than silently scaffolding a brief that omits a project's
+# declared bootstrap contract (bin/fm-bootstrap-contract-lib.sh owns discovery,
+# the marker format, and this failure mode). BOOTSTRAP_SECTION is empty when
+# the project declares nothing, which keeps that brief's output unchanged.
+BOOTSTRAP_SECTION=$(fm_brief_bootstrap_contract_block "$PROJECTS" "$REPO" "$STATUS_FILE") || exit 1
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -365,7 +387,7 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is the only thing that survives, so anything worth keeping must be in it.$BOOTSTRAP_SECTION
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -450,7 +472,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.$BOOTSTRAP_SECTION
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
