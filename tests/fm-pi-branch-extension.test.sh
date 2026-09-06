@@ -107,6 +107,9 @@ export class ModelRuntime {
     this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
     this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
     this.registeredProviderConfigs = new Map();
+    // Like the real runtime, a registered provider's credentials are only
+    // known once refresh() has run for it; registration alone is provisional.
+    this.pendingAuth = new Set();
   }
   static async create() {
     const queuedError = globalThis.__fmModelRuntimeErrors?.shift();
@@ -121,9 +124,13 @@ export class ModelRuntime {
     for (const model of config.models ?? []) {
       this.models.push({ ...model, provider: providerId });
     }
-    if (config.oauth || config.apiKey) this.authenticated.add(providerId);
+    if (config.oauth || config.apiKey) this.pendingAuth.add(providerId);
   }
-  async refresh() {}
+  async refresh(options) {
+    for (const providerId of options?.providers ?? this.pendingAuth) {
+      if (this.pendingAuth.delete(providerId)) this.authenticated.add(providerId);
+    }
+  }
   getModel(provider, id) {
     return this.models.find((model) => model.provider === provider && model.id === id);
   }

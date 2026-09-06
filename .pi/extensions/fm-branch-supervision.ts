@@ -723,8 +723,11 @@ export default function (pi: ExtensionAPI) {
   // reuses the provider's own registration rather than reimplementing its
   // wire protocol; the copy is never persisted and stays scoped to this one
   // runtime. One registration that fails to compose must not blind the rest,
-  // so each copy is isolated.
-  function copyExtensionProviders(modelRuntime: ModelRuntime): void {
+  // so each copy is isolated. A just-registered provider's auth check has not
+  // run yet, so the copied providers are refreshed here and every caller's
+  // hasConfiguredAuth verdict is real rather than the provisional entry
+  // registration leaves behind.
+  async function copyExtensionProviders(modelRuntime: ModelRuntime): Promise<void> {
     if (!mainModelRegistry) return;
     let providerIds: readonly string[];
     try {
@@ -732,14 +735,24 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return;
     }
+    const copied: string[] = [];
     for (const providerId of providerIds) {
       try {
         const config = mainModelRegistry.getRegisteredProviderConfig(providerId);
-        if (config) modelRuntime.registerProvider(providerId, config);
+        if (config) {
+          modelRuntime.registerProvider(providerId, config);
+          copied.push(providerId);
+        }
       } catch {
         // A registration that fails to compose in the isolated runtime leaves
         // that provider unavailable, exactly as if it were never copied.
       }
+    }
+    if (copied.length === 0) return;
+    try {
+      await modelRuntime.refresh({ providers: copied, allowNetwork: false });
+    } catch {
+      // A failed availability refresh is answered by hasConfiguredAuth.
     }
   }
 
@@ -748,18 +761,8 @@ export default function (pi: ExtensionAPI) {
     const modelRuntime = await ModelRuntime.create();
     let model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
     if (!model) {
-      copyExtensionProviders(modelRuntime);
+      await copyExtensionProviders(modelRuntime);
       model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
-      if (model) {
-        // A just-registered provider's auth check has not run yet; resolve it
-        // now so the hasConfiguredAuth verdict below is real rather than the
-        // provisional entry registration leaves behind.
-        try {
-          await modelRuntime.refresh({ providers: [provider], allowNetwork: false });
-        } catch {
-          // A failed availability refresh is answered by hasConfiguredAuth.
-        }
-      }
     }
     if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
     if (!modelRuntime.hasConfiguredAuth(provider)) {
@@ -1708,7 +1711,7 @@ ${context.command}
       let available: string[];
       try {
         const modelRuntime = await ModelRuntime.create();
-        copyExtensionProviders(modelRuntime);
+        await copyExtensionProviders(modelRuntime);
         available = ctx.modelRegistry
           .getAvailable()
           .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
