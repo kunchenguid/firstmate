@@ -2048,12 +2048,12 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    cat "$SOURCE_BRIEF"
-    printf '\n'
-    fm_brief_worker_role
-    if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-      fm_brief_intent_overlay "$CAPTAIN_INTENT"
-    fi
+    cat "$SOURCE_BRIEF" &&
+      printf '\n' &&
+      fm_brief_worker_role &&
+      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi
   } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
   if ! mv "$BRIEF_TMP" "$BRIEF"; then
     rm -f -- "$BRIEF_TMP"
