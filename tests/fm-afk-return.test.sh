@@ -22,6 +22,9 @@ install_runner() {  # <case-dir>
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/"
+  # fm-nm-run-lib.sh: the sibling fm-classify-lib.sh sources for the live-run
+  # probe's FM_NM_OWN_RUN_MARK.
+  cp "$ROOT/bin/fm-nm-run-lib.sh" "$dir/bin/"
   cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2

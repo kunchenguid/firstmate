@@ -1816,41 +1816,11 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
-pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
-}
+# Fix 2 (see script header) reads its candidate pids from the shared
+# cwd-binding owner, fm_pids_with_cwd_under in bin/fm-classify-lib.sh, which the
+# watcher's live-run wedge probe reads too. This reap needs the COMPLETE process
+# list to be safe, so it passes no wall-clock bound and keeps treating any
+# unusable scan result as a refusal rather than as "nothing to reap".
 
 task_process_identity() {  # <pid>
   local pid=$1 proc_root stat_line starttime value
@@ -1888,7 +1858,7 @@ task_pids_under_roots() {  # <dir>...
   local dir dir_pids pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
-    if ! dir_pids=$(pids_with_cwd_under "$dir"); then
+    if ! dir_pids=$(fm_pids_with_cwd_under "$dir"); then
       TASK_PIDS_FAILED_DIR=$dir
       return 1
     fi
