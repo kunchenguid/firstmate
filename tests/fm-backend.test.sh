@@ -1159,6 +1159,20 @@ SH
   [ "$status" -eq 124 ] || fail "bounded backend state returned $status instead of timeout"
   [ "$(cat "$log" 2>/dev/null)" = 4 ] \
     || fail "backend state did not use its requested four-second deadline"
+  status=0
+  rm -f "$log"
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$log" \
+    fm_backend_agent_alive_bounded 3 tmux session:window >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded agent probe returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 3 ] \
+    || fail "agent probe did not use its requested three-second deadline"
+  status=0
+  rm -f "$log"
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$log" \
+    fm_backend_events_capable_bounded 2 herdr session >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded event capability probe returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 2 ] \
+    || fail "event capability probe did not use its requested two-second deadline"
   pass "bounded backend reads use the caller's requested deadline"
 }
 
