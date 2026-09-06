@@ -1941,10 +1941,12 @@ test_secondmate_force_teardown_refuses_duplicated_child_slot() {
   home="$TMP_ROOT/force-duplicate-slot-home"
   subhome="$TMP_ROOT/force-duplicate-slot-subhome"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-duplicate-slot-worktree"
+  childwt="$TMP_ROOT/force-duplicate-slot-pool/1/alpha"
   err="$TMP_ROOT/force-duplicate-slot.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
   fm_git_worktree "$childproj" "$childwt" duplicate-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-duplicate-slot-pool/treehouse-state.json"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -1993,10 +1995,12 @@ test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   home="$TMP_ROOT/force-lock-home"
   subhome="$TMP_ROOT/force-lock-subhome"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-lock-child-worktree"
+  childwt="$TMP_ROOT/force-lock-child-pool/1/alpha"
   err="$TMP_ROOT/force-lock-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
   fm_git_worktree "$childproj" "$childwt" force-child-lock
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-lock-child-pool/treehouse-state.json"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain

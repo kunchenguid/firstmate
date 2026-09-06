@@ -35,6 +35,19 @@ SH
   printf '%s\n' "$TMP_ROOT/$dir"
 }
 
+mark_case_as_treehouse_pool() {  # <case>
+  local dir=$1
+  rm -rf "$dir/worktree"
+  mkdir -p "$dir/pool/1"
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm pool-fixture
+  git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project"
+  ln -s "pool/1/project" "$dir/worktree"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
+    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+  : > "$dir/worktree/sentinel"
+}
+
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -406,6 +419,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   local dir id=stale-task other=live-task worker rc
 
   dir=$(make_case slot-reuse)
+  mark_case_as_treehouse_pool "$dir"
   # The reuse collision: the pool slot recorded for a finished task has already
   # been handed to another task, whose worker is live in it right now.
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -440,6 +454,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   # The same collision recorded on a secondmate home field rather than a task
   # worktree is the same slot, and refuses the same way.
   dir=$(make_case slot-reuse-home)
+  mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -463,6 +478,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
 test_cross_home_pool_slot_collision_refuses() {
   local dir id=stale-task other=secondmate-task second_home second_project rc
   dir=$(make_case slot-reuse-cross-home)
+  mark_case_as_treehouse_pool "$dir"
   printf 'fixture\n' > "$dir/project/tracked"
   git -C "$dir/project" add tracked
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
@@ -498,6 +514,7 @@ test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
   dir=$(make_case slot-sole)
+  mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -525,6 +542,7 @@ test_endpoint_outside_recorded_slot_refuses_before_mutation() {
   local dir id=drifted-task rc
 
   dir=$(make_case slot-endpoint-drift)
+  mark_case_as_treehouse_pool "$dir"
   mkdir -p "$dir/other-worktree"
   # The recorded pane answers from a DIFFERENT copy: the record no longer proves
   # this task owns the slot it names.

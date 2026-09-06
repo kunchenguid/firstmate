@@ -289,9 +289,28 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+
+# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
+# Require both its pool state and the same Git common directory as the recorded
+# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+is_treehouse_pool_slot() {  # <project> <worktree>
+  local project=$1 worktree=$2 slot pool state project_common slot_common
+  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
+  slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
+  [ "$project_common" = "$slot_common" ]
+}
+
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
+TREEHOUSE_SLOT_LOCK_REQUIRED=0
 if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
   [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
@@ -301,7 +320,8 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
-     && [ -n "$TEARDOWN_LOCK_WT" ] && [ -d "$TEARDOWN_LOCK_WT" ]; then
+     && is_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+    TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
       echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
       exit 1
@@ -898,7 +918,8 @@ CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+   && is_treehouse_pool_slot "$PROJ" "$WT"; then
   EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
     echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
     exit 1
@@ -908,7 +929,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "$WT" ] && [ -d "
     echo "REFUSED: task $ID's Treehouse project identity changed while teardown acquired its locks; nothing was changed" >&2
     exit 1
   fi
-elif [ "$TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
   echo "REFUSED: task $ID stopped naming a live Treehouse slot while teardown acquired its locks; nothing was changed" >&2
   exit 1
 fi
@@ -2052,7 +2073,7 @@ require_orca_worktree_path_match_if_present() {
 # record with nothing live to return skips them rather than refusing.
 teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
-  [ -n "$WT" ] || return 1
+  is_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
 }
 
@@ -2648,9 +2669,9 @@ preflight_descendant_treehouse_slots() {
     [ -n "$kind" ] || kind=ship
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
-    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
-      && [ -n "$worktree" ] && [ -d "$worktree" ] || continue
     project=$(meta_value "$meta" project)
+    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
+      && is_treehouse_pool_slot "$project" "$worktree" || continue
     lock_path=$(fm_treehouse_project_lock_path "$project") || {
       echo "REFUSED: cannot resolve the shared Treehouse project lock for child $task_id; forced teardown changed nothing" >&2
       return 1
@@ -2677,9 +2698,9 @@ preflight_descendant_treehouse_slots() {
     [ -n "$kind" ] || kind=ship
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
-    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
-      && [ -n "$worktree" ] && [ -d "$worktree" ] || continue
     project=$(meta_value "$meta" project)
+    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
+      && is_treehouse_pool_slot "$project" "$worktree" || continue
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
     target=$FM_BACKEND_VALIDATED_TARGET
     require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
