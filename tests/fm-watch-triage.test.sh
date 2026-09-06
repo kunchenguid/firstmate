@@ -2367,9 +2367,9 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
 # awaiting their merge word.
 # Pinned here, in both directions: while the call stands the first sight still
 # alarms, further sights of the SAME call and status-log state are absorbed, and
-# the window's end alarms once more; and the identical fixture WITHOUT the hold
-# keeps alarming on every hash, because a bound that swallowed an unheld
-# delivery or blocker would be worse than the churn it removes.
+# a new pane hash after the window's end alarms once more; and the identical
+# fixture WITHOUT the hold keeps alarming on every hash, because a bound that
+# swallowed an unheld delivery or blocker would be worse than the churn it removes.
 #
 # The backlog is real rather than a fixture file: bin/fm-captain-hold.sh is the
 # only writer of a hold and tasks-axi the only reader, so a hand-written row
@@ -2499,8 +2499,8 @@ test_open_captain_call_bounds_stale_churn() {
     [ "$wakes" -eq 0 ] \
       || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
 
-    # End of the window: held work re-surfaces exactly once, so a forgotten call
-    # cannot rot invisibly behind the bound that quieted its churn.
+    # After the window ends, the next new pane hash re-surfaces held work exactly
+    # once, so a forgotten call on a churning pane cannot hide behind the bound.
     [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
     set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
     hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
