@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Task flow board</title>
+<style>
+:root {
+  --bg: #10151d;
+  --surface: #1b222d;
+  --surface-2: #232c39;
+  --line: #394554;
+  --text: #edf2f7;
+  --muted: #9ca9b8;
+  --faint: #718092;
+  --blue: #7bb7ff;
+  --green: #55d187;
+  --amber: #eeb85d;
+  --red: #ff827a;
+  --shadow: 0 18px 45px rgba(0, 0, 0, .22);
+  --graph-step-width: 120px;
+  --graph-step-gap: 20px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  color: var(--text);
+  background: radial-gradient(circle at 50% -10%, #263444 0, transparent 42%), var(--bg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button { font: inherit; }
+.graph-nav {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center;
+  justify-content: space-between; gap: 18px; padding: 18px 28px;
+  background: rgba(16, 21, 29, .94); border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+}
+.graph-title { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.graph-subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.graph-freshness { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.graph-freshness[data-state="stale"] { color: var(--amber); }
+.graph-freshness[data-state="unknown"] { color: var(--red); }
+.graph-main { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 64px; }
+.graph-tasks { display: grid; gap: 22px; }
+.graph-task {
+  overflow: hidden; border: 1px solid var(--line); border-radius: 7px;
+  background: rgba(27, 34, 45, .92); box-shadow: var(--shadow);
+}
+.graph-task__head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
+  padding: 18px 20px 14px; border-bottom: 1px solid var(--line);
+}
+.graph-task__id { margin: 0; font-size: 15px; font-weight: 700; }
+.graph-task__meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.graph-task__actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.graph-observation {
+  padding: 4px 8px; border: 1px solid rgba(85, 209, 135, .55); border-radius: 999px;
+  color: var(--green); font-size: 11px; font-weight: 700;
+}
+.graph-detail {
+  cursor: pointer; padding: 5px 9px; border: 1px solid var(--line); border-radius: 5px;
+  color: var(--muted); background: var(--surface-2); font-size: 11px;
+}
+.graph-detail:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.graph-banner {
+  margin: 14px 20px 0; padding: 9px 11px; border-left: 3px solid var(--amber);
+  color: #d9e0e8; background: rgba(238, 184, 93, .09); font-size: 12px;
+}
+.graph-banner[data-tone="danger"] { border-left-color: var(--red); background: rgba(255, 130, 122, .09); }
+.graph-banner[data-tone="success"] { border-left-color: var(--green); background: rgba(85, 209, 135, .08); }
+.graph-flow { position: relative; overflow-x: auto; padding: 28px 20px 22px; }
+.graph-edge-svg { position: absolute; top: 28px; left: 20px; min-width: 720px; height: 72px; pointer-events: none; }
+.graph-edge { fill: none; stroke: #718196; stroke-width: 2.5; }
+.graph-step-track {
+  position: relative; z-index: 1; display: flex; align-items: center; gap: var(--graph-step-gap);
+  min-width: max-content; min-height: 72px;
+}
+.graph-step {
+  position: relative; display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  width: var(--graph-step-width); min-height: 72px; padding: 11px 10px; border: 1px solid #445162;
+  border-radius: 5px; background: #272f3b; box-shadow: 0 3px 0 rgba(0, 0, 0, .18);
+}
+.graph-step[data-state="success"] { border-color: var(--green); box-shadow: 0 0 0 1px rgba(85, 209, 135, .22), 0 3px 0 rgba(0, 0, 0, .18); }
+.graph-step[data-state="uninitialized"] { border-style: dashed; }
+.graph-step[data-current="true"]::before {
+  content: ""; position: absolute; top: -7px; left: 12px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(85, 209, 135, .16);
+}
+.graph-step__state { color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.graph-step[data-state="success"] .graph-step__state { color: var(--green); }
+.graph-step__name { color: var(--text); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.graph-step__duration { color: var(--muted); font-size: 10px; }
+.graph-step__evidence { color: var(--faint); font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.graph-detail-panel {
+  margin: 0 20px 18px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 5px;
+  color: var(--muted); background: rgba(16, 21, 29, .6); font-size: 12px;
+}
+.graph-detail-panel[hidden] { display: none; }
+.graph-detail-row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; padding: 3px 0; }
+.graph-detail-key { color: var(--faint); font-weight: 650; }
+.graph-detail-value { color: var(--text); overflow-wrap: anywhere; }
+.graph-empty { padding: 32px; border: 1px dashed var(--line); color: var(--muted); text-align: center; }
+@media (max-width: 700px) {
+  .graph-nav { align-items: flex-start; flex-direction: column; padding: 16px; }
+  .graph-main { width: min(100% - 24px, 1240px); padding-top: 16px; }
+  .graph-task__head { padding: 15px; }
+  .graph-banner { margin-left: 15px; margin-right: 15px; }
+  .graph-flow { padding-left: 15px; padding-right: 15px; }
+  .graph-edge-svg { left: 15px; }
+  .graph-detail-panel { margin-left: 15px; margin-right: 15px; }
+}
+</style>
+</head>
+<body>
+<header class="graph-nav">
+  <div>
+    <h1 class="graph-title">Task flow</h1>
+    <p class="graph-subtitle">Artifact-backed progress, rendered from the owner snapshot.</p>
+  </div>
+  <div id="graph-freshness" class="graph-freshness" data-state="unknown">freshness unknown</div>
+</header>
+<main class="graph-main">
+  <div id="graph-tasks" class="graph-tasks"></div>
+</main>
+<script id="graph-board-data" type="application/json">
+__FM_GRAPH_BOARD_DATA__
+</script>
+<script>
+(function () {
+  "use strict";
+
+  function renderError(message) {
+    var root = document.getElementById("graph-tasks");
+    root.textContent = "";
+    var error = document.createElement("div");
+    error.className = "graph-empty";
+    error.textContent = message + " - rebuild the board from a fresh snapshot.";
+    root.appendChild(error);
+  }
+
+  var data;
+  try {
+    data = JSON.parse(document.getElementById("graph-board-data").textContent);
+  } catch (error) {
+    renderError("The board data is not valid JSON");
+    return;
+  }
+  if (!data || data.schema !== "fm-pipeline-board.v1" || !Array.isArray(data.tasks)) {
+    renderError("Unsupported board data schema");
+    return;
+  }
+
+  function text(value, fallback) {
+    return typeof value === "string" ? value : (fallback || "");
+  }
+  function el(tag, className, value) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value != null) node.textContent = value;
+    return node;
+  }
+  function attr(node, name, value) {
+    node.setAttribute(name, String(value));
+  }
+  function cssPixels(name, fallback) {
+    if (!window.getComputedStyle || !document.documentElement) return fallback;
+    var pixels = Number.parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue(name));
+    return Number.isFinite(pixels) ? pixels : fallback;
+  }
+  function detailRow(parent, key, value) {
+    var row = el("div", "graph-detail-row");
+    row.appendChild(el("span", "graph-detail-key", key + " "));
+    row.appendChild(el("span", "graph-detail-value", value));
+    parent.appendChild(row);
+  }
+  function recordEvidence(task) {
+    return task.step_evidence == null ? "unavailable" : text(task.step_evidence, "unavailable");
+  }
+  function durationFor(timestamp, freshnessState) {
+    if (freshnessState === "unknown" || typeof timestamp !== "string") return "";
+    var time = Date.parse(timestamp);
+    if (!Number.isFinite(time) || time > Date.now()) return "";
+    var seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+    if (seconds < 60) return seconds + "s";
+    if (seconds < 3600) return Math.floor(seconds / 60) + "m";
+    return Math.floor(seconds / 3600) + "h";
+  }
+  function observationText(task) {
+    var verb = task.crew_state && text(task.crew_state.verb, "");
+    if (verb === "working" || verb === "running") return "In progress";
+    if (verb && verb !== "unavailable") return "Observed: " + verb;
+    return "";
+  }
+  function freshness() {
+    var now = Math.floor(Date.now() / 1000);
+    var generated = data.generated_epoch;
+    var interval = data.check_interval;
+    var validGenerated = typeof generated === "number" && Number.isInteger(generated) && generated > 0 && generated <= now;
+    var validInterval = typeof interval === "number" && Number.isInteger(interval) && interval > 0;
+    if (!validGenerated || !validInterval) return { state: "unknown", text: "freshness unknown" };
+    var age = now - generated;
+    if (age > interval) return { state: "stale", text: "board stale · refresh interval " + interval + "s" };
+    return { state: "fresh", text: "board current · refresh interval " + interval + "s" };
+  }
+
+  var freshnessInfo = freshness();
+  var freshnessNode = document.getElementById("graph-freshness");
+  attr(freshnessNode, "data-state", freshnessInfo.state);
+  freshnessNode.textContent = freshnessInfo.text;
+  var root = document.getElementById("graph-tasks");
+  if (!data.tasks.length) root.appendChild(el("div", "graph-empty", "No tasks are in the owner snapshot."));
+
+  data.tasks.forEach(function (task, taskIndex) {
+    var nodes = task.steps && Array.isArray(task.steps.nodes) ? task.steps.nodes : [];
+    var edges = task.steps && Array.isArray(task.steps.edges) ? task.steps.edges : [];
+    var state = text(task.record_state, "unknown");
+    var hasRecord = state === "ok" && task.initialized === true && task.step_proven === true;
+    var current = hasRecord && typeof task.step === "string" && nodes.indexOf(task.step) !== -1;
+    var evidence = current ? recordEvidence(task) : "unavailable";
+    var taskNode = el("article", "graph-task");
+    attr(taskNode, "data-task-id", text(task.id, "unknown"));
+    attr(taskNode, "data-kind", text(task.kind, "unknown"));
+    attr(taskNode, "data-record-state", state);
+    attr(taskNode, "data-probe", task.probe_last && text(task.probe_last.verdict, "unavailable") || "unavailable");
+    attr(taskNode, "data-evidence", evidence);
+
+    var head = el("div", "graph-task__head");
+    var heading = el("div");
+    heading.appendChild(el("h2", "graph-task__id", text(task.id, "unknown task")));
+    heading.appendChild(el("div", "graph-task__meta", "kind " + text(task.kind, "unknown") + " · generation " + text(task.gen, "unknown")));
+    head.appendChild(heading);
+    var actions = el("div", "graph-task__actions");
+    var observation = observationText(task);
+    if (observation) actions.appendChild(el("span", "graph-observation", observation));
+    var detailId = "graph-detail-" + taskIndex;
+    var detailButton = el("button", "graph-detail", "Details");
+    detailButton.type = "button";
+    attr(detailButton, "aria-controls", detailId);
+    attr(detailButton, "aria-expanded", "false");
+    actions.appendChild(detailButton);
+    head.appendChild(actions);
+    taskNode.appendChild(head);
+
+    var bannerText;
+    var bannerTone = "";
+    if (state === "uninitialized" && task.initialized !== true) {
+      bannerText = "no owner step recorded yet";
+    } else if (state.indexOf("refused:") === 0) {
+      bannerText = "owner record refused: " + state;
+      bannerTone = "danger";
+    } else if (current) {
+      bannerText = "artifact step recorded: " + task.step;
+      bannerTone = "success";
+    } else {
+      bannerText = "owner step unknown: " + state;
+    }
+    var banner = el("div", "graph-banner", bannerText);
+    if (bannerTone) attr(banner, "data-tone", bannerTone);
+    taskNode.appendChild(banner);
+
+    var flow = el("div", "graph-flow");
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    attr(svg, "class", "graph-edge-svg");
+    var stepWidth = cssPixels("--graph-step-width", 120);
+    var stepGap = cssPixels("--graph-step-gap", 20);
+    var pitch = stepWidth + stepGap;
+    var width = Math.max(720, nodes.length * pitch);
+    attr(svg, "viewBox", "0 0 " + width + " 72");
+    attr(svg, "width", width);
+    attr(svg, "style", "width: " + width + "px;");
+    attr(svg, "role", "img");
+    attr(svg, "aria-label", "Structural edges for " + text(task.id, "task"));
+    edges.forEach(function (edge) {
+      var from = nodes.indexOf(edge.from);
+      var to = nodes.indexOf(edge.to);
+      if (from < 0 || to < 0) return;
+      var x1 = from * pitch + stepWidth;
+      var x2 = to * pitch;
+      var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      attr(path, "class", "graph-edge");
+      attr(path, "data-from", text(edge.from, "unknown"));
+      attr(path, "data-to", text(edge.to, "unknown"));
+      attr(path, "d", "M " + x1 + " 36 C " + (x1 + 10) + " 36, " + (x2 - 10) + " 36, " + x2 + " 36");
+      svg.appendChild(path);
+    });
+    flow.appendChild(svg);
+    var track = el("div", "graph-step-track");
+    nodes.forEach(function (step) {
+      var isCurrent = current && task.step === step;
+      var boxState = state === "uninitialized" && task.initialized !== true ? "uninitialized" : (isCurrent ? "success" : "unknown");
+      var box = el("div", "graph-step");
+      attr(box, "data-step", step);
+      attr(box, "data-state", boxState);
+      attr(box, "data-evidence", isCurrent ? evidence : "unavailable");
+      if (isCurrent) attr(box, "data-current", "true");
+      var stateLabel = boxState === "success" ? "Success" : (boxState === "uninitialized" ? "Uninitialized" : "Unknown");
+      box.appendChild(el("span", "graph-step__state", stateLabel));
+      box.appendChild(el("strong", "graph-step__name", step));
+      var duration = isCurrent ? durationFor(task.step_ts, freshnessInfo.state) : "";
+      if (duration) {
+        var durationNode = el("span", "graph-step__duration", duration);
+        attr(durationNode, "data-duration", duration);
+        box.appendChild(durationNode);
+        attr(box, "data-duration", duration);
+      }
+      box.appendChild(el("span", "graph-step__evidence", isCurrent ? evidence : "evidence unavailable"));
+      track.appendChild(box);
+    });
+    flow.appendChild(track);
+    taskNode.appendChild(flow);
+
+    var detail = el("div", "graph-detail-panel");
+    detail.id = detailId;
+    detail.hidden = true;
+    attr(detail, "role", "region");
+    attr(detail, "aria-label", "Task details");
+    detailRow(detail, "record state:", state);
+    detailRow(detail, "step:", current ? task.step : "unavailable");
+    detailRow(detail, "evidence:", evidence);
+    detailRow(detail, "crew observation:", observation || "unavailable");
+    detailRow(detail, "waits:", task.waits && task.waits.length ? String(task.waits.length) : "none");
+    detailButton.addEventListener("click", function () {
+      detail.hidden = !detail.hidden;
+      attr(detailButton, "aria-expanded", String(!detail.hidden));
+    });
+    taskNode.appendChild(detail);
+    root.appendChild(taskNode);
+  });
+})();
+</script>
+</body>
+</html>
