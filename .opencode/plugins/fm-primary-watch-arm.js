@@ -130,7 +130,7 @@ async function sessionOwnsLock(paths) {
   return false;
 }
 
-function classifyArmClose(stdout, stderr, code, signal) {
+export function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
@@ -154,6 +154,9 @@ function classifyArmClose(stdout, stderr, code, signal) {
       kind: "failure",
       message: `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined.trim() ? `\n${combined.trim()}` : ""}`,
     };
+  }
+  if (code === 0 && combined.split(/\r?\n/).includes("FM_WATCH_ARM_RESULT=busy-holder")) {
+    return { kind: "benign", message: "busy-holder" };
   }
   return {
     kind: "failure",
@@ -295,6 +298,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
+    if (status === "benign") return { failure: "" };
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
@@ -325,7 +329,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   const timer = setTimeout(() => {
     if (retryTimer === timer) retryTimer = null;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
-      if (["armed", "starting", "wake"].includes(status)) return;
+      if (["armed", "starting", "wake", "benign"].includes(status)) return;
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
@@ -390,7 +394,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    settleReadiness(classification.kind === "actionable" ? "wake" : classification.kind);
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
@@ -414,6 +418,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
       });
+      return;
+    }
+    if (classification.kind === "benign") {
+      retryFailures = 0;
+      setArmStatus("busy-holder");
       return;
     }
     if (restorationInFlight) {
