@@ -919,12 +919,17 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
   watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
   : > "$state/.paused-$watcher_key"
+  : > "$state/.stale-$watcher_key"
+  printf '2\n' > "$state/.wedge-escalations-$watcher_key"
+  : > "$state/.wedge-resurfaced-$watcher_key"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
   [ ! -e "$state/.paused-$watcher_key" ] || fail "stale watcher pause marker was not cleared after resume"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "unpaused watcher handoff created a daemon pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "unpaused watcher handoff retained daemon stale tracking"
   [ ! -e "$state/.stale-$watcher_key" ] || fail "unpaused watcher handoff retained watcher stale tracking"
+  [ ! -e "$state/.wedge-escalations-$watcher_key" ] || fail "unpaused watcher handoff retained the wedge escalation counter"
+  [ ! -e "$state/.wedge-resurfaced-$watcher_key" ] || fail "unpaused watcher handoff retained the wedge resurface throttle, so the episode did not end"
   pass "housekeeping clears an already-resumed watcher pause across both supervisors"
 }
 

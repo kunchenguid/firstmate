@@ -44,9 +44,13 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every CHANGED state/*.meta with a bounded
+#                       state/*.status tail, state/.afk, and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs. A task
+#                       unchanged since the last session start collapses to one
+#                       compact line naming its .meta and status-log paths
+#                       instead (FINGERPRINT DEDUP below); --reemit never
+#                       compacts.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -161,6 +165,42 @@
 # may be. Both bounds are safe because the section prints every task's full
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
+#
+# FINGERPRINT DEDUP: a task's full block (.meta plus status tail) prints again
+# only when its fingerprint differs from the one recorded in
+# state/.session-start-seen-<task> at the previous session start, or when that
+# marker is missing, unreadable, or otherwise fails to match (including the
+# task's very first session start). The fingerprint is a digest of .meta
+# content, the last status line, the status log's size in bytes, and the
+# endpoint alive/dead/unknown verdict, keyed by the
+# FM_SESSION_START_STATUS_TAIL bound in force.
+# Keying by the tail bound keeps the knob honest: a run that asks for a deeper
+# tail asks for a different block, so it gets the full one rather than the
+# previous bound's compact line. The status log's size is in the key because an
+# append-only log that returns to the same last line (working -> failed ->
+# working) is not unchanged, and its size is the one whole-log signal that
+# costs no extra read of an unbounded file. The endpoint verdict is in the key
+# because a pane that dies between session starts writes no status line at all,
+# and "unchanged" must never label the alive->dead flip that AGENTS.md makes
+# actionable.
+# A --reemit is excluded from the compact path outright: a re-emit is by
+# definition a session that LOST the context in which the full block was
+# printed, so it always reprints every task in full, marker or no marker.
+# A matching fingerprint prints one compact line instead: task id, endpoint
+# alive/dead, and the last known status verb (normalized by
+# bin/fm-classify-lib.sh, the fleet's leading-verb owner), plus the full status
+# log path - or the same "(no status file yet: <path>)" wording the full block
+# uses when there is none - the exact marker to delete to force the full
+# block back on, and the task's own state/<id>.meta path, which the read-once
+# contract explicitly allows reading directly for a compacted task. This is
+# purely a repeat-print optimization for a digest that already documents
+# status lines as wake EVENTS rather than current state (above); it never
+# suppresses the wake queue, OPEN DECISIONS, or UNREAD STATUS, and any real
+# change to .meta, the status log, or the endpoint verdict always restores the
+# full block.
+# The compact line's verb carries the same per-line cap as the status tail,
+# and a lock-refused read-only session compares an existing marker but writes
+# none, so it never consumes the lock owner's first full print of a task.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
 # adapter (see bin/fm-sessionstart-run.sh), which blocks either hook-driven
@@ -341,6 +381,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -532,6 +574,78 @@ print_status_tail() {
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
   done < <(tail -n "$STATUS_TAIL" "$status")
+}
+
+# fleet_state_seen_marker <task-id> -> path of this task's per-home "already
+# shown, unchanged" marker (see the STATUS TAILS comment above).
+fleet_state_seen_marker() {
+  printf '%s/.session-start-seen-%s' "$STATE" "$1"
+}
+
+# fleet_state_key_material <meta-file> <last-status-line> <status-tail-bound>
+# <endpoint-state> <status-bytes>: emit the exact bytes the fingerprint hashes,
+# so both hashing backends below key on ONE definition of "unchanged" instead
+# of two that can drift apart.
+fleet_state_key_material() {
+  cat "$1" 2>/dev/null
+  printf '\nstatus-tail=%s\nendpoint=%s\nstatus-bytes=%s\n%s\n' "$3" "$4" "$5" "$2"
+}
+
+# fleet_state_fingerprint <meta-file> <last-status-line> <status-tail-bound>
+# <endpoint-state> <status-bytes>
+# -> a digest of that task's .meta content, its last status line, its status
+# log's size, and its endpoint verdict, keyed by the tail bound that decides
+# how much of the status log the full block would show, or a non-zero return
+# when no hashing tool is available. The caller
+# hands in the line that fm-classify-lib.sh's last_status_line selected, so the
+# key and the rendered verb always agree and one status-log scan serves both -
+# the status log is an unbounded append-only log on a startup-blocking path.
+# This is a cache
+# key only, never state truth: any mismatch, including "cannot compute one",
+# falls back to the full block. The tail bound belongs in the key because a
+# session start run with a different FM_SESSION_START_STATUS_TAIL asks for a
+# different block, so the previous run's compact line would answer the wrong
+# question. The endpoint verdict belongs in it because a pane that dies between
+# session starts writes no status line at all, and "unchanged" must never label
+# the alive->dead flip that AGENTS.md makes actionable. The status log's size
+# belongs in it because an append-only log that returns to the same last line
+# (working -> failed -> working) is NOT unchanged, and the size is the one
+# whole-log signal that costs no extra read of an unbounded file.
+fleet_state_fingerprint() {
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(fleet_state_key_material "$@" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(fleet_state_key_material "$@" | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [ -n "$digest" ] || return 1
+  printf '%s\n' "$digest"
+}
+
+# fleet_state_status_bytes <status-file> -> the status log's size in bytes, or 0
+# when there is none. O(1) on a regular file, unlike hashing the whole log.
+fleet_state_status_bytes() {
+  local bytes
+  [ -f "$1" ] || { printf '0\n'; return 0; }
+  bytes=$(LC_ALL=C wc -c < "$1" 2>/dev/null | tr -d '[:space:]')
+  printf '%s\n' "${bytes:-0}"
+}
+
+# write_fleet_state_seen_marker <task-id> <fingerprint>: atomic tmp-then-mv
+# write, mirroring write_agents_baseline below. Best-effort: a failed write
+# only costs one extra full block at the next session start, never a wrongly
+# suppressed one.
+write_fleet_state_seen_marker() {
+  local id=$1 fingerprint=$2 tmp
+  tmp=$(mktemp "$STATE/.session-start-seen-$id.XXXXXX" 2>/dev/null) || return 1
+  if printf '%s\n' "$fingerprint" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$(fleet_state_seen_marker "$id")" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 hash_file_sha256() {
@@ -798,10 +912,17 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+Everything below is printed in full for this session start: a compact
+data/backlog.md listing, data/projects.md, data/secondmates.md,
+data/captain.md, data/captain-shared.md, data/learnings.md, and - for every
+task that CHANGED since the last session start - that task's whole
+state/*.meta with a bounded tail of its state/*.status.
+A task whose .meta, status log, and endpoint verdict are all unchanged since
+the last session start is printed as ONE compact line instead (endpoint, last
+known verb, full status log path, its state/<id>.meta path, and the marker to
+delete to force the full block back). For such a compacted task, reading that
+named .meta and status log directly IS allowed - the compact line names both
+paths precisely so you can.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -812,6 +933,9 @@ Go to a source directly only when:
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
+  - a task was printed as a compact "unchanged since last session start" line
+    and this turn needs its identity fields or its status history (that line
+    names both its state/<id>.meta and its full status log path),
   - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -833,28 +957,72 @@ for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
+  status="$STATE/$id.status"
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint_state=alive
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      endpoint_state=dead
     fi
+    endpoint_line="endpoint: $endpoint_state (backend=$backend window=$window)"
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    endpoint_state=unknown
+    endpoint_line='endpoint: unknown (no window recorded)'
   fi
 
-  status="$STATE/$id.status"
-  if [ -f "$status" ]; then
-    print_status_tail "$status"
+  # Unchanged since the last session start (same fingerprint marker) ->
+  # one compact line instead of the full .meta + status-tail block. A
+  # missing, unreadable, or stale marker never matches, so it always falls
+  # back to the full block below - see the STATUS TAILS comment above.
+  # fm-classify-lib.sh owns both "the last status line" (blank trailing lines
+  # filtered) and leading-verb normalization for the whole fleet, so a
+  # bracketed key or a corr= token is stripped here exactly as it is on every
+  # other surface. One scan per task feeds both the key and the rendered verb.
+  # A --reemit is by definition a session that LOST the context in which the
+  # full block was printed, so it is excluded from the compact path outright
+  # and always reprints every task in full, marker or no marker.
+  last_line=
+  [ -f "$status" ] && last_line=$(last_status_line "$status")
+
+  SEEN_MARKER=$(fleet_state_seen_marker "$id")
+  FP_OK=1
+  NEW_FP=$(fleet_state_fingerprint "$meta" "$last_line" "$STATUS_TAIL" "$endpoint_state" \
+    "$(fleet_state_status_bytes "$status")") || FP_OK=0
+  OLD_FP=
+  [ -f "$SEEN_MARKER" ] && { read -r OLD_FP 2>/dev/null < "$SEEN_MARKER" || true; }
+
+  if [ "$REEMIT" -eq 0 ] && [ "$FP_OK" -eq 1 ] && [ -n "$OLD_FP" ] && [ "$NEW_FP" = "$OLD_FP" ]; then
+    verb='-'
+    status_ref="(no status file yet: $status)"
+    if [ -f "$status" ]; then
+      status_ref="full status log: $status"
+      verb=$(status_line_verb "$last_line")
+      [ -n "$verb" ] || verb='-'
+      fm_cap_line_var "$verb"
+      verb=$FM_LINE_CAP_LINE
+    fi
+    printf '\n--- %s --- unchanged since last session start; compact (delete %s to force the full block)\n' \
+      "$id" "$SEEN_MARKER"
+    printf '%s · last known verb: %s · %s\n' "$endpoint_line" "$verb" "$status_ref"
+    printf 'read %s directly when this task needs its identity fields; the read-once contract allows that for a compacted task\n' \
+      "$meta"
   else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    printf '\n--- %s ---\n' "$id"
+    cat "$meta"
+    printf '%s\n' "$endpoint_line"
+    if [ -f "$status" ]; then
+      print_status_tail "$status"
+    else
+      printf 'status tail: (no status file yet: %s)\n' "$status"
+    fi
   fi
+
+  [ "$READ_ONLY" -eq 0 ] && [ "$FP_OK" -eq 1 ] && [ "$NEW_FP" != "$OLD_FP" ] \
+    && write_fleet_state_seen_marker "$id" "$NEW_FP"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 

@@ -727,6 +727,20 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_teardown_removes_the_session_start_fingerprint_marker() {
+  local case_dir out
+  case_dir=$(make_case session-start-marker-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  printf 'deadbeef\n' > "$case_dir/state/.session-start-seen-task-x1"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
+  assert_absent "$case_dir/state/.session-start-seen-task-x1" \
+    "teardown left the session-start fleet-state fingerprint marker behind: $out"
+  pass "teardown removes the retired task's session-start fingerprint marker"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -3650,6 +3664,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_removes_the_session_start_fingerprint_marker
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

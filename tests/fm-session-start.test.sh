@@ -1102,9 +1102,15 @@ EOF
   assert_contains "$out" "working: step 3" "default status tail (5 lines) missing an expected recent line"
   assert_not_contains "$out" "working: step 1" "default status tail (5 lines) leaked an older line"
   assert_contains "$out" "$home/state/task-a.status" "digest did not print the full status log path for a deeper read"
-  assert_contains "$out" "a bounded tail of every state/*.status" "read-once contract does not distinguish bounded status tails"
+  assert_contains "$out" "a bounded tail of its state/*.status" "read-once contract does not distinguish bounded status tails"
 
+  # task-a is otherwise unchanged since the run above, so this also proves a
+  # different tail bound outranks the fleet-state fingerprint dedup: the run
+  # asks for a different block, so it gets the full one, not the compact line
+  # the previous bound left behind.
   out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "--- task-a --- unchanged" \
+    "a changed FM_SESSION_START_STATUS_TAIL was silently answered with the previous bound's compact line"
   assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"
   assert_not_contains "$out" "working: step 5" "FM_SESSION_START_STATUS_TAIL=2 did not bound the tail to 2 lines"
 
@@ -1181,6 +1187,434 @@ EOF
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 
   pass "orphan status logs are printed once with bounded tails"
+}
+
+# --- fleet-state fingerprint dedup --------------------------------------------
+# Posten 4 of the wachmeldung-dedup build plan: the "Work under way" subsection
+# prints a task's full .meta + status-tail block again only when its
+# state/.session-start-seen-<task> fingerprint (meta content + last status
+# line) differs from the previous session start, or when that marker is
+# missing/unreadable/mismatched - including the task's first session start.
+
+test_fleet_state_fingerprint_first_start_full_then_unchanged_compact() {
+  local rec root home fakebin out marker
+  rec=$(new_world fingerprint-unchanged)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  marker="$home/state/.session-start-seen-task-a"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-a.meta"
+  printf 'working: step 1\nworking: step 2\n' > "$home/state/task-a.status"
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "--- task-a ---" "first session start for task-a did not print the full block header"
+  assert_contains "$out" "harness=claude" "first session start did not print the full .meta content"
+  assert_contains "$out" "status tail (last" "first session start did not print the full status tail"
+  assert_present "$marker" "first session start did not record a fingerprint marker for task-a"
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "--- task-a --- unchanged since last session start; compact" \
+    "unchanged task-a was not printed as a compact line on the second session start"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live) · last known verb: working · full status log: $home/state/task-a.status" \
+    "compact line missing endpoint/verb/full-log-path self-explanation"
+  assert_contains "$out" "delete $marker to force the full block" \
+    "compact line did not name the exact marker to delete to force the full block"
+  assert_not_contains "$out" "harness=claude" "unchanged task-a still printed its full .meta content"
+  assert_not_contains "$out" "status tail (last" "unchanged task-a still printed its full status tail"
+
+  pass "an unchanged task prints one compact line on the second session start; the first start is always full"
+}
+
+test_fleet_state_fingerprint_meta_change_forces_full_block() {
+  local rec root home fakebin out
+  rec=$(new_world fingerprint-meta-change)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-b.meta"
+  printf 'working: step 1\n' > "$home/state/task-b.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=codex\n' > "$home/state/task-b.meta"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "--- task-b ---" "a changed .meta did not restore the full block header"
+  assert_contains "$out" "harness=codex" "a changed .meta was not reprinted in full"
+  assert_not_contains "$out" "--- task-b --- unchanged" "a changed .meta was incorrectly reported as unchanged"
+
+  pass "a .meta change restores the full block even though the task was shown before"
+}
+
+test_fleet_state_fingerprint_new_status_line_forces_full_block() {
+  local rec root home fakebin out
+  rec=$(new_world fingerprint-status-change)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-c.meta"
+  printf 'working: step 1\n' > "$home/state/task-c.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  printf 'working: step 1\nworking: step 2 - new development\n' > "$home/state/task-c.status"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "--- task-c ---" "a new status line did not restore the full block header"
+  assert_contains "$out" "working: step 2 - new development" "a new status line was not reprinted in the full tail"
+  assert_not_contains "$out" "--- task-c --- unchanged" "a new status line was incorrectly reported as unchanged"
+
+  pass "a new status line restores the full block even though the task was shown before"
+}
+
+test_fleet_state_fingerprint_missing_marker_forces_full_block() {
+  local rec root home fakebin out marker
+  rec=$(new_world fingerprint-missing-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  marker="$home/state/.session-start-seen-task-d"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-d.meta"
+  printf 'working: step 1\n' > "$home/state/task-d.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  assert_present "$marker" "the first session start did not leave a fingerprint marker to remove"
+
+  rm -f "$marker"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "--- task-d ---" "a missing fingerprint marker did not fall back to the full block"
+  assert_contains "$out" "status tail (last" "a missing fingerprint marker did not restore the full status tail"
+  assert_not_contains "$out" "--- task-d --- unchanged" "a missing fingerprint marker was incorrectly reported as unchanged"
+
+  pass "a missing fingerprint marker always falls back to the full block, never a silent compact form"
+}
+
+test_fleet_state_fingerprint_read_only_session_records_no_marker() {
+  local rec root home fakebin out marker holder_pid
+  rec=$(new_world fingerprint-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  marker="$home/state/.session-start-seen-task-e"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-e.meta"
+  printf 'working: step 1\n' > "$home/state/task-e.status"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(FM_FAKE_HARNESS_PID=$$ FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "lock-refusal fixture did not enter read-only mode"
+  assert_contains "$out" "--- task-e ---" "the read-only session did not print task-e's full block"
+  assert_absent "$marker" "a lock-refused read-only session recorded a fingerprint marker"
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "--- task-e --- unchanged" \
+    "a read-only session consumed the lock owner's first full print of task-e"
+  assert_contains "$out" "harness=claude" "the lock-owning session start did not print the full .meta content"
+  assert_present "$marker" "the lock-owning session start did not record a fingerprint marker"
+
+  pass "a lock-refused session compares the fingerprint but records none, so the lock owner still gets the full block"
+}
+
+test_fleet_state_fingerprint_compact_line_caps_its_verb() {
+  local rec root home fakebin out compact verb
+  rec=$(new_world fingerprint-verb-cap)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-f.meta"
+  {
+    printf 'sailing onward without a colon'
+    awk 'BEGIN { while (i++ < 400) printf " padding" }'
+    printf '\n'
+  } > "$home/state/task-f.status"
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  compact=$(printf '%s\n' "$out" | grep 'last known verb: ' || true)
+  [ -n "$compact" ] || fail "an unchanged task-f did not produce a compact line: $out"
+  assert_contains "$compact" "sailing onward without a colon" \
+    "the verb cap discarded the lede of the last known status line"
+  assert_contains "$compact" "$home/state/task-f.status" \
+    "the compact line dropped the full log path that recovers the rest"
+
+  verb=${compact#*last known verb: }
+  verb=${verb%% · full status log:*}
+  [ "${#verb}" -le 220 ] \
+    || fail "the compact line's verb ran ${#verb} characters past the 220-character cap: $verb"
+  case "$verb" in
+    *' [truncated]') : ;;
+    *) fail "an over-long colon-less status line was not marked as truncated on the compact line: $verb" ;;
+  esac
+
+  pass "the compact line caps an unbounded status verb the way the status tail caps its lines"
+}
+
+test_fleet_state_fingerprint_compact_verb_matches_the_fleet_normalization() {
+  local rec root home fakebin out compact
+  rec=$(new_world fingerprint-verb-normalization)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-g.meta"
+  # The shape bin/fm-pending-reply-lib.sh writes: a bracketed key, and a
+  # correlation token, ahead of the first colon.
+  printf 'resolved [key=pending-reply-77] corr=00112233445566778899aabbccddeeff: pending-reply-resolved: task=task-g\n' \
+    > "$home/state/task-g.status"
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  compact=$(printf '%s\n' "$out" | grep 'last known verb: ' || true)
+  [ -n "$compact" ] || fail "an unchanged task-g did not produce a compact line: $out"
+  assert_contains "$compact" "last known verb: resolved ·" \
+    "the compact line did not report the same leading verb every other fleet surface reports"
+  assert_not_contains "$compact" "key=pending-reply-77" \
+    "the compact line leaked a bracketed status key into the verb"
+  assert_not_contains "$compact" "corr=00112233445566778899aabbccddeeff" \
+    "the compact line leaked a correlation token into the verb"
+
+  pass "the compact line's verb is normalized by the fleet's own status-verb owner"
+}
+
+test_fleet_state_fingerprint_compact_line_names_an_absent_status_log() {
+  local rec root home fakebin out compact
+  rec=$(new_world fingerprint-no-status)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  # A freshly spawned task: .meta present, no status line written yet.
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-h.meta"
+  rm -f "$home/state/task-h.status"
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "status tail: (no status file yet: $home/state/task-h.status)" \
+    "the full block did not report the absent status file for a freshly spawned task"
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  compact=$(printf '%s\n' "$out" | grep 'last known verb: ' || true)
+  [ -n "$compact" ] || fail "an unchanged task-h did not produce a compact line: $out"
+  assert_contains "$compact" "(no status file yet: $home/state/task-h.status)" \
+    "the compact line did not mirror the full block's wording for an absent status file"
+  assert_not_contains "$compact" "full status log:" \
+    "the compact line advertised a full status log that does not exist"
+
+  pass "the compact line names an absent status log the same way the full block does"
+}
+
+test_fleet_state_fingerprint_compact_verb_skips_blank_trailing_lines() {
+  local rec root home fakebin out compact
+  rec=$(new_world fingerprint-blank-tail)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-i.meta"
+  # A crewmate writes its own status lines, so a trailing blank line is its
+  # to produce; every other fleet surface still reports the done: verb.
+  printf 'done: shipped\n\n' > "$home/state/task-i.status"
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  compact=$(printf '%s\n' "$out" | grep 'last known verb: ' || true)
+  [ -n "$compact" ] || fail "an unchanged task-i did not produce a compact line: $out"
+  assert_contains "$compact" "last known verb: done ·" \
+    "a blank trailing status line hid the task's last known verb behind a placeholder"
+
+  pass "the compact line reads past blank trailing status lines the way every other fleet surface does"
+}
+
+test_fleet_state_fingerprint_blank_terminated_append_forces_full_block() {
+  local rec root home fakebin out
+  rec=$(new_world fingerprint-blank-terminated-append)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-j.meta"
+  printf 'working: step 1\n\n' > "$home/state/task-j.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  printf 'working: step 1\n\nneeds-decision: which branch?\n\n' > "$home/state/task-j.status"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "--- task-j --- unchanged" \
+    "a new status line under a blank-terminated log was incorrectly reported as unchanged"
+  assert_contains "$out" "needs-decision: which branch?" \
+    "a new status line under a blank-terminated log was never shown"
+
+  pass "a new status line restores the full block even when the writer terminates its log with a blank line"
+}
+
+test_fleet_state_fingerprint_unreadable_marker_falls_back_quietly() {
+  local rec root home fakebin out err marker
+  rec=$(new_world fingerprint-unreadable-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  marker="$home/state/.session-start-seen-task-k"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-k.meta"
+  printf 'working: step 1\n' > "$home/state/task-k.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  assert_present "$marker" "the first session start did not leave a fingerprint marker to make unreadable"
+
+  chmod 000 "$marker"
+  err="$home/unreadable-marker.err"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err")
+  chmod 644 "$marker" 2>/dev/null || true
+
+  assert_contains "$out" "--- task-k ---" "an unreadable fingerprint marker did not fall back to the full block"
+  assert_contains "$out" "harness=claude" "an unreadable fingerprint marker did not restore the full .meta content"
+  assert_not_contains "$out" "--- task-k --- unchanged" \
+    "an unreadable fingerprint marker was incorrectly reported as unchanged"
+  assert_not_contains "$(cat "$err")" "$marker" \
+    "an unreadable fingerprint marker leaked a raw shell error naming it"
+
+  pass "an unreadable fingerprint marker falls back to the full block without leaking a shell error"
+}
+
+test_fleet_state_fingerprint_reemit_never_compacts() {
+  local rec root home fakebin out marker
+  rec=$(new_world fingerprint-reemit)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  marker="$home/state/.session-start-seen-task-m"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-m.meta"
+  printf 'working: step 1\n' > "$home/state/task-m.status"
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  assert_present "$marker" "the first session start did not record a fingerprint marker for task-m"
+
+  # Nothing changed since that startup, so an ordinary session start compacts
+  # task-m: the fixture is proven to sit on the compact path before --reemit
+  # is asked the same question.
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "--- task-m --- unchanged" \
+    "the fixture never reached the compact path, so the --reemit assertion below would prove nothing"
+
+  # A re-emit is by definition a session that LOST the context in which the
+  # full block was printed, so it must reprint every task in full.
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+
+  assert_contains "$out" "SESSION START (CONTEXT RE-EMIT) - $home" "the --reemit fixture did not re-emit"
+  assert_not_contains "$out" "--- task-m --- unchanged" \
+    "--reemit compacted the very block a context re-emit exists to restore"
+  assert_contains "$out" "harness=claude" "--reemit did not reprint task-m's .meta identity fields"
+  assert_contains "$out" "working: step 1" "--reemit did not reprint task-m's status tail"
+
+  pass "--reemit always reprints the full block, even when the fingerprint would otherwise compact it"
+}
+
+test_fleet_state_fingerprint_dead_endpoint_forces_full_block() {
+  local rec root home fakebin out
+  rec=$(new_world fingerprint-endpoint-flip)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-n.meta"
+  printf 'working: step 1\n' > "$home/state/task-n.status"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live)" \
+    "the fixture's first session start did not see task-n's endpoint alive"
+
+  # The crew's pane dies without writing a final status line - the wedge/crash
+  # case. .meta, the status log, and the tail bound are all untouched.
+  make_fake_tmux "$fakebin" "fm-sess:elsewhere"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "--- task-n --- unchanged" \
+    "an endpoint that flipped alive -> dead was reported as unchanged since the last session start"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:live)" \
+    "the digest did not report task-n's endpoint as dead"
+  assert_contains "$out" "harness=claude" \
+    "a dead endpoint did not restore task-n's full .meta block for stuck-crewmate recovery"
+
+  pass "an endpoint that dies between session starts restores the full block instead of an unchanged label"
+}
+
+test_fleet_state_fingerprint_repeated_last_line_forces_full_block() {
+  local rec root home fakebin out
+  rec=$(new_world fingerprint-repeated-last-line)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\nharness=claude\n' > "$home/state/task-o.meta"
+  printf 'working: running tests\n' > "$home/state/task-o.status"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  # The crewmate fails and then retries, so the log's LAST line is the same
+  # string the previous session start recorded - but the log itself grew.
+  printf 'working: running tests\nfailed: tests red\nworking: running tests\n' \
+    > "$home/state/task-o.status"
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "--- task-o --- unchanged" \
+    "a status log that returned to its previous last line was reported as unchanged"
+  assert_contains "$out" "failed: tests red" \
+    "the intervening failure line was suppressed by a last-line-only fingerprint"
+
+  pass "a status log that returns to the same last line still restores the full block"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------
@@ -2645,6 +3079,20 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_fleet_state_fingerprint_first_start_full_then_unchanged_compact
+test_fleet_state_fingerprint_meta_change_forces_full_block
+test_fleet_state_fingerprint_new_status_line_forces_full_block
+test_fleet_state_fingerprint_missing_marker_forces_full_block
+test_fleet_state_fingerprint_read_only_session_records_no_marker
+test_fleet_state_fingerprint_compact_line_caps_its_verb
+test_fleet_state_fingerprint_compact_verb_matches_the_fleet_normalization
+test_fleet_state_fingerprint_compact_line_names_an_absent_status_log
+test_fleet_state_fingerprint_compact_verb_skips_blank_trailing_lines
+test_fleet_state_fingerprint_blank_terminated_append_forces_full_block
+test_fleet_state_fingerprint_unreadable_marker_falls_back_quietly
+test_fleet_state_fingerprint_reemit_never_compacts
+test_fleet_state_fingerprint_dead_endpoint_forces_full_block
+test_fleet_state_fingerprint_repeated_last_line_forces_full_block
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

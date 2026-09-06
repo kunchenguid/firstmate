@@ -937,23 +937,177 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# $state/.status-presentation-cursor is the durable fleet-wide manifest this
+# file owns: one row per task, TAB-separated, exactly 4 fields per row -
+#   <task-id>\t<ident>\t<offset>\t<backstop>
+# - task-id: the status file's basename with ".status" stripped.
+# - ident: _fm_open_decisions_file_ident's identity string for that status
+#   file (device:inode plus birth time where available); a row whose ident no
+#   longer matches the live file is stale and its cached offset is discarded.
+# - offset: the byte offset through which this task's status log has been
+#   presented fleet-wide (status_presentation_cursor_offset).
+# - backstop: the byte offset status_outcome_backstop_cursor_offset falls
+#   back to when no newer supervision-branch outcome covers this task's
+#   latest event.
+# Every writer below emits exactly these 4 fields. Readers additionally accept
+# one deliberate legacy shape: a 3-field row (task, ident, offset) written
+# before commit d977128 added the backstop column. It is read as backstop 0 -
+# the same value that column carries when no supervision-branch outcome covers
+# the task - and is rewritten as a full 4-field row on the next rewrite, so
+# accepting it loses nothing in either rollout direction.
+# Anything else is a malformed manifest: more than 4 fields, fewer than 3, an
+# empty task/ident/offset/backstop, or an offset or backstop that is not a
+# canonical decimal byte count - it must be digits only, at most
+# FM_STATUS_PRESENTATION_MAX_OFFSET_DIGITS of them so shell integer comparison
+# still holds, and without a leading zero, which `$((size - offset))` would
+# read as octal while the `[ -lt ]` beside it reads the same digits as
+# decimal.
+# Every reader below then fails closed (returns 1, deletes nothing) rather than
+# guessing at a partial or newer format, because a rewrite has to carry every
+# other task's columns through untouched, and says why on stderr rather than
+# refusing in silence. See _fm_status_presentation_row_parse and
+# _fm_status_presentation_row_error for a row, and
+# _fm_status_presentation_manifest_error for a refusal about the manifest file
+# itself.
+
+# Print one diagnostic line to stderr for a malformed $state/.status-
+# presentation-cursor row instead of failing silently. Every caller here still
+# returns 1 right after calling this (or breaks a rewrite loop with rc=1) -
+# this only makes that existing fail-closed behavior visible; it changes no
+# control flow and deletes nothing itself.
+_fm_status_presentation_row_error() {  # <manifest> <line-no> <reason> <row>
+  printf 'error: %s:%s: malformed status-presentation-cursor row: %s (expected 4 TAB-separated fields: task, ident, offset, backstop, where offset and backstop are decimal byte counts of at most %s digits without a leading zero): %s\n' \
+    "$1" "$2" "$3" "$FM_STATUS_PRESENTATION_MAX_OFFSET_DIGITS" "$4" >&2
+}
+
+# The same for a refusal that concerns the manifest file itself rather than one
+# of its rows, so an unreadable, symlinked or unwritable manifest is as visible
+# to bin/fm-teardown.sh as a malformed row instead of returning 1 in silence.
+_fm_status_presentation_manifest_error() {  # <manifest> <reason>
+  printf 'error: %s: unusable status-presentation-cursor manifest: %s (expected TAB-separated rows: task, ident, offset, backstop)\n' \
+    "$1" "$2" >&2
+}
+
+# The widest offset a manifest row may carry. A byte count this large is not a
+# real status file, and once a value leaves the shell's signed 64-bit range -
+# which a 19-digit value already can - `[ "$offset" -gt "$size" ]` aborts with
+# "integer expression expected" instead of comparing, which would leave the
+# reader returning an unusable offset with rc=0. Every 18-digit value is inside
+# that range.
+FM_STATUS_PRESENTATION_MAX_OFFSET_DIGITS=18
+
+# True for a canonical decimal byte count: digits only, no leading zero, and
+# narrow enough for shell integer comparison. On refusal, names the rule the
+# value broke in FM_STATUS_PRESENTATION_OFFSET_ERROR - a value like "010" or a
+# 25-digit one is numeric, so reporting it as non-numeric would send the
+# operator looking for the wrong defect.
+_fm_status_presentation_offset_is_canonical() {  # <value>
+  FM_STATUS_PRESENTATION_OFFSET_ERROR=
+  case "$1" in
+    ''|*[!0-9]*)
+      FM_STATUS_PRESENTATION_OFFSET_ERROR="non-numeric offset or backstop"
+      return 1
+      ;;
+    0) return 0 ;;
+    0*)
+      FM_STATUS_PRESENTATION_OFFSET_ERROR="offset or backstop has a leading zero"
+      return 1
+      ;;
+  esac
+  if [ "${#1}" -gt "$FM_STATUS_PRESENTATION_MAX_OFFSET_DIGITS" ]; then
+    FM_STATUS_PRESENTATION_OFFSET_ERROR="offset or backstop is wider than $FM_STATUS_PRESENTATION_MAX_OFFSET_DIGITS digits"
+    return 1
+  fi
+}
+
+# Split one raw manifest row into FM_STATUS_PRESENTATION_ROW_{TASK,IDENT,OFFSET,
+# BACKSTOP} and validate its field count and field contents. The split happens
+# here, on the raw line, because TAB is an IFS whitespace character: reading a
+# row with `IFS=$'\t' read -r task ident offset backstop extra` merges adjacent
+# TABs, so a row carrying an empty column would hide the surplus column behind
+# it and shift every later value one place left. Prints the diagnostic and
+# returns 1 for a malformed row; the caller still fails closed itself.
+_fm_status_presentation_row_parse() {  # <manifest> <line-no> <row>
+  local manifest=$1 lineno=$2 row=$3 rest count
+  local fields=()
+  FM_STATUS_PRESENTATION_ROW_TASK=
+  FM_STATUS_PRESENTATION_ROW_IDENT=
+  FM_STATUS_PRESENTATION_ROW_OFFSET=
+  FM_STATUS_PRESENTATION_ROW_BACKSTOP=0
+  rest=$row
+  while :; do
+    case "$rest" in
+      *$'\t'*) fields+=("${rest%%$'\t'*}"); rest=${rest#*$'\t'} ;;
+      *) fields+=("$rest"); break ;;
+    esac
+  done
+  count=${#fields[@]}
+  if [ "$count" -gt 4 ]; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" \
+      "unexpected extra field ($count fields)" "$row"
+    return 1
+  fi
+  FM_STATUS_PRESENTATION_ROW_TASK=${fields[0]}
+  if [ "$count" -ge 2 ]; then FM_STATUS_PRESENTATION_ROW_IDENT=${fields[1]}; fi
+  if [ "$count" -ge 3 ]; then FM_STATUS_PRESENTATION_ROW_OFFSET=${fields[2]}; fi
+  if [ "$count" -ge 4 ]; then FM_STATUS_PRESENTATION_ROW_BACKSTOP=${fields[3]}; fi
+  if [ -z "$FM_STATUS_PRESENTATION_ROW_TASK" ]; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" "missing task field" "$row"
+    return 1
+  fi
+  if [ -z "$FM_STATUS_PRESENTATION_ROW_IDENT" ]; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" "missing ident field" "$row"
+    return 1
+  fi
+  if [ -z "$FM_STATUS_PRESENTATION_ROW_OFFSET" ]; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" "missing offset field" "$row"
+    return 1
+  fi
+  if [ -z "$FM_STATUS_PRESENTATION_ROW_BACKSTOP" ]; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" "missing backstop field" "$row"
+    return 1
+  fi
+  if ! _fm_status_presentation_offset_is_canonical "$FM_STATUS_PRESENTATION_ROW_OFFSET"; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" \
+      "$FM_STATUS_PRESENTATION_OFFSET_ERROR" "$row"
+    return 1
+  fi
+  if ! _fm_status_presentation_offset_is_canonical "$FM_STATUS_PRESENTATION_ROW_BACKSTOP"; then
+    _fm_status_presentation_row_error "$manifest" "$lineno" \
+      "$FM_STATUS_PRESENTATION_OFFSET_ERROR" "$row"
+    return 1
+  fi
+}
+
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
+  local f=$1 state task manifest data row row_task offset ident cur_ident size legacy lineno
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
   manifest="$state/.status-presentation-cursor"
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
-    [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+    if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
+      _fm_status_presentation_manifest_error "$manifest" "not a readable regular file"
+      return 1
+    fi
+    if ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      _fm_status_presentation_manifest_error "$manifest" "could not be read"
+      return 1
+    fi
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
-      [ -n "$row_task" ] || continue
-      [ -z "$extra" ] || return 1
-      case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
-      [ -n "$legacy" ] && [ -n "$ident" ] || return 1
+    lineno=0
+    while IFS= read -r row; do
+      lineno=$((lineno + 1))
+      [ -n "$row" ] || continue
+      _fm_status_presentation_row_parse "$manifest" "$lineno" "$row" || return 1
+      row_task=$FM_STATUS_PRESENTATION_ROW_TASK
+      ident=$FM_STATUS_PRESENTATION_ROW_IDENT
+      legacy=$FM_STATUS_PRESENTATION_ROW_OFFSET
       if [ "$row_task" = "$task" ]; then
-        [ -z "$offset" ] || return 1
+        if [ -n "$offset" ]; then
+          _fm_status_presentation_row_error "$manifest" "$lineno" "duplicate row for task $task" "$row"
+          return 1
+        fi
         offset=$legacy
         cur_ident=$ident
       fi
@@ -983,20 +1137,29 @@ EOF
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  local f=$1 state task manifest data row row_task ident row_backstop backstop current size lineno
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
   manifest="$state/.status-presentation-cursor"
-  [ -e "$manifest" ] || { printf '0'; return 0; }
-  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+  [ -e "$manifest" ] || [ -L "$manifest" ] || { printf '0'; return 0; }
+  if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
+    _fm_status_presentation_manifest_error "$manifest" "not a readable regular file"
+    return 1
+  fi
+  if ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+    _fm_status_presentation_manifest_error "$manifest" "could not be read"
+    return 1
+  fi
   backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
-    [ -n "$row_task" ] || continue
-    [ -z "$extra" ] || return 1
-    case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
-    [ -n "$presented" ] && [ -n "$ident" ] || return 1
+  lineno=0
+  while IFS= read -r row; do
+    lineno=$((lineno + 1))
+    [ -n "$row" ] || continue
+    _fm_status_presentation_row_parse "$manifest" "$lineno" "$row" || return 1
+    row_task=$FM_STATUS_PRESENTATION_ROW_TASK
+    ident=$FM_STATUS_PRESENTATION_ROW_IDENT
+    row_backstop=$FM_STATUS_PRESENTATION_ROW_BACKSTOP
     if [ "$row_task" = "$task" ]; then
       current=$(_fm_open_decisions_file_ident "$f") || return 1
       size=$(_fm_status_file_size "$f") || return 1
@@ -1147,7 +1310,7 @@ status_presentation_marker_commit() {
 }
 
 status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
+  local state=$1 task=$2 lock manifest tmp data row row_task rc=0 found=0 lineno
   local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1172,42 +1335,56 @@ status_retire_presentation_task() {  # <state> <task-id>
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
-        [ -n "$row_task" ] || continue
-        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
-        [ -n "$offset" ] || { rc=1; break; }
-        [ "$row_task" != "$task" ] || found=1
+      lineno=0
+      while IFS= read -r row; do
+        lineno=$((lineno + 1))
+        [ -n "$row" ] || continue
+        if ! _fm_status_presentation_row_parse "$manifest" "$lineno" "$row"; then
+          rc=1; break
+        fi
+        [ "$FM_STATUS_PRESENTATION_ROW_TASK" != "$task" ] || found=1
       done <<EOF
 $data
 EOF
-      [ "$rc" -ne 0 ] || [ "$found" -ne 0 ] || return 0
-      rc=0
+      # A row this pre-check already reported must not be reported a second
+      # time by the locked rewrite loop below: one malformed row is one finding.
+      [ "$rc" -eq 0 ] || return 1
+      [ "$found" -ne 0 ] || return 0
     fi
   fi
 
   fm_lock_acquire_wait "$lock" || return 1
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
+      _fm_status_presentation_manifest_error "$manifest" "not a readable regular file"
       rc=1
     elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      _fm_status_presentation_manifest_error "$manifest" "could not be read"
       rc=1
     elif ! : > "$tmp"; then
+      _fm_status_presentation_manifest_error "$manifest" "could not create the rewrite file $tmp"
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
-        [ -n "$row_task" ] || continue
-        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
-        [ -n "$offset" ] || { rc=1; break; }
+      lineno=0
+      while IFS= read -r row; do
+        lineno=$((lineno + 1))
+        [ -n "$row" ] || continue
+        if ! _fm_status_presentation_row_parse "$manifest" "$lineno" "$row"; then
+          rc=1; break
+        fi
+        row_task=$FM_STATUS_PRESENTATION_ROW_TASK
         if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
-            || { rc=1; break; }
+          printf '%s\t%s\t%s\t%s\n' "$row_task" "$FM_STATUS_PRESENTATION_ROW_IDENT" \
+            "$FM_STATUS_PRESENTATION_ROW_OFFSET" "$FM_STATUS_PRESENTATION_ROW_BACKSTOP" >> "$tmp" \
+            || { _fm_status_presentation_manifest_error "$manifest" "could not be written to the rewrite file $tmp"; rc=1; break; }
         fi
       done <<EOF
 $data
 EOF
-      if [ "$rc" -eq 0 ]; then mv -f "$tmp" "$manifest" || rc=1; fi
+      if [ "$rc" -eq 0 ]; then
+        mv -f "$tmp" "$manifest" \
+          || { _fm_status_presentation_manifest_error "$manifest" "could not be replaced from $tmp"; rc=1; }
+      fi
       [ "$rc" -eq 0 ] || rm -f "$tmp"
     fi
   fi
