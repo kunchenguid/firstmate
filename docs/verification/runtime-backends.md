@@ -6,6 +6,31 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex Max reasoning effort
+
+Verified on 2026-09-06 with codex-cli 0.153.4 and `gpt-5.6-luna`.
+The installed bundled model catalog advertises `low`, `medium`, `high`, `xhigh`, and `max` for Luna.
+From outside a project, the following read-only request completed with exit status 0:
+
+```sh
+codex exec --ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check \
+  --model gpt-5.6-luna -c 'model_reasoning_effort="max"' --color never \
+  'This is a model configuration smoke test. Do not use tools, read files, or change anything. Reply exactly LUNA_MAX_OK.'
+```
+
+Observed configuration and response:
+
+```text
+model: gpt-5.6-luna
+sandbox: read-only
+reasoning effort: max
+LUNA_MAX_OK
+```
+
+`tests/fm-spawn-dispatch-profile.test.sh` verifies that Firstmate passes this effort in the generated worker launch and records it in task metadata.
+`tests/fm-bootstrap.test.sh` verifies acceptance in individual and array profiles while retaining invalid-effort diagnostics.
+Model support remains a dispatch-time catalog check; this evidence does not imply every Codex model accepts Max.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
