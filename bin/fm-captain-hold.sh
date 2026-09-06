@@ -208,12 +208,14 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
+PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
   local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+  PARENT_HOLD_PUBLISHED=0
   fm_parent_channel_report "$FM_HOME" "$STATE" \
     "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
   case "$rc" in
-    0|1) ;;
+    0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
   esac
 }
@@ -1415,7 +1417,11 @@ reconcile_close() {
       || fail "task $id records a different resolution; it cannot be reconciled again"
     [ "$(recorded_resolution_mode "$body" || true)" = reconciled ] \
       || fail "task $id was not closed by reconciliation"
+    occurrence=$(resolution_record_count "$body")
     remove_interrupted_answer_stamp "$id"
+    publish_parent_hold "$id" "$occurrence" resolved reconciled
+    [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
+      || fail "could not publish the reconciled captain-held task $id to its parent"
     reconcile_request_retire "$id"
     printf 'reconciled: %s\n' "$id"
     return 0
@@ -1436,8 +1442,10 @@ reconcile_close() {
   show=$(task_show "$id") || fail "task $id disappeared after closing"
   body_has_resolution_record "$(show_field "$show" body)" \
     || fail "captain-held task $id did not retain its durable resolution record"
-  reconcile_request_retire "$id"
   publish_parent_hold "$id" "$occurrence" resolved reconciled
+  [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
+    || fail "could not publish the reconciled captain-held task $id to its parent"
+  reconcile_request_retire "$id"
   printf 'reconciled: %s\n' "$id"
 }
 

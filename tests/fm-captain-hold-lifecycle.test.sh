@@ -1318,6 +1318,51 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+test_secondmate_reconcile_publishes_before_request_retirement() {
+  local parent mate channel evidence out show rc request
+  parent=$(make_home reconcile-parent-channel)
+  mate=$(make_home reconcile-channel-mate)
+  printf 'reconcile-channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/reconcile-channel-mate.status"
+  evidence="$mate/reconcile-evidence.txt"
+
+  tasks_in "$mate" add reconcile-channel-call "Verify the mate call" --kind ship --repo sample >/dev/null \
+    || fail "could not create the reconcile channel call"
+  run_captain "$mate" hold reconcile-channel-call --reason "verify current release state" >/dev/null \
+    || fail "could not hold the reconcile channel call"
+  request_reconciles "$mate" reconcile-board reconcile-channel-call \
+    || fail "could not request the channel reconciliation"
+  printf 'The release has already landed.\n' > "$evidence"
+  request="$mate/state/reconcile-requests/reconcile-channel-call.request"
+
+  chmod 0500 "$mate/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$mate" reconcile close reconcile-channel-call \
+    --evidence-file "$evidence" 2>&1)
+  rc=$?
+  set -e
+  chmod 0700 "$mate/state/reconcile-requests"
+  [ "$rc" -ne 0 ] || fail "failed reconcile request retirement reported success"
+  assert_contains "$out" "reconcile-channel-call" \
+    "the reconcile retirement failure did not name its task: $out"
+  show=$(tasks_in "$mate" show reconcile-channel-call --full)
+  assert_contains "$show" "state: done" "request retirement failure reversed the reconciled close"
+  assert_contains "$show" "Resolution mode: reconciled" \
+    "request retirement failure lost the reconciled resolution mode"
+  [ -f "$request" ] || fail "the request retired despite its forced retirement failure"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+    || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
+
+  run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
+    || fail "the closed reconciliation could not finish publication and retirement"
+  [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+    || fail "the reconciliation retry duplicated or changed its parent resolution: $(cat "$channel")"
+  pass "secondmate reconciliation publishes before retiring its durable request"
+}
+
 # The one keyed-answer intake, fed through the real process-event runner by a
 # fixture channel that knows nothing about captain holds: task-id keys close at
 # answer time, a card-declared release mode frees held work, freeform prose can
@@ -2524,6 +2569,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
