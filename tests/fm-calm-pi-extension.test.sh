@@ -1619,7 +1619,7 @@ JS
 }
 
 test_operational_followup_turn_e2e() {
-  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
+  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session captain_count
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi operational follow-up E2E"
     return 0
@@ -1809,7 +1809,8 @@ TS
     while [ "$i" -lt 240 ]; do
       session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l "CAPTAIN_PROMPT_$label" {} + 2>/dev/null | head -1 || true)
       if [ -n "$session_file" ] && grep -Fq "MONITOR_HANDLED_${label}_ONE" "$session_file"; then
-        break
+        pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+        printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE" && break
       fi
       sleep 0.05
       i=$((i + 1))
@@ -1818,9 +1819,12 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+    captain_count=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
+    if [ "$captain_count" -ne 1 ]; then
+      printf 'Pi follow-up %s captain_answer_rows=%s\n--- captured pane ---\n%s\n--- persisted session ---\n' "$label" "$captain_count" "$pane" >&2
+      cat "$session_file" >&2
+      fail "Pi follow-up $label case expected one rendered captain answer, found $captain_count"
+    fi
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
@@ -3081,7 +3085,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -3749,10 +3753,17 @@ JS
   # Exactly one wave row means the sprite reflowed rather than wrapping onto extra rows.
   [ "$(grep -c -F '\__/' "$boat_resized_snapshot")" -eq 1 ] \
     || fail "the working ship wrapped onto more than one water row after the resize"
-  while IFS= read -r boat_line; do
-    [ "${#boat_line}" -le 100 ] \
-      || fail "a rendered line was ${#boat_line} cells after resizing to 100 columns"
-  done <"$boat_resized_snapshot"
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module - "$boat_resized_snapshot" <<'JS' || fail "a rendered line exceeded 100 cells after resizing"
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { visibleWidth } = await import(pathToFileURL(
+  `${process.env.PI_PACKAGE_DIR}/node_modules/@earendil-works/pi-tui/dist/index.js`,
+).href);
+for (const line of readFileSync(process.argv[2], "utf8").split("\n")) {
+  const width = visibleWidth(line);
+  if (width > 100) throw new Error(`a rendered line was ${width} cells after resizing to 100 columns`);
+}
+JS
   boat_column_one=$(awk 'index($0,"\\__/"){print index($0,"\\__/"); exit}' "$boat_resized_snapshot")
   [ "$boat_column_one" -le 97 ] \
     || fail "the working ship hull started at column $boat_column_one and cannot fit in 100 columns"

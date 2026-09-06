@@ -5,10 +5,10 @@
 #   fm-backlog-receive.sh state/handoff/<secondmate-id>.outbox.md <bytes> <sha256> <generation>
 #
 # The delivered file must be a non-symlink backlog-format scratch file confined
-# to FM_HOME/state/handoff. Every item must be Queued. Keys already present in
-# data/backlog.md are skipped; every remaining key moves in one dependency-closed
-# `tasks-axi mv` transaction under tasks-axi's own locks. On an ambiguous caller
-# retry, destination-present classification makes this operation idempotent.
+# to FM_HOME/state/handoff; it may contain no items. Every item must be Queued.
+# Keys already present in data/backlog.md are skipped; every remaining key moves
+# in one dependency-closed `tasks-axi mv` transaction under tasks-axi's own locks.
+# On an ambiguous caller retry, destination-present classification is idempotent.
 #
 # If tasks-axi reports a lock failure, this host may remove and retry once only
 # for its own backlog or delivered lock whose pid is dead and whose mtime is at
@@ -141,7 +141,8 @@ KEYS=()
 while IFS= read -r key; do
   [ -n "$key" ] && KEYS+=("$key")
 done < <(list_keys "$DELIVERED")
-for key in "${KEYS[@]}"; do
+# bash 3.2 + set -u treats "${arr[@]}" on an empty array as unbound.
+for key in ${KEYS[@]+"${KEYS[@]}"}; do
   section=$(backlog_key_section "$DELIVERED" "$key") || die "delivered key disappeared during classification: $key"
   [ "$section" = '## Queued' ] || die "delivered outbox contains non-Queued item $key under $section"
 done
@@ -154,7 +155,7 @@ if [ ! -f "$DEST" ]; then
 fi
 TO_MOVE=()
 ALREADY=()
-for key in "${KEYS[@]}"; do
+for key in ${KEYS[@]+"${KEYS[@]}"}; do
   if backlog_key_section "$DEST" "$key" >/dev/null 2>&1; then
     ALREADY+=("$key")
   else
@@ -177,7 +178,7 @@ if [ "${#TO_MOVE[@]}" -gt 0 ]; then
   fi
 fi
 
-for key in "${KEYS[@]}"; do
+for key in ${KEYS[@]+"${KEYS[@]}"}; do
   backlog_key_section "$DEST" "$key" >/dev/null 2>&1 \
     || die "receipt verification failed for $key; delivered outbox is preserved"
 done

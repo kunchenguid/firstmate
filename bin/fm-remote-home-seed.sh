@@ -157,7 +157,9 @@ done < "$BRIEF" > "$TMP/charter.remote"
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+# bash 3.2 + set -u treats "${arr[@]}" on an empty array as unbound, and
+# --no-projects reaches this loop with no project names.
+for project in ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")

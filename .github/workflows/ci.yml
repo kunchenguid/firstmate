@@ -407,6 +407,17 @@ jobs:
             exit 1
           }
 
+          # The remaining empty-array guards. The file skips itself on a Bash at
+          # or above 4.4, so this lane's real 3.2 is the only place it proves
+          # anything.
+          empty_array_output=$(/bin/bash tests/fm-bash32-empty-array.test.sh)
+          printf '%s\n' "$empty_array_output"
+          empty_array_count=$(printf '%s\n' "$empty_array_output" | grep -c '^ok - ')
+          [ "$empty_array_count" -eq 2 ] || {
+            echo "::error::expected 2 empty-array bash 3.2 regressions, got $empty_array_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest

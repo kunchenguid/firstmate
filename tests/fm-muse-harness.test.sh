@@ -25,6 +25,39 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-muse-harness)
 
+# A real named ancestor, following the Cursor fixture pattern. Copying the
+# system Bash executable is not executable on every supported macOS host.
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+[ -n "$CC_BIN" ] || fail "a C compiler is required to build the fake Muse process"
+cat > "$TMP_ROOT/fake-muse.c" <<'C'
+#include <errno.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+  int status;
+  pid_t child;
+  if (argc != 3 || strcmp(argv[1], "-c") != 0) return 64;
+  child = fork();
+  if (child < 0) return 70;
+  if (child == 0) {
+    execl("/bin/bash", "bash", "-c", argv[2], (char *)0);
+    _exit(127);
+  }
+  while (waitpid(child, &status, 0) < 0) {
+    if (errno != EINTR) return 71;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 72;
+}
+C
+make_muse_process() {
+  "$CC_BIN" -o "$1" "$TMP_ROOT/fake-muse.c" \
+    || fail "could not build the fake Muse process"
+}
+
 # --- session-log fixtures ---------------------------------------------------
 
 # muse_log_metadata <workspace-root>: the first record of every session log,
@@ -104,7 +137,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  make_muse_process "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -181,7 +214,7 @@ test_detects_versioned_process_ancestor() {
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
+    make_muse_process "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -197,7 +230,7 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
+    make_muse_process "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
