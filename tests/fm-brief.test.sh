@@ -898,6 +898,17 @@ More prose after the marker.'
   [ "$contract_line" -lt "$branch_line" ] \
     || fail "ship brief presents the bootstrap contract (line $contract_line) after branch creation (line $branch_line)"
 
+  # The contract's own lead-in must not claim to precede the isolation
+  # self-check (it textually appears after it, and that check is a
+  # pre-existing, universal, absolute safety step firstmate never delays for
+  # project content): "investigating" collided with that check's own
+  # `pwd -P`/`git rev-parse` environment investigation (Greptile review on
+  # PR #3877). Scope the claim to task work instead.
+  assert_grep "Before any other task work, read every document" "$brief" \
+    "ship brief's contract lead-in lost its task-work scoping"
+  assert_no_grep "Before investigating, diagnosing, or changing anything" "$brief" \
+    "ship brief's contract lead-in still collides with the isolation self-check's own investigation"
+
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-scout-b2 incident-proj --scout >/dev/null 2>&1
   brief="$home/data/bootstrap-scout-b2/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"

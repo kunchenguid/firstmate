@@ -79,7 +79,7 @@ fm_brief_bootstrap_contract_block() {  # <projects-dir> <repo-name> <quoted-stat
 
 
 # Project bootstrap contract
-$agents declares a mandatory bootstrap contract for every worker on this project (a \`firstmate:bootstrap-contract\` block in its own AGENTS.md). Before investigating, diagnosing, or changing anything, read every document it names, in the order given, and follow its rule for incidents exactly as written:
+$agents declares a mandatory bootstrap contract for every worker on this project (a \`firstmate:bootstrap-contract\` block in its own AGENTS.md). Before any other task work, read every document it names, in the order given, and follow its rule for incidents exactly as written:
 
 $body
 
