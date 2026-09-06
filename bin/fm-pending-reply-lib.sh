@@ -710,7 +710,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
     if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
       || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-      _fm_pending_reply_archive_locked "$state" "$corr" || true
+      _fm_pending_reply_archive_locked "$state" "$corr" || return 1
     fi
     return 0
   fi
@@ -750,7 +750,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
   if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
     || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-    _fm_pending_reply_archive_locked "$state" "$corr" || true
+    _fm_pending_reply_archive_locked "$state" "$corr" || return 1
   fi
   return 0
 }
@@ -849,8 +849,14 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
+  if [ -n "${FM_PENDING_REPLY_CAPTURE_TIMEOUT:-}" ]; then
+    tail40=$(fm_backend_capture_bounded "$FM_PENDING_REPLY_CAPTURE_TIMEOUT" \
+      "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+  else
+    tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+  fi
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | fm_busy_lines_match "$harness"; then
     printf 'busy'
@@ -1613,21 +1619,22 @@ fm_pending_reply_tick() {  # <state-dir>
           break
         done
         if [ "$found" = 0 ]; then
+          observation_grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+          case "$observation_grace" in ''|*[!0-9]*|0) observation_grace=300 ;; esac
+          observation_timeout=$(( observation_grace / 2 ))
+          [ "$observation_timeout" -ge 1 ] || observation_timeout=1
+          [ "$observation_timeout" -le 30 ] || observation_timeout=30
+          if [ -n "${FM_PENDING_REPLY_TICK_BEAT:-}" ]; then
+            "$FM_PENDING_REPLY_TICK_BEAT"
+          fi
           if [ -n "$remote_host" ]; then
-            observation_grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
-            case "$observation_grace" in ''|*[!0-9]*|0) observation_grace=300 ;; esac
-            observation_timeout=$(( observation_grace / 2 ))
-            [ "$observation_timeout" -ge 1 ] || observation_timeout=1
-            [ "$observation_timeout" -le 30 ] || observation_timeout=30
-            if [ -n "${FM_PENDING_REPLY_TICK_BEAT:-}" ]; then
-              "$FM_PENDING_REPLY_TICK_BEAT"
-            fi
             observation=$(fm_run_timed "$observation_timeout" \
               "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+            observation=$(FM_PENDING_REPLY_CAPTURE_TIMEOUT="$observation_timeout" \
+              fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")
